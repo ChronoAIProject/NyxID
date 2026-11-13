@@ -29,7 +29,7 @@ impl Drop for Fixture {
 
 async fn fixture(name: &str) -> Fixture {
     let (state, calls, upstream) = setup(name).await;
-    let (mut channel, key) = channel(&state, "gateway").await;
+    let (mut channel, key) = Box::pin(channel(&state, "gateway")).await;
     channel.owner_sender_ids = vec!["7".into()];
     state
         .db
@@ -73,11 +73,11 @@ async fn fixture(name: &str) -> Fixture {
     let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
         .await
         .unwrap();
-    let conversation = crate::services::assistant_team_service::home_thread(
+    let conversation = Box::pin(crate::services::assistant_team_service::home_thread(
         &state.db,
         &state.encryption_keys,
         &agent,
-    )
+    ))
     .await
     .unwrap();
     state.db.collection::<bson::Document>(THREADS).insert_one(doc! {
@@ -748,20 +748,40 @@ async fn late_capacity_failure_preserves_complete_partial_reply_and_wait_copy() 
 #[tokio::test]
 async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answer() {
     use crate::services::assistant_checking_notice as notice;
-    let mut f = fixture("channel_checking_notice_delivery").await;
+    let (mut f, platform) =
+        Box::pin(image_delivery_tests::image_fixture("telegram", "gateway")).await;
+    // This case admits its own live turn; remove the image fixture's settled reply.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .delete_many(doc! {"conversation_id": &f.event.conversation_id})
+        .await
+        .unwrap();
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":99}})),
+        )
+        .expect(1)
+        .mount(&platform)
+        .await;
     Mock::given(method("POST"))
         .and(path("/events/cmaeg1.ev.original/replies"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
-        .expect(1)
+        .expect(0)
         .mount(&f.gateway)
         .await;
     let request = serde_json::from_value::<engine::TurnRequest>(json!({
         "text": "Check current availability", "conversation_id": &f.event.conversation_id,
     }))
     .unwrap();
-    let mut row = engine::begin_turn(&f.state.db, OWNER, &request, &f.state.encryption_keys)
-        .await
-        .unwrap();
+    let mut row = Box::pin(engine::begin_turn(
+        &f.state.db,
+        OWNER,
+        &request,
+        &f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
     let origin = f.event.delivery.as_ref().unwrap().origin.clone();
     let turn = row.active_turn.as_mut().unwrap();
     turn.origin = crate::models::assistant_conversation::TurnOrigin::Channel;
@@ -803,7 +823,7 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
         .unwrap()
         .unwrap();
     assert!(began.elapsed() >= std::time::Duration::from_millis(4900));
-    let progress = f.gateway.received_requests().await.unwrap();
+    let progress = platform.received_requests().await.unwrap();
     assert_eq!(progress.len(), 1);
     assert_eq!(
         serde_json::from_slice::<Value>(&progress[0].body).unwrap()["text"],
@@ -926,9 +946,14 @@ async fn typing_fixture(
     let request: engine::TurnRequest =
         serde_json::from_value(json!({"text":"Check", "conversation_id":&f.event.conversation_id}))
             .unwrap();
-    let mut row = engine::begin_turn(&f.state.db, OWNER, &request, &f.state.encryption_keys)
-        .await
-        .unwrap();
+    let mut row = Box::pin(engine::begin_turn(
+        &f.state.db,
+        OWNER,
+        &request,
+        &f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
     let turn = row.active_turn.as_mut().unwrap();
     turn.origin = TurnOrigin::Channel;
     turn.asked_from = Some(f.event.delivery.as_ref().unwrap().origin.clone());

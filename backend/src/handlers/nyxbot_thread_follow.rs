@@ -730,6 +730,41 @@ pub(crate) async fn send(
     text: &str,
     images: Option<super::images::ImageTurn<'_>>,
 ) -> AppResult<()> {
+    send_impl(state, owner, origin, conversation, text, images, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_supplemental(
+    state: &AppState,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+    images: Option<super::images::ImageTurn<'_>>,
+    decision: &mut super::supplemental::Decision,
+) -> AppResult<()> {
+    Box::pin(send_impl(
+        state,
+        owner,
+        origin,
+        conversation,
+        text,
+        images,
+        Some(decision),
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_impl(
+    state: &AppState,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+    images: Option<super::images::ImageTurn<'_>>,
+    mut decision: Option<&mut super::supplemental::Decision>,
+) -> AppResult<()> {
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
     if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
         return Err(follow::not_found());
@@ -772,12 +807,39 @@ pub(crate) async fn send(
     // committed transport, not that identity alone, selects the reply path.
     if channel.transport == "gateway" && channel.gateway_source.is_some() {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        if let Some(decision) = decision {
+            return Box::pin(super::supplemental::native(
+                state,
+                &channel,
+                origin,
+                conversation,
+                &text,
+                decision,
+            ))
+            .await;
+        }
         return super::native_responses::send_update(state, &channel, origin, conversation, &text)
             .await;
     }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        if let Some(decision) = decision {
+            return Box::pin(super::supplemental::followed(
+                state,
+                &channel,
+                owner,
+                origin,
+                conversation,
+                &text,
+                decision,
+            ))
+            .await;
+        }
         return super::gateway_threads::send(state, &channel, origin, conversation, &text).await;
+    }
+    if let Some(decision) = decision.as_mut() {
+        decision.anchor = super::supplemental::Anchor::ThreadBinding;
+        decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
     }
     let outcome = send_bound_reply(
         state,
@@ -795,7 +857,12 @@ pub(crate) async fn send(
     .await?;
     match outcome.error {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => {
+            if let Some(decision) = decision {
+                decision.outcome("confirmed");
+            }
+            Ok(())
+        }
     }
 }
 

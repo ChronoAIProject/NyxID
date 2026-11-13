@@ -320,17 +320,23 @@ pub struct NyxbotThread {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_message_at: Option<DateTime<Utc>>,
     /// Gateway only: the newest sealed event reference, encrypted; used to
-    /// deliver asynchronous replies while it is unexpired. Opaque, never logged.
+    /// gate supplemental-send eligibility while it is unexpired. Opaque, never logged.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub event_ref_ciphertext: Option<Vec<u8>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub event_ref_expires_at: Option<DateTime<Utc>>,
+    /// Relay inbound paired with the reference, including bot-originated activity.
+    #[serde(default)]
+    pub event_ref_relay_message_id: Option<String>,
+    /// Digest of the ciphertext and expiry; detects a reference replaced by an old writer.
+    #[serde(default)]
+    pub event_ref_relay_binding: Option<String>,
     /// Direct only: the newest inbound NyxID message ID, for asynchronous replies.
     #[serde(default)]
     pub last_message_id: Option<String>,
     /// Newest inbound NyxID relay message ID, regardless of transport.
-    /// Kept separate from `last_message_id` so gateway text routing semantics
-    /// remain unchanged while image delivery can target the relay adapter.
+    /// Used by images and unbound supplemental text. Source-bound sends retain
+    /// their admitted event's own inbound instead.
     #[serde(default)]
     pub last_relay_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

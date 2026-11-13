@@ -582,12 +582,13 @@ pub(crate) async fn after_turn(
     if error.is_some() {
         // They were told an answer would come: say it did not.
         for origin in &also {
-            super::nyxbot::deliver_to(
+            super::nyxbot::deliver_to_for(
                 state,
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
                 None,
+                super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
             )
             .await;
         }
@@ -620,7 +621,15 @@ pub(crate) async fn after_turn(
         | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
+        super::nyxbot::deliver_to_for(
+            state,
+            row,
+            origin,
+            text,
+            Some(&plan),
+            super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
+        )
+        .await;
     }
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }

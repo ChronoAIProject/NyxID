@@ -5008,11 +5008,18 @@ fn response_sse(
     response
 }
 
+#[cfg(test)]
+tokio::task_local! { static TEST_MESSAGE_ITEM_ID: String; }
+
 fn message_frames(response_id: &str, text: Option<&str>) -> Vec<Value> {
     let mut frames = Vec::new();
     let mut output = Vec::new();
     if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
         let item_id = format!("msg_{}", Uuid::new_v4().simple());
+        #[cfg(test)]
+        let item_id = TEST_MESSAGE_ITEM_ID
+            .try_with(Clone::clone)
+            .unwrap_or(item_id);
         let item = json!({"id": item_id, "type": "message", "role": "assistant",
             "content": [{"type": "output_text", "text": text}]});
         frames.push(
@@ -6204,16 +6211,12 @@ async fn gateway_inbound_inner(
     if let Some(event_ref) = event_ref
         && let Ok(sealed) = state.encryption_keys.encrypt(event_ref.as_bytes()).await
     {
-        metadata.insert(
-            "event_ref_ciphertext",
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: sealed,
-            },
-        );
-        metadata.insert(
-            "event_ref_expires_at",
-            bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(29)),
+        metadata.extend(
+            crate::services::channel_supplemental_delivery::reference_fields(
+                sealed,
+                Utc::now() + ChronoDuration::minutes(29),
+                relay_message_id.as_deref(),
+            ),
         );
     }
     if !metadata.is_empty() {
@@ -6359,23 +6362,32 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
     )
 }
 
-/// Deliver an asynchronous NyxBot reply (an event turn, e.g. a subagent
-/// report) to the chat that owns the conversation. Gateway channels reply to
-/// the newest unexpired event reference; direct channels reply to the newest
-/// inbound message as the route key. Best effort: the reply stays in the
-/// owner's NyxBot history either way.
+/// Deliver a supplemental reply to the conversation's chat. Relay-source
+/// gateway chats use a validated retained inbound within the existing reference
+/// window. Native sources retain their original event reply. Best effort: the
+/// result stays in the conversation history either way.
 pub async fn deliver_update(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
     text: &str,
     images: Option<&images::ImageSendPlan>,
 ) {
+    deliver_update_for(state, row, text, images, supplemental::Purpose::TeamResult).await;
+}
+
+pub async fn deliver_update_for(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    text: &str,
+    images: Option<&images::ImageSendPlan>,
+    purpose: supplemental::Purpose,
+) {
     // A channel thread answers its chat; the owner's own thread answers the
     // chat they last wrote from.
     let Some(origin) = row.channel.as_ref().or(row.reply_channel.as_ref()) else {
         return;
     };
-    deliver_to(state, row, origin, text, images).await;
+    deliver_to_for(state, row, origin, text, images, purpose).await;
 }
 
 /// The chat a conversation may deliver to: its own channel thread's chat,
@@ -6398,6 +6410,32 @@ pub async fn deliver_to(
     text: &str,
     images: Option<&images::ImageSendPlan>,
 ) {
+    deliver_to_for(
+        state,
+        row,
+        origin,
+        text,
+        images,
+        supplemental::Purpose::TeamResult,
+    )
+    .await;
+}
+
+pub async fn deliver_to_for(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    text: &str,
+    images: Option<&images::ImageSendPlan>,
+    purpose: supplemental::Purpose,
+) {
+    let mut decision = supplemental::Decision::new(purpose);
+    decision.event = origin.native_event_id.clone().or_else(|| {
+        row.active_turn
+            .as_ref()
+            .filter(|turn| turn.asked_from.as_ref() == Some(origin))
+            .and_then(|turn| turn.channel_event_id.clone())
+    });
     let trace = row
         .active_turn
         .as_ref()
@@ -6414,10 +6452,19 @@ pub async fn deliver_to(
                         app_visible: !row.guest_turn && row.channel.is_none(),
                     })
                 });
-                return thread_follow::send(state, &row.user_id, origin, &row.id, text, image_turn)
-                    .await;
+                return thread_follow::send_supplemental(
+                    state,
+                    &row.user_id,
+                    origin,
+                    &row.id,
+                    text,
+                    image_turn,
+                    &mut decision,
+                )
+                .await;
             }
             let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
+                decision.skip(supplemental::Reason::NoDestination);
                 return Ok(());
             };
             if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
@@ -6452,51 +6499,43 @@ pub async fn deliver_to(
                 reply = images::append_failure(&reply, &report);
             }
             if reply.trim().is_empty() {
+                decision.skip(supplemental::Reason::EmptyOutput);
                 return Ok(());
             }
             if channel.gateway_source.is_some() {
-                return native_responses::send_update(state, &channel, origin, &row.id, &reply)
-                    .await;
+                return supplemental::native(
+                    state,
+                    &channel,
+                    origin,
+                    &row.id,
+                    &reply,
+                    &mut decision,
+                )
+                .await;
             }
             // A chat from before its bot moved to the gateway has no gateway
             // reference yet: it is answered through NyxID's relay, as before.
             let relay_era =
                 thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
+            if (channel.transport != "gateway" || relay_era) && thread.last_message_id.is_some() {
+                decision.anchor = supplemental::Anchor::ChatPointer;
+                decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
+            }
             if channel.transport == "gateway" && !relay_era {
-                let (Some(ciphertext), Some(expires_at)) = (
-                    thread.event_ref_ciphertext.as_ref(),
-                    thread.event_ref_expires_at,
-                ) else {
-                    return Ok(());
-                };
-                if expires_at <= Utc::now() {
-                    return Ok(());
-                }
-                let event_ref = Zeroizing::new(
-                    String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                        .map_err(|_| AppError::Internal("Event reference unavailable".into()))?,
-                );
-                let Some(agent_key) = decrypt_agent_key(state, &channel).await? else {
-                    return Ok(());
-                };
-                gateway_call(
-                    state,
-                    reqwest::Method::POST,
-                    &format!("/events/{}/replies", urlencode(&event_ref)),
-                    &agent_key,
-                    Some(&json!({"text": reply})),
-                    None,
-                )
-                .await?;
+                supplemental::relay(state, row, origin, &channel, &thread, &reply, &mut decision)
+                    .await?;
             } else if let Some(message_id) = thread.last_message_id.as_deref() {
                 direct_reply(state, &channel, message_id, &reply, None).await?;
+                decision.outcome("confirmed");
             }
             Ok(())
         })
         .await;
-        if let Err(error) = result {
+        decision.result(&result);
+        if let Err(error) = &result {
             tracing::debug!(%error, "NyxBot channel update not delivered");
         }
+        decision.record(state, row).await;
     })
     .await
 }
@@ -7639,3 +7678,6 @@ mod org_channels;
 
 #[path = "nyxbot_execution_delivery.rs"]
 pub(crate) mod execution_delivery;
+
+#[path = "nyxbot_supplemental.rs"]
+pub(crate) mod supplemental;
