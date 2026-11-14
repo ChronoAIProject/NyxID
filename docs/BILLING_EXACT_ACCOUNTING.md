@@ -236,6 +236,15 @@ provider snapshot, commits it and deletes only the request token it serviced.
 If a newer deferral changed that token, the worker releases only its own lease
 so the newer request can run on the next tick; a successor's lease is preserved.
 
+Wallet `snapshot_generation` orders provider balance reads against local publication
+and invalidation. It advances on publication, a balance webhook before its provider
+read, and the first wallet-backed usage acknowledgement. A rejected read changes
+no balance or ledger entry: webhook/reconcile callers request a fresh read, the
+deferred worker retains its existing request, and expiry retries from its stored
+operation/receipt without creating a refresh request. Old binaries ignore the
+field; their balance writes and acknowledgements are not fenced. Ordering is
+complete only once every replica runs this release; rollback needs no data change.
+
 Purchased credits expire independently after 365 days. The Lago void boundary
 floors at five decimal places. Residue remains spendable in the provider purchase
 and is reconsidered from provider history on every sweep; there is no local

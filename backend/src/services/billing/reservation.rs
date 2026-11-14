@@ -1311,6 +1311,7 @@ mod tests {
     fn wallet(owner_id: &str, balance_credits: i64) -> BillingWallet {
         let now = Utc::now();
         BillingWallet {
+            snapshot_generation: 0,
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.to_string(),
             lago_customer_id: owner_id.to_string(),

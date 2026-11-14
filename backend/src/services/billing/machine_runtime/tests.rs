@@ -1291,7 +1291,7 @@ async fn unknown_stop_holds_liability_and_topup_never_resumes_a_closed_run() {
             .close_machine_runtime_in_session(&mut s, &w.run_id)
     )
     .unwrap();
-    super::super::webhook::refresh_wallet_balance(&f.db, &f.owner, Credits::from_whole(20))
+    super::super::webhook::refresh_test_balance(&f.db, &f.owner, Credits::from_whole(20))
         .await
         .unwrap();
     assert_eq!(

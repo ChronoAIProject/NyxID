@@ -67,6 +67,7 @@ pub async fn ensure_owner_wallet(
     let lago_wallet = lago.ensure_wallet(&customer_id).await?;
     let now = Utc::now();
     let wallet = BillingWallet {
+        snapshot_generation: 0,
         id: Uuid::new_v4().to_string(),
         owner_id: owner_id.to_string(),
         lago_customer_id: customer_id,
