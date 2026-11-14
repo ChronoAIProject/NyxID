@@ -36,7 +36,7 @@ async fn consent_get_warm_default_off_adds_zero_commands_and_enabled_rollout_is_
             test_auth_user(&id),
         )
     };
-    get().await.unwrap(); // Warm absence only.
+    let _ = get().await.unwrap(); // Warm absence only.
     commands.lock().unwrap().clear();
     let (_, axum::Json(off)) = get().await.unwrap();
     assert_eq!(off.diagnostics_status, DiagnosticsStatus::NotOffered);
