@@ -1,6 +1,10 @@
 import type { ConsentSnapshot } from "../analyticsConsentState";
 import type { AnalyticsPermission, RelayRequest } from "../analyticsRelay";
-import { revalidateNativeRecord, type CrashBinding } from "./nativeRecord";
+import {
+  nativeRecordEventId,
+  revalidateNativeRecord,
+  type CrashBinding,
+} from "./nativeRecord";
 import {
   createCrashRelay,
   crashAuthorityError,
@@ -119,7 +123,10 @@ export function createCrashLifecycle(deps: {
       generation++;
       ready = false;
       deps.native.pause();
-      if (restoring || !deps.snapshot().isHydrated) return;
+      // A restore timeout can end the splash before an account is known.
+      // Only an explicit sign-out or a known successor authorizes a purge.
+      if (restoring || !deps.snapshot().isHydrated || !deps.snapshot().accountId)
+        return;
       if (!eligible()) {
         disarm();
         return;
@@ -181,10 +188,9 @@ export function createCrashLifecycle(deps: {
             record.binding.accountId !== binding.accountId ||
             record.binding.revision !== binding.revision
           ) {
-            deps.native.disarm();
-            ready = false;
-            binding = null;
-            return;
+            const eventId = nativeRecordEventId(raw);
+            if (eventId) deps.native.removeRecords([eventId]);
+            continue;
           }
           if (await send(record.report, binding))
             deps.native.removeRecords([record.report.event_id]);
@@ -195,7 +201,12 @@ export function createCrashLifecycle(deps: {
             error && typeof error === "object"
               ? (error as { errorCode?: number }).errorCode
               : undefined;
-          if (code === 13400 || !eligible()) disarm();
+          const snapshot = deps.snapshot();
+          if (
+            code === 13400 ||
+            (snapshot.accountId && (!snapshot.enabled || snapshot.policy !== 2))
+          )
+            disarm();
           else pause();
         }
       }

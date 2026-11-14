@@ -492,4 +492,22 @@ for noticeReason in noticeReasons {
   precondition(notice == "nyx-crash: raw report age unknown bytes=unknown")
   precondition(crashMatches(notice, "^nyx-crash: raw report age unknown bytes=([0-9]+|unknown)$"))
 }
+
+
+let bufferNow = Date(timeIntervalSince1970: 1_800_000_000)
+let bufferFormatter = ISO8601DateFormatter()
+bufferFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+for age in [0.0, 86400.0, -300.0] {
+  precondition(crashRecordIsFresh(
+    capturedAt: bufferFormatter.string(from: bufferNow.addingTimeInterval(-age)), now: bufferNow))
+}
+for age in [86400.001, -300.001] {
+  precondition(!crashRecordIsFresh(
+    capturedAt: bufferFormatter.string(from: bufferNow.addingTimeInterval(-age)), now: bufferNow))
+}
+for invalid in [nil, "not a timestamp", 123, String(repeating: "1", count: 41)] as [Any?] {
+  precondition(!crashRecordIsFresh(capturedAt: invalid, now: bufferNow))
+}
+print("Captured-at buffer expiry proof passed")
+
 print("Shared pending-raw consume proof passed")

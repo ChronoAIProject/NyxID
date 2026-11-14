@@ -37,6 +37,21 @@ func crashRawNoticeLogLine(reason: CrashRawNotice, byteCount: Int?) -> String {
 }
 
 let crashRecordMaxAgeSeconds: TimeInterval = 86400
+/// Age follows capture time, never the time a crash was copied into the buffer.
+func crashRecordIsFresh(capturedAt: Any?, now: Date) -> Bool {
+  guard let value = capturedAt as? String, value.utf8.count <= 40 else { return false }
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  var date = formatter.date(from: value)
+  if date == nil {
+    formatter.formatOptions = [.withInternetDateTime]
+    date = formatter.date(from: value)
+  }
+  guard let date else { return false }
+  let age = now.timeIntervalSince(date)
+  return age.isFinite && age >= -300 && age <= crashRecordMaxAgeSeconds
+}
+
 enum InitialRawReportDecision: Equatable { case parse, discard(CrashDiscardReason) }
 /// An authorized report with an unavailable mtime remains parseable. The
 /// parsed report customData is checked separately after the in-memory parse.

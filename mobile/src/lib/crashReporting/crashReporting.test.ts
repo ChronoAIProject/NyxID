@@ -9,6 +9,7 @@ import {
   type ErrorHandler,
 } from "./globalHandler";
 import { createCrashLifecycle, type CrashNativeModule } from "./lifecycle";
+import { buildApiError } from "../api/responseError";
 import { createCrashRelay } from "./reporter";
 import type { ConsentSnapshot } from "../analyticsConsentState";
 import type { RelayRequest, AnalyticsPermission } from "../analyticsRelay";
@@ -519,11 +520,85 @@ for (const [statusCode,errorCode,action] of [
   const native=h.native; let current=true;
   const send=createCrashRelay(async<T>(path: string)=>{
     if(path.endsWith("/analytics")) return {account_id:h.binding!.accountId,revision:h.binding!.revision,enabled:true,policy_version:"2",diagnostics_status:"available",diagnostics_available:true} as T;
-    throw {statusCode,errorCode};
+    throw buildApiError({error: "refused", error_code: errorCode, message: "fixed"}, statusCode);
   },()=>current,()=>{native.disarm();current=false;},()=>0,()=>{current=false;native.pause();});
   const b=h.binding!; const r=revalidateNativeRecord(h.records[0]!)!.report;
   if(await send(r,b)) native.removeRecords([r.event_id]);
   if(action==="drop") {assert.equal(h.records.length,0);assert.equal(h.purges,purges);}
   else if(action==="disarm") {assert.equal(h.records.length,0);assert.equal(h.binding,null);}
   else {assert.equal(h.records.length,1);assert.equal(h.purges,purges);assert.equal(h.binding!.epochId,epoch);}
+});
+
+test("an invalid buffered record is dropped alone while valid records and binding survive", async () => {
+  const h = harness();
+  await h.lifecycle.setRestoring(false);
+  h.lifecycle.fatal(new Error("first"));
+  h.lifecycle.fatal(new Error("invalid"));
+  h.lifecycle.fatal(new Error("third"));
+  const invalid = JSON.parse(h.records[1]!);
+  invalid.report.captured_at = new Date(Date.now() - 25 * 3600_000).toISOString();
+  h.records[1] = JSON.stringify(invalid);
+  const binding = { ...h.binding! }, purges = h.purges;
+  await h.lifecycle.refresh();
+  assert.deepEqual(h.binding, binding);
+  assert.equal(h.purges, purges);
+  assert.equal(h.records.length, 0);
+  assert.equal(h.sent.length, 2);
+  assert.ok(!JSON.stringify(h.sent).includes(invalid.report.event_id));
+});
+
+test("restore timeout without an account pauses then same-account restore resumes; sign-out and account change purge", async () => {
+  const h = harness();
+  await h.lifecycle.setRestoring(false);
+  h.lifecycle.fatal(new Error("pending"));
+  const binding = { ...h.binding! }, purges = h.purges;
+  h.change({accountId: null, enabled: false});
+  const next = h.relaunch();
+  await next.setRestoring(false); // The auth splash timeout, before a bound account.
+  assert.deepEqual(h.binding, binding);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.purges, purges);
+  assert.ok(h.pauses > 0);
+  next.fatal(new Error("paused"));
+  assert.equal(h.records.length, 1);
+  h.change({accountId: binding.accountId, enabled: true});
+  await next.refresh();
+  assert.deepEqual(h.binding, binding);
+  assert.equal(h.records.length, 0);
+  assert.equal(h.sent.length, 1);
+  next.fatal(new Error("sign-out"));
+  next.disarm();
+  assert.equal(h.binding, null);
+  assert.equal(h.records.length, 0);
+  await next.refresh();
+  next.fatal(new Error("account-switch"));
+  const other = randomUUID();
+  h.change({accountId: other});
+  h.permission({account_id: other, revision: randomUUID()});
+  await next.refresh();
+  assert.equal(h.records.length, 0);
+  assert.equal(h.native.getBinding()!.accountId, other);
+});
+
+for (const [status, body, drop] of [
+  [400, {error: "validation_error", error_code: 1000, message: "fixed"}, true],
+  [403, "<html>captive portal</html>", false],
+  [404, null, false],
+  [400, {message: "proxy"}, false],
+  [400, {error: "bad_request"}, false],
+  [422, {error: "validation_error", error_code: "1000"}, false],
+  [429, {error: "rate_limited", error_code: 1000}, false],
+  [403, {error: "crash_report_consent_required", error_code: 13401}, false],
+] as const) test(`persisted HTTP ${status} ${JSON.stringify(body)} drops only a coded NyxID refusal (${drop})`, async () => {
+  const binding = bound();
+  let paused = 0, disarmed = 0;
+  const send = createCrashRelay(async<T>(path: string) => {
+    if (path.endsWith("/analytics")) return {account_id: binding.accountId, revision: binding.revision,
+      enabled: true, policy_version: "2", diagnostics_status: "available", diagnostics_available: true} as T;
+    throw buildApiError(body, status);
+  }, () => true, () => { disarmed++; }, () => 0, () => { paused++; });
+  const record = revalidateNativeRecord(JSON.stringify({binding, report: report()}))!.report;
+  assert.equal(await send(record, binding), drop);
+  assert.equal(disarmed, 0);
+  assert.equal(paused, drop ? 0 : 1);
 });

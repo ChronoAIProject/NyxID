@@ -118,13 +118,13 @@ public class NyxCrashReporterModule: Module {
   }
   private func trim() {
     purgeInterruptedCrashWrites(in: directory)
-    let now = Date().timeIntervalSince1970
+    let now = Date()
     var retained: [(URL, Int)] = []
     for file in recordFiles() {
       guard let data = try? Data(contentsOf: file), data.count <= 32 * 1024,
         let wrapper = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-        let captured = wrapper["storedAt"] as? Double,
-        now - captured <= 86400, captured <= now + 300
+        let record = wrapper["report"] as? [String: Any],
+        crashRecordIsFresh(capturedAt: record["captured_at"], now: now)
       else {
         try? FileManager.default.removeItem(at: file)
         continue

@@ -46,3 +46,15 @@ export function revalidateNativeRecord(raw: unknown): NativeRecord | null {
     return null;
   }
 }
+
+/** An invalid record grants no capture authority; its UUID only identifies deletion. */
+export function nativeRecordEventId(raw: string): string | null {
+  if (raw.length > 32768) return null;
+  try {
+    const value = JSON.parse(raw);
+    const id = value?.report?.event_id;
+    return typeof id === "string" && uuid.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}

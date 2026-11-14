@@ -85,30 +85,23 @@ export function createCrashRelay(
       guard();
       return true;
     } catch (error) {
-      const code =
-        error && typeof error === "object"
-          ? (error as { errorCode?: number }).errorCode
-          : undefined;
       if (!current()) return false;
-      if (code === 13400) {
+      const authoritative = error instanceof ApiError && error.hasErrorEnvelope;
+      if (authoritative && error.errorCode === 13400) {
         denied();
         return false;
       }
-      if (code === 13401) {
+      if (authoritative && error.errorCode === 13401) {
         paused();
         return false;
       }
-      const status =
-        error && typeof error === "object"
-          ? (error as { statusCode?: number }).statusCode
-          : undefined;
       if (
-        status !== undefined &&
-        status >= 400 &&
-        status < 500 &&
-        status !== 429
+        authoritative &&
+        error.statusCode >= 400 &&
+        error.statusCode < 500 &&
+        error.statusCode !== 429
       )
-        return true; // Permanently rejected: remove this record only.
+        return true; // An authoritative refusal drops this record only.
       paused();
       return false;
     } finally {
