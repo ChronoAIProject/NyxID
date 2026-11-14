@@ -346,19 +346,24 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
 }
 
 /// Wait, within the shared readiness budget, until majority-acknowledged
-/// writes and linearizable reads on this database answer within 100 ms for
+/// writes and linearizable reads on this database answer within 150 ms for
 /// three consecutive probes, including a gap between probes.
 ///
 /// Tests that exercise production admission gates (the 250 ms analytics
 /// dispatch transaction, the 200 ms linearizable consent read) assert those
-/// deadlines as written. A CI runner can start such a test while MongoDB is
-/// still stalled on its own journal flushes and the per-test database drop
+/// deadlines as written. An idle default-config single-node replica set has a
+/// roughly 100 ms journal cadence: 60 quiet majority-write/linearizable-read
+/// probes measured 102–113 ms (p50 106 ms, p90 111 ms), with none at or below
+/// 100 ms. The 150 ms precondition accommodates that cadence while retaining
+/// margin below both production bounds and rejecting stalls lasting seconds.
+/// A CI runner can start such a test while MongoDB is still stalled on its
+/// own journal flushes and the per-test database drop
 /// backlog, which no nextest slot reservation prevents. This establishes the
 /// healthy-server precondition first; the measured call still runs once
 /// against the unchanged production bounds.
 pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
     const BUDGET: Duration = Duration::from_secs(90);
-    const RESPONSIVE: Duration = Duration::from_millis(100);
+    const RESPONSIVE: Duration = Duration::from_millis(150);
     let started = std::time::Instant::now();
     let probes = db.collection::<Document>("__readiness");
     let mut responsive_probes = 0;
