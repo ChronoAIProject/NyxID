@@ -314,7 +314,8 @@ fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
-/// One registry `Export::Section` maps to exactly one explicit subsection.
+/// Each primary registry export maps to exactly one explicit subsection.
+/// Additional scoped views of the same source are declared separately.
 fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
     match collection {
         "agent_key_login_requests" => Some(("account", "agent_key_login_requests")),
@@ -598,6 +599,32 @@ fn explicit_export_spec(collection: &str) -> Result<ExplicitExportSpec, ExportSp
         fields: fields_for(collection)?,
     })
 }
+
+fn additional_export_spec(
+    view: &personal_data_registry::AdditionalExportView,
+) -> ExplicitExportSpec {
+    let fields = match view.selector {
+        personal_data_registry::ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
+            AUTHORED_GROUP_MESSAGE_FIELDS
+        }
+    };
+    ExplicitExportSpec {
+        section: view.section,
+        subsection: view.subsection,
+        fields,
+    }
+}
+
+fn additional_export_filter(
+    view: &personal_data_registry::AdditionalExportView,
+    account_id: &str,
+) -> Document {
+    match view.selector {
+        personal_data_registry::ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
+            doc! {"author_user_id": account_id, "user_id": {"$ne": account_id}}
+        }
+    }
+}
 const ACCOUNT_RECORD_FIELDS: &[&str] = &[
     "user_id",
     "owner_id",
@@ -829,6 +856,7 @@ const GROUP_MESSAGE_FIELDS: &[&str] = &[
     "text",
     "created_at",
 ];
+const AUTHORED_GROUP_MESSAGE_FIELDS: &[&str] = &["group_id", "role", "text", "created_at"];
 const FEEDBACK_FIELDS: &[&str] = &[
     "user_id",
     "message_id",
@@ -1753,6 +1781,22 @@ async fn build_with_limit(
             .or_default()
             .insert(spec.subsection.into(), value);
     }
+    for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
+        let spec = additional_export_spec(view);
+        let value = rows(
+            db,
+            view.collection,
+            additional_export_filter(view, account_id),
+            spec.fields,
+            doc! {"created_at": -1},
+            &mut budget,
+        )
+        .await?;
+        sections
+            .entry(spec.section.into())
+            .or_default()
+            .insert(spec.subsection.into(), value);
+    }
     let mut export = AccountExport {
         format: FORMAT,
         version: VERSION,
@@ -2188,13 +2232,33 @@ mod tests {
                     "empty explicit field allowlist for {}",
                     entry.collection
                 );
-                assert!(seen.insert(spec.subsection), "duplicate subsection spec");
+                assert!(
+                    seen.insert((spec.section, spec.subsection)),
+                    "duplicate subsection spec"
+                );
                 assert!(
                     spec.fields.iter().all(|field| !forbidden_key(field)),
                     "forbidden field in explicit spec for {}",
                     entry.collection
                 );
             }
+        }
+        for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
+            let source = personal_data_registry::find(view.collection).expect(view.collection);
+            let spec = additional_export_spec(view);
+            assert_eq!(
+                source.export,
+                personal_data_registry::Export::Section(spec.section)
+            );
+            assert!(
+                seen.insert((spec.section, spec.subsection)),
+                "duplicate additional view subsection"
+            );
+            assert!(!spec.fields.is_empty(), "empty additional view allowlist");
+            assert!(
+                spec.fields.iter().all(|field| !forbidden_key(field)),
+                "forbidden additional view field"
+            );
         }
     }
 
@@ -2205,6 +2269,141 @@ mod tests {
             result,
             Err(ExportSpecError(collection)) if collection == "collection_added_after_registry"
         ));
+    }
+
+    #[tokio::test]
+    async fn authored_group_message_export_isolates_authors_and_preserves_owner_export() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("authored_group_export").await;
+        let alice = uuid::Uuid::new_v4().to_string();
+        let bob = uuid::Uuid::new_v4().to_string();
+        let carol = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many(
+                [&alice, &bob, &carol]
+                    .into_iter()
+                    .map(|id| crate::test_utils::test_user(id, UserType::Person)),
+            )
+            .await
+            .unwrap();
+        let message = |id: &str, owner: &str, author: &str, text: &str, millis: i64| {
+            doc! {
+                "_id": id, "user_id": owner, "author_user_id": author,
+                "group_id": format!("group-{owner}"), "role": "user", "text": text,
+                "created_at": bson::DateTime::from_millis(millis),
+                "author_display_name": "PRIVATE_DISPLAY_NAME", "activities": [{"text": "PRIVATE_ACTIVITY"}],
+            }
+        };
+        db.collection::<Document>("assistant_group_messages")
+            .insert_one(message("bob-message", &bob, &bob, "BOB_MESSAGE", 1000))
+            .await
+            .unwrap();
+        let bob_before = build(&db, &bob).await.unwrap();
+        let mut notice = message("notice", &bob, &bob, "GROUP_NOTICE", 5000);
+        notice.remove("author_user_id");
+        notice.insert("role", "notice");
+        db.collection::<Document>("assistant_group_messages")
+            .insert_many([
+                message("alice-older", &bob, &alice, "ALICE_OLDER", 2000),
+                message("alice-newer", &bob, &alice, "ALICE_NEWER", 4000),
+                message("carol-message", &bob, &carol, "CAROL_MESSAGE", 3000),
+                message("alice-owned", &alice, &alice, "ALICE_OWN_GROUP", 6000),
+                notice,
+            ])
+            .await
+            .unwrap();
+        let alice_export = build(&db, &alice).await.unwrap();
+        let authored = &alice_export.sections["assistant"]["authored_group_messages"];
+        assert_eq!(authored.total_count, 2);
+        assert!(!authored.truncated);
+        assert_eq!(
+            authored
+                .items
+                .iter()
+                .map(|item| item["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["ALICE_NEWER", "ALICE_OLDER"]
+        );
+        for (item, millis) in authored.items.iter().zip([4000, 2000]) {
+            assert_eq!(
+                item.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["group_id", "role", "text", "created_at"])
+            );
+            assert_eq!(item["group_id"], format!("group-{bob}"));
+            assert_eq!(item["role"], "user");
+            assert_eq!(
+                chrono::DateTime::parse_from_rfc3339(item["created_at"].as_str().unwrap())
+                    .unwrap()
+                    .timestamp_millis(),
+                millis
+            );
+        }
+        let owned = &alice_export.sections["assistant"]["assistant_group_messages"];
+        assert_eq!(owned.total_count, 1);
+        assert_eq!(owned.items[0]["text"], "ALICE_OWN_GROUP");
+        let bytes = serde_json::to_string(&alice_export).unwrap();
+        for excluded in [
+            "BOB_MESSAGE",
+            "CAROL_MESSAGE",
+            "GROUP_NOTICE",
+            "PRIVATE_DISPLAY_NAME",
+            "PRIVATE_ACTIVITY",
+        ] {
+            assert!(
+                !bytes.contains(excluded),
+                "other-member or private metadata escaped: {excluded}"
+            );
+        }
+        let bob_after = build(&db, &bob).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&bob_before.sections).unwrap(),
+            serde_json::to_value(&bob_after.sections).unwrap()
+        );
+        assert_eq!(
+            bob_after.sections["assistant"]["assistant_group_messages"].items[0]["text"],
+            "BOB_MESSAGE"
+        );
+        assert_eq!(
+            bob_after.sections["assistant"]["authored_group_messages"].total_count,
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authored_group_message_view_respects_the_shared_export_budget() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("authored_group_budget").await;
+        let person = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>("assistant_group_messages").insert_many((0..3).map(|index| doc! {
+            "_id": format!("message-{index}"), "user_id": "other-owner", "author_user_id": &person,
+            "group_id": "shared-group", "role": "user", "text": format!("{index}{}", "x".repeat(600)),
+            "created_at": bson::DateTime::from_millis(index),
+        })).await.unwrap();
+        let view = &personal_data_registry::ADDITIONAL_EXPORT_VIEWS[0];
+        let spec = additional_export_spec(view);
+        let mut budget = ExportBudget { remaining: 2000 };
+        assert!(budget.admit(&serde_json::json!({"earlier_subsection": "x".repeat(1000)})));
+        let value = rows(
+            &db,
+            view.collection,
+            additional_export_filter(view, &person),
+            spec.fields,
+            doc! {"created_at": -1},
+            &mut budget,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value.total_count, 3);
+        assert!(value.truncated);
+        assert_eq!(value.items.len(), 1);
+        assert!(value.items[0]["text"].as_str().unwrap().starts_with('2'));
+        assert!(!budget.admit(&serde_json::json!({"later_subsection": "x".repeat(600)})));
+        db.drop().await.unwrap();
     }
 
     fn put_owner(document: &mut Document, path: &str, owner: &str) {

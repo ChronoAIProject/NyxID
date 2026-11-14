@@ -59,6 +59,27 @@ pub enum Export {
     Excluded(ExclusionReason),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ExportViewSelector {
+    AuthoredGroupMessagesOutsideOwnedGroups,
+}
+
+/// An explicitly scoped second export view of an already registered source.
+/// Each (collection, selector) maps to one distinct section/subsection pair.
+pub struct AdditionalExportView {
+    pub collection: &'static str,
+    pub section: &'static str,
+    pub subsection: &'static str,
+    pub selector: ExportViewSelector,
+}
+
+pub static ADDITIONAL_EXPORT_VIEWS: &[AdditionalExportView] = &[AdditionalExportView {
+    collection: "assistant_group_messages",
+    section: "assistant",
+    subsection: "authored_group_messages",
+    selector: ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups,
+}];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub collection: &'static str,
@@ -69,8 +90,8 @@ pub struct Entry {
 }
 
 /// Persisted human-readable attribution, independent of resource ownership.
-/// The opaque person key is retained; these paths never authorize deletion of
-/// the containing shared resource or inclusion in an account export.
+/// The opaque person key is retained; these paths do not confer ownership of
+/// the containing shared resource. Authored-content exports use explicit views.
 pub struct Attribution {
     pub collection: &'static str,
     pub person_field: &'static str,
@@ -4224,6 +4245,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn additional_export_views_have_registered_sources_and_unique_selectors() {
+        let mut selectors = BTreeSet::new();
+        let mut subsections = BTreeSet::new();
+        for view in ADDITIONAL_EXPORT_VIEWS {
+            let source =
+                find(view.collection).expect("additional export source must be registered");
+            assert_eq!(source.export, Export::Section(view.section));
+            assert!(
+                selectors.insert((view.collection, view.selector)),
+                "duplicate export view selector"
+            );
+            assert!(
+                subsections.insert((view.section, view.subsection)),
+                "duplicate export view subsection"
+            );
+            match view.selector {
+                ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
+                    assert_eq!(
+                        view.collection,
+                        crate::models::assistant_group::MESSAGES_COLLECTION_NAME
+                    );
+                    assert_eq!(
+                        (view.section, view.subsection),
+                        ("assistant", "authored_group_messages")
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            selectors.len(),
+            1,
+            "authored group-message export view is missing"
+        );
     }
 
     #[test]

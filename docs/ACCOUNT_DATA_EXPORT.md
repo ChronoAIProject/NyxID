@@ -9,7 +9,8 @@ service-account and relay credentials. The response is named
 `generated_at`, the opaque `account_id`, `limits`, `truncated_sections`,
 `excluded`, and nested section/subsection objects.
 
-Each `sections.<section>.<subsection>` value is exactly one source collection:
+Each `sections.<section>.<subsection>` value is one explicitly filtered view of
+a source collection:
 
 ```json
 {
@@ -53,7 +54,7 @@ MIME type, byte size, creation and expiry timestamps).
 
 ### Complete subsection map
 
-Every registry export source has one subsection. The following table is the version-1 field contract; fields containing dates use RFC3339 strings, Decimal128 values use decimal strings, and binary values are omitted. Per-collection allowlists include the visible authored fields for that source: conversation `title`; agent `name`, `description`, `display_name`, `persona`, `voice_instructions`, and the requesting person's own `memory.text`; private-note `notes.text`; feedback `comment`; trigger labels, schedules, and assistant instructions; endpoint labels and URLs; connection labels and metadata; node names; channel-bot labels; OAuth client names, redirect URIs and scopes; and service-account names and descriptions. Shared/team memory, system-injected instructions, and group messages whose `author_user_id` is another person are excluded.
+Every declared registry export view has one subsection; a source collection may have multiple explicitly scoped views. The following table is the version-1 field contract; fields containing dates use RFC3339 strings, Decimal128 values use decimal strings, and binary values are omitted. Per-collection allowlists include the visible authored fields for that source: conversation `title`; agent `name`, `description`, `display_name`, `persona`, `voice_instructions`, and the requesting person's own `memory.text`; private-note `notes.text`; feedback `comment`; trigger labels, schedules, and assistant instructions; endpoint labels and URLs; connection labels and metadata; node names; channel-bot labels; OAuth client names, redirect URIs and scopes; and service-account names and descriptions. Shared/team memory, system-injected instructions, and group messages whose `author_user_id` is another person are excluded.
 
 | Section | Subsection | Allowlisted fields |
 |---|---|---|
@@ -135,6 +136,7 @@ Every registry export source has one subsection. The following table is the vers
 | `assistant` | `assistant_group_agent_proposals` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
 | `assistant` | `assistant_group_invites` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
 | `assistant` | `assistant_group_messages` | `user_id`, `group_id`, `author_user_id`, `role`, `text`, `created_at` |
+| `assistant` | `authored_group_messages` | `group_id`, `role`, `text`, `created_at` |
 | `assistant` | `assistant_group_read_states` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
 | `assistant` | `assistant_group_requests` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
 | `assistant` | `assistant_groups` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
@@ -248,6 +250,14 @@ Every registry export source has one subsection. The following table is the vers
 | `account_activity` | `platform_personal_link_intents` | `claimant_user_id`, `state`, `created_at`, `expires_at` |
 | `account_activity` | `platform_personal_setup_selections` | `user_id`, `setup_id`, `selection`, `created_at`, `updated_at` |
 | `services` | `service_accounts` | `owner_user_id`, `created_by`, `name`, `description`, `role_ids`, `allowed_scopes`, `is_active`, `purpose`, `created_at`, `updated_at`, `last_authenticated_at` |
+
+The two group-message views read `assistant_group_messages` with disjoint
+filters. `assistant_group_messages` includes only messages both owned and
+authored by the requesting person. `authored_group_messages` includes only that
+person's authored messages in groups they do not own, using
+`{author_user_id: account_id, user_id: {$ne: account_id}}`. It does not include
+other members' messages or the group's transcript. Both views sort newest first,
+have independent 10,000-row caps, and share the export's 32 MiB byte budget.
 
 The export omits password and authentication hashes, session/token hashes,
 OAuth codes and states, raw access or refresh tokens, API-key prefixes and
