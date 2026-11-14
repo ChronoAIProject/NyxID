@@ -29,8 +29,11 @@ export function ConsentBanner() {
     enabled: candidate && telemetryActive,
     staleTime: Infinity,
     gcTime: Infinity,
+    retry: false,
+    retryOnMount: false,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
   const offered = permission.data?.diagnostics_offered === true;
   const current = offered && permission.data?.current_policy_version === "2" ? 2 : 1;

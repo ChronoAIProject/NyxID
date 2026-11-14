@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ConsentBanner } from "./consent-banner";
 import { useConsentStore } from "@/stores/consent-store";
@@ -91,4 +91,19 @@ it("banner preference cache lasts the session across stale time focus and remoun
   show();
   expect(mocks.read).toHaveBeenCalledOnce();
   clock.mockRestore();
+});
+
+it("a failed banner preference read does not retry on remount focus or reconnect", async () => {
+  mocks.read.mockRejectedValue(new Error("offline"));
+  const first = show();
+  await waitFor(() => expect(client.getQueryState(["analytics-consent", "owner"])?.status).toBe("error"));
+  first.unmount();
+  show();
+  await act(async () => {
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+  });
+  expect(mocks.read).toHaveBeenCalledOnce();
 });
