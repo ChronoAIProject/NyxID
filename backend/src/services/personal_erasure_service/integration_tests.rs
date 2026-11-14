@@ -213,10 +213,6 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                 .insert_one(bystander.clone())
                 .await
                 .unwrap();
-            db.collection::<Document>(collection)
-                .insert_one(org_row.clone())
-                .await
-                .unwrap();
             target_rows.push((collection, target.get("_id").cloned().unwrap()));
             bystander_rows.push((
                 collection,
@@ -273,6 +269,12 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         .unwrap();
 
     accept(&db, &owner, &owner, None).await.unwrap();
+    for (collection, _, row) in &org_rows {
+        db.collection::<Document>(collection)
+            .insert_one(row.clone())
+            .await
+            .unwrap();
+    }
     // Joined children have no personal owner field. Seed every registry join
     // with a target parent and child so the worker's authoritative-parent
     // cleanup is exercised automatically when a new join is added.
