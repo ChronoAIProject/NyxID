@@ -1016,9 +1016,9 @@ async fn server_run(cli: Cli) {
     ));
     // Register before serving. Reuse the process generation, not node socket
     // heartbeats: a replica can enforce policy without owning any node sockets.
-    services::security_readiness_service::ensure_indexes(&db)
+    services::personal_erasure_service::ensure_startup_indexes(&db)
         .await
-        .expect("security replica indexes failed");
+        .expect("late startup indexes failed");
     let readiness_runtime = services::security_readiness_service::Runtime::new(
         (*replica_identity).clone(),
         config.security_rollout.clone(),
@@ -1373,9 +1373,6 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
-    services::personal_erasure_service::ensure_indexes(&state.db)
-        .await
-        .expect("Personal erasure indexes");
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(

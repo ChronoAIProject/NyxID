@@ -2541,45 +2541,134 @@ pub fn export_sections() -> impl Iterator<Item = &'static str> {
         .into_iter()
 }
 
-/// Ensure the exact owner selectors used by local erasure and the orphan
-/// sweep have supporting indexes. `_id` is provided by MongoDB and needs no
-/// additional definition. Keeping the definitions here makes the registry's
-/// predicates and their bounded-page execution auditable together.
-pub(crate) async fn ensure_indexes(db: &mongodb::Database) -> crate::errors::AppResult<()> {
-    use mongodb::IndexModel;
-    use std::collections::BTreeMap;
+/// Owner predicates that are not covered by an index in the origin/main
+/// startup definitions.  This is an explicit rollout manifest rather than a
+/// blanket "one index per field" loop: existing indexes are reused whenever
+/// their first key covers the predicate, and only these audited gaps can add
+/// a new index.
+pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
+    ("agent_key_login_requests", "approved_user_id"),
+    ("assistant_agent_consents", "owner_id"),
+    ("assistant_agent_learning_members", "member_user_id"),
+    ("assistant_agent_learning_runs", "owner_id"),
+    ("assistant_agent_learning_skill_roots", "owner_id"),
+    ("assistant_agent_private_notes", "actor_user_id"),
+    ("assistant_agent_shares", "owner_id"),
+    ("assistant_agent_sharing", "owner_id"),
+    ("assistant_async_quotas", "user_id"),
+    ("assistant_checkpoints", "user_id"),
+    ("assistant_group_agent_access", "owner_id"),
+    ("assistant_group_agent_proposals", "proposed_by"),
+    ("assistant_group_invites", "accepted_by_user_id"),
+    ("assistant_group_invites", "intended_user_id"),
+    ("assistant_group_invites", "issuer_user_id"),
+    ("assistant_group_mention_notifications", "user_id"),
+    ("assistant_group_messages", "user_id"),
+    ("assistant_group_read_states", "user_id"),
+    ("assistant_group_requests", "user_id"),
+    ("assistant_learning_migrations", "owner_id"),
+    ("assistant_skill_draft_attempts", "user_id"),
+    ("assistant_voice_announcements", "user_id"),
+    ("assistant_voice_windows", "user_id"),
+    ("assistant_wire_logs", "user_id"),
+    ("auth_device_codes", "approved_user_id"),
+    ("auth_device_codes_v2", "approved_user_id"),
+    ("authorization_codes", "user_id"),
+    ("channel_adapter_accounts", "user_id"),
+    ("channel_adapter_allocations", "user_id"),
+    ("channel_adapter_events", "user_id"),
+    ("channel_delivery_receipts", "user_id"),
+    ("channel_email_batches", "user_id"),
+    ("channel_email_receipts", "user_id"),
+    ("channel_email_sends", "user_id"),
+    ("channel_email_subscriptions", "user_id"),
+    ("channel_reply_deliveries", "user_id"),
+    ("device_codes", "approved_by_user_id"),
+    ("encrypted_record_migration_findings", "owner_uuid"),
+    ("encrypted_record_migration_runs", "owner_uuid"),
+    ("feature_flag_overrides", "target_key"),
+    ("invite_codes", "usages.user_id"),
+    ("invocation_diagnostics", "actor_user_id"),
+    ("login_approvals", "user_id"),
+    ("mcp_session_notifications", "user_id"),
+    ("mfa_challenges", "user_id"),
+    ("nyxbot_events", "user_id"),
+    ("oauth_consent_requests", "user_id"),
+    ("openclaw_channel_mappings", "user_id"),
+    ("org_invites", "created_by"),
+    ("platform_guide_selections", "user_id"),
+    ("platform_native_replies", "user_id"),
+    ("platform_onboarding_binding_requests", "user_id"),
+    ("platform_personal_decision_spacing", "user_id"),
+    ("platform_personal_setup_selections", "user_id"),
+    ("refresh_tokens", "user_id"),
+    ("service_account_key_read_grants", "owner_id"),
+    ("service_change_events", "actor.person_id"),
+    ("service_pool_member_health", "owner_id"),
+    ("telegram_bot_claims", "owner_user_id"),
+    ("telegram_bot_requests", "user_id"),
+    ("telegram_managed_bot_events", "user_id"),
+    ("trigger_deliveries", "user_id"),
+    ("trigger_work", "user_id"),
+    ("channel_send_claims", "conversation_id"),
+    ("platform_delivery_tests", "installation_id"),
+    ("platform_setup_steps", "setup_id"),
+    ("service_pool_health_observations", "pool_id"),
+];
 
-    let mut by_collection = BTreeMap::<&str, Vec<IndexModel>>::new();
-    for entry in ENTRIES {
-        let (Erasure::LocalInventory | Erasure::Redacted) = entry.erasure else {
-            continue;
+/// Add only the audited owner indexes absent from the existing startup index
+/// set.  The first key check is deliberate: MongoDB rejects a same-key index
+/// under a different name, so this preserves every pre-existing definition.
+pub(crate) async fn ensure_owner_index_gaps(
+    db: &mongodb::Database,
+) -> crate::errors::AppResult<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+
+    for &(collection, field) in OWNER_INDEX_GAPS {
+        let indexes: Vec<IndexModel> = match db
+            .collection::<mongodb::bson::Document>(collection)
+            .list_indexes()
+            .await
+        {
+            Ok(cursor) => cursor.try_collect().await?,
+            Err(error)
+                if matches!(
+                    error.kind.as_ref(),
+                    mongodb::error::ErrorKind::Command(command) if command.code == 26
+                ) => Vec::new(),
+            Err(error) => return Err(error.into()),
         };
-        let OwnerSelector::Fields(fields) = entry.owner else {
+        if indexes.iter().any(|index| {
+            index
+                .keys
+                .keys()
+                .next()
+                .is_some_and(|first| first == field)
+        }) {
             continue;
-        };
-        for field in fields {
-            if *field == "_id" || field.is_empty() {
-                continue;
-            }
-            let index_name = format!("personal_erasure_owner_{}", field.replace('.', "_"));
-            let mut keys = mongodb::bson::Document::new();
-            keys.insert(*field, 1_i32);
-            by_collection.entry(entry.collection).or_default().push(
+        }
+        let name = format!(
+            "personal_erasure_owner_{}_{}",
+            collection.replace('.', "_"),
+            field.replace('.', "_")
+        );
+        let mut keys = mongodb::bson::Document::new();
+        keys.insert(field, 1_i32);
+        if let Err(error) = db
+            .collection::<mongodb::bson::Document>(collection)
+            .create_index(
                 IndexModel::builder()
                     .keys(keys)
-                    .options(
-                        mongodb::options::IndexOptions::builder()
-                            .name(index_name)
-                            .build(),
-                    )
+                    .options(IndexOptions::builder().name(name).build())
                     .build(),
-            );
+            )
+            .await
+        {
+            return Err(crate::errors::AppError::Internal(format!(
+                "owner index {collection}.{field}: {error}"
+            )));
         }
-    }
-    for (collection, indexes) in by_collection {
-        db.collection::<mongodb::bson::Document>(collection)
-            .create_indexes(indexes)
-            .await?;
     }
     Ok(())
 }
@@ -2587,7 +2676,6 @@ pub(crate) async fn ensure_indexes(db: &mongodb::Database) -> crate::errors::App
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bson::doc;
     use futures::TryStreamExt;
     use std::{collections::BTreeSet, fs, path::Path};
 
@@ -3173,49 +3261,88 @@ mod tests {
         assert_eq!(claims.get_bool("delivered"), Ok(true));
     }
 
-    #[tokio::test]
-    async fn ensure_indexes_creates_every_personal_owner_predicate_index() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("privacy_registry_indexes").await;
-        super::ensure_indexes(&db).await.unwrap();
-        for entry in ENTRIES {
-            let (Erasure::LocalInventory | Erasure::Redacted) = entry.erasure else {
-                continue;
+    async fn index_models(
+        db: &mongodb::Database,
+        collection: &str,
+    ) -> Vec<mongodb::IndexModel> {
+        let Ok(cursor) = db
+            .collection::<mongodb::bson::Document>(collection)
+            .list_indexes()
+            .await
+        else {
+            return Vec::new();
+        };
+        cursor.try_collect().await.unwrap()
+    }
+
+    fn registry_owner_predicates() -> BTreeSet<(&'static str, &'static str)> {
+        ENTRIES
+            .iter()
+            .filter_map(|entry| match entry.erasure {
+                Erasure::LocalInventory | Erasure::Redacted => match entry.owner {
+                    OwnerSelector::Fields(fields) => Some(
+                        fields
+                            .iter()
+                            .map(move |field| (entry.collection, *field)),
+                    ),
+                    OwnerSelector::NotPersonal => None,
+                },
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    async fn assert_owner_prefix_coverage(db: &mongodb::Database) {
+        let mut missing = Vec::new();
+        for (collection, field) in registry_owner_predicates() {
+            let covered = if field == "_id" {
+                true
+            } else {
+                index_models(db, collection).await.iter().any(|index| {
+                    index
+                        .keys
+                        .keys()
+                        .next()
+                        .is_some_and(|first| first == field)
+                })
             };
-            let OwnerSelector::Fields(fields) = entry.owner else {
-                continue;
-            };
-            // A collection with only an `_id` owner selector has no custom
-            // index to create on an empty test database. Seed one document so
-            // MongoDB materializes the namespace; `_id_` is the supporting
-            // index.
-            if fields.iter().all(|field| *field == "_id") {
-                db.collection::<mongodb::bson::Document>(entry.collection)
-                    .insert_one(doc! {"_id": "index-fixture"})
-                    .await
-                    .unwrap();
-            }
-            let indexes = db
-                .collection::<mongodb::bson::Document>(entry.collection)
-                .list_indexes()
-                .await
-                .unwrap();
-            let indexes: Vec<_> = indexes.try_collect().await.unwrap();
-            for field in fields {
-                if *field == "_id" {
-                    continue;
-                }
-                assert!(
-                    indexes
-                        .iter()
-                        .any(|index| index.keys.get_i32(field).ok() == Some(1)),
-                    "{} needs an owner index for {}",
-                    entry.collection,
-                    field
-                );
+            if !covered {
+                missing.push((collection, field));
             }
         }
-        db.drop().await.unwrap();
+
+        for spec in JOINED_CHILD_SPECS {
+            let covered = if spec.child_parent_field == "_id" {
+                true
+            } else {
+                index_models(db, spec.child).await.iter().any(|index| {
+                    index
+                        .keys
+                        .keys()
+                        .next()
+                        .is_some_and(|first| first == spec.child_parent_field)
+                })
+            };
+            if !covered {
+                missing.push((spec.child, spec.child_parent_field));
+            }
+        }
+        assert!(missing.is_empty(), "owner predicates lack prefix indexes: {missing:?}");
+    }
+
+    #[tokio::test]
+    async fn startup_indexes_are_idempotent_and_cover_registry_predicates() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("privacy_startup_indexes").await;
+        crate::db::ensure_indexes(&db).await.unwrap();
+        crate::services::personal_erasure_service::ensure_startup_indexes(&db)
+            .await
+            .unwrap_or_else(|error| panic!("startup indexes: {error}"));
+        crate::services::personal_erasure_service::ensure_startup_indexes(&db)
+            .await
+            .unwrap_or_else(|error| panic!("startup indexes second run: {error}"));
+        assert_owner_prefix_coverage(&db).await;
     }
 
     #[test]

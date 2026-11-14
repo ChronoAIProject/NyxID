@@ -57,10 +57,20 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
         ])
         .await?;
     super::personal_erasure_registry::ensure_indexes(db).await?;
-    super::personal_data_registry::ensure_indexes(db).await?;
+    super::personal_data_registry::ensure_owner_index_gaps(db).await?;
     preparation::ensure_indexes(db).await?;
     issuance::ensure_indexes(db).await?;
     Ok(())
+}
+
+/// Run the late startup index groups in the same order as the server.
+///
+/// The base database indexes are created by `db::create_connection` first;
+/// these groups own only their feature-specific indexes and must remain
+/// idempotent when an older replica restarts during a rolling deployment.
+pub async fn ensure_startup_indexes(db: &Database) -> AppResult<()> {
+    super::security_readiness_service::ensure_indexes(db).await?;
+    ensure_indexes(db).await
 }
 
 pub async fn status(db: &Database, user_id: &str) -> AppResult<Option<PersonalErasureJob>> {
