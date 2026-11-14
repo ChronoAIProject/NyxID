@@ -41,6 +41,8 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
     let mut found = Inventory::new();
     visit(&root, &root, &mut found);
     let expected: Inventory = [
+        // Startup-only validated destination construction; performs no I/O.
+        ("config.rs", "parse_inner", 1),
         // Local test capture exercises successful provider exchange through
         // live account/device consent and verifies pre-auth dispatch denial.
         (
@@ -58,7 +60,6 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
             "weak_inherited_options_cannot_weaken_registry_dispatch_or_completion_evidence",
             1,
         ),
-        ("services/crash_report_export/sentry.rs", "parse", 1),
         ("services/crash_report_export/sentry.rs", "submit", 1),
         (
             "services/crash_report_export/sentry_tests.rs",
