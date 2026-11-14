@@ -225,13 +225,18 @@ pub(crate) async fn for_turn(state: &AppState, turn: &str) {
 }
 
 pub(crate) fn spawn_sweep(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             let result: AppResult<()> = async {
                 for id in deliveries::due(&state.db).await? {
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
                     process(&state, &id).await?;
                 }
                 Ok(())

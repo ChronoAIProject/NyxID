@@ -132,6 +132,9 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
         .await?;
 
     for service in services {
+        let Some(_work) = super::shutdown::process().background() else {
+            break;
+        };
         sync_service_endpoints_from_spec_url(db, &service).await;
     }
     Ok(())
@@ -141,7 +144,7 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
 /// the service and syncs Tool specs or discovers empty legacy services so
 /// a slow or unreachable spec URL never delays the HTTP response.
 pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let service = match db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .find_one(doc! { "_id": &service_id, "is_active": true, "service_type": "http" })

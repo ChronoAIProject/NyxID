@@ -299,11 +299,16 @@ pub fn spawn_chain_verify_worker(
         return;
     }
 
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = crate::services::shutdown::process()
+                .tick(&mut interval)
+                .await
+            else {
+                break;
+            };
             if let Err(error) = run_once(&db, audit_key.as_slice(), ledger_key.as_slice()).await {
                 tracing::warn!(error = %error, "chain verification sweep failed");
             }

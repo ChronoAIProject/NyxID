@@ -430,7 +430,7 @@ async fn kick_with_origin(
     .await?
     {
         let state = state.clone();
-        tokio::spawn(run(state, token, row, budget));
+        state.shutdown.clone().spawn(run(state, token, row, budget));
     }
     Ok(false)
 }
@@ -749,6 +749,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for claim in stale {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         let (Ok(actor), Ok(id), Ok(token)) = (
             claim.get_str("user_id"),
             claim.get_str("conversation_id"),
@@ -772,6 +775,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for notice in notices {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if let (Ok(actor), Ok(agent), Ok(profile)) = (
             notice.get_str("user_id"),
             notice.get_str("agent_id"),
@@ -784,6 +790,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         .find(doc!{"guest_model_setup":true,"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(70))}})
         .limit(32).await?.try_collect().await?;
     for row in hidden {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         // The normal delete path revokes keys and purges all content. Completed
         // route metadata is deliberately unbound before deleting its thread.
         state

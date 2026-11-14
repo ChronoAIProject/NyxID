@@ -3145,6 +3145,9 @@ pub async fn refresh_expiring_oauth_keys(
     };
 
     for key in &candidates {
+        let Some(_claim) = super::shutdown::process().background() else {
+            break;
+        };
         match refresh_user_api_key_in_place(db, encryption_keys, key, notifier).await {
             Ok(_) => report.refreshed += 1,
             Err(error) => {

@@ -102,75 +102,77 @@ fn warn_at(
     let active_since = report.active_since;
     let live_generations = report.live_generations;
     let expected_replicas = report.expected_replicas.clone();
-    Some(tokio::spawn(
-        async move {
-            // A stuck diagnostic must not accumulate unbounded work or hold a
-            // request open. Failed diagnostics retry after a short local delay.
-            let work = async {
-                let key = audit_service::audit_chain_hmac_key().ok_or_else(|| {
-                    crate::errors::AppError::Internal("Audit chain not initialized".into())
-                })?;
-                let event_data = serde_json::json!({
-                    "first_observed_capability": capability,
-                    "roster_warnings": warnings,
-                    "active_since": active_since,
-                    "live_generations": live_generations,
-                    "expected_replicas": expected_replicas,
-                });
-                // An audit failure must not consume the shared day. Both facts
-                // commit together, so a short retry can actually emit the event.
-                let context = (db.clone(), condition.clone(), key, event_data);
-                let emitted = transaction_service::run_db_only(
-                    &db,
-                    &context,
-                    |session, (db, condition, key, event_data)| {
-                        Box::pin(async move {
-                            if !RateWindowStore::admit_in_session(
-                                db, EVENT, condition, 1, INTERVAL, session,
-                            )
-                            .await?
-                            {
-                                return Ok(false);
-                            }
-                            audit_service::log_system_event_in_session(
-                                db,
-                                session,
-                                key,
-                                EVENT,
-                                event_data.clone(),
-                            )
-                            .await?;
-                            Ok(true)
-                        })
-                    },
-                )
-                .await?;
-                if emitted {
-                    tracing::warn!(
-                        first_observed_capability = capability,
-                        ?warnings,
-                        ?active_since,
-                        live_generations,
-                        ?expected_replicas,
-                        "Serving an activated security capability with roster warnings"
-                    );
-                }
-                Ok::<_, crate::errors::AppError>(())
-            };
-            match tokio::time::timeout(Duration::from_secs(5), work).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    retry_local(&key, now + INTERVAL, Instant::now());
-                    tracing::debug!(%error, "Serving readiness diagnostic unavailable")
-                }
-                Err(_) => {
-                    retry_local(&key, now + INTERVAL, Instant::now());
-                    tracing::debug!("Serving readiness diagnostic timed out");
+    Some(
+        crate::services::shutdown::process().spawn_cleanup(
+            async move {
+                // A stuck diagnostic must not accumulate unbounded work or hold a
+                // request open. Failed diagnostics retry after a short local delay.
+                let work = async {
+                    let key = audit_service::audit_chain_hmac_key().ok_or_else(|| {
+                        crate::errors::AppError::Internal("Audit chain not initialized".into())
+                    })?;
+                    let event_data = serde_json::json!({
+                        "first_observed_capability": capability,
+                        "roster_warnings": warnings,
+                        "active_since": active_since,
+                        "live_generations": live_generations,
+                        "expected_replicas": expected_replicas,
+                    });
+                    // An audit failure must not consume the shared day. Both facts
+                    // commit together, so a short retry can actually emit the event.
+                    let context = (db.clone(), condition.clone(), key, event_data);
+                    let emitted = transaction_service::run_db_only(
+                        &db,
+                        &context,
+                        |session, (db, condition, key, event_data)| {
+                            Box::pin(async move {
+                                if !RateWindowStore::admit_in_session(
+                                    db, EVENT, condition, 1, INTERVAL, session,
+                                )
+                                .await?
+                                {
+                                    return Ok(false);
+                                }
+                                audit_service::log_system_event_in_session(
+                                    db,
+                                    session,
+                                    key,
+                                    EVENT,
+                                    event_data.clone(),
+                                )
+                                .await?;
+                                Ok(true)
+                            })
+                        },
+                    )
+                    .await?;
+                    if emitted {
+                        tracing::warn!(
+                            first_observed_capability = capability,
+                            ?warnings,
+                            ?active_since,
+                            live_generations,
+                            ?expected_replicas,
+                            "Serving an activated security capability with roster warnings"
+                        );
+                    }
+                    Ok::<_, crate::errors::AppError>(())
+                };
+                match tokio::time::timeout(Duration::from_secs(5), work).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        retry_local(&key, now + INTERVAL, Instant::now());
+                        tracing::debug!(%error, "Serving readiness diagnostic unavailable")
+                    }
+                    Err(_) => {
+                        retry_local(&key, now + INTERVAL, Instant::now());
+                        tracing::debug!("Serving readiness diagnostic timed out");
+                    }
                 }
             }
-        }
-        .with_current_subscriber(),
-    ))
+            .with_current_subscriber(),
+        ),
+    )
 }
 
 #[cfg(test)]

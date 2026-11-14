@@ -261,7 +261,7 @@ pub(super) async fn start_with_provider(
         Ok(Ok((socket, sdp))) => {
             let state = state.clone();
             let running = call.clone();
-            tokio::spawn(Box::pin(async move {
+            crate::services::shutdown::process().spawn(Box::pin(async move {
                 run(state, running, Some(provider), socket, billing, concurrency).await;
             }));
             Ok(Started { session: call, sdp })
@@ -518,6 +518,7 @@ pub(super) async fn run(
         let session_work = async {
             loop {
                 tokio::select! {
+                    () = state.shutdown.interrupted() => break Ok("server_shutdown"),
                     result=&mut work => break result,
                     _=renew.tick() => {
                         match session::refresh(&state.db,&lease).await {
@@ -1499,15 +1500,17 @@ async fn task_updates(
 }
 
 pub fn spawn_recovery(state: AppState) {
-    tokio::spawn(Box::pin(async move {
+    state.shutdown.clone().spawn_worker(Box::pin(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tick.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut tick).await else {
+                break;
+            };
             if Box::pin(recover(&state)).await.is_err() {
                 tracing::warn!("Voice recovery deferred");
             }
-            if Box::pin(notify_completed(&state)).await.is_err() {
+            if !state.shutdown.is_draining() && Box::pin(notify_completed(&state)).await.is_err() {
                 tracing::warn!("Voice completion notification deferred");
             }
         }
@@ -1643,7 +1646,7 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
         .await;
         match resumed {
             Ok((provider, socket, resumed_call, billing, concurrency)) => {
-                tokio::spawn(Box::pin(run(
+                crate::services::shutdown::process().spawn(Box::pin(run(
                     state.clone(),
                     resumed_call,
                     Some(provider),
@@ -1689,6 +1692,9 @@ async fn notify_completed(state: &AppState) -> AppResult<()> {
         .collect::<Result<_, _>>()
         .map_err(|_| AppError::Internal("Voice notification state invalid".into()))?;
     for request in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let Some(call) = state
             .db
             .collection::<VoiceSession>(COLLECTION_NAME)

@@ -2409,14 +2409,21 @@ async fn build_filtered_response(
                 .as_ref()
                 .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-            crate::turn_trace::spawn(async move {
+            crate::turn_trace::spawn_cleanup(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
 
                 loop {
-                    match tokio::time::timeout(idle_timeout, stream.next()).await {
+                    match {
+                        let shutdown = crate::services::shutdown::process();
+                        tokio::select! {
+                            biased;
+                            () = shutdown.stopped() => break,
+                            result = tokio::time::timeout(idle_timeout, stream.next()) => result,
+                        }
+                    } {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
@@ -2707,7 +2714,7 @@ async fn build_translated_sse_response(
         .as_ref()
         .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-    crate::turn_trace::spawn(async move {
+    crate::turn_trace::spawn_cleanup(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
@@ -2715,7 +2722,14 @@ async fn build_translated_sse_response(
         let mut response_len: i64 = 0;
 
         loop {
-            match tokio::time::timeout(idle_timeout, stream.next()).await {
+            match {
+                let shutdown = crate::services::shutdown::process();
+                tokio::select! {
+                    biased;
+                    () = shutdown.stopped() => break,
+                    result = tokio::time::timeout(idle_timeout, stream.next()) => result,
+                }
+            } {
                 Ok(Some(Ok(bytes))) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
 

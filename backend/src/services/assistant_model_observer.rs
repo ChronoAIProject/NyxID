@@ -95,7 +95,7 @@ impl Drop for Completion {
             let conversation = self.conversation.clone();
             let turn = self.turn.clone();
             let elapsed = self.started.elapsed();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = complete_request(&db, &conversation, &turn, elapsed).await;
             });
         }

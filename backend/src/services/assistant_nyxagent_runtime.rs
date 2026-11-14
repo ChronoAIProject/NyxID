@@ -758,13 +758,14 @@ async fn request(
 pub(crate) async fn run_owner_turn(
     state: AppState,
     egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
-    row: AssistantConversation,
+    mut row: AssistantConversation,
     text: String,
     mut credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
     mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    let shutdown_work = state.shutdown.turn(&row);
     let trace = row
         .active_turn
         .as_ref()
@@ -784,6 +785,11 @@ pub(crate) async fn run_owner_turn(
         .is_err()
     {
         return None;
+    }
+    // Platform recovery claims the worker in the existing transaction. Keep
+    // the local settlement snapshot on that same process fence.
+    if let Some(turn) = row.active_turn.as_mut() {
+        turn.worker_instance = Some(super::assistant_engine_worker::instance().clone());
     }
     let turn_id = row
         .active_turn
@@ -813,7 +819,7 @@ pub(crate) async fn run_owner_turn(
     let heartbeat_turn = turn_id.clone();
     // AbortOnDropHandle ties the child to this worker: a panic or task abort
     // cannot leave a fresh heartbeat behind to hide an orphaned turn.
-    let heartbeat_task = AbortOnDropHandle::new(tokio::spawn(async move {
+    let heartbeat_task = AbortOnDropHandle::new(crate::services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS));
         interval.tick().await;
@@ -871,7 +877,11 @@ pub(crate) async fn run_owner_turn(
     let queued = match queue_deadline {
         Some((since, deadline)) => {
             let queued =
-                wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline).await;
+                tokio::select! {
+                    biased;
+                    () = state.shutdown.interrupted() => Err(TurnError::internal("turn_lost", "shutdown")),
+                    result = wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline) => result,
+                };
             if queued.is_ok() {
                 events.emit(
                     "turn.status",
@@ -952,6 +962,7 @@ pub(crate) async fn run_owner_turn(
             outcome
         });
         tokio::select! {
+            () = state.shutdown.interrupted() => Err(TurnError::internal("turn_lost", "shutdown")),
             result = &mut execution => result,
             () = permit.cancelled() => Err(TurnError::internal("assistant_unavailable", "permit")),
             error = watch_stop(&state, &row, &turn_id) => Err(error),
@@ -1014,6 +1025,9 @@ pub(crate) async fn run_owner_turn(
         },
     )
     .await;
+    if let (Some(work), SettledExecution::Saved { error, .. }) = (&shutdown_work, &settled) {
+        work.settled(error.as_ref().is_some_and(|error| error.stage == "shutdown"));
+    }
     let _ = heartbeat_stop.send(());
     let _ = heartbeat_task.await;
     match settled {
@@ -1051,7 +1065,7 @@ pub(crate) async fn wait_for_running_slot(
     // Display only, for the moments before the engine request starts, which
     // clears the markers durably; the lease set on queuing covers execution.
     let (db, row, turn_id) = (state.db.clone(), row.clone(), turn_id.to_owned());
-    tokio::spawn(async move {
+    state.shutdown.spawn(async move {
         let _ = tokio::time::timeout(
             QUEUE_WRITE_TIMEOUT,
             engine::mark_dequeued(&db, &row, &turn_id),

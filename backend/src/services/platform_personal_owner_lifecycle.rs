@@ -322,6 +322,9 @@ pub async fn recover_pending(db: &Database, limit: usize) -> AppResult<usize> {
         .await?;
     let visited = pending.len();
     for user in pending {
+        let Some(_claim) = super::shutdown::process().background() else {
+            break;
+        };
         let owner = user.get_str("_id").map_err(|_| changed())?;
         users
             .update_one(

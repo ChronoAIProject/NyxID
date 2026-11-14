@@ -210,6 +210,9 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 /// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
+    let Some(_claim) = state.shutdown.background() else {
+        return;
+    };
     let result: AppResult<()> = async {
         let (row, org_access) = match Box::pin(engine::get_authorized(&state.db, owner, id)).await {
             Ok(authorized) => authorized,
@@ -4124,16 +4127,24 @@ pub fn spawn_sweeps(state: AppState) {
     super::nyxbot::execution_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::nyxbot::guest_setup_queue::sweep(&state)
                 .await
                 .is_err()
             {
                 tracing::warn!("Guest model queue deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::assistant_guest_model_setup::sweep(&state)
                 .await
@@ -4141,11 +4152,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::warn!("Guest model recovery deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::nyxbot::guest_model_notices::sweep(&state)
                 .await
                 .is_err()
             {
                 tracing::warn!("Guest model setup notices deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::lark_base_writes::sweep(&state.db)
                 .await
@@ -4153,11 +4170,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Lark Base write maintenance deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::assistant_channel_media::queue::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel media finalization deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await
@@ -4165,11 +4188,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Channel media sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::channel_thread_follow_service::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel thread sweep deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::assistant_invocation_service::reconcile_cancellations(&state)
                 .await
@@ -4177,8 +4206,14 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Invocation cancellation sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
                 Ok(rows) => {
@@ -4194,6 +4229,9 @@ pub fn spawn_sweeps(state: AppState) {
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::execution_permission_dispatch::proposals::sweep(&state)
                 .await
                 .is_err()
@@ -4201,32 +4239,57 @@ pub fn spawn_sweeps(state: AppState) {
                 tracing::debug!("Execution permission recovery deferred");
             }
             // Things the owner finished outside the chat queue events first.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::process_watches(&state).await {
                 tracing::debug!(%error, "NyxBot watch sweep deferred");
             }
             // Linked chat apps whose messages stopped reaching their agent.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::check_deliveries(&state).await {
                 tracing::debug!(%error, "NyxBot delivery sweep deferred");
             }
             // Reconcile personal and org bot transports against their linking person's flags.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::switch_to_gateway(&state).await {
                 tracing::debug!(%error, "NyxBot gateway switch-over deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if deliver_pending_skill_notifications(&state).await.is_err() {
                 tracing::debug!("Skill attachment outbox sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
                     wake(&state, &row.user_id, &row.id).await;
                 }
             }
             super::collaboration_group::sweep(&state).await;
             // Group members addressed while busy (or while the pool was full).
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Ok(rows) =
                 crate::services::assistant_group_service::with_pending(&state.db).await
             {
                 for group in rows {
-                    super::assistant_group::advance(&state, &group.user_id, &group.id).await;
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
+                    super::assistant_group::advance_background(&state, &group.user_id, &group.id)
+                        .await;
                 }
             }
         }

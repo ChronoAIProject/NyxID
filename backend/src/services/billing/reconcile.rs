@@ -21,7 +21,7 @@ use super::lago_client::{LagoApi, LagoError, LagoErrorKind, LagoEvent};
 use super::reservation;
 use super::webhook;
 
-const RECONCILE_LEASE: &str = "billing:reconcile";
+pub(crate) const RECONCILE_LEASE: &str = "billing:reconcile";
 
 tokio::task_local! {
     // Scoped to the supervisor future, never inherited by request tasks. Leaf
@@ -121,6 +121,18 @@ impl BillingReconciler {
         &self,
         runtime: &ClusterLeaseRuntime,
     ) -> AppResult<ReconcileStats> {
+        self.run_once_with_shutdown(runtime, &crate::services::shutdown::process())
+            .await
+    }
+
+    async fn run_once_with_shutdown(
+        &self,
+        runtime: &ClusterLeaseRuntime,
+        shutdown: &crate::services::shutdown::Runtime,
+    ) -> AppResult<ReconcileStats> {
+        let Some(_work) = shutdown.background() else {
+            return Ok(ReconcileStats::default());
+        };
         let Some(token) = runtime.acquire(&self.db, RECONCILE_LEASE).await? else {
             return Ok(ReconcileStats::default());
         };
@@ -131,7 +143,21 @@ impl BillingReconciler {
                 // Passing a borrow keeps the pass alive when the house renewal
                 // runner drops its operation on loss. Do not drop a multi-write
                 // settlement/release between its durable steps.
-                match runtime.run_while_renewed(&self.db, &token, &mut pass).await {
+                let outcome = {
+                    let renewed = runtime.run_while_renewed(&self.db, &token, &mut pass);
+                    tokio::pin!(renewed);
+                    tokio::select! {
+                        biased;
+                        () = shutdown.intake_stopped() => {
+                            CONTINUE_RECONCILE.with(|running| running.set(false));
+                            // Keep renewing while the current unit finishes. If the
+                            // hard deadline aborts us, retain the token until TTL.
+                            renewed.await
+                        },
+                        result = &mut renewed => result,
+                    }
+                };
+                match outcome {
                     Some(result) => result,
                     None => {
                         CONTINUE_RECONCILE.with(|running| running.set(false));
@@ -143,8 +169,11 @@ impl BillingReconciler {
                 }
             })
             .await;
-        if let Err(error) = LeaseStore::release(&self.db, &token).await {
-            tracing::warn!(%error, "Billing reconcile lease release failed; waiting for expiry");
+        match LeaseStore::release(&self.db, &token).await {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "Billing reconcile lease release failed; waiting for expiry")
+            }
         }
         result
     }
@@ -277,6 +306,9 @@ impl BillingReconciler {
                 error_code = error.error_code(),
                 "Model tariff synchronization will retry"
             ),
+        }
+        if !continue_reconcile() {
+            return Ok(stats);
         }
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
@@ -639,18 +671,25 @@ pub fn spawn_reconcile_worker(
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // The first tick fires immediately so a fresh deploy has rate-cache
-        // rows and wallet balances before the first billable request.
-        loop {
-            interval.tick().await;
-            if let Err(error) = reconciler.run_once().await {
-                tracing::warn!(error = %error, "Billing reconcile sweep failed");
+    Some(
+        crate::services::shutdown::process().spawn_worker(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately so a fresh deploy has rate-cache
+            // rows and wallet balances before the first billable request.
+            loop {
+                let Some(_work) = crate::services::shutdown::process()
+                    .tick(&mut interval)
+                    .await
+                else {
+                    break;
+                };
+                if let Err(error) = reconciler.run_once().await {
+                    tracing::warn!(error = %error, "Billing reconcile sweep failed");
+                }
             }
-        }
-    }))
+        }),
+    )
 }
 
 pub fn decide_lago_push(

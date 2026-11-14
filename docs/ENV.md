@@ -49,6 +49,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
+| `SHUTDOWN_DRAIN_TIMEOUT_SECS` | `600` | Process shutdown budget after SIGTERM/ctrl-c. Requests, response streams and admitted background work drain while both listeners serve. Reserves the smaller of five seconds or 10% of the budget for fenced settlement, release and audit. `0` preserves immediate shutdown, including the existing bounded Discord cancellation. See [Rolling deploys and graceful drain](DEPLOYMENT.md#rolling-deploys-and-graceful-drain). |
 | `BASE_URL` | `http://localhost:3001` | Canonical backend base URL (default JWT issuer/audience); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
 | `CHRONO_PROBE_URL` | *(unset)* | Optional trusted internal chrono-probe HTTP(S) origin; connected-service monitoring also requires the default-off `services:monitoring` flag for the acting person. Unset or invalid configuration returns `monitoring_not_configured` (404). No path, credentials, query or fragment. See [Service monitoring](SERVICE_MONITORING.md). |
 | `INVOCATION_DIAGNOSTICS_ENABLED` | `false` | Startup-only opt-in for automatic failure diagnostic handles; requires `CHRONO_PROBE_URL`. Only ordinary unconstrained access-token callers and downstream 5xx/eligible transport failures qualify. Off performs no diagnostic database write or response decoration. Redemption still checks the live `services:monitoring` flag. |
@@ -95,11 +96,14 @@ expire before removing resource verification support. No runtime restart or
 sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
 
 Deploying the provider still needs a verified drain of existing proxy streams
-and NyxBot turns. The current backend does not track those tasks through a
-graceful shutdown; losing a worker can end its turn as `turn_lost`, without
-automatic replay. Keep existing processes alive until their admitted work is
-complete and new work has been routed elsewhere. The disabled feature flag
-does not protect unrelated in-flight work from a backend process replacement.
+and NyxBot turns. SIGTERM/ctrl-c starts the backend drain described below;
+configure the platform termination grace period to cover it. An early kill
+still ends active turns as `turn_lost`, without automatic replay. The disabled
+feature flag does not protect admitted work from a process replacement.
+
+`GET /ready` is unauthenticated and uses only process state: 200 while serving,
+503 after drain begins. Use it for traffic readiness. `GET /health` retains its
+existing liveness response, including 200 throughout the drain.
 
 ## Remote Machine backend Kubernetes authentication
 

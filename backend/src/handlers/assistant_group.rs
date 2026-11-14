@@ -233,22 +233,46 @@ async fn group_response_for(
 
 /// Start (or keep queued) the members a group has addressed.
 pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
+    advance_inner(state, owner, group_id, false).await;
+}
+
+pub(crate) async fn advance_background(state: &AppState, owner: &str, group_id: &str) {
+    advance_inner(state, owner, group_id, true).await;
+}
+
+async fn advance_inner(state: &AppState, owner: &str, group_id: &str, background: bool) {
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
         crate::services::assistant_group_kind::require_legacy(&group)?;
         if crate::services::org_group_service::is_org(&group) {
-            Box::pin(super::org_group::advance(state, &group)).await;
+            Box::pin(super::org_group::advance_inner(state, &group, background)).await;
             return Ok(());
         }
         if group.followers.iter().any(|f| f.automation.is_some()) {
             crate::services::trigger_schedule::group::recover(&state.db, &group).await?;
             let current = groups::get(&state.db, owner, group_id).await?;
             for (work, agent_id) in crate::services::trigger_schedule::group::queued(&current) {
+                let _claim = if background {
+                    let Some(work) = state.shutdown.background() else {
+                        return Ok(());
+                    };
+                    Some(work)
+                } else {
+                    None
+                };
                 run_member_with_work(state, owner, &current, &agent_id, Some(work)).await?;
             }
         }
         let now = Utc::now();
         for agent_id in &group.pending_agent_ids {
+            let _claim = if background {
+                let Some(work) = state.shutdown.background() else {
+                    return Ok(());
+                };
+                Some(work)
+            } else {
+                None
+            };
             // A member still answering picks up its next message afterwards.
             if let Some(thread) =
                 groups::member_thread(&state.db, owner, group_id, agent_id).await?
@@ -509,7 +533,7 @@ pub(crate) async fn member_settled(
             }
             Err(error) => tracing::debug!(%error, "Automation group unavailable"),
         }
-        Box::pin(advance(state, owner, group_id)).await;
+        Box::pin(advance_background(state, owner, group_id)).await;
         return;
     }
     if row.agent_owner_id.is_some() {
@@ -620,7 +644,7 @@ pub(crate) async fn member_settled(
     if let Err(error) = result {
         tracing::debug!(%error, "Group reply not posted");
     }
-    advance(state, owner, group_id).await;
+    advance_background(state, owner, group_id).await;
 }
 
 /// Keep the hand-offs the group's per-message budget and the owner's hourly

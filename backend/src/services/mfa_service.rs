@@ -1036,7 +1036,7 @@ fn schedule_recovery_notice(
     permit: tokio::sync::OwnedSemaphorePermit,
     notice: impl std::future::Future<Output = AppResult<()>> + Send + 'static,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         match tokio::time::timeout(RECOVERY_NOTICE_TIMEOUT, notice).await {
             Ok(Ok(())) => {}

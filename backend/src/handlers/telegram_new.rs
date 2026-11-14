@@ -643,7 +643,7 @@ pub(crate) async fn relay_manager_channel(
     let deadline = std::time::Duration::from_secs(
         u64::from(state.config.channel_relay_callback_timeout_secs) + 10,
     );
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         match tokio::time::timeout(
             deadline,

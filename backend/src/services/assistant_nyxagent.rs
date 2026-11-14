@@ -4178,7 +4178,7 @@ pub(crate) async fn request_stop_row_target(
     let db = db.clone();
     let user_id = user_id.to_owned();
     let id = id.to_owned();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         tokio::time::sleep(delay).await;
         if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
             && !matches!(error, AppError::NotFound(_))
@@ -4382,6 +4382,12 @@ artifact_recovery_target: None,
                         "user_id": &row.user_id,
                         "active_turn.turn_id": &turn_id,
                     };
+                if result.error.as_ref().is_some_and(|error| error.stage == "shutdown") {
+                    let worker = row.active_turn.as_ref()
+                        .and_then(|turn| turn.worker_instance.as_ref())
+                        .ok_or_else(not_found)?;
+                    active_filter.insert("active_turn.worker_instance.id", &worker.id);
+                }
                 if let Some(expected) = row.active_turn.as_ref().and_then(|turn| turn.platform_origin.as_ref()) {
                     active_filter.insert("active_turn.platform_origin", bson::to_bson(expected).map_err(|_|AppError::AssistantTurnRequired)?);
                 }
@@ -4713,6 +4719,43 @@ pub async fn force_stop(db: &Database, user_id: &str, id: &str, turn_id: &str) -
     )
     .await
     .map(|_| true)
+}
+
+/// Shutdown alone can settle a fresh heartbeat, and only for the exact worker
+/// and turn. The transaction retains Stop precedence and the existing format.
+pub async fn settle_shutdown_turn(
+    db: &Database,
+    row: &AssistantConversation,
+    worker_id: &str,
+) -> AppResult<Option<TurnError>> {
+    if row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.worker_instance.as_ref())
+        .is_none_or(|worker| worker.id != worker_id)
+    {
+        return Ok(None);
+    }
+    match finish_turn_inner(
+        db,
+        row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(TurnError::internal("turn_lost", "shutdown")),
+        },
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(error) => Ok(error),
+        Err(AppError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Reclaim only turns whose heartbeat is durably stale. The heartbeat predicate

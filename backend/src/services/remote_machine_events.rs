@@ -436,6 +436,9 @@ async fn escalate_cleanup(db: &Database, op: &MachineOperation) -> AppResult<()>
 /// visible and does not block lifecycle reconciliation or physical cleanup.
 pub async fn deliver_pending(state: &crate::AppState) -> AppResult<()> {
     for _ in 0..16 {
+        let Some(_work) = state.shutdown.background() else {
+            break;
+        };
         let claim = uuid::Uuid::new_v4().to_string();
         let event=state.db.collection::<Document>(EVENTS).find_one_and_update(doc! {
             "notification":true,"notification_delivered_at":bson::Bson::Null,
@@ -451,6 +454,13 @@ pub async fn deliver_pending(state: &crate::AppState) -> AppResult<()> {
         let Some(document) = event else { break };
         let event: MachineLifecycleEvent = bson::from_document(document.clone())
             .map_err(|_| AppError::Internal("lifecycle event invalid".into()))?;
+        let release = state.shutdown.register_release(super::shutdown::Release {
+            safe_after_stop: false,
+            db: state.db.clone(),
+            collection: EVENTS,
+            filter: doc! {"_id": &event.id, "notification_claim": &claim},
+            update: doc! {"$set": {"notification_claim_until": null, "notification_claim": null}},
+        });
         #[cfg(test)]
         notice_tests::age_claim(&state.db, &event.id).await;
         let result = dispatch_lifecycle_notice(state, &event, &claim).await;
@@ -480,6 +490,7 @@ pub async fn deliver_pending(state: &crate::AppState) -> AppResult<()> {
                 vec![doc! {"$set":updates}],
             )
             .await?;
+        release.completed();
     }
     Ok(())
 }

@@ -62,11 +62,13 @@ pub async fn register_destinations(db: &Database, clients: &ErasureClients) -> A
 
 pub fn spawn_worker(db: crate::db::DbHandle, clients: ErasureClients) {
     let clients = Arc::new(clients);
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(30));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            timer.tick().await;
+            let Some(_work) = crate::services::shutdown::process().tick(&mut timer).await else {
+                break;
+            };
             if drain_once(&db, &clients).await.is_err() {
                 tracing::warn!("Telemetry erasure pass failed; durable checkpoints retained");
             }
@@ -730,10 +732,21 @@ pub(crate) async fn drain_once(db: &Database, clients: &ErasureClients) -> AppRe
     let db = &durable;
     backfill_intents(db).await?;
     for _ in 0..BATCH_SIZE {
+        let Some(_work) = super::shutdown::process().background() else {
+            break;
+        };
         let Some(job) = claim(db).await? else {
             break;
         };
+        let release = super::shutdown::process().register_release(super::shutdown::Release {
+            safe_after_stop: false,
+            db: db.clone(),
+            collection: COLLECTION_NAME,
+            filter: doc! {"_id": &job.id, "lease_token": &job.lease_token},
+            update: doc! {"$set": {"lease_expires_at": null, "lease_token": null}},
+        });
         process(db, clients, &job).await?;
+        release.completed();
     }
     Ok(())
 }

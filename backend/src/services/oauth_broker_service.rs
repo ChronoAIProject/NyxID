@@ -1365,7 +1365,7 @@ fn spawn_revocation_webhook(
     http_client: reqwest::Client,
     dispatch: RevocationWebhookDispatch,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let binding_hash = dispatch.binding_hash;
         let client_id = dispatch.client_id;
         let client = match db

@@ -374,6 +374,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         .find(doc!{"status":"queued","turn_id":bson::Bson::Null,"guest_setup_deadline":{"$exists":true},"guest_setup_payload":{"$exists":true}})
         .projection(doc!{"_id":1}).sort(doc!{"created_at":1}).limit(32).await?.try_collect().await?;
     for event in events {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         if let Ok(id) = event.get_str("_id") {
             crate::services::channel_turn_delivery::detach(&state.db, id).await?;
             let _ = Box::pin(resume(state, id)).await;

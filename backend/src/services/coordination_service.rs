@@ -170,6 +170,19 @@ impl ClusterLeaseRuntime {
         LeaseStore::acquire(db, name, &self.holder, self.ttl).await
     }
 
+    /// Request-time leases (notably OAuth refresh) still use `acquire`.
+    pub async fn acquire_background(
+        &self,
+        db: &mongodb::Database,
+        name: &str,
+        shutdown: &super::shutdown::Runtime,
+    ) -> AppResult<Option<LeaseToken>> {
+        let Some(_claim) = shutdown.background() else {
+            return Ok(None);
+        };
+        self.acquire(db, name).await
+    }
+
     pub fn contender_wait(&self) -> Duration {
         self.renew_interval / 10
     }
@@ -337,6 +350,7 @@ impl LeaseStore {
             .delete_one(without_checkpoint)
             .await?;
         if deleted.deleted_count == 1 {
+            super::shutdown::process().record_release("cluster", 1);
             return Ok(true);
         }
 
@@ -352,6 +366,7 @@ impl LeaseStore {
                 }},
             )
             .await?;
+        super::shutdown::process().record_release("cluster", released.modified_count);
         Ok(released.modified_count == 1)
     }
 
@@ -755,6 +770,7 @@ impl SlotStore {
                 &token.lease_id,
             ))
             .await?;
+        super::shutdown::process().record_release("capacity_slots", result.deleted_count);
         Ok(result.deleted_count == 1)
     }
 

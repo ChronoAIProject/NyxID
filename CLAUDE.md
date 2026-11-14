@@ -13,6 +13,8 @@ Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.m
 
 ## Critical Rules
 
+- SIGTERM/ctrl-c drains admitted work while serving both listeners; stop background claims, retain renewals, settle deadline turns as `turn_lost`/`shutdown`, and release exact generation/claim fences. `/ready` becomes 503; `/health` stays 200. See `docs/DEPLOYMENT.md#rolling-deploys-and-graceful-drain`.
+
 ### 1. MongoDB Model Conventions
 
 - NEVER use `#[serde(skip_serializing)]` on model fields -- prevents `insert_one(&struct)` from storing them
@@ -505,6 +507,7 @@ GCP_KMS_KEY_NAME= / GCP_KMS_KEY_NAME_PREVIOUS=
 
 # Defaults provided
 PORT=3001
+SHUTDOWN_DRAIN_TIMEOUT_SECS=600     # Hard exit budget; includes up to 5s cleanup (10% for short budgets); 0 = legacy immediate exit
 BASE_URL=http://localhost:3001
 FRONTEND_URL=http://localhost:3000
 JWT_PRIVATE_KEY_PATH=keys/private.pem

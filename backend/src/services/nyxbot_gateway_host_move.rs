@@ -310,6 +310,9 @@ async fn reconcile(state: &AppState, catalog: &Catalog) -> AppResult<Counts> {
             break;
         }
         for row in rows {
+            let Some(_claim) = state.shutdown.background() else {
+                return Ok(counts);
+            };
             after = row.id.clone();
             if row.transport != "gateway" || row.status == "deleted" {
                 continue;
@@ -336,6 +339,9 @@ async fn reconcile(state: &AppState, catalog: &Catalog) -> AppResult<Counts> {
             break;
         }
         for row in rows {
+            let Some(_claim) = state.shutdown.background() else {
+                return Ok(counts);
+            };
             after = row.id.clone();
             if !matches!(row.state.as_str(), "active" | "prepared")
                 || (row.gateway_base == catalog.base
@@ -359,6 +365,9 @@ async fn reconcile(state: &AppState, catalog: &Catalog) -> AppResult<Counts> {
             break;
         }
         for row in rows {
+            let Some(_claim) = state.shutdown.background() else {
+                return Ok(counts);
+            };
             after = row.id.clone();
             if row.state == ReleaseState::Settled || row.gateway_base_url == catalog.base {
                 continue;
@@ -398,6 +407,9 @@ async fn reconcile(state: &AppState, catalog: &Catalog) -> AppResult<Counts> {
             break;
         }
         for row in rows {
+            let Some(_claim) = state.shutdown.background() else {
+                return Ok(counts);
+            };
             after = row
                 .get_str("_id")
                 .map_err(|_| AppError::Internal("Invalid native metadata".into()))?

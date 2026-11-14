@@ -1377,6 +1377,9 @@ pub(crate) async fn repair_stale_bindings_sweep(state: &AppState) -> AppResult<(
         .await?;
     let mut malformed = false;
     for document in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let row = match bson::from_document::<NyxbotChannel>(document.clone()) {
             Ok(row) => row,
             Err(_) => {
@@ -1559,7 +1562,21 @@ pub(crate) async fn observe(state: &AppState, release: &Release) -> AppResult<Ob
     }
 }
 
-pub(crate) async fn execute(state: &AppState, mut release: Release) -> AppResult<bool> {
+pub(crate) async fn execute(state: &AppState, release: Release) -> AppResult<bool> {
+    let ticket = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+        db: state.db.clone(), collection: RELEASES,
+        filter: doc! {"_id": &release.id, "claim_id": &release.claim_id, "revision": release.revision, "state": "due"},
+        update: doc! {"$set": {"lease_until": bson::DateTime::from_millis(0)}},
+    });
+    let result = execute_claimed(state, release).await;
+    if result.is_ok() {
+        ticket.completed();
+    }
+    result
+}
+
+async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bool> {
     let observation = match observe(state, &release).await {
         Ok(observation) => observation,
         Err(error) => {
@@ -1920,6 +1937,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     }
     let results: Vec<_> = futures::stream::iter(0..remaining)
         .map(|_| async {
+            let Some(_work) = state.shutdown.background() else {
+                return Ok(());
+            };
             match claim(&state.db, None).await? {
                 Some(row) => execute(state, row).await.map(|_| ()),
                 None => Ok(()),
@@ -1935,12 +1955,14 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
 }
 
 pub(crate) fn spawn_worker(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut host_move = super::nyxbot_gateway_host_move::Reconciler::default();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tick.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut tick).await else {
+                break;
+            };
             // The first tick runs immediately, inside this spawned task. Never
             // block boot; reconcile before release destination validation.
             if host_move.tick(&state).await.is_err() {
@@ -1954,6 +1976,9 @@ pub(crate) fn spawn_worker(state: AppState) -> tokio::task::JoinHandle<()> {
 }
 
 pub(crate) async fn reconcile_step(state: &AppState) -> AppResult<()> {
+    let Some(_work) = state.shutdown.background() else {
+        return Ok(());
+    };
     let db = &state.db;
     db.collection::<Document>(MIGRATIONS).update_one(doc! {"_id":RECONCILE_ID},doc! {"$setOnInsert":{"last_id":bson::Bson::Null,"claim_id":bson::Bson::Null,
         "lease_until":bson::Bson::Null,"pass_started_at":bson::Bson::Null,"pass_completed_at":bson::Bson::Null}}).upsert(true).await?;
@@ -1968,6 +1993,13 @@ pub(crate) async fn reconcile_step(state: &AppState) -> AppResult<()> {
     let Some(cursor) = cursor else {
         return Ok(());
     };
+    let ticket = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+        db: db.clone(),
+        collection: MIGRATIONS,
+        filter: doc! {"_id": RECONCILE_ID, "claim_id": &claim_id},
+        update: doc! {"$set": {"lease_until": bson::DateTime::from_millis(0), "claim_id": null}},
+    });
     let filter = doc! {"_id":{"$gt":cursor.last_id.as_deref().unwrap_or("")},"status":{"$nin":["pending","active"]},
     "$or":[{"gateway_channel_id":{"$type":"string"}},{"gateway_record_id":{"$type":"string"}}]};
     let rows: Vec<NyxbotChannel> = db
@@ -2033,7 +2065,9 @@ pub(crate) async fn reconcile_step(state: &AppState) -> AppResult<()> {
             if complete {audit(&db,session,"system","nyxbot_gateway_release_reconcile_pass_completed",json!({"pass_started_at":cursor.pass_started_at})).await?;}
             Ok(())
         }).await;transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+    }).await.map_err(transactions::map_transaction_error)?;
+    ticket.completed();
+    Ok(())
 }
 
 pub(crate) async fn not_created(db: &Database, release: &Release) -> AppResult<()> {
@@ -2137,6 +2171,9 @@ pub(crate) async fn repair_direct_attempts(state: &AppState) -> AppResult<()> {
             {"$dateSubtract":{"startDate":"$$NOW","unit":"minute","amount":SETUP_MINUTES}}]},
     }).sort(doc! {"gateway_repair_checked_at":1,"_id":1}).limit(10).await?.try_collect().await?;
     for row in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         state
             .db
             .collection::<Document>(CHANNELS)

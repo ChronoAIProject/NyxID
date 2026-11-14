@@ -782,6 +782,7 @@ mod tests {
     ) -> AppConfig {
         AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: 600,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),

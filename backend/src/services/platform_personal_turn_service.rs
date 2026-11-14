@@ -686,7 +686,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         claim.log_reclaimed();
         let settled_hook = self.settled_hook.clone();
         // The bounded receiver belongs to the caller before the worker starts.
-        tokio::spawn(
+        state.shutdown.clone().spawn(
             async move {
                 let row = claim.conversation;
                 let text = engine::turn_input(&row, &start);

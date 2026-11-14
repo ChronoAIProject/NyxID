@@ -108,8 +108,12 @@ pub async fn require_ready(db: &mongodb::Database) -> AppResult<()> {
 /// Runs independently of serving and the billing reconciler. Every replica
 /// observes the durable marker; completed deployments perform no further scans.
 pub fn spawn(db: mongodb::Database, drained: bool) {
-    tokio::spawn(async move {
+    let shutdown = crate::services::shutdown::process();
+    shutdown.clone().spawn_worker(async move {
         loop {
+            let Some(_work) = shutdown.background() else {
+                break;
+            };
             if let Err(error) = start(&db, drained).await {
                 tracing::error!(%error, "exact billing migration will retry");
                 let _ = report(&db, "error", &error.to_string()).await;
@@ -124,7 +128,11 @@ pub fn spawn(db: mongodb::Database, drained: bool) {
             if ready(&db).await.unwrap_or(false) && rollup_ready(&db).await.unwrap_or(false) {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            drop(_work);
+            tokio::select! {
+                () = shutdown.intake_stopped() => break,
+                () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {},
+            }
         }
     });
 }

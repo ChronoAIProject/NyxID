@@ -27,11 +27,16 @@ pub fn spawn(db: mongodb::Database, billing_enabled: bool, cadence_secs: u64) {
     if !billing_enabled || cadence_secs == 0 {
         return;
     }
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = crate::services::shutdown::process()
+                .tick(&mut interval)
+                .await
+            else {
+                break;
+            };
             if !super::exact_migration::ready(&db).await.unwrap_or(false) {
                 continue;
             }
@@ -83,9 +88,19 @@ async fn run_scheduled_pass(db: &mongodb::Database, cadence_secs: u64) -> AppRes
     let Some(token) = claim_pass(db).await? else {
         return Ok(());
     };
+    let release =
+        crate::services::shutdown::process().register_release(crate::services::shutdown::Release {
+            safe_after_stop: true,
+            db: db.clone(),
+            collection: LEASE,
+            filter: doc! {"_id": CHECK_ID, "token": &token},
+            update: doc! {"$unset": {"token": "", "lease_until": ""}},
+        });
     let result = async {
         loop {
-            if run_batch(db, Some(&token)).await? {
+            if run_batch(db, Some(&token)).await?
+                || crate::services::shutdown::process().is_draining()
+            {
                 return Ok(());
             }
             tokio::task::yield_now().await;
@@ -103,13 +118,14 @@ async fn run_scheduled_pass(db: &mongodb::Database, cadence_secs: u64) -> AppRes
                     "next_pass_at": bson::DateTime::from_chrono(
                         Utc::now()
                             + chrono::Duration::seconds(
-                                i64::try_from(cadence_secs).unwrap_or(i64::MAX).min(86_400),
+                                if crate::services::shutdown::process().is_draining() { 0 } else { i64::try_from(cadence_secs).unwrap_or(i64::MAX).min(86_400) },
                             ),
                     ),
                 },
             },
         )
         .await?;
+    release.completed();
     result
 }
 

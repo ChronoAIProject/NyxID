@@ -785,8 +785,8 @@ impl Drop for PendingSshExecGuard {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
             Err(mpsc::error::TrySendError::Full(outbound)) => {
                 let tx = self.tx.clone();
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(async move {
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    crate::services::shutdown::process().spawn_cleanup(async move {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
                             tx.send(outbound),
@@ -2219,7 +2219,7 @@ impl NodeWsManager {
             )));
         }
         drop(conn);
-        let task = tokio::spawn(async move {
+        let task = crate::services::shutdown::process().spawn(async move {
             let mut stream = body.into_data_stream();
             let mut sequence = 0;
             let mut aborted = false;
@@ -2277,7 +2277,7 @@ impl NodeWsManager {
         match outcome {
             Ok(Ok(NodeProxyOutcome::Response(ProxyResponseType::Streaming(mut source)))) => {
                 let (sender, receiver) = mpsc::channel(16);
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     let _guard = guard;
                     loop {
                         tokio::select! {
@@ -3121,6 +3121,23 @@ impl NodeWsManager {
             .collect()
     }
 
+    /// Idle management sockets do not keep a drain open; their operations do.
+    pub fn in_flight_operations(&self) -> usize {
+        self.connections
+            .iter()
+            .map(|connection| {
+                connection.pending.len()
+                    + connection.ssh_tunnels.len()
+                    + connection.web_terminals.len()
+                    + connection.ssh_exec_requests.len()
+                    + connection.machine_requests.len()
+                    + connection.ssh_node_exec_streams.len()
+                    + connection.ws_proxies.len()
+                    + connection.credential_acks.len()
+            })
+            .sum()
+    }
+
     pub fn connected_nodes(&self) -> Vec<(String, String)> {
         self.connections
             .iter()
@@ -3829,7 +3846,7 @@ impl NodeWsManager {
             .or_insert_with(|| tokio::sync::broadcast::channel(2).0)
             .subscribe();
         let (tx, rx) = mpsc::channel(2);
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             loop {
                 tokio::select! {
                     _=tx.closed()=>break,

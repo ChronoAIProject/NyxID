@@ -1857,6 +1857,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
+        shutdown_drain_timeout_secs: 600,
         auth_device_eight_char_codes: false,
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
@@ -2201,6 +2202,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        shutdown: crate::services::shutdown::Runtime::default(),
         local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),

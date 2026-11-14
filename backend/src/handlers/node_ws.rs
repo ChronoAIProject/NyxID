@@ -846,9 +846,12 @@ pub async fn ws_handler(
         state.config.proxy_max_body_size,
     );
 
+    let admission = state.shutdown.work();
     ws.max_message_size(control_message_limit)
         .max_frame_size(control_message_limit)
-        .on_upgrade(move |socket| handle_node_connection(state, socket, reservation, ip, ua))
+        .on_upgrade(move |socket| {
+            handle_node_connection(state, socket, reservation, ip, ua, admission)
+        })
         .into_response()
 }
 
@@ -919,11 +922,13 @@ async fn handle_node_connection(
     _reservation: NodeConnectionReservation,
     ip_address: Option<String>,
     user_agent: Option<String>,
+    admission: crate::services::shutdown::Work,
 ) {
+    let _socket = state.shutdown.node_socket();
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Wait for auth/register message with 10s timeout
-    let auth_result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let authentication = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while let Some(msg) = ws_stream.next().await {
             let msg = match msg {
                 Ok(Message::Text(text)) => text,
@@ -1159,8 +1164,21 @@ async fn handle_node_connection(
             }
         }
         None
-    })
-    .await;
+    });
+    let auth_result = state
+        .shutdown
+        .stop_token()
+        .run_until_cancelled(authentication)
+        .await;
+    let Some(auth_result) = auth_result else {
+        let _ = ws_sink
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1001,
+                reason: "server shutdown".into(),
+            })))
+            .await;
+        return;
+    };
 
     let (node_id, owner_user_id, needs_auth_ok, managed_runtime) = match auth_result {
         Ok(Some(pair)) => pair,
@@ -1179,6 +1197,16 @@ async fn handle_node_connection(
     // Keep claim and publication in the same order for concurrent reconnects
     // on this replica. MongoDB still fences ownership across replicas/generations.
     let setup_guard = state.node_ws_manager.lock_connection_setup(&node_id).await;
+
+    if state.shutdown.is_stopped() {
+        let _ = ws_sink
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1001,
+                reason: "server shutdown".into(),
+            })))
+            .await;
+        return;
+    }
 
     // H4: Use bounded channel to prevent memory exhaustion from slow/malicious nodes
     let (tx, rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
@@ -1221,6 +1249,16 @@ async fn handle_node_connection(
     };
     let owner_fence =
         crate::services::node_owner_service::NodeOwnerFence::from_owner(&node_id, &owner);
+    if state.shutdown.is_stopped() {
+        let _ = ws_sink
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1001,
+                reason: "server shutdown".into(),
+            })))
+            .await;
+        let _ = crate::services::node_owner_service::release(&state.db, &owner_fence).await;
+        return;
+    }
     if let Some(binding) = managed_runtime.as_ref()
         && validate_managed_runtime_binding(&state.db, &node_id, binding)
             .await
@@ -1287,6 +1325,7 @@ async fn handle_node_connection(
         }
     }
     drop(setup_guard);
+    drop(admission);
     tracing::info!(node_id = %node_id, connection_id, "Node connected via WebSocket");
 
     // Telemetry: node.connected. Emitted once after WS auth + registration
@@ -1313,6 +1352,7 @@ async fn handle_node_connection(
     }
 
     let mut writer_task = tokio::spawn(run_node_writer(ws_sink, rx, close_rx, node_id.clone()));
+    let mut writer_finished = false;
 
     // Reader loop: process incoming messages from the node
     let node_id_reader = node_id.clone();
@@ -1350,6 +1390,7 @@ async fn handle_node_connection(
                 msg
             }
             _ = &mut writer_task => {
+                writer_finished = true;
                 reason = "writer_closed";
                 break;
             }
@@ -1856,13 +1897,20 @@ async fn handle_node_connection(
 
     // Cleanup on disconnect
     tracing::info!(node_id = %node_id, connection_id, reason, "Node disconnected");
-    writer_task.abort();
+    if !writer_finished {
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
     ws_manager.unregister_connection_if(&node_id, &connection_id);
 
     machine_gateway.close().await;
-    if let Err(error) = crate::services::node_owner_service::release(&state.db, &owner_fence).await
-    {
-        tracing::warn!(node_id = %node_id, %error, "Failed to release node connection ownership");
+    match crate::services::node_owner_service::release(&state.db, &owner_fence).await {
+        Ok(released) => state
+            .shutdown
+            .record_release("node_owners", u64::from(released)),
+        Err(error) => {
+            tracing::warn!(node_id = %node_id, %error, "Failed to release node connection ownership")
+        }
     }
 
     // Telemetry: node.disconnected. Single-owner rule -- only the reader
@@ -2397,6 +2445,59 @@ mod tests {
         })
         .await
         .expect("node WebSocket lifecycle regression timed out");
+    }
+
+    #[tokio::test]
+    async fn shutdown_node_websocket_receives_going_away_before_peer_takes_ownership() {
+        use futures::StreamExt;
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let db = test_db("shutdown_node_wire").await;
+            let node = test_node(&uuid::Uuid::new_v4().to_string(), "drain", "auth-token");
+            insert_user_and_node(&db, &node.user_id, &node).await;
+            let state = test_app_state(db.clone());
+            let (url, server) = start_node_ws_test_server(state.clone()).await;
+            let mut socket = auth_test_socket(&url, &node.id, "auth-token").await;
+            assert!(socket.next().await.unwrap().unwrap().is_text());
+            state.shutdown.begin_drain();
+            state.shutdown.stop();
+            crate::services::shutdown::release::nodes(&state)
+                .await
+                .unwrap();
+            let frame = socket.next().await.unwrap().unwrap();
+            match frame {
+                tokio_tungstenite::tungstenite::Message::Close(Some(close)) => {
+                    assert_eq!(u16::from(close.code), 1001)
+                }
+                other => panic!("Expected going-away close, received {other:?}"),
+            }
+            state.shutdown.node_sockets_closed().await;
+            let peer = crate::services::node_owner_service::ReplicaIdentity::new(
+                "peer".into(),
+                "http://127.0.0.1:1".into(),
+            );
+            assert!(
+                crate::services::node_owner_service::claim(
+                    &db,
+                    &node.id,
+                    &peer,
+                    "replacement",
+                    std::time::Duration::from_secs(90)
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+            assert_eq!(
+                crate::services::shutdown::release::nodes(&state)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(state.shutdown.tracked_units(), 0);
+            server.abort();
+        })
+        .await
+        .unwrap();
     }
 
     fn b64url(byte: u8, len: usize) -> String {

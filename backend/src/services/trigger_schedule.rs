@@ -153,7 +153,17 @@ pub async fn due(db: &Database, now: DateTime<Utc>) -> AppResult<Vec<Document>> 
         .await?)
 }
 
+#[cfg(test)]
 pub async fn claim(db: &Database, id: &str, now: DateTime<Utc>) -> AppResult<Option<Document>> {
+    claim_for_replica(db, id, now, "test").await
+}
+
+pub async fn claim_for_replica(
+    db: &Database,
+    id: &str,
+    now: DateTime<Utc>,
+    generation: &str,
+) -> AppResult<Option<Document>> {
     Ok(db
         .collection::<Document>(WORK)
         .find_one_and_update(
@@ -163,12 +173,35 @@ pub async fn claim(db: &Database, id: &str, now: DateTime<Utc>) -> AppResult<Opt
                     date(now+Duration::seconds(continuation::ADMISSION_LEASE_SECONDS)),
                     date(now+Duration::seconds(LEASE_SECONDS))]},
                 "fence": Uuid::new_v4().to_string(),
+                "claim_generation": generation,
                 "claimed_wake_generation": {"$cond": [{"$eq": ["$automation_v2", true]}, {"$ifNull": ["$wake_generation", 0]}, "$$REMOVE"]},
                 "admission_lease_until": {"$cond": [{"$eq": ["$automation_v2", true]}, date(now+Duration::seconds(continuation::ADMISSION_LEASE_SECONDS)), "$$REMOVE"]},
             }}],
         )
         .return_document(ReturnDocument::After)
         .await?)
+}
+
+pub fn retain_shutdown_release(
+    db: &Database,
+    job: &Document,
+    generation: &str,
+    runtime: &super::shutdown::Runtime,
+) -> super::shutdown::ReleaseTicket {
+    runtime.register_release(super::shutdown::Release {
+        safe_after_stop: job.get_str("kind").ok() != Some("pause_notice"),
+        db: db.clone(),
+        collection: WORK,
+        filter: doc! {
+            "_id": job.get_str("_id").unwrap_or_default(),
+            "fence": job.get_str("fence").unwrap_or_default(),
+            "claim_generation": generation,
+        },
+        update: doc! {
+            "$set": {"at": bson::DateTime::from_millis(0), "fence": ""},
+            "$unset": {"claim_generation": "", "admission_lease_until": ""},
+        },
+    })
 }
 
 pub async fn reschedule(db: &Database, job: &Document, at: Option<DateTime<Utc>>) -> AppResult<()> {
@@ -181,12 +214,15 @@ pub async fn reschedule(db: &Database, job: &Document, at: Option<DateTime<Utc>>
     {
         db.collection::<Document>(WORK).update_one(filter, vec![doc! {"$set": {
             "at": {"$cond": [{"$ne": ["$wake_generation", "$claimed_wake_generation"]}, date(Utc::now()), date(at)]},
-            "fence": "", "admission_lease_until": "$$REMOVE",
+            "fence": "", "admission_lease_until": "$$REMOVE", "claim_generation": "$$REMOVE",
             "deferrals": {"$cond": [{"$ne": ["$wake_generation", "$claimed_wake_generation"]}, 0, {"$add": [{"$ifNull": ["$deferrals", 0]}, 1]}]},
         }}]).await?;
     } else if let Some(at) = at {
         db.collection::<Document>(WORK)
-            .update_one(filter, doc! { "$set": {"at":date(at)} })
+            .update_one(
+                filter,
+                doc! { "$set": {"at":date(at)}, "$unset": {"claim_generation": ""} },
+            )
             .await?;
     } else {
         db.collection::<Document>(WORK).delete_one(filter).await?;

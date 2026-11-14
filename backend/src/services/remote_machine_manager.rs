@@ -192,6 +192,9 @@ impl Manager {
         lifecycle::suspend_ineligible_with_billing(&self.db, self.billing.clone()).await?;
         operations::cancel_undispatched_delete_effects(&self.db).await?;
         for _ in 0..16 {
+            let Some(_claim) = crate::services::shutdown::process().background() else {
+                break;
+            };
             let Some(effect) =
                 operations::claim_effect(&self.db, Utc::now(), Duration::from_secs(60)).await?
             else {
@@ -234,6 +237,9 @@ impl Manager {
         let mut observations = tokio::task::JoinSet::new();
         let mut first_error = None;
         for machine in machines {
+            let Some(work) = crate::services::shutdown::process().background() else {
+                break;
+            };
             if observations.len() == 8 {
                 let result = observations
                     .join_next()
@@ -246,7 +252,8 @@ impl Manager {
                 }
             }
             let manager = self.clone();
-            observations.spawn(async move {
+            crate::services::shutdown::process().spawn_joined(&mut observations, async move {
+                let _work = work;
                 let result: AppResult<()> = async {
                     // Repair a lost diagnostic append after durable quarantine,
                     // without waiting for Kubernetes connectivity to recover.
@@ -1890,7 +1897,7 @@ impl Manager {
 pub fn spawn(state: crate::AppState) {
     let safety_db = state.db.clone();
     let safety_billing = state.billing.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut ticks = tokio::time::interval(Duration::from_secs(10));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1914,11 +1921,13 @@ pub fn spawn(state: crate::AppState) {
     });
     let notification_state = state.clone();
     let notification_db = state.db.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut ticks = tokio::time::interval(Duration::from_secs(60));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            ticks.tick().await;
+            let Some(_work) = notification_state.shutdown.tick(&mut ticks).await else {
+                break;
+            };
             if super::remote_machine_events::sweep(&notification_db, Utc::now())
                 .await
                 .is_err()
@@ -1957,7 +1966,7 @@ pub fn spawn(state: crate::AppState) {
     let manager = Arc::new(manager);
     MANAGER_STARTED.store(true, Ordering::Release);
     let funding_manager = manager.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut ticks = tokio::time::interval(Duration::from_secs(5));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1969,11 +1978,13 @@ pub fn spawn(state: crate::AppState) {
             }
         }
     });
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut ticks = tokio::time::interval(Duration::from_secs(10));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            ticks.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut ticks).await else {
+                break;
+            };
             if manager.tick().await.is_err() {
                 tracing::warn!(
                     "Remote Machine reconciliation pending; no physical finality inferred"

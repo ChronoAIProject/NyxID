@@ -52,6 +52,15 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
+/// Readiness is process-local; liveness and security capability readiness are independent.
+pub async fn ready(State(state): State<AppState>) -> axum::http::StatusCode {
+    if state.shutdown.is_draining() {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    }
+}
+
 /// GET /health
 ///
 /// Returns service health status. Used by load balancers and monitoring.

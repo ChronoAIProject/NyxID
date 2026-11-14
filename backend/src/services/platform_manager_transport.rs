@@ -1051,7 +1051,7 @@ pub(crate) async fn deliver_saved(
 }
 
 pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
-    crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
+    crate::services::platform_native_reply_service::spawn_native_worker(async move {
         let mut ticks = tokio::time::interval(std::time::Duration::from_secs(15));
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut pending = false;
@@ -1062,6 +1062,9 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
             } else {
                 ticks.tick().await;
             }
+            let Some(_work) = state.shutdown.background() else {
+                break;
+            };
             pending = false;
             match super::platform_personal_owner_lifecycle::recover_pending(&state.db, 32).await {
                 Ok(visited) => {
@@ -1078,6 +1081,9 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
                     "Personal account retirement recovery failed"
                 ),
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             pending |= recovery_progress(
                 "personal lifecycle",
                 producers
@@ -1085,20 +1091,35 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
                     .recover_personal_lifecycle(&state.db, producers.personal.as_ref(), 100)
                     .await,
             );
+            if state.shutdown.is_draining() {
+                break;
+            }
             pending |= recovery_progress(
                 "public lifecycle",
                 super::platform_public_agent_service::sweep_public_lifecycle(&state, 100).await,
             );
+            if state.shutdown.is_draining() {
+                break;
+            }
             pending |= recovery_progress(
                 "public budget",
                 super::platform_public_budget_service::sweep(&state.db, 100).await,
             );
+            if state.shutdown.is_draining() {
+                break;
+            }
             pending |= recovery_progress("saved replies", recover_saved_replies(&state, 100).await);
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = recover_ingress(&state, &producers, 100).await {
                 tracing::warn!(
                     error_code = error.error_code(),
                     "Manager ingress recovery failed"
                 );
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             pending |= recovery_progress(
                 "delivery",
@@ -1152,6 +1173,9 @@ async fn recover_saved_replies(state: &AppState, limit: u32) -> AppResult<Recove
         .sort(doc! {"created_at":1,"_id":1}).limit(i64::from(batch)).await?;
     let mut processed = 0;
     while let Some(message) = pending.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let result: AppResult<()> = async {
             let row = state
                 .db
@@ -1217,6 +1241,9 @@ async fn recover_ingress(
     let receipts_collection = state.db.collection::<PlatformManagerIngress>(INGRESS);
     let mut receipts=receipts_collection.find(doc! {"phase":"settled","reply_id":{"$type":"string"},"delivery_recovery_queued":{"$ne":true}}).sort(doc! {"settled_at":1,"_id":1}).limit(i64::from(batch)).await?;
     while let Some(receipt) = receipts.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let result: AppResult<()> = async {
             let reply_id = receipt
                 .reply_id
@@ -1280,6 +1307,9 @@ async fn recover_ingress(
         .limit(i64::from(batch))
         .await?;
     while let Some(receipt) = expired.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         receipts_collection.update_one(doc! {"_id":receipt.id,"phase":"admitted","start_before":{"$lte":bson::DateTime::now()}},doc! {"$set":{"phase":"interrupted","interrupted_reason":"admission_expired","settled_at":bson::DateTime::now()}}).await?;
     }
     Ok(())

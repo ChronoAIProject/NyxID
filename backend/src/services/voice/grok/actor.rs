@@ -28,7 +28,7 @@ impl Handle {
         let clock = grok.clock;
         let closed_ms = grok.closed_ms.clone();
         let marker = closed_ms.clone();
-        let task = tokio::spawn(Box::pin(async move {
+        let task = crate::services::shutdown::process().spawn(Box::pin(async move {
             let work = async {
                 loop {
                     while let Some(event) = grok.events.pop_front() {

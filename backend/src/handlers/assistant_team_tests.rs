@@ -2140,6 +2140,11 @@ async fn concurrent_distinct_threads_share_the_event_budget() {
             let (state, calls, server) = setup("distinct_thread_event_budget").await;
             let first = user_turn(&state, None, None, "First thread").await;
             let second = user_turn(&state, None, None, "Second thread").await;
+            // Reply persistence precedes after_turn's queue wakes. Finish those
+            // setup runners before the two-party admission barrier is installed.
+            tokio::time::timeout(Duration::from_secs(20), state.shutdown.idle())
+                .await
+                .expect("setup turns and their completion hooks finished");
             calls.lock().await.clear();
             for row in [&first, &second] {
                 engine::push_events(

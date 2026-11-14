@@ -170,6 +170,37 @@ sequence, and resumes after reconnect. Producers never report success unless
 the notification is durable, so a POST on a non-owning replica cannot silently
 drop it.
 
+## Replica shutdown
+
+SIGTERM/ctrl-c starts a process-local drain. `/ready` becomes 503 without a
+MongoDB read; `/health` stays 200. Public and internal listeners continue serving
+requests during the wait, including new assistant turns. Background pullers stop
+acquiring work, while existing claims and their renewal loops finish. The
+internal listener remains available for peers routing to this replica's nodes.
+
+The default shutdown budget is 600 seconds, including up to five seconds of
+cleanup (10% for budgets shorter than 50 seconds). A second signal begins cleanup
+immediately; `SHUTDOWN_DRAIN_TIMEOUT_SECS=0` preserves immediate shutdown. At
+handover, local execution stops before capacity or ownership is released.
+Cluster/node/slot releases are generation fenced, other claimed work retains
+its exact claim token, and node sockets receive close code 1001. Polling and
+Discord resume checkpoints survive release. The security heartbeat stops before
+its exact generation's observation is deleted; the rollout `drained` advisory
+field is not used as the shutdown flag.
+
+Uncertain external-effect claims retain their barriers and expiry, including
+rotating OAuth refreshes and channel/Telegram setup locks; wallet/expiry crash
+bridges are never cleared by drain.
+The same task tracker waits for detached request children and completion queues.
+
+Remaining turns settle as `turn_lost` with stage `shutdown` through the ordinary
+transaction and exact turn/worker fence. Old replicas see an ordinary terminal
+reply and no active turn, so their sweep and next-send reclamation do nothing
+for it. Crashes retain the existing 75-second heartbeat threshold, 15-second
+sweep and 2,100-second admission fence. There is no automatic execution replay.
+See [Rolling deploys and graceful drain](DEPLOYMENT.md#rolling-deploys-and-graceful-drain)
+for platform settings and bounded-cleanup limits.
+
 ## Deployment properties
 
 The backend deployment runs at least two replicas. The public ClusterIP remains
@@ -193,3 +224,14 @@ proxy.
   replacements.
 - External responses never contain internal addresses or authentication data.
 - MCP sessions and notifications work across three different replicas.
+
+Recoverable MCP notification, assistant `/live`, and dedicated CMA event observers end with a clean
+EOF after a five-second drain grace. They do not hold the work counter open;
+shutdown waits for their closure while both listeners keep accepting. MCP resumes
+from the durable outbox cursor; assistant clients poll and resync on reconnect.
+Dedicated CMA observers retain their cursor for the existing Reconnect action;
+the remote task continues. Generic proxy streams keep their existing behavior.
+Turn/provider streams, managed setup, native response delivery and interactive
+sessions remain in-flight work. The billing reconcile wrapper stops at the next
+financial unit boundary, retaining renewal until it releases its exact token.
+A deadline-aborted pass leaves that lease to its default 30-second TTL.

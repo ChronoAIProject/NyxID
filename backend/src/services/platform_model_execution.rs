@@ -704,8 +704,10 @@ pub(crate) async fn consume(
         #[allow(unreachable_code)]
         Ok::<(), AppError>(())
     };
+    let shutdown = super::shutdown::process();
     let result = tokio::select! {
         biased;
+        () = shutdown.stopped() => Err(AppError::ClientDisconnected),
         _ = ctx.cancel.cancelled() => Err(AppError::ClientDisconnected),
         r = Box::pin(authority) => r,
         r = tokio::time::timeout_at(deadline, Box::pin(read)) => {

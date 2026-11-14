@@ -195,6 +195,8 @@ impl std::str::FromStr for TrustedProxyRange {
 pub struct AppConfig {
     /// Server port (default: 3001)
     pub port: u16,
+    /// Work-drain deadline after SIGTERM/ctrl-c; zero preserves immediate shutdown.
+    pub shutdown_drain_timeout_secs: u64,
     /// Base URL for the backend (e.g. https://auth.nyxid.dev)
     pub base_url: String,
     /// Operator-configured chrono-probe origin; unset disables monitoring integration.
@@ -1071,6 +1073,10 @@ impl AppConfig {
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
+            shutdown_drain_timeout_secs: env::var("SHUTDOWN_DRAIN_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(600),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1949,6 +1955,7 @@ mod tests {
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
         AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: 600,
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),

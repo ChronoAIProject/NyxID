@@ -185,6 +185,9 @@ pub(crate) fn process_one(
 }
 
 async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
+    let Some(_work) = state.shutdown.background() else {
+        return Ok(false);
+    };
     let keys = &state.encryption_keys;
     let durable = super::super::transaction_service::durable_database(&state.db);
     let db = &durable;
@@ -194,6 +197,12 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
     let Some(job) = claim(db).await? else {
         return Ok(false);
     };
+    let release = state.shutdown.register_release(crate::services::shutdown::Release {
+        safe_after_stop: false,
+        db: db.clone(), collection: JOBS,
+        filter: doc! {"_id": &job.id, "lease_token": &job.lease_token, "inventory_version": INVENTORY_VERSION},
+        update: doc! {"$set": {"lease_expires_at": null, "lease_token": null}},
+    });
     let Some(index) = next_domain_index(&job) else {
         return Err(AppError::Internal(
             "Erasure checkpoint has no pending domain".into(),
@@ -303,6 +312,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
         Err(_) => Outcome::RetryableFailure("domain_operation_failed_repair_required"),
     };
     checkpoint(db, &job, index, outcome).await?;
+    release.completed();
     Ok(true)
 }
 
@@ -401,11 +411,13 @@ pub(crate) async fn retry_domain(
 }
 
 pub(crate) fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            timer.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut timer).await else {
+                break;
+            };
             if super::preparation::process_one(&state.db, &state.encryption_keys)
                 .await
                 .is_err()

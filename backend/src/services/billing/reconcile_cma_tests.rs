@@ -792,3 +792,95 @@ async fn reconcile_lease_simultaneous_start_ticks_have_one_winner() {
     assert_eq!(f.provider.push_ids.lock().unwrap().len(), 1);
     f.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn shutdown_reconcile_finishes_current_unit_stops_next_and_releases_token_for_peer() {
+    let f = Fixture::new("shutdown_reconcile", SUCCESS).await;
+    let mut second = finalized_row("after-drain");
+    second.updated_at = f.row.updated_at + Duration::seconds(1);
+    f.db.collection::<UsageMeterRow>(USAGE)
+        .insert_one(&second)
+        .await
+        .unwrap();
+    f.provider.pause_push.store(true, Ordering::SeqCst);
+    let shutdown = crate::services::shutdown::Runtime::default();
+    let first = f.reconciler.clone();
+    let run_shutdown = shutdown.clone();
+    let holder = tokio::spawn(async move {
+        first
+            .run_once_with_shutdown(&lease_runtime("a", 30_000), &run_shutdown)
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.provider.push_entered.notified(),
+    )
+    .await
+    .unwrap();
+    shutdown.begin_drain();
+    assert!(!holder.is_finished());
+    f.provider.resume_push.notify_one();
+    assert_eq!(holder.await.unwrap().unwrap().pushed, 1);
+    assert!(
+        !f.db
+            .collection::<UsageMeterRow>(USAGE)
+            .find_one(doc! {"_id":&second.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .lago_acked
+    );
+    assert_eq!(shutdown.tracked_units(), 0);
+    assert_eq!(
+        f.reconciler
+            .run_once_with_shutdown(&lease_runtime("a", 30_000), &shutdown)
+            .await
+            .unwrap(),
+        super::ReconcileStats::default()
+    );
+    let peer = lease_runtime("b", 30_000);
+    let token = peer
+        .acquire(&f.db, super::RECONCILE_LEASE)
+        .await
+        .unwrap()
+        .expect("peer acquires immediately without waiting 30s");
+    assert!(
+        crate::services::coordination_service::LeaseStore::release(&f.db, &token)
+            .await
+            .unwrap()
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_reconcile_deadline_abort_retains_active_provider_unit_lease_until_ttl() {
+    let f = Fixture::new("shutdown_reconcile_abort", SUCCESS).await;
+    f.provider.pause_push.store(true, Ordering::SeqCst);
+    let shutdown = crate::services::shutdown::Runtime::default();
+    let first = f.reconciler.clone();
+    let run_shutdown = shutdown.clone();
+    let holder = shutdown.spawn(async move {
+        first
+            .run_once_with_shutdown(&lease_runtime("a", 30_000), &run_shutdown)
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        f.provider.push_entered.notified(),
+    )
+    .await
+    .unwrap();
+    shutdown.begin_drain();
+    shutdown.stop();
+    assert!(holder.await.unwrap_err().is_cancelled());
+    shutdown.execution_stopped().await;
+    assert!(
+        lease_runtime("b", 30_000)
+            .acquire(&f.db, super::RECONCILE_LEASE)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(shutdown.released().is_empty());
+    f.db.drop().await.unwrap();
+}
