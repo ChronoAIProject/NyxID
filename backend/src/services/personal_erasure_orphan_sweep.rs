@@ -111,7 +111,10 @@ fn owner_pipeline(field: &str) -> Vec<Document> {
     let mut pipeline = vec![doc! {"$match": owner_match}];
     let mut path = String::new();
     let segments: Vec<&str> = field.split('.').collect();
-    for segment in segments.iter().take(segments.len().saturating_sub(1)) {
+    // Unwind every segment, including the terminal value.  Several redacted
+    // records (invite usages, actor attribution) store owner ids in arrays;
+    // grouping an array as `_id` would skip those owners entirely.
+    for segment in segments {
         if !path.is_empty() {
             path.push('.');
         }
@@ -423,7 +426,12 @@ async fn redact_invite_row(db: &mongodb::Database, id: &Bson, owner: &str) -> Ap
     if changed {
         row.insert("usages", usages);
         db.collection::<Document>("invite_codes")
-            .replace_one(doc! {"_id": id}, row)
+            // Match an unredacted usage as well as the id.  A second apply
+            // must not rewrite an already-redacted shared invite row.
+            .replace_one(
+                doc! {"_id": id, "usages.user_id": owner, "usages.email": {"$exists": true}},
+                row,
+            )
             .await?;
     }
     Ok(())
@@ -467,7 +475,19 @@ async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<(
                     && group.field == "actor.person_id" =>
             {
                 db.collection::<Document>(group.collection)
-                    .update_many(filter, doc! {"$set": {"actor.name": "Deleted account"}})
+                    .update_many(
+                        filter,
+                        doc! {
+                            "$set": {
+                                "actor.name": "Deleted account",
+                                "actor.display_name": "Deleted account",
+                            },
+                            "$unset": {
+                                "actor.email": "",
+                                "actor.email_address": "",
+                            },
+                        },
+                    )
                     .await?;
             }
             Erasure::Redacted => {
