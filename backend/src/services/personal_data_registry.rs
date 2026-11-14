@@ -3187,28 +3187,26 @@ mod tests {
     fn every_personal_owner_selector_names_a_model_or_document_field() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/models");
         let mut fields = BTreeSet::new();
-        fn gather(path: &Path, fields: &mut BTreeSet<String>) {
+        let field_regex =
+            regex::Regex::new(r"(?m)^\s*(?:pub\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*:").unwrap();
+        fn gather(path: &Path, fields: &mut BTreeSet<String>, field_regex: &regex::Regex) {
             let Ok(entries) = fs::read_dir(path) else {
                 return;
             };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    gather(&path, fields);
-                } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
-                    if let Ok(source) = fs::read_to_string(path) {
-                        for capture in
-                            regex::Regex::new(r"(?m)^\s*(?:pub\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*:")
-                                .unwrap()
-                                .captures_iter(&source)
-                        {
-                            fields.insert(capture[1].to_owned());
-                        }
+                    gather(&path, fields, field_regex);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
+                    && let Ok(source) = fs::read_to_string(path)
+                {
+                    for capture in field_regex.captures_iter(&source) {
+                        fields.insert(capture[1].to_owned());
                     }
                 }
             }
         }
-        gather(&root, &mut fields);
+        gather(&root, &mut fields, &field_regex);
         let documented = BTreeSet::from([
             "actor".to_owned(),
             "usages".to_owned(),
