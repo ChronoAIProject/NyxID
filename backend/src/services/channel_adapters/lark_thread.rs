@@ -53,7 +53,7 @@ impl LarkFamilyAdapter {
             .await
     }
 
-    async fn thread_message(
+    pub(super) async fn thread_message(
         &self,
         http: &reqwest::Client,
         token: &str,

@@ -14,6 +14,19 @@ pub(crate) async fn claim(
 ) -> AppResult<EventDedupClaimResult> {
     let event = message.platform_message_id.as_deref().unwrap_or_default();
     let namespace = match message.platform.as_str() {
+        "lark" | "feishu"
+            if event.starts_with("om_")
+                && event.len() <= 256
+                && event
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') =>
+        {
+            if message.platform == "lark" {
+                "lark-inbound"
+            } else {
+                "feishu-inbound"
+            }
+        }
         "discord" if super::discord_gateway::valid_message_id(event) => "discord-inbound",
         "whatsapp" if super::channel_delivery_service::valid_message_id(event) => {
             "whatsapp-inbound"
@@ -258,6 +271,82 @@ mod tests {
             .upsert(true)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lark_parallel_redelivery_is_one_message_but_distinct_sources_and_owners_survive() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("lark_atomic_redelivery").await;
+        seed_owner(&db, "owner").await;
+        for platform in ["lark", "feishu"] {
+            let mut original = message("om_question");
+            original.platform = platform.into();
+            let start = std::sync::Arc::new(tokio::sync::Barrier::new(12));
+            let mut tasks = tokio::task::JoinSet::new();
+            for _ in 0..12 {
+                let db = db.clone();
+                let start = start.clone();
+                let mut copy = original.clone();
+                copy.id = uuid::Uuid::new_v4().to_string();
+                tasks.spawn(async move {
+                    start.wait().await;
+                    store(&db, copy).await.unwrap().is_some()
+                });
+            }
+            let mut admitted = 0;
+            while let Some(result) = tasks.join_next().await {
+                admitted += u64::from(result.unwrap());
+            }
+            assert_eq!(
+                admitted, 1,
+                "one source may only enter the execution pipeline once"
+            );
+            let mut next = original.clone();
+            next.id = uuid::Uuid::new_v4().to_string();
+            next.platform_message_id = Some("om_followup".into());
+            assert!(store(&db, next).await.unwrap().is_some());
+            let mut another_bot = original.clone();
+            another_bot.id = uuid::Uuid::new_v4().to_string();
+            another_bot.channel_bot_id = Some("another-bot".into());
+            assert!(store(&db, another_bot).await.unwrap().is_some());
+            let mut another_owner = original.clone();
+            another_owner.id = uuid::Uuid::new_v4().to_string();
+            another_owner.user_id = "another-owner".into();
+            seed_owner(&db, &another_owner.user_id).await;
+            assert!(store(&db, another_owner).await.unwrap().is_some());
+            assert!(store(&db, original).await.unwrap().is_none());
+        }
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            8
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lark_redelivery_of_pre_upgrade_metadata_does_not_execute_again() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("lark_legacy_redelivery").await;
+        let mut original = message("om_legacy");
+        original.platform = "lark".into();
+        seed_owner(&db, &original.user_id).await;
+        db.collection::<ChannelMessage>(COLLECTION_NAME)
+            .insert_one(&original)
+            .await
+            .unwrap();
+        original.id = uuid::Uuid::new_v4().to_string();
+        assert!(store(&db, original).await.unwrap().is_none());
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

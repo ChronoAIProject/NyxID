@@ -106,6 +106,37 @@ async fn identity_2187_direct_gateway_persist_complete_current_context_without_a
                 .contains(&gateway.channel_bot_id)
         );
     }
+    let source = crate::services::channel_relay_service::inbound_metadata(
+        &direct.channel_bot_id,
+        direct.route_id.as_deref().unwrap(),
+        OWNER,
+        "lark",
+        &crate::services::channel_platform::InboundMessage {
+            embedded_attachments: vec![],
+            embedded_attachments_omitted: 0,
+            platform_message_id: "om_identity_direct".into(),
+            conversation_id: "oc_ou_alice".into(),
+            conversation_type: "private".into(),
+            sender_platform_id: "ou_alice".into(),
+            sender_display_name: Some("Alice".into()),
+            content_type: "text".into(),
+            text: Some("The client claims this came from another Bot".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: Some("om_previous_question".into()),
+            thread_id: None,
+            raw_data: json!({}),
+        },
+        &direct.route_api_key_id,
+        "identity-direct",
+    );
+    state
+        .db
+        .collection::<crate::models::channel_message::ChannelMessage>(
+            crate::models::channel_message::COLLECTION_NAME,
+        )
+        .insert_one(&source)
+        .await
+        .unwrap();
     let (_guard, done) = watch_relay_callback(&direct.id, "identity-direct");
     assert_eq!(
         direct_private(
@@ -128,6 +159,28 @@ async fn identity_2187_direct_gateway_persist_complete_current_context_without_a
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0]["identity"]["platform"], "lark");
         assert_eq!(cs[0]["identity"]["channel_bot_id"], direct.channel_bot_id);
+        assert_eq!(cs[0]["conversation"]["platform_chat_id"], "oc_ou_alice");
+        assert!(
+            cs[0]["conversation"]["nyxid_chat_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(cs[0]["source_message"]["receipt_id"], "identity-direct");
+        assert_eq!(
+            cs[0]["source_message"]["platform_message_id"],
+            "om_identity_direct"
+        );
+        assert_eq!(cs[0]["source_message"]["sender_platform_id"], "ou_alice");
+        assert_eq!(
+            cs[0]["source_message"]["reply_to_platform_message_id"],
+            "om_previous_question"
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(
+                cs[0]["source_message"]["received_at"].as_str().unwrap()
+            )
+            .is_ok()
+        );
         assert_eq!(
             cs[0]["display"]["bot_label"],
             contexts(&observed[0])[0]["display"]["bot_label"]

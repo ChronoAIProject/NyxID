@@ -297,7 +297,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn channel_retry_dedup_is_opt_in_for_whatsapp_only() {
+    fn channel_retry_dedup_includes_lark_and_feishu_native_messages() {
         let cache = Arc::new(TokenExchangeCache::new());
         for platform in [
             "telegram", "discord", "lark", "feishu", "slack", "openclaw", "whatsapp",
@@ -306,7 +306,7 @@ mod tests {
                 resolve_adapter(platform, &cache)
                     .unwrap()
                     .dedup_inbound_by_platform_message_id(),
-                platform == "whatsapp"
+                matches!(platform, "whatsapp" | "lark" | "feishu")
             );
         }
     }

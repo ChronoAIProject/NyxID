@@ -304,7 +304,11 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     service.endpoints.retain(|e| {
         e.name != super::assistant_skill_authoring::TOOL_NAME
             && e.name != "list_notifications"
-            && (!chat.guest || e.name != "task_status")
+            && (!chat.guest
+                || !matches!(
+                    e.name.as_str(),
+                    "task_status" | "current_time" | "channel_delivery_status"
+                ))
     });
     if chat.collaboration_thread {
         service.endpoints.retain(|e| {

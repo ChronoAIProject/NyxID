@@ -3788,6 +3788,10 @@ async fn start_chat_turn(
         }
     }
     let source_context = crate::models::assistant_conversation::ChannelTurnContext {
+        source_message: Box::pin(crate::services::channel_turn_context::source_message(
+            &state.db, row, chat, sender.id, event_key,
+        ))
+        .await?,
         org_origin: execution.is_some().then(|| Box::new(origin.clone())),
         source_event_id: event_key.to_owned(),
         channel_id: row.id.clone(),

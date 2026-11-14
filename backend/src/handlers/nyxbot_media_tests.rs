@@ -1110,6 +1110,7 @@ async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_
         )
         .mount(&provider)
         .await;
+    mock_plain_source_replies(&provider).await;
     Mock::given(method("POST"))
         .and(path("/open-apis/im/v1/messages"))
         .respond_with(
@@ -1333,12 +1334,35 @@ pub(super) fn native_png() -> Vec<u8> {
         .unwrap();
     bytes
 }
+
+async fn mock_plain_source_replies(provider: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path_regex("^/open-apis/im/v1/messages/[^/]+$"))
+        .respond_with(|request: &wiremock::Request| {
+            let id = request.url.path_segments().unwrap().next_back().unwrap();
+            ResponseTemplate::new(200).set_body_json(
+                json!({"code":0,"data":{"items":[{"message_id":id,"chat_id":"oc_human"}]}}),
+            )
+        })
+        .mount(provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex("^/open-apis/im/v1/messages/[^/]+/reply$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"data":{"message_id":"reply"}})),
+        )
+        .mount(provider)
+        .await;
+}
+
 pub(super) async fn ingestion_provider(
     _state: &AppState,
     row: &NyxbotChannel,
     bytes: Vec<u8>,
 ) -> MockServer {
     let provider = MockServer::start().await;
+    mock_plain_source_replies(&provider).await;
     INGESTION_ORIGINS
         .lock()
         .unwrap()

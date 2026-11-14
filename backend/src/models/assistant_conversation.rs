@@ -102,6 +102,10 @@ pub struct AgentEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelTurnContext {
+    /// Metadata copied only from this installation's authenticated ingress.
+    /// It identifies the source; it never grants access to another chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message: Option<ChannelSourceMessage>,
     /// Exact server-validated organization source, retained independently of
     /// mutable reply preferences and revalidated before rendering model input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +123,18 @@ pub struct ChannelTurnContext {
     pub sender_kind: super::channel_thread::ThreadSenderKind,
     pub guest: bool,
     pub original_message: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelSourceMessage {
+    pub receipt_id: String,
+    pub platform_message_id: String,
+    pub platform_chat_id: String,
+    pub nyxid_chat_id: String,
+    pub sender_platform_id: String,
+    pub reply_to_platform_message_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub received_at: DateTime<Utc>,
 }
 
 impl AgentEvent {

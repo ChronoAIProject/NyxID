@@ -507,8 +507,13 @@ async fn stored_lark_and_feishu_encrypted_original_private_events_reach_one_real
             .expect(1)
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/open-apis/im/v1/messages/om_native_original"))
+            .and(header("authorization", "Bearer local-tenant-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"items":[{"message_id":"om_native_original","chat_id":"oc_native_private"}]}})))
+            .expect(1).mount(&server).await;
         Mock::given(method("POST"))
-            .and(path("/open-apis/im/v1/messages"))
+            .and(path("/open-apis/im/v1/messages/om_native_original/reply"))
             .and(header("authorization", "Bearer local-tenant-token"))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -521,15 +526,15 @@ async fn stored_lark_and_feishu_encrypted_original_private_events_reach_one_real
         let requests = server.received_requests().await.unwrap();
         assert_eq!(
             requests.len(),
-            2,
-            "one tenant exchange and one send; all egress local"
+            3,
+            "one tenant exchange, source validation and one reply; all egress local"
         );
         let send = requests
             .iter()
-            .find(|r| r.url.path() == "/open-apis/im/v1/messages")
+            .find(|r| r.url.path() == "/open-apis/im/v1/messages/om_native_original/reply")
             .unwrap();
         let posted: Value = serde_json::from_slice(&send.body).unwrap();
-        assert_eq!(posted["receive_id"], "oc_native_private");
+        assert_eq!(posted["reply_in_thread"], false);
         let content: Value = serde_json::from_str(posted["content"].as_str().unwrap()).unwrap();
         assert_eq!(content["text"], expected);
         f.state.db.drop().await.unwrap();

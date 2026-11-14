@@ -1596,6 +1596,15 @@ fn dispatch<'a>(
     delegation_approved: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "current_time" => {
+            Box::pin(async move { Ok((crate::services::assistant_clock::read(args)?, false)) })
+        }
+        "channel_delivery_status" => Box::pin(async move {
+            Ok((
+                super::nyxbot::chats::delivery_status(state, chat, args).await?,
+                false,
+            ))
+        }),
         "list_notifications" => Box::pin(async move {
             Ok((
                 super::assistant_notifications::list_for_tool(state, &chat.user_id, args).await?,

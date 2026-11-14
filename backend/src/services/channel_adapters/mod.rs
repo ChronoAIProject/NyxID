@@ -307,8 +307,8 @@ mod tests {
             let capabilities = adapter.outbound_capabilities();
             let (reply_to, thread) = match adapter.platform_id() {
                 "telegram" | "telegram-new" | "slack" => (true, true),
-                "whatsapp" | "aurinko" => (true, false),
-                "discord" | "lark" | "feishu" | "x" | "openclaw" => (false, false),
+                "whatsapp" | "aurinko" | "lark" | "feishu" => (true, false),
+                "discord" | "x" | "openclaw" => (false, false),
                 unexpected => panic!("Add outbound transport contracts for {unexpected}"),
             };
             // Corresponding production request-builder tests exercise these

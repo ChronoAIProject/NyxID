@@ -2087,6 +2087,53 @@ pub(crate) async fn post_current_turn(
     }))
 }
 
+/// Metadata reads keep the same live actor/target boundary as explicit posts,
+/// without consuming a send limiter or creating any platform effect.
+pub(crate) async fn delivery_status(
+    state: &AppState,
+    actor: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    args: &Value,
+) -> AppResult<Value> {
+    if actor.guest || !post_turn_is_live(state, actor).await? {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let chat_id = args["chat_id"].as_str().unwrap_or_default();
+    let owner = if let Some(access) = actor.org_agent_access.as_ref().and_then(|a| a.channel()) {
+        if state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {
+                "_id":chat_id,"channel_id":&access.channel().id,
+                "partition":&access.origin().partition,
+            })
+            .await?
+            .is_none()
+        {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        access.channel().user_id.as_str()
+    } else {
+        actor.user_id.as_str()
+    };
+    validate_post(
+        state,
+        owner,
+        chat_id,
+        (!actor.is_orchestrator()).then_some(actor.agent_id.as_str()),
+    )
+    .await?;
+    let (channel, target) = load_chat(state, owner, chat_id).await?;
+    crate::services::channel_delivery_receipts::read(
+        &state.db,
+        &channel,
+        &target,
+        &actor.user_id,
+        (!actor.is_orchestrator()).then_some(actor.agent_id.as_str()),
+        args,
+    )
+    .await
+}
+
 pub(crate) async fn post_automation(
     state: &AppState,
     owner: &str,

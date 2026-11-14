@@ -3,8 +3,12 @@
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        assistant_conversation::{AssistantConversation, ChannelTurnContext},
-        nyxbot_channel::{COLLECTION_NAME as CHANNELS, NyxbotChannel},
+        assistant_conversation::{AssistantConversation, ChannelSourceMessage, ChannelTurnContext},
+        channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
+        nyxbot_channel::{
+            COLLECTION_NAME as CHANNELS, EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel,
+            NyxbotEvent, NyxbotThread,
+        },
     },
 };
 use bson::doc;
@@ -13,6 +17,59 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 const MAX_USERNAME_BYTES: usize = 1024;
+
+/// Resolve only the already admitted event's relay receipt. Gateway text and
+/// model-supplied IDs never select the source record. Missing legacy metadata
+/// stays missing, rather than turning a display value into provenance.
+pub(crate) async fn source_message(
+    db: &Database,
+    channel: &NyxbotChannel,
+    chat: &NyxbotThread,
+    sender: &str,
+    event_id: &str,
+) -> AppResult<Option<ChannelSourceMessage>> {
+    let Some(event) = db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":event_id,"channel_id":&channel.id,"user_id":&channel.user_id,"partition":&chat.partition})
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(chat_id) = chat.platform_chat_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(route) = channel.route_id.as_deref() else {
+        return Ok(None);
+    };
+    let receipt = event.relay_message_id.as_deref().unwrap_or(&event.event_id);
+    let filter = doc! {
+        "_id":receipt,"direction":"inbound","platform":&channel.platform,
+        "channel_bot_id":&channel.channel_bot_id,
+        "user_id":channel.bot_owner_id.as_deref().unwrap_or(&channel.user_id),
+        "agent_api_key_id":&channel.route_api_key_id,
+        "conversation_id":route,
+        "platform_conversation_id":chat_id,"sender_platform_id":sender,
+    };
+    let Some(message) = db
+        .collection::<ChannelMessage>(MESSAGES)
+        .find_one(filter)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(platform_message_id) = message.platform_message_id.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(ChannelSourceMessage {
+        receipt_id: message.id,
+        platform_message_id,
+        platform_chat_id: chat_id.to_owned(),
+        nyxid_chat_id: chat.id.clone(),
+        sender_platform_id: sender.to_owned(),
+        reply_to_platform_message_id: message.reply_to_platform_message_id,
+        received_at: message.created_at,
+    }))
+}
 
 /// Bound editable data before JSON escaping (a control character can expand to
 /// six bytes). The stable UUID is always retained in full, outside this budget.
@@ -42,7 +99,15 @@ async fn identity(
         "display": {"bot_label": display(&bot.label), "editable": true,
             "sender_name": source.display_name.as_deref().map(display)},
         "conversation": {"kind": source.conversation_kind, "followed": source.followed,
-            "label": source.conversation_label.as_deref().map(display)},
+            "label": source.conversation_label.as_deref().map(display),
+            "platform_chat_id":source.source_message.as_ref().map(|message| &message.platform_chat_id),
+            "nyxid_chat_id":source.source_message.as_ref().map(|message| &message.nyxid_chat_id)},
+        "source_message": source.source_message.as_ref().map(|message| json!({
+            "receipt_id":message.receipt_id,"platform_message_id":message.platform_message_id,
+            "sender_platform_id":message.sender_platform_id,
+            "reply_to_platform_message_id":message.reply_to_platform_message_id,
+            "received_at":message.received_at.to_rfc3339(),
+        })),
         "sender": {"classification": match (source.org_origin.is_some(), source.guest) {
             (true, true) => "org_guest",
             (true, false) => "org_member",
@@ -186,3 +251,7 @@ pub(crate) async fn turn_notes(db: &Database, row: &AssistantConversation) -> Ap
     }
     Ok(notes)
 }
+
+#[cfg(test)]
+#[path = "channel_turn_context_tests.rs"]
+mod tests;

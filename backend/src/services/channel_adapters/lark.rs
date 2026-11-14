@@ -39,6 +39,9 @@ mod thread;
 
 #[path = "lark_post.rs"]
 mod post;
+#[cfg(test)]
+#[path = "lark_reply_tests.rs"]
+mod reply_tests;
 pub use post::{PostContent, parse_post};
 
 /// Read only the authenticated native post; normalized callback content stays unchanged.
@@ -966,10 +969,18 @@ impl PlatformAdapter for LarkFamilyAdapter {
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
-            reply_to: false,
+            reply_to: true,
             thread: false,
             edit: true,
         }
+    }
+
+    fn atomic_inbound_admission(&self) -> bool {
+        true
+    }
+
+    fn dedup_inbound_by_platform_message_id(&self) -> bool {
+        true
     }
 
     fn platform_id(&self) -> &str {
@@ -1291,12 +1302,25 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .get_tenant_access_token(http, app_id, app_secret)
             .await?;
 
-        let body = build_addressed_message_body(conversation_id, reply);
-
-        let url = format!(
-            "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
-            self.base_url
-        );
+        let (url, body) = if let Some(source) = &reply.reply_to_platform_message_id {
+            // The reply endpoint selects its own chat. Verify that the source
+            // belongs to the authorized target before performing any send.
+            self.thread_message(http, &tenant_token, conversation_id, source)
+                .await?;
+            let (msg_type, content) = build_send_body(reply);
+            (
+                format!("{}/open-apis/im/v1/messages/{source}/reply", self.base_url),
+                serde_json::json!({"msg_type":msg_type,"content":content,"reply_in_thread":false}),
+            )
+        } else {
+            (
+                format!(
+                    "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
+                    self.base_url
+                ),
+                build_addressed_message_body(conversation_id, reply),
+            )
+        };
 
         crate::services::channel_platform::mark_provider_attempt().await?;
         let resp: serde_json::Value = http

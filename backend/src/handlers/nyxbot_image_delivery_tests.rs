@@ -177,6 +177,21 @@ async fn mock_sends(
     delay: std::time::Duration,
 ) {
     if platform == "lark" {
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(path("/open-apis/im/v1/messages/17"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"code":0,"data":{"items":[{"message_id":"17","chat_id":"123"}]}}),
+            ))
+            .mount(server)
+            .await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(path("/open-apis/im/v1/messages/17/reply"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"sent"}})),
+            )
+            .mount(server)
+            .await;
         for index in 0..2 {
             Mock::given(path("/open-apis/im/v1/images"))
                 .and(body_string_contains(format!("pixels-{index}")))
@@ -374,7 +389,8 @@ async fn nyxbot_direct_images_precede_text_preserve_anchor_and_never_resend() {
                     "/open-apis/im/v1/messages",
                     "/open-apis/im/v1/images",
                     "/open-apis/im/v1/messages",
-                    "/open-apis/im/v1/messages"
+                    "/open-apis/im/v1/messages/17",
+                    "/open-apis/im/v1/messages/17/reply"
                 ]
             );
         } else {
@@ -1468,6 +1484,58 @@ async fn live_image_authority(f: &Fixture, attachments: &[TurnAttachment]) -> ac
         .await
         .unwrap()
         .unwrap()
+}
+
+#[tokio::test]
+async fn delivery_receipt_reads_require_a_live_allowed_destination_and_never_send() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let actor = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    let args = json!({"chat_id":target.id,"source_message_id":f.event.relay_message_id});
+    let result = chats::delivery_status(&f.state, &actor, &args)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "unconfirmed");
+    let mut guest = actor.clone();
+    guest.guest = true;
+    assert!(
+        chats::delivery_status(&f.state, &guest, &args)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":false}})
+        .await
+        .unwrap();
+    assert!(
+        chats::delivery_status(&f.state, &actor, &args)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":true}})
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&actor.conversation_id},
+            doc! {"$set":{"active_turn.stop_requested":true}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        chats::delivery_status(&f.state, &actor, &args)
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]

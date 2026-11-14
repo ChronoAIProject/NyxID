@@ -2797,3 +2797,43 @@ not resolve unknown creation/deletion, override operator review, switch existing
 native bots back to relay, or shorten the persisted 90-second post-delete drain.
 A missing release proof remains blocked for review. No message contents, tokens
 or upstream prose are added to health or repair metadata.
+### Lark source replies and delivery evidence
+
+Lark and Feishu ordinary text replies retain the exact inbound native message
+ID and use `POST /im/v1/messages/{message_id}/reply` with `reply_in_thread=false`.
+The adapter checks that the source belongs to the authorized chat before sending.
+Initiated notices have no reply anchor; existing followed topics keep their native
+thread reply path. Atomic ingress admission uses the native `om_` identity within
+platform, bot and owner, including pre-upgrade receipt rows. It changes no Telegram
+edit or event semantics.
+
+Authenticated channel turn context now includes a metadata-only `source_message`
+with the ingress receipt, native message and sender IDs, received time and reply
+parent, plus `conversation.platform_chat_id` and `conversation.nyxid_chat_id`.
+These identify the current source; they grant no authority. Missing legacy source
+metadata stays absent. Event coalescing retains each source association.
+
+Two read-only native agent tools support time-sensitive operations and external
+business records:
+
+- `nyxid__current_time` accepts an optional IANA `timezone` and returns fresh UTC,
+  local time and Unix milliseconds. A scheduled instant is not a clock snapshot.
+- `nyxid__channel_delivery_status` accepts `chat_id` and exactly one of
+  `source_message_id` (NyxID ingress receipt) or `schedule_id`. It reads destination-
+  scoped provider acceptance IDs and reports pending, unknown, refused or confirmed
+  delivery. A partial or uncertain multipart reply is never confirmed. Source
+  execution state and `answer_succeeded` distinguish a successful answer from a
+  delivered failure notice; absent legacy execution facts remain unknown. Schedule
+  execution completion is returned independently from delivery. The tool uses the
+  current live turn and the existing agent/post destination ACL, with organization
+  channel actors restricted to their exact current partition. It never sends or
+  retries a provider operation; guests and shared agents do not acquire this tool.
+
+A business workflow can persist its source receipt before returning an automatic
+reply, then reconcile the corresponding row in a bounded owner task after actual
+send. The core does not know any event spreadsheet, question schema or workflow
+schedule. Confirmed means accepted by the platform, not read by a person. Compatible
+readers tolerate absent source metadata; these capabilities require the upgraded
+executing backend. Upgrade all webhook-receiving replicas before accepting
+cluster-wide Lark deduplication; older receivers do not participate in admission.
+Do not report runtime acceptance from a skill update alone.
