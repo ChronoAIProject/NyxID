@@ -787,4 +787,61 @@ mod tests {
         assert!(!reconcile_completed_once(&state).await.unwrap());
         db.drop().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn mixed_fleet_completion_does_not_stamp_revision_for_old_local_pass() {
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let old_domains: Vec<_> = accepted
+            .domains
+            .iter()
+            .enumerate()
+            .map(|(index, domain)| {
+                let mut domain = domain.clone();
+                domain.status = if domain.domain == "vendor" {
+                    DomainStatus::Pending
+                } else {
+                    DomainStatus::Complete
+                };
+                domain.completed_at =
+                    (domain.status == DomainStatus::Complete).then_some(chrono::Utc::now());
+                if index == 4 {
+                    domain.completed_at = Some(chrono::Utc::now());
+                }
+                domain
+            })
+            .collect();
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id},
+                vec![doc! {"$set": {
+                    "status": "pending",
+                    "domains": bson::to_bson(&old_domains).unwrap(),
+                    "local_inventory_revision": 0_i32,
+                    "retry_at": "$$NOW",
+                }}],
+            )
+            .await
+            .unwrap();
+        let job = claim(&db).await.unwrap().unwrap();
+        let vendor = job
+            .domains
+            .iter()
+            .position(|domain| domain.domain == "vendor")
+            .unwrap();
+        assert!(
+            checkpoint(&db, &job, vendor, Outcome::Complete)
+                .await
+                .unwrap()
+        );
+        let current = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id": &accepted.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.get_i32("local_inventory_revision"), Ok(0));
+        assert_eq!(current.get_str("status"), Ok("complete"));
+        db.drop().await.unwrap();
+    }
 }

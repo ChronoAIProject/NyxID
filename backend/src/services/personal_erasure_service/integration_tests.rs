@@ -790,13 +790,13 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
             doc! {
                 "_id": "personal-history",
                 "owner_id": &owner,
-                "actor": {"person_id": &owner, "name": "Deleted Person", "display_name": "Deleted Person", "email": "deleted@example.test", "api_key_id": "key", "app_id": "app"},
+                "actor": {"person_id": &owner, "name": "Deleted Person", "display_name": "Deleted Person", "email": "deleted@example.test", "email_address": "deleted@example.test", "api_key_id": "key", "app_id": "app"},
                 "action": "update",
             },
             doc! {
                 "_id": "org-history",
                 "owner_id": &org,
-                "actor": {"person_id": &owner, "name": "Deleted Person", "display_name": "Deleted Person", "email": "deleted@example.test", "api_key_id": "key", "app_id": "app"},
+                "actor": {"person_id": &owner, "name": "Deleted Person", "display_name": "Deleted Person", "email": "deleted@example.test", "email_address": "deleted@example.test", "api_key_id": "key", "app_id": "app"},
                 "action": "update",
                 "sequence": 7_i64,
             },
@@ -816,10 +816,19 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
     assert_eq!(invite.get_i32("used_count"), Ok(2));
     assert_eq!(invite.get_i32("max_uses"), Ok(10));
     let usages = invite.get_array("usages").unwrap();
-    assert_eq!(usages.len(), 1);
+    assert_eq!(usages.len(), 2);
     assert_eq!(
         usages[0].as_document().unwrap().get_str("user_id"),
+        Ok(owner.as_str())
+    );
+    assert!(usages[0].as_document().unwrap().get("email").is_none());
+    assert_eq!(
+        usages[1].as_document().unwrap().get_str("user_id"),
         Ok(other.as_str())
+    );
+    assert_eq!(
+        usages[1].as_document().unwrap().get_str("email"),
+        Ok("kept@example.test")
     );
 
     assert!(
@@ -843,6 +852,7 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
     assert_eq!(actor.get_str("app_id"), Ok("app"));
     assert_eq!(actor.get_str("display_name"), Ok("Deleted account"));
     assert!(actor.get("email").is_none());
+    assert!(actor.get("email_address").is_none());
     db.drop().await.unwrap();
 }
 
