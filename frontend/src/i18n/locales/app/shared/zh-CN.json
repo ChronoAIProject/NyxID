@@ -1285,7 +1285,7 @@
   "Optional": "可选",
   "Optional description": "可选说明",
   "Optional funding organization": "可选的资金来源组织",
-  "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.": "可选的用量分析数据会关联到你的账号。选择“允许”会启用账号权限并在此浏览器中开启。拒绝会在所有设备上撤回账号权限。其他每台设备仍需单独选择加入，并且“请勿跟踪”始终会停用数据收集。可在“设置 → 隐私”中更改。",
+  "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Change this in Settings → Privacy.": "可选的用量分析数据会关联到你的账号。选择“允许”会启用账号权限并在此浏览器中开启。拒绝会在所有设备上撤回账号权限。其他每台设备仍需单独选择加入，并且“请勿跟踪”或“全局隐私控制”始终会停用数据收集。可在“设置 → 隐私”中更改。",
   "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Optional crash diagnostics include app version and sanitized code locations, without messages or URLs; reports are kept for up to 30 days. Change this in Settings → Privacy.": "可选使用情况分析与您的账号关联。允许会开启账号权限及此浏览器的收集。拒绝会撤回所有设备上的账号权限。其他每台设备仍需单独选择加入，“请勿追踪”或“全局隐私控制”始终会禁用收集。可选崩溃诊断包括应用版本和经过处理的代码位置，不包含消息或网址；报告最多保留 30 天。您可以在“设置 → 隐私”中更改选择。",
   "Or start with:": "或从以下内容开始：",
   "Org": "组织",

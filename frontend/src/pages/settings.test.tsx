@@ -645,6 +645,7 @@ describe("MFA security settings", () => {
 
 it("privacy hides diagnostics when not offered and orders offered rows account browser diagnostics", async () => {
   const {client}=await open("/settings","privacy");
+  expect(screen.getByText("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")).toBeInTheDocument();
   await waitFor(()=>expect(transport).toHaveBeenCalledWith("/api/v1/users/me/preferences/analytics",expect.anything()));
   expect(screen.queryByText("Crash diagnostics")).not.toBeInTheDocument();
   expect(screen.queryByText("Review updated analytics")).not.toBeInTheDocument();

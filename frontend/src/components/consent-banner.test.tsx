@@ -9,7 +9,7 @@ import type { User } from "@/types/api";
 const mocks = vi.hoisted(() => ({read:vi.fn(),save:vi.fn()}));
 vi.mock("@/lib/analytics-consent",()=>({readAnalyticsConsent:mocks.read,saveAnalyticsConsent:mocks.save}));
 vi.mock("@/hooks/use-public-config",()=>({usePublicConfig:()=>({data:{telemetry_share_analytics:true}})}));
-const original = "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.";
+const original = "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Change this in Settings → Privacy.";
 const initialAuth=useAuthStore.getState(),initialConsent=useConsentStore.getState();
 let client:QueryClient;
 beforeEach(()=>{

@@ -107,7 +107,7 @@
   "Node / fetch client": "Node / fetch client",
   "Notification settings updated": "Notification settings updated",
   "One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.": "One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.",
-  "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.": "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.",
+  "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.": "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.",
   "Or add manually · .claude/settings.json or .mcp.json": "Or add manually · .claude/settings.json or .mcp.json",
   "Or add manually · ~/.codex/config.toml": "Or add manually · ~/.codex/config.toml",
   "Or copy manually · .cursor/mcp.json": "Or copy manually · .cursor/mcp.json",

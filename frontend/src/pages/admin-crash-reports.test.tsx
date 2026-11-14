@@ -87,6 +87,14 @@ it("admin overview renders ingestion health and localized filter labels", () => 
     screen.getByRole("columnheader", { name: "Reported events by kind" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Ingestion health")).toBeInTheDocument();
+  const exportStatus = within(
+    screen.getByRole("region", { name: "Export status" }),
+  );
+  expect(
+    exportStatus.getByRole("heading", { name: "Export status" }),
+  ).toBeInTheDocument();
+  expect(exportStatus.getByText("Disabled")).toBeInTheDocument();
+  expect(exportStatus.getByText("3")).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "Last 24 hours" })).toHaveValue(
     "24h",
   );

@@ -236,16 +236,24 @@ export function AdminCrashReportsPage() {
                 {t("Export destinations")}:{" "}
                 {summary.data.health.destination_ids.join(", ") || t("None")}
               </p>
-              <dl className="flex flex-wrap gap-4">
-                {Object.entries(summary.data.health.export_statuses).map(
-                  ([key, count]) => (
-                    <div key={key}>
-                      <dt>{label(key, exportLabels)}</dt>
-                      <dd className="font-mono">{count}</dd>
-                    </div>
-                  ),
-                )}
-              </dl>
+              <section
+                aria-labelledby="crash-export-status"
+                className="space-y-2"
+              >
+                <h3 id="crash-export-status" className="type-group-heading">
+                  {t("Export status")}
+                </h3>
+                <dl className="flex flex-wrap gap-4">
+                  {Object.entries(summary.data.health.export_statuses).map(
+                    ([key, count]) => (
+                      <div key={key}>
+                        <dt>{label(key, exportLabels)}</dt>
+                        <dd className="font-mono">{count}</dd>
+                      </div>
+                    ),
+                  )}
+                </dl>
+              </section>
             </CardContent>
           </Card>
           <Card>

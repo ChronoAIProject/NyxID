@@ -1188,7 +1188,7 @@ function PrivacyTab() {
       title={translateUi("Usage analytics")}
       footer={
         <>
-          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.")}</p>
+          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")}</p>
           {persistenceError && (
             <div role="alert" className="space-y-2">
               <p>{translateUi("This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.")}</p>
