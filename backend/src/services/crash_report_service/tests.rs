@@ -5,6 +5,20 @@ use crate::{
 };
 use serde_json::json;
 
+// Integration assertions exercise production admission once, after establishing
+// the healthy majority-I/O precondition its bounded consent gate requires.
+async fn insert(
+    db: &Database,
+    config: &CrashConfig,
+    environment: &str,
+    actor: &str,
+    revision: &str,
+    report: CrashReportV1,
+) -> AppResult<(bool, String)> {
+    crate::test_utils::await_responsive_majority_io(db).await;
+    super::insert(db, config, environment, actor, revision, report).await
+}
+
 pub(crate) fn report() -> CrashReportV1 {
     serde_json::from_value(json!({"schema_version":1,"event_id":uuid::Uuid::new_v4().to_string(),"captured_at":Utc::now().to_rfc3339(),"platform":"web","kind":"js_error","exception_class":"TypeError","app_version":"1.2.3","app_build":"abc123","artifact_id":uuid::Uuid::new_v4().to_string(),"os_version":"18.1","runtime":{"name":"safari","major":18},"js_frames":[{"asset":"assets/app-a1.js","line":12,"column":4}]})).unwrap()
 }
@@ -167,6 +181,7 @@ async fn consent_matrix_storage_duplicate_ttl_and_expired_reads() {
         let enabled = consent::set_acknowledging(&db, &id, true, policy)
             .await
             .unwrap();
+        crate::test_utils::await_responsive_majority_io(&db).await;
         assert!(consent::permits_dispatch(&db, &id, &enabled.revision).await);
         assert_eq!(
             consent::permits_diagnostics(&db, &id, &enabled.revision).await,
@@ -221,25 +236,35 @@ async fn all_cluster_limits_produce_retry_after_before_json_parsing() {
         ("crash:account-day", "actor", 50, 86400, None),
     ] {
         let db = connect_test_database("crash_rates").await.unwrap();
+        crate::test_utils::await_responsive_majority_io(&db).await;
         crate::test_utils::ensure_rate_window_headroom(
             Duration::from_secs(seconds),
             Duration::from_secs(10),
         )
         .await;
-        for _ in 0..limit {
-            assert!(
-                super::super::coordination_service::RateWindowStore::admit(
-                    &db,
-                    namespace,
-                    key,
-                    limit,
-                    Duration::from_secs(seconds)
-                )
+        use super::super::coordination_service::RateWindowStore;
+        assert!(
+            RateWindowStore::admit(&db, namespace, key, limit, Duration::from_secs(seconds))
                 .await
                 .unwrap()
                 .allowed
-            );
-        }
+        );
+        // Seed only the warm-up count. Exercise both real boundary admissions
+        // without hundreds of writes that can cross the minute under load.
+        let seeded = db
+            .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .update_one(
+                doc! {"namespace":namespace},
+                doc! {"$set":{"count":(limit - 1) as i64}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(seeded.matched_count, 1);
+        let last = RateWindowStore::admit(&db, namespace, key, limit, Duration::from_secs(seconds))
+            .await
+            .unwrap();
+        assert!(last.allowed);
+        assert_eq!(last.remaining, 0);
         assert!(
             matches!(rate_limits(&db,"actor",ip).await,Err(AppError::RateLimitedWithRetry{retry_after}) if retry_after>0)
         );
@@ -404,6 +429,7 @@ async fn diagnostics_gate_requires_a_policy_acknowledgement_without_changing_ana
     let permission = consent::set_acknowledging(&db, &id, true, consent::PolicyVersion::V1)
         .await
         .unwrap();
+    crate::test_utils::await_responsive_majority_io(&db).await;
     assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
     assert!(!consent::permits_diagnostics(&db, &id, &permission.revision).await);
     db.collection::<Document>(crate::models::user::COLLECTION_NAME)
@@ -413,6 +439,7 @@ async fn diagnostics_gate_requires_a_policy_acknowledgement_without_changing_ana
         )
         .await
         .unwrap();
+    crate::test_utils::await_responsive_majority_io(&db).await;
     assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
     assert!(!consent::permits_diagnostics(&db, &id, &permission.revision).await);
     assert!(!available(&db, &id).await);

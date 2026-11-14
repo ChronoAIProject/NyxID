@@ -100,6 +100,7 @@ async fn ingestion_auth_consent_device_readiness_kill_and_encoding_matrix() {
     let auth = test_auth_user(&id);
     let bytes = body(&id, &rev);
     for _ in 0..2 {
+        crate::test_utils::await_responsive_majority_io(&db).await;
         assert_eq!(
             ingest(
                 State(state.clone()),
@@ -226,6 +227,7 @@ async fn admin_operator_projection_and_nonhuman_denial() {
     let report = report();
     let artifact = report.artifact_id.clone().unwrap();
     service::tests::register_report_release(&db, &report).await;
+    crate::test_utils::await_responsive_majority_io(&db).await;
     let (_, report_id) = service::insert(&db, &state.crash_reports, "test", &id, &rev, report)
         .await
         .unwrap();

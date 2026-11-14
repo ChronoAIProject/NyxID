@@ -97,6 +97,7 @@ async fn unserving_readiness_is_unknown_and_ingestion_returns_503_without_destro
     .err()
     .unwrap();
     assert!(matches!(error, AppError::SecurityReadinessUnavailable));
+    crate::test_utils::await_responsive_majority_io(&db).await;
     assert!(consent::permits_diagnostics(&db, &id, &rev).await);
     flags::set_platform_override(&db, FLAG, &FlagTarget::Global, false, &id)
         .await

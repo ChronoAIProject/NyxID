@@ -258,6 +258,7 @@ mod tests {
             )
             .await
             .unwrap();
+        crate::test_utils::await_responsive_majority_io(&db).await;
         tick(&db, &config).await.unwrap();
         assert_eq!(row(&db, &id).await.export.status, ExportStatus::Exported);
         assert_eq!(exporter.calls.load(Ordering::SeqCst), 1);
@@ -266,6 +267,7 @@ mod tests {
     async fn zero_export_interval_disables_new_rows_and_never_works_pending_rows() {
         let (db, actor, rev, id, mut config, exporter) = setup("crash_zero_interval", 0).await;
         config.interval = Duration::ZERO;
+        crate::test_utils::await_responsive_majority_io(&db).await;
         let (_, disabled) =
             crash_report_service::insert(&db, &config, "test", &actor, &rev, report())
                 .await

@@ -346,7 +346,8 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
 }
 
 /// Wait, within the shared readiness budget, until majority-acknowledged
-/// writes and linearizable reads on this database answer within 100 ms.
+/// writes and linearizable reads on this database answer within 100 ms for
+/// three consecutive probes, including a gap between probes.
 ///
 /// Tests that exercise production admission gates (the 250 ms analytics
 /// dispatch transaction, the 200 ms linearizable consent read) assert those
@@ -360,6 +361,7 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
     const RESPONSIVE: Duration = Duration::from_millis(100);
     let started = std::time::Instant::now();
     let probes = db.collection::<Document>("__readiness");
+    let mut responsive_probes = 0;
     loop {
         let id = Uuid::new_v4().to_string();
         let probe = std::time::Instant::now();
@@ -373,7 +375,12 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
             .await;
         let elapsed = probe.elapsed();
         if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
-            return;
+            responsive_probes += 1;
+            if responsive_probes == 3 {
+                return;
+            }
+        } else {
+            responsive_probes = 0;
         }
         assert!(
             started.elapsed() < BUDGET,
@@ -382,7 +389,7 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
             write.is_ok(),
             read.is_ok()
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
