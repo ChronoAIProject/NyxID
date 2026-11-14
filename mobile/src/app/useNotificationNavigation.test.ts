@@ -639,3 +639,21 @@ test("service OAuth returns never navigate or supersede a queued notification, w
   assert.match(JSON.stringify(f.actions[0]), /queued-thread/);
   stop(); unsubscribe(); f.h.unmount();
 });
+
+test("unsupported first-party HTTPS pages open in-app warm and cold, deduplicate, and preserve native delivery", async () => {
+  const f = setup();
+  const routed: string[] = [];
+  const unsubscribe = f.linking.appLinking.subscribe((url: string) => routed.push(url));
+  f.setInitialUrl("https://api.nyx.example/developer/apps?tab=oauth");
+  assert.equal(await f.linking.appLinking.getInitialURL(), null);
+  f.directLink("https://api.nyx.example/developer/apps?tab=oauth");
+  f.directLink("https://nyx.example/settings/advanced?tab=limits");
+  assert.deepEqual(f.browsers, ["https://nyx.example/developer/apps?tab=oauth", "https://nyx.example/settings/advanced?tab=limits"]);
+  assert.deepEqual(routed, []);
+  for (const url of ["https://evil.example/developer/apps", "https://nyx.onelink.me/developer/apps"]) f.directLink(url);
+  assert.equal(f.browsers.length, 2);
+  f.directLink("https://nyx.example/services");
+  assert.equal(routed.at(-1), "https://nyx.example/services");
+  assert.equal(f.browsers.length, 2);
+  unsubscribe(); f.h.unmount();
+});

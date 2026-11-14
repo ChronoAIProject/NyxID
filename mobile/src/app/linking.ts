@@ -2,6 +2,11 @@ import {
   getStateFromPath,
   type LinkingOptions,
 } from "@react-navigation/native";
+import * as WebBrowser from "expo-web-browser";
+import {
+  nativeWebFallback,
+  deduplicatedWebFallback,
+} from "../lib/nativeWebFallback";
 import {
   isServiceOAuthReturn,
   parseServiceOAuthReturn,
@@ -15,6 +20,7 @@ import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
 import { capture } from "../lib/telemetry";
 import type { LinkType } from "../lib/telemetry-schema";
 import {
+  getFrontendUrl,
   IS_DEV_BUILD,
   NYXID_APP_SCHEME,
   NYXID_TRUSTED_API_BASE_URLS,
@@ -43,6 +49,25 @@ function consumeServiceOAuthReturn(url: string): boolean {
   if (!isServiceOAuthReturn(url, NYXID_APP_SCHEME)) return false;
   const result = parseServiceOAuthReturn(url, NYXID_APP_SCHEME);
   if (result) recordServiceOAuthReturn(result);
+  return true;
+}
+
+const openFallback = deduplicatedWebFallback((url) =>
+  WebBrowser.openBrowserAsync(url),
+);
+function consumeWebFallback(url: string): boolean {
+  if (isSupportedDirectLink(url)) return false;
+  const target = nativeWebFallback(
+    url,
+    {
+      apiBaseUrls: NYXID_TRUSTED_API_BASE_URLS,
+      frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
+      universalLinkHost: NYXID_UNIVERSAL_LINK_HOST,
+    },
+    getFrontendUrl(),
+  );
+  if (!target) return false;
+  openFallback(target);
   return true;
 }
 
@@ -213,7 +238,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
 
     try {
       linkingSubscription = Linking.addEventListener("url", ({ url }) => {
-        if (consumeServiceOAuthReturn(url)) return;
+        if (consumeServiceOAuthReturn(url) || consumeWebFallback(url)) return;
         reportDirectLinkOpened(url);
         listener(rewriteChallengeUrl(url));
       });

@@ -31,6 +31,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
     apiBaseUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    firstPartyLinkUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    androidApiAppLinks: r.androidApiAppLinks,
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,
     scheme: ident.scheme,

@@ -149,6 +149,8 @@ function resolveProfile(appEnv, env, options = {}) {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
   }
 
+  const linkOptIn = env[`${appEnv.toUpperCase()}_ANDROID_API_APP_LINKS`] || "false";
+  if (!["true", "false"].includes(linkOptIn)) fatal("ANDROID_API_APP_LINKS must be true or false");
   const dev = readProfile(env, "DEV");
   const prod = readProfile(env, "PROD");
   if (env.PROD_USE_NEW_DOMAINS !== undefined) {
@@ -200,6 +202,7 @@ function resolveProfile(appEnv, env, options = {}) {
     appleAscAppId: pick("appleAscAppId"),
     iosBuildNumber: pick("iosBuildNumber") || "1",
     androidVersionCode: pick("androidVersionCode") || "1",
+    androidApiAppLinks: linkOptIn === "true",
     universalLinkHost: pick("universalLinkHost"),
     universalLinkPathPrefix: pick("universalLinkPathPrefix"),
     legalBaseUrl,
