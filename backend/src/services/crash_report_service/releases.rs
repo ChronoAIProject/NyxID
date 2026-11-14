@@ -262,7 +262,7 @@ pub async fn auto_register_web(
         }
     }
 }
-// The initial interval tick registers the live release before any crash arrives.
+// The initial tick registers enrolled live releases before any crash arrives.
 // Each refresh shares the hardened, single-flight origin cache with ingestion.
 const MANIFEST_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 pub async fn run_manifest_refresh(
@@ -289,6 +289,14 @@ async fn refresh_live_manifests(
     config: &crate::config::AppConfig,
     shutdown: &super::super::shutdown::Runtime,
 ) {
+    if shutdown.is_draining()
+        || !matches!(
+            admin::rollout(db).await,
+            Ok(admin::Rollout::Global | admin::Rollout::Cohort)
+        )
+    {
+        return;
+    }
     for url in manifest_urls(config) {
         if shutdown.is_draining() {
             break;
@@ -300,7 +308,15 @@ async fn refresh_live_manifests(
                 app_build: manifest.app_build,
                 artifact_id: Some(manifest.artifact_id),
             };
-            let _ = register(db, &identity, ReleaseSource::FrontendManifest, None).await;
+            // A known release needs no write; a lookup failure grants no authority.
+            if matches!(
+                db.collection::<ClientRelease>(RELEASES)
+                    .find_one(identity.filter())
+                    .await,
+                Ok(None)
+            ) {
+                let _ = register(db, &identity, ReleaseSource::FrontendManifest, None).await;
+            }
         }
     }
 }

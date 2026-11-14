@@ -1,5 +1,10 @@
 use super::*;
+use crate::services::{
+    feature_flag_service::{self as flags, FlagTarget},
+    security_readiness_service as readiness,
+};
 use futures::TryStreamExt;
+use mongodb::event::{EventHandler, command::CommandEvent};
 use tracing::instrument::WithSubscriber;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -11,6 +16,15 @@ fn identity() -> RegisterRelease {
 }
 fn manifest(identity: &RegisterRelease) -> serde_json::Value {
     serde_json::json!({"artifact_id":identity.artifact_id,"app_version":identity.app_version,"app_build":identity.app_build})
+}
+
+async fn enable_manifest_rollout(db: &Database, actor: &str, target: FlagTarget) {
+    readiness::ready_test_replica(db).await;
+    flags::set_platform_override(db, FLAG, &target, true, actor)
+        .await
+        .unwrap();
+    // Rollout checks need no heartbeat; stop fixture writes before monitoring passes.
+    readiness::stop_test_replica(db).await;
 }
 
 #[tokio::test]
@@ -190,7 +204,8 @@ async fn crash_concurrent_release_registration_is_idempotent() {
 #[tokio::test]
 async fn crash_live_manifest_registers_at_startup_refreshes_periodically_and_stops_on_drain() {
     use crate::services::shutdown::Runtime;
-    let (db, _, _) = super::super::tests::account("crash_live_manifest").await;
+    let (db, actor, _) = super::super::tests::account("crash_live_manifest").await;
+    enable_manifest_rollout(&db, &actor, FlagTarget::Global).await;
     let server = MockServer::builder().start().await;
     let mut config = crate::test_utils::test_app_state(db.clone()).config;
     config.environment = "development".into();
@@ -271,7 +286,8 @@ async fn crash_live_manifest_registers_at_startup_refreshes_periodically_and_sto
 async fn crash_live_manifest_invalid_or_unreachable_registers_nothing_and_logs_closed_reason() {
     use crate::services::shutdown::Runtime;
     for mode in ["invalid_json", "transport"] {
-        let (db, _, _) = super::super::tests::account("crash_live_manifest_failure").await;
+        let (db, actor, _) = super::super::tests::account("crash_live_manifest_failure").await;
+        enable_manifest_rollout(&db, &actor, FlagTarget::Global).await;
         let server = MockServer::builder().start().await;
         let origin = if mode == "transport" {
             // Port zero is never a listening HTTP endpoint; no free-port reuse race.
@@ -313,5 +329,108 @@ async fn crash_live_manifest_invalid_or_unreachable_registers_nothing_and_logs_c
             })
         );
         assert!(!capture.text().contains("SECRET_SENTINEL"));
+    }
+}
+
+#[tokio::test]
+async fn crash_live_manifest_off_and_killed_skip_io_and_enabled_rollouts_write_only_once() {
+    use crate::{
+        models::user::{User, UserType},
+        services::shutdown::Runtime,
+        test_utils::{connect_test_database_with_command_handler, test_user},
+    };
+    for mode in ["off", "killed", "global", "cohort"] {
+        let commands = Arc::new(std::sync::Mutex::new(Vec::<Document>::new()));
+        let observed = commands.clone();
+        let db = connect_test_database_with_command_handler(
+            "crash_manifest_rollout",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    observed.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        super::super::ensure_indexes(&db).await.unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+        match mode {
+            "global" => enable_manifest_rollout(&db, &actor, FlagTarget::Global).await,
+            "cohort" | "killed" => {
+                enable_manifest_rollout(&db, &actor, FlagTarget::User(actor.clone())).await;
+                if mode == "killed" {
+                    flags::set_platform_override(&db, FLAG, &FlagTarget::Global, false, &actor)
+                        .await
+                        .unwrap();
+                }
+            }
+            _ => {}
+        }
+        let enabled = matches!(mode, "global" | "cohort");
+        let server = MockServer::builder().start().await;
+        let release = identity();
+        Mock::given(method("GET"))
+            .and(path("/crash-build.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(manifest(&release)))
+            .expect(if enabled { 2 } else { 0 })
+            .mount(&server)
+            .await;
+        let mut config = crate::test_utils::test_app_state(db.clone()).config;
+        config.environment = "development".into();
+        config.frontend_url = server.uri();
+        config.domain_aliases.frontend_urls.clear();
+        for pass in 0..2 {
+            if enabled && pass == 1 {
+                let key = url::Url::parse(&server.uri())
+                    .unwrap()
+                    .origin()
+                    .ascii_serialization();
+                let gate = FLIGHTS.lock().unwrap().get(&key).unwrap().clone();
+                gate.lock().await.as_mut().unwrap().fetched_at =
+                    Instant::now() - Duration::from_secs(61);
+            }
+            commands.lock().unwrap().clear();
+            refresh_live_manifests(&db, &config, &Runtime::default()).await;
+            let seen = commands.lock().unwrap().clone();
+            let writes = seen
+                .iter()
+                .filter(|command| {
+                    ["insert", "update", "delete", "findAndModify", "bulkWrite"]
+                        .iter()
+                        .any(|key| command.contains_key(key))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                writes.len(),
+                usize::from(enabled && pass == 0),
+                "{mode}: {seen:?}"
+            );
+            if let Some(write) = writes.first() {
+                assert_eq!(write.get_str("update"), Ok(RELEASES));
+            }
+            assert_eq!(
+                seen.iter()
+                    .filter(|command| command.get_str("find") == Ok(RELEASES))
+                    .count(),
+                usize::from(enabled),
+                "{mode}: {seen:?}"
+            );
+        }
+        assert_eq!(
+            db.collection::<ClientRelease>(RELEASES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            u64::from(enabled)
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            if enabled { 2 } else { 0 }
+        );
+        server.verify().await;
     }
 }

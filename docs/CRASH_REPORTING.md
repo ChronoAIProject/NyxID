@@ -387,9 +387,13 @@ disposition is recorded in the personal-erasure inventory (the existing
 `client_error_reports` is owner-linked personal diagnostic data;
 `client_error_report_counters` is anonymous aggregate operational data).
 
-At backend startup and every fifteen minutes, a tracked shutdown worker fetches
-the live manifests from the configured frontend origins and registers valid
-identities with source `frontend_manifest`, even before the first crash arrives.
+At backend startup and every fifteen minutes, a tracked shutdown worker checks
+the diagnostics rollout. Only global or cohort rollout permits it to fetch the
+live manifests from configured frontend origins and register valid identities
+with source `frontend_manifest`, even before the first crash arrives. Off,
+killed, or unavailable rollout checks cause no outbound requests or registry
+writes. Each valid identity is looked up before registration, so a known release
+causes no steady-state write.
 There is no new environment variable. Each pass holds a `tick` work guard through
 fetch and registration; drain stops further passes and checks before the next
 origin. It reuses the hardened fetch, sixty-second positive/negative origin cache,
