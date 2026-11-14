@@ -120,6 +120,7 @@ const connection = {
   catalog_service_id: "catalog",
 };
 beforeEach(() => {
+  AppState.currentState = "active";
   mockFocused = true;
   Socket.instances = [];
   mockInject.mockClear();
@@ -474,6 +475,11 @@ test("a terminated renderer gets a fresh inline document and navigation allowanc
     first.props.onContentProcessDidTerminate();
   });
   expect(Socket.instances[0]!.close).toHaveBeenCalledWith(1000);
+  expect(
+    screen.getByText("The terminal display stopped. Connect again to continue."),
+  ).toBeTruthy();
+  expect(screen.queryByTestId("terminal-webview")).toBeNull();
+  await fireEvent.press(screen.getByLabelText("Connect"));
   const replacement = screen.getByTestId("terminal-webview");
   expect(replacement.props.onShouldStartLoadWithRequest({ url: "about:blank", navigationType: "other" })).toBe(true);
   expect(replacement.props.onShouldStartLoadWithRequest({ url: "about:blank" })).toBe(false);
@@ -688,7 +694,7 @@ test("reconnect preserves a valid principal and clears an invalid one", async ()
   });
   jest.mocked(servicesApi.connection).mockResolvedValue({
     ...connection,
-    ssh_allowed_principals: ["deploy"],
+    ssh_allowed_principals: ["deploy", "dev"],
   });
   await fireEvent.press(invalid.getByText("Reconnect"));
   await act(async () => {
@@ -762,6 +768,9 @@ test("a connection load failure has an unavailable state without terminal chrome
 });
 
 test("a disallowed deep-link principal shows the picker instead of hanging", async () => {
+  jest.mocked(servicesApi.connections).mockResolvedValue([
+    { ...connection, ssh_allowed_principals: ["ops", "dev"] },
+  ]);
   const screen = await renderTerminal(
     <SshTerminalScreen
       route={{ params: { serviceId: "catalog", principal: "forbidden" } }}
@@ -803,5 +812,176 @@ test.each([
   });
   expect(screen.getByText(copy)).toBeTruthy();
   expect(screen.queryByText("Open web terminal")).toBeNull();
+  await screen.unmount();
+});
+
+test("a route principal is applied only when changed; reconnect keeps the user's selection", async () => {
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    ssh_allowed_principals: ["ops", "dev", "root"],
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{
+        params: {
+          serviceId: "catalog",
+          connectionId: "connection",
+          principal: "ops",
+          autoConnect: false,
+        },
+      }}
+    />,
+  );
+  await fireEvent.press(screen.getByText("SSH principal"));
+  await fireEvent.press(screen.getByText("dev"));
+  await fireEvent.press(screen.getByLabelText("Connect"));
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  expect(
+    new URL(Socket.instances.at(-1)!.url).searchParams.get("principal"),
+  ).toBe("dev");
+  await act(async () => Socket.instances.at(-1)!.onclose?.({}));
+  await fireEvent.press(screen.getByText("Reconnect"));
+  await waitFor(() => expect(Socket.instances.length).toBeGreaterThan(1));
+  expect(
+    new URL(Socket.instances.at(-1)!.url).searchParams.get("principal"),
+  ).toBe("dev");
+  await screen.rerender(
+    <SshTerminalScreen
+      route={{
+        params: {
+          serviceId: "catalog",
+          connectionId: "connection",
+          principal: "root",
+          autoConnect: false,
+        },
+      }}
+    />,
+  );
+  await waitFor(() =>
+    expect(
+      new URL(Socket.instances.at(-1)!.url).searchParams.get("principal"),
+    ).toBe("root"),
+  );
+  await screen.unmount();
+});
+
+test.each([
+  [["ops", "root"], "ops"],
+  [["root"], "root"],
+] as const)(
+  "a removed selection falls back through route then single principal: %s",
+  async (allowed, expected) => {
+    jest.mocked(servicesApi.connection).mockResolvedValue({
+      ...connection, ssh_allowed_principals: ["ops", "dev"],
+    });
+    const screen = await renderTerminal(
+      <SshTerminalScreen
+        route={{
+          params: {
+            serviceId: "catalog",
+            connectionId: "connection",
+            principal: "ops",
+            autoConnect: false,
+          },
+        }}
+      />,
+    );
+    await fireEvent.press(screen.getByText("SSH principal"));
+    await fireEvent.press(screen.getByText("dev"));
+    await fireEvent.press(screen.getByLabelText("Connect"));
+    await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+    await waitForSocket();
+    await act(async () => Socket.instances.at(-1)!.onclose?.({}));
+    jest.mocked(servicesApi.connection).mockResolvedValue({
+      ...connection, ssh_allowed_principals: [...allowed],
+    });
+    await fireEvent.press(screen.getByText("Reconnect"));
+    await waitFor(() =>
+      expect(
+        new URL(Socket.instances.at(-1)!.url).searchParams.get("principal"),
+      ).toBe(expected),
+    );
+    await screen.unmount();
+  },
+);
+
+test("renderer death in background requires an explicit Connect after returning", async () => {
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  const first = screen.getByTestId("terminal-webview");
+  await message(first, { type: "ready" });
+  await waitForSocket();
+  await act(async () => {
+    AppState.currentState = "background";
+    mockAppHandlers.forEach((handler) => handler("background"));
+    first.props.onRenderProcessGone();
+  });
+  await message(first, { type: "ready" });
+  expect(Socket.instances).toHaveLength(1);
+  await act(async () => {
+    AppState.currentState = "active";
+    mockAppHandlers.forEach((handler) => handler("active"));
+  });
+  expect(Socket.instances).toHaveLength(1);
+  await fireEvent.press(screen.getByLabelText("Connect"));
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitFor(() => expect(Socket.instances).toHaveLength(2));
+  await screen.unmount();
+});
+
+test.each([14999, 15000])(
+  "an attempt starting backgrounded defers the socket and enforces wall clock: %s",
+  async (elapsed) => {
+    jest.useFakeTimers();
+    jest.setSystemTime(100000);
+    AppState.currentState = "background";
+    const screen = await renderTerminal(
+      <SshTerminalScreen
+        route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+      />,
+    );
+    await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+    expect(Socket.instances).toHaveLength(0);
+    jest.setSystemTime(100000 + elapsed);
+    await act(async () => {
+      AppState.currentState = "active";
+      mockAppHandlers.forEach((handler) => handler("active"));
+    });
+    expect(Socket.instances).toHaveLength(elapsed < 15000 ? 1 : 0);
+    if (elapsed >= 15000) expect(screen.getByText("Disconnected")).toBeTruthy();
+    await screen.unmount();
+    jest.useRealTimers();
+  },
+);
+
+test("truncated paste is an informational notice without error or reconnect on a healthy session", async () => {
+  jest.mocked(Clipboard.getStringAsync).mockResolvedValueOnce("a".repeat(65537));
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  await act(async () =>
+    Socket.instances[0]!.onmessage?.({
+      data: JSON.stringify({ type: "connected" }),
+    }),
+  );
+  await fireEvent.press(screen.getByLabelText("Paste"));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(
+    screen.getByText("Only the first 65,536 characters were pasted."),
+  ).toBeTruthy();
+  expect(screen.queryByText("Reconnect")).toBeNull();
+  expect(screen.getByText("Connected")).toBeTruthy();
+  await fireEvent.press(screen.getByLabelText("Paste"));
+  expect(
+    screen.queryByText("Only the first 65,536 characters were pasted."),
+  ).toBeNull();
   await screen.unmount();
 });

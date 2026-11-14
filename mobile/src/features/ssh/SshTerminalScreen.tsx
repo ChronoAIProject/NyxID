@@ -90,10 +90,12 @@ export function SshTerminalScreen({
   const [loadUnavailable, setLoadUnavailable] = useState(false);
   const [principal, setPrincipal] = useState(route.params.principal);
   const principalRef = useRef(principal);
+  const lastAppliedRoutePrincipal = useRef(route.params.principal);
   const [principalPickerOpen, setPrincipalPickerOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const [state, setState] = useState("Connecting…");
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const [waiting, setWaiting] = useState(false);
   const waitingRef = useRef(false);
   const sessionEndedRef = useRef(false);
@@ -141,6 +143,7 @@ export function SshTerminalScreen({
   };
   const resetForAttempt = () => {
     sessionEndedRef.current = false;
+    setNotice(undefined);
     stopWaiting();
   };
   const output = useMemo(
@@ -203,34 +206,24 @@ export function SshTerminalScreen({
         const allowedPrincipals = value.ssh_allowed_principals ?? [];
         const requestedPrincipal = route.params.principal;
         const selectedPrincipal = principalRef.current;
-        if (
-          requestedPrincipal &&
-          !allowedPrincipals.includes(requestedPrincipal)
-        ) {
-          setPrincipal(undefined);
-          setPrincipalPickerOpen(true);
-        } else if (
-          requestedPrincipal &&
-          allowedPrincipals.includes(requestedPrincipal)
-        ) {
-          setPrincipal(requestedPrincipal);
-          setPrincipalPickerOpen(false);
-        } else if (
-          selectedPrincipal &&
-          allowedPrincipals.includes(selectedPrincipal)
-        ) {
-          setPrincipal(selectedPrincipal);
-          setPrincipalPickerOpen(false);
-        } else if (allowedPrincipals.length === 1) {
-          setPrincipal(allowedPrincipals[0]);
-          setPrincipalPickerOpen(false);
-        } else if (allowedPrincipals.length > 1) {
-          setPrincipal(undefined);
-          setPrincipalPickerOpen(true);
-        } else {
-          setPrincipal(undefined);
-          setPrincipalPickerOpen(false);
-        }
+        const routeChanged =
+          lastAppliedRoutePrincipal.current !== requestedPrincipal;
+        lastAppliedRoutePrincipal.current = requestedPrincipal;
+        const allowedRoute =
+          requestedPrincipal && allowedPrincipals.includes(requestedPrincipal)
+            ? requestedPrincipal
+            : undefined;
+        const allowedSelection =
+          selectedPrincipal && allowedPrincipals.includes(selectedPrincipal)
+            ? selectedPrincipal
+            : undefined;
+        const nextPrincipal =
+          (routeChanged ? allowedRoute : undefined) ??
+          allowedSelection ??
+          allowedRoute ??
+          (allowedPrincipals.length === 1 ? allowedPrincipals[0] : undefined);
+        setPrincipal(nextPrincipal);
+        setPrincipalPickerOpen(!nextPrincipal && allowedPrincipals.length > 0);
       })
       .catch(() => {
         if (current) {
@@ -262,6 +255,7 @@ export function SshTerminalScreen({
     )
       return;
     let closed = false;
+    let deferredConnect = AppState.currentState !== "active";
     let retries = 0;
     const current = () =>
       !closed && epoch === generation.current && account === getAuthAccountId();
@@ -299,6 +293,11 @@ export function SshTerminalScreen({
         await refreshAccessTokenIfNeeded(force);
         const session = await loadStoredAuthSession();
         if (!current()) return;
+        if (AppState.currentState !== "active") {
+          deferredConnect = true;
+          if (backgroundStartedAt.current === undefined) startBackgroundGrace();
+          return;
+        }
         if (!session?.accessToken) {
           stopWaiting();
           endSession();
@@ -423,17 +422,21 @@ export function SshTerminalScreen({
         }
       }
     };
-    void connect();
+    const startBackgroundGrace = () => {
+      clearTimeout(backgroundTimer.current);
+      backgroundStartedAt.current = Date.now();
+      backgroundTimer.current = setTimeout(() => {
+        backgroundTimer.current = undefined;
+        backgroundStartedAt.current = undefined;
+        close(translateRef.current("Connection closed."));
+        setState("Disconnected");
+      }, TERMINAL_BACKGROUND_GRACE_MS);
+    };
+    if (deferredConnect) startBackgroundGrace();
+    else void connect();
     const appState = AppState.addEventListener("change", (value) => {
       if (value === "background") {
-        clearTimeout(backgroundTimer.current);
-        backgroundStartedAt.current = Date.now();
-        backgroundTimer.current = setTimeout(() => {
-          backgroundTimer.current = undefined;
-          backgroundStartedAt.current = undefined;
-          close(translateRef.current("Connection closed."));
-          setState("Disconnected");
-        }, TERMINAL_BACKGROUND_GRACE_MS);
+        startBackgroundGrace();
       } else if (value === "active") {
         const startedAt = backgroundStartedAt.current;
         if (
@@ -449,6 +452,10 @@ export function SshTerminalScreen({
           clearTimeout(backgroundTimer.current);
           backgroundTimer.current = undefined;
           backgroundStartedAt.current = undefined;
+          if (deferredConnect && current()) {
+            deferredConnect = false;
+            void connect();
+          }
         }
       }
     });
@@ -520,6 +527,7 @@ export function SshTerminalScreen({
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, []);
   const reconnect = () => {
+    setNotice(undefined);
     setConnectRequested(true);
     endSession();
     generation.current++;
@@ -537,6 +545,7 @@ export function SshTerminalScreen({
     setAttempt((value) => value + 1);
   };
   const paste = async () => {
+    setNotice(undefined);
     const epoch = generation.current;
     const account = getAuthAccountId();
     try {
@@ -549,7 +558,7 @@ export function SshTerminalScreen({
       if (sent) {
         send({ type: "paste", text: pasted.text });
         if (pasted.truncated)
-          setError(t("Only the first 65,536 characters were pasted."));
+          setNotice("Only the first 65,536 characters were pasted.");
       }
     } catch {
       if (epoch === generation.current)
@@ -570,6 +579,8 @@ export function SshTerminalScreen({
     endSession();
     setState("Disconnected");
     setReady(false);
+    setConnectRequested(false);
+    setNotice("The terminal display stopped. Connect again to continue.");
     setDocumentVersion((value) => value + 1);
   };
   const principals = connection?.ssh_allowed_principals ?? [];
@@ -622,6 +633,7 @@ export function SshTerminalScreen({
         </View>
       ) : connection && eligible && !connectRequested ? (
         <View style={styles.preconnect}>
+          {notice ? <Notice message={t(notice)} /> : null}
           <Notice
             message={
               principal
@@ -666,7 +678,10 @@ export function SshTerminalScreen({
             label={t("Connect")}
             accessibilityLabel={t("Connect")}
             disabled={!principal}
-            onPress={() => setConnectRequested(true)}
+            onPress={() => {
+              setNotice(undefined);
+              setConnectRequested(true);
+            }}
           />
         </View>
       ) : (
@@ -732,6 +747,7 @@ export function SshTerminalScreen({
               {t(error)}
             </Text>
           ) : null}
+          {notice ? <Notice message={t(notice)} /> : null}
           {principalPickerOpen && principals.length > 0 ? (
             <SettingsGroup title={t("SSH principal")}>
               {principals.map((value) => (

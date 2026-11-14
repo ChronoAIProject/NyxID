@@ -387,6 +387,7 @@
   "Open Services": "開啟服務",
   "That SSH principal is not allowed for this service. Choose one below.": "此 SSH 登入身分不允許用於此服務。請從下方選擇一個。",
   "This SSH connection could not be loaded.": "無法載入此 SSH 連線。",
+  "The terminal display stopped. Connect again to continue.": "終端機顯示已停止。請重新連線以繼續。",
   "Unavailable": "無法使用",
   "Connect": "連線",
   "Choose an SSH principal, then connect to {{connection}}.": "請選擇 SSH 登入身分，然後連線到 {{connection}}。",
