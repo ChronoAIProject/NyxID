@@ -536,7 +536,6 @@ const ACTIVITY_RECORD_FIELDS: &[&str] = &[
     "completed_at",
     "expires_at",
     "actor.person_id",
-    "actor.api_key_id",
     "actor.app_id",
     "actor.name",
 ];
@@ -556,7 +555,6 @@ const SERVICE_HISTORY_FIELDS: &[&str] = &[
     "created_at",
     "updated_at",
     "actor.person_id",
-    "actor.api_key_id",
     "actor.app_id",
     "actor.name",
 ];
