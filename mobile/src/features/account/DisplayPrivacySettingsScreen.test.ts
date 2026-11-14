@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ApiError } from "../../lib/api/ApiError";
 import { elements, setupSettingsScreen, style } from "./settingsTestHarness";
 
 test("Display previews appearance only in its Light/Dark tiles, with radios and the Automatic switch", () => {
@@ -80,6 +81,29 @@ test("Privacy exposes a first-party export row and disables it while sharing", (
   assert.equal(pendingRow.props.disabled, true);
   assert.equal(pendingRow.props.accessibilityState.busy, true);
   env.harness.unmount();
+});
+
+test("Privacy export result toasts request two lines without changing analytics toasts", () => {
+  const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen");
+  const [analytics, exportData] = env.mutationOptions;
+  const toast = () => env.all().find((node) => node.type === "ToastOverlay")!.props.toast;
+  try {
+    exportData!.onSuccess();
+    env.harness.render();
+    assert.equal(toast().lines, 2);
+    for (const error of [new Error("failed"), ...[404, 405, 429].map((statusCode) => new ApiError({
+      errorKey: "export_failed", errorCode: 1000, statusCode, message: "failed", retryAfter: 130,
+    }))]) {
+      exportData!.onError(error);
+      env.harness.render();
+      assert.equal(toast().lines, 2);
+    }
+    analytics!.onError();
+    env.harness.render();
+    assert.equal(toast().lines, undefined);
+  } finally {
+    env.harness.unmount();
+  }
 });
 
 test("Privacy analytics keeps shared group insets and wrapping controls at narrow widths and large text", () => {

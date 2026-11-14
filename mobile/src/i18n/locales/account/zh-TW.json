@@ -55,7 +55,7 @@
   "Open Authenticator": "開啟驗證器",
   "Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules.": "只有在帳戶和此裝置都允許時，才會傳送選用的使用情況事件。安全和帳務記錄有各自的保留規則。",
   "Password sign-in asks for a code from your authenticator.": "密碼登入時需輸入驗證器中的代碼。",
-  "Permanently deletes your account and its data. This cannot be undone.": "永久刪除您的帳戶及其資料。此操作無法復原。",
+  "Permanently deletes your account and personal data. Necessary security and financial records are retained. This cannot be undone.": "永久刪除您的帳戶和個人資料。必要的安全與財務記錄將予以保留。此操作無法復原。",
   "Permission unavailable": "權限無法使用",
   "Preferences": "偏好設定",
   "Recovery codes": "復原碼",

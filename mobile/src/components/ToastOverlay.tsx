@@ -10,6 +10,7 @@ export type ToastKind = "success" | "error" | "info";
 export type ToastState = {
   message: string;
   kind: ToastKind;
+  lines?: number;
   action?: { label: string; onPress: () => void };
 };
 
@@ -74,7 +75,7 @@ export function ToastOverlay({ toast, duration = 2400 }: Props) {
           style={[styles.toast, { borderColor: getAccentBorder(colors)[entry.kind] }]}
         >
           <View style={[styles.dot, { backgroundColor: getAccent(colors)[entry.kind] }]} />
-          <Text style={styles.text} numberOfLines={1}>
+          <Text style={styles.text} numberOfLines={entry.lines ?? 1}>
             {entry.message}
           </Text>
           {entry.action && (

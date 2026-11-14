@@ -100,7 +100,7 @@ export function PrivacySettingsScreen(
       }
     },
     onSuccess: () =>
-      setToast({ message: t("Your data export is ready."), kind: "success" }),
+      setToast({ message: t("Your data export is ready."), kind: "success", lines: 2 }),
     onError: (error: unknown) => {
       if (error instanceof ApiError && error.statusCode === 429) {
         const seconds = error.retryAfterMs ? Math.ceil(error.retryAfterMs / 1000) : 0;
@@ -120,6 +120,7 @@ export function PrivacySettingsScreen(
                     { minutes },
                   ),
           kind: "error",
+          lines: 2,
         });
       } else if (
         error instanceof ApiError &&
@@ -128,11 +129,13 @@ export function PrivacySettingsScreen(
         setToast({
           message: t("Data export is not available on this server yet."),
           kind: "error",
+          lines: 2,
         });
       } else {
         setToast({
           message: t("We couldn't create your data export. Please try again."),
           kind: "error",
+          lines: 2,
         });
       }
     },
