@@ -690,21 +690,19 @@ async fn sync_locked(
         }
         let pico = amounts::decimal_to_pico(&c.credits_per_unit)
             .ok_or_else(|| invalid("Invalid price"))?;
-        db.collection::<BillingRateCache>(RATES)
-            .replace_one(
-                doc! {"_id":BillingRateCache::cache_id(&c.lago_metric_code,None)},
-                BillingRateCache {
-                    id: BillingRateCache::cache_id(&c.lago_metric_code, None),
-                    lago_metric_code: c.lago_metric_code.clone(),
-                    model: None,
-                    credits_per_unit_micros: pico / 1_000_000,
-                    credits_per_unit_pico: Some(pico),
-                    synced_at: Utc::now(),
-                    retired_at: None,
-                },
-            )
-            .upsert(true)
-            .await?;
+        super::rate_cache::replace(
+            db,
+            &BillingRateCache {
+                id: BillingRateCache::cache_id(&c.lago_metric_code, None),
+                lago_metric_code: c.lago_metric_code.clone(),
+                model: None,
+                credits_per_unit_micros: pico / 1_000_000,
+                credits_per_unit_pico: Some(pico),
+                synced_at: Utc::now(),
+                retired_at: None,
+            },
+        )
+        .await?;
     }
     if !super::reconcile::continue_reconcile() {
         return Ok(false);
@@ -962,6 +960,7 @@ pub async fn retire(
                 .iter()
                 .map(|c| c.lago_metric_code.as_str())
                 .collect();
+            super::rate_cache::advance_in_session(db, session).await?;
             db.collection::<BillingRateCache>(RATES)
                 .update_many(
                     doc! {"lago_metric_code":{"$in":codes}},

@@ -567,21 +567,19 @@ async fn sync_lane_component(
     if synced {
         let pico = decimal_to_pico(&lane.credits_per_unit)
             .ok_or_else(|| AppError::Internal("stored lane price is invalid".to_string()))?;
-        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .replace_one(
-                doc! { "_id": BillingRateCache::cache_id(&lane.lago_metric_code, None) },
-                BillingRateCache {
-                    id: BillingRateCache::cache_id(&lane.lago_metric_code, None),
-                    lago_metric_code: lane.lago_metric_code.clone(),
-                    model: None,
-                    credits_per_unit_micros: pico / 1_000_000,
-                    credits_per_unit_pico: Some(pico),
-                    synced_at: Utc::now(),
-                    retired_at: None,
-                },
-            )
-            .upsert(true)
-            .await?;
+        super::rate_cache::replace(
+            db,
+            &BillingRateCache {
+                id: BillingRateCache::cache_id(&lane.lago_metric_code, None),
+                lago_metric_code: lane.lago_metric_code.clone(),
+                model: None,
+                credits_per_unit_micros: pico / 1_000_000,
+                credits_per_unit_pico: Some(pico),
+                synced_at: Utc::now(),
+                retired_at: None,
+            },
+        )
+        .await?;
     }
     let result = collection.update_one(filter, doc! { "$set": {
         format!("{path}.sync_status"): if synced { "synced" } else if pending { "pending" } else { "failed" },
@@ -741,21 +739,19 @@ async fn sync_legacy_price(
                     .await?;
                 return Ok(false);
             }
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .replace_one(
-                    doc! { "_id": BillingRateCache::cache_id(&pricing.lago_metric_code, None) },
-                    BillingRateCache {
-                        id: BillingRateCache::cache_id(&pricing.lago_metric_code, None),
-                        lago_metric_code: pricing.lago_metric_code.clone(),
-                        model: None,
-                        credits_per_unit_micros: pico / 1_000_000,
-                        credits_per_unit_pico: Some(pico),
-                        synced_at: Utc::now(),
-                        retired_at: None,
-                    },
-                )
-                .upsert(true)
-                .await?;
+            super::rate_cache::replace(
+                db,
+                &BillingRateCache {
+                    id: BillingRateCache::cache_id(&pricing.lago_metric_code, None),
+                    lago_metric_code: pricing.lago_metric_code.clone(),
+                    model: None,
+                    credits_per_unit_micros: pico / 1_000_000,
+                    credits_per_unit_pico: Some(pico),
+                    synced_at: Utc::now(),
+                    retired_at: None,
+                },
+            )
+            .await?;
             Ok(true)
         }
         Err(error) => {
@@ -815,13 +811,7 @@ async fn complete_price_removal(
 /// `retired_at` makes new reservations refuse it. A later sync of the same code
 /// replaces the whole row, which clears the mark.
 async fn retire_rate(db: &mongodb::Database, code: &str) -> AppResult<()> {
-    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-        .update_many(
-            doc! { "lago_metric_code": code },
-            doc! { "$set": { "retired_at": bson::DateTime::from_chrono(Utc::now()) } },
-        )
-        .await?;
-    Ok(())
+    super::rate_cache::retire(db, code).await
 }
 
 pub async fn retry_pending_service_prices(

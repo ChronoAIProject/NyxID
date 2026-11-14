@@ -10,6 +10,9 @@ pub(super) fn retryable(error: &mongodb::error::Error) -> bool {
             .is_some()
         || error.get_custom::<ConcurrentHeadCreation>().is_some()
         || error
+            .get_custom::<crate::services::billing::rate_cache::EpochCreationRace>()
+            .is_some()
+        || error
             .get_custom::<crate::services::audit_chain_service::AuditHeadCollision>()
             .is_some()
 }
