@@ -1085,6 +1085,10 @@ function PrivacyTab() {
     enabled: Boolean(accountId),
     staleTime: 0,
   });
+  const diagnosticsEnabled =
+    permission.data?.diagnostics_available &&
+    consentEnabled &&
+    devicePolicy === 2;
   async function handleToggle(next: boolean, policy: 1|2 = 1) {
     if (!accountId) return;
     setSaving(true);
@@ -1270,16 +1274,12 @@ function PrivacyTab() {
           <GroupedRow
             title={translateUi("Crash diagnostics")}
             description={translateUi(
-              permission.data?.diagnostics_available &&
-                consentEnabled &&
-                devicePolicy === 2
+              diagnosticsEnabled
                 ? "Crash diagnostics enabled"
                 : "Crash diagnostics need updated permission",
             )}
             accessory={
-              permission.data?.diagnostics_available &&
-              consentEnabled &&
-              devicePolicy === 2 ? undefined : (
+              diagnosticsEnabled ? undefined : (
                 <Button
                   variant="outline"
                   size="sm"

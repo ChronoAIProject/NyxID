@@ -54,6 +54,10 @@ export function PrivacySettingsScreen(
       return permission;
     },
   });
+  const diagnosticsEnabled =
+    analyticsPermission.data?.diagnostics_available &&
+    deviceConsent.enabled &&
+    deviceConsent.policy === 2;
   const saveAnalytics = useMutation({
     mutationFn: (enabled: boolean) =>
       saveAnalyticsPermission(
@@ -270,19 +274,13 @@ export function PrivacySettingsScreen(
               icon={ChartColumn}
               label={t("Crash diagnostics")}
               detail={t(
-                analyticsPermission.data?.diagnostics_available &&
-                  deviceConsent.enabled &&
-                  deviceConsent.policy === 2
+                diagnosticsEnabled
                   ? "Crash diagnostics enabled"
                   : "Crash diagnostics need updated permission",
               )}
               chevron={false}
             />
-            {!(
-              analyticsPermission.data?.diagnostics_available &&
-              deviceConsent.enabled &&
-              deviceConsent.policy === 2
-            ) && (
+            {!diagnosticsEnabled && (
               <SettingsRow
                 label={t("Review updated analytics")}
                 onPress={
