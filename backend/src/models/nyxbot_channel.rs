@@ -487,6 +487,8 @@ impl std::fmt::Debug for NyxbotEvent {
 /// TTL-expired.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyxbotWatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_claim: Option<super::assistant_wake::WatchClaim>,
     /// Binds setup origin to the exact hosted request. Legacy writers replacing
     /// a pending watch may leave unknown fields behind; a mismatch is unknown context.
     #[serde(default, skip_serializing_if = "Option::is_none")]

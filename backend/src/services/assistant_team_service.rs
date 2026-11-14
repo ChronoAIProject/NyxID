@@ -133,6 +133,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        wake: None,
         automation_work: None,
         execution_task: None,
         channel_contexts: Vec::new(),
@@ -3426,6 +3427,10 @@ pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<Assista
     let mut filter = doc! {
         "collaboration": null,
         "pending_events.created_at": {"$exists": true},
+        "$expr":{"$anyElementTrue":[{"$map":{"input":{"$ifNull":["$pending_events",[]]},"as":"event","in":{"$or":[
+            {"$ne":[{"$ifNull":["$$event.wake.kind",""]},"watch"]},
+            {"$lte":["$$event.wake.ready_at","$$NOW"]}
+        ]}}}]},
         "$or": [
             {"role": "subagent"},
             {"event_streak": {"$not": {"$gte": MAX_EVENT_STREAK}}},

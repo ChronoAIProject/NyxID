@@ -852,7 +852,17 @@ first use) and persistent `specialist` agents with a name, role description,
 `created_by`, `destroyed_at`, and an optional `display_name` (≤ 40) and
 `persona` (≤ 2000, style only). Conversations are threads of an agent
 (`agent_id`; legacy rows are NyxBot's) with a denormalized `role`, `report_to`,
-`pending_events` and `event_streak`. NyxAgent is unchanged: every thread is an
+`pending_events` and `event_streak`. Optional metadata-only `wake` references
+are rendered and consumed in the existing admission transaction; preparing
+watch events stay queued until completion or lease expiry. Their source fences
+and any verification-code hash changes commit with admission. Ordinary events
+without a reference keep their existing path and database command count. See
+[durable wake admission](09-nyxbot-orchestrator.md#durable-wake-admission-and-rollout).
+Personal-group turns admitted with `group_reply_in_settlement` also publish
+their public reply, safe machine receipts and bounded hand-offs in their
+settlement transaction. Repeated settlement or a late callback cannot duplicate the post
+or its budget spend. The marker defaults to false for older active turns.
+NyxAgent is unchanged: every thread is an
 ordinary conversation with its own key.
 
 NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent`,
