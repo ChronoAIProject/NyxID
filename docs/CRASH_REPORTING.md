@@ -108,17 +108,27 @@ process. On iOS it also converts any matching capture-time raw report locally
 and purges the raw file through `collect`; only bounded sanitized records survive
 an offline launch. A later successful refresh can re-arm the same revision and drain
 retained records within the existing bounds. Explicit denial still purges. Logout, account switch, withdrawal, remote
-denial or kill switch disarms and purges; transient unknown availability pauses. A→B→A and
+denial or kill switch disarms and purges; transient unknown availability pauses.
+A session-restore timeout or failure with no authenticated account also pauses,
+retaining the binding and records until the same account can be restored.
+Only explicit sign-out or a definitive different authenticated account authorizes
+an account-transition purge. A→B→A and
 withdrawal/regrant cannot adopt a predecessor's records.
 
 The iOS directory is Application Support/nyx-crash, excluded from backup with
 complete-until-first-user-authentication file protection. Android uses its
 no-backup directory. Only sanitized fatal/native records enter the bounded
 buffer: at most three records, 256 KiB total, 32 KiB per record, 24 hours old.
+iOS trims by each record's `captured_at`, allowing at most five minutes in the
+future. Missing or unparseable capture times drop only that record; copying an
+old report into the buffer does not extend its lifetime. JS revalidation also
+rejects records individually and keeps the binding and other valid records.
 Writes are synchronous, atomic and fsynced before native return. JS revalidates
 both the binding and the closed record before upload. Successful sends remove
-the record. HTTP 4xx refusals drop only that record, except 429 (retry later),
-13401 (pause and keep) and 13400 (disarm/purge). Other failed sends may survive only
+the record. Only a 4xx with a NyxID JSON error envelope and numeric code can
+authoritatively reject that record, except 429 (retry later), 13401 (pause and
+keep) and 13400 (disarm/purge). Envelope-less proxy/captive-portal 4xx responses
+pause and retain the record. Other failed sends may survive only
 within that consent-bound buffer and its limits.
 Interrupted atomic-write staging files are deleted on the next buffer trim or
 disarm, including iOS temporary files and Android AtomicFile sidecars. They are
@@ -214,12 +224,25 @@ A Release simulator compile proves integration, not crash delivery or deletion.
 `POST /api/v1/users/me/crash-reports` accepts uncompressed JSON within 64 KiB,
 under device/account consent headers. It returns 202 accepted/duplicate with a
 local report ID and no-store. Cluster limits apply before parsing: 5/minute and
-50/day/account, 30/minute/trusted client IP and 600/minute/global. IP is only a
+50/day/account, 30/minute/trusted client IP and 600/minute/global. Account windows
+are checked first, then IP, then global, so a locally exhausted client cannot
+consume the shared global budget. IP is only a
 rate-window key, never a report field. Unavailable capture returns 13400/404;
-missing or stale diagnostics consent returns 13401/403. Unknown readiness or lookup
-failures return the existing transient 503 `security_readiness_unavailable`. Mobile
+missing or stale diagnostics consent returns 13401/403 only after a successful
+linearizable read confirms denial. Consent reads distinguish permitted, denied
+and unknown: timeout or database failure is unknown, including in the pre-send
+export check. Unknown readiness or consent lookup failures return the existing
+transient 503 `security_readiness_unavailable`. A policy-2 acknowledgement while
+the offer is unknown returns that same 503; definitively not offered returns
+validation error 400. The exporter retains an unknown-consent row as pending
+with a ten-second backoff (`consent_unknown`), without sending. Mobile
 pauses on 13401/503 and disarms only on definitive 13400. The web session stops
-only for 13400/13401; unknown/5xx permits a later refresh.
+only for 13400/13401; a later available permission refresh clears that stop.
+Unknown/5xx permits a later refresh. Capture timestamps are capped at forty bytes
+before parsing and stored/exported as normalized UTC RFC3339 values.
+The consent banner skips preference reads when public telemetry configuration
+is off and otherwise reuses its answer for the session; explicit saves update
+that cache.
 
 `client_error_reports` has UUID IDs, a unique owner/event index, owner revision,
 closed report, derived fields, receive/expiry timestamps and fenced export state.
@@ -277,8 +300,12 @@ protocol headers.
 
 ## Private build artifacts
 
-Web Vite builds generate a random artifact UUID, package version and build ID,
-and hidden source maps. The build collector moves all maps out of dist into
+Web Vite builds use a provided `CRASH_ARTIFACT_ID` UUID, package version and
+build ID, and hidden source maps. An explicitly malformed UUID fails the build;
+local builds without an ID generate a random UUID. The publish workflow derives
+one deterministic UUIDv5 from repository, commit SHA and workflow run ID in a
+single prerequisite job and passes it to both architecture builds. Only the
+amd64 frontend build receives the optional upload secret, so symbols upload once. The build collector moves all maps out of dist into
 `crash-artifacts/web/<artifact>/`, copies matching assets, writes a manifest and
 fails if a map or sourceMappingURL remains public. nginx also rejects `.map`.
 The runtime image copies only dist. The builder installs the artifact uploader
@@ -356,6 +383,15 @@ disposition is recorded in the personal-erasure inventory (the existing
 `client_error_reports` is owner-linked personal diagnostic data;
 `client_error_report_counters` is anonymous aggregate operational data).
 
+At backend startup and every fifteen minutes, a tracked shutdown worker fetches
+the live manifests from the configured frontend origins and registers valid
+identities with source `frontend_manifest`, even before the first crash arrives.
+There is no new environment variable. Each pass holds a `tick` work guard through
+fetch and registration; drain stops further passes and checks before the next
+origin. It reuses the hardened fetch, sixty-second positive/negative origin cache,
+single-flight, and closed failure logging described below. Invalid or unreachable
+manifests register nothing.
+
 After a consent-verified report is successfully inserted, a background task
 checks `crash-build.json` for unknown web identities at
 `FRONTEND_URL` and each `FRONTEND_URL_ALIASES` origin only. Report fields never
@@ -381,7 +417,8 @@ releases action in `/admin/crash-reports`, or admin-only first-party-human
 counts but cannot register. Registration first upserts the registry identity,
 then writes a metadata-only audit event with the actual outcome and returns
 `{status: "registered" | "already_registered"}`. Repeats preserve the existing
-row and attribution. A failed registry write never audits success. Mobile cannot
+row and attribution, including concurrent identical upserts that encounter the
+unique identity index. A failed registry write never audits success. Mobile cannot
 register automatically because store binaries have no server-reachable manifest.
 Verification uses a query-time registry lookup: version totals contain only
 verified records, and Unverified releases shows the others. Later registration

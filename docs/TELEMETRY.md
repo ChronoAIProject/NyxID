@@ -107,7 +107,14 @@ Withdrawing permission stops new reports and pending exports; reports NyxID has 
 
 Crash permission responses distinguish definitive denial from unknown status.
 Timeout, lookup failures and unserving readiness pause client capture without
-purging pending mobile records; 13401 also pauses. Definitive not-offered/13400,
+purging pending mobile records; 13401 also pauses. A failed linearizable consent
+read remains unknown: ingestion and policy-2 acknowledgement return transient
+503 `security_readiness_unavailable`, and export stays pending with a short
+`consent_unknown` backoff. Only a successful consent read can establish denial.
+A restore timeout with no known account pauses; a later same-account restore
+can resume. Invalid or expired mobile records are rejected individually by their
+capture time, keeping the binding and other records. Envelope-less 4xx responses
+pause and retain records; only a numeric NyxID error envelope can reject one. Definitive not-offered/13400,
 withdrawal, logout and account switch purge. Export interval zero stores new
 rows as disabled and never works existing pending rows. Release-version counts
 include only identities verified by `client_release_registry`; unknown store
