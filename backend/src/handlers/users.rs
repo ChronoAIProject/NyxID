@@ -1857,12 +1857,16 @@ mod account_deletion_policy_tests;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyticsConsentRequest {
+    #[serde(default)]
+    pub policy_version: Option<String>,
     pub account_id: String,
     pub enabled: bool,
 }
 
 #[derive(serde::Serialize)]
 pub struct AnalyticsConsentResponse {
+    pub current_policy_version: String,
+    pub diagnostics_available: bool,
     pub account_id: String,
     pub policy_version: Option<String>,
     pub revision: String,
@@ -1870,10 +1874,13 @@ pub struct AnalyticsConsentResponse {
     pub changed_at: Option<String>,
 }
 
-fn analytics_consent_response(
+async fn analytics_consent_response(
+    db: &mongodb::Database,
     account_id: &str,
     value: crate::models::user::AnalyticsConsent,
 ) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
+    let (current, diagnostics) =
+        crate::services::crash_report_service::policy_status(db, account_id, &value).await;
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -1882,6 +1889,8 @@ fn analytics_consent_response(
     (
         headers,
         Json(AnalyticsConsentResponse {
+            current_policy_version: current.into(),
+            diagnostics_available: diagnostics,
             account_id: account_id.to_owned(),
             policy_version: value.policy_version,
             revision: value.revision,
@@ -1898,9 +1907,11 @@ pub async fn get_analytics_consent(
     super::login_client_context::require_first_party_human(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     Ok(analytics_consent_response(
+        &state.db,
         &actor,
         crate::services::analytics_consent_service::read(&state.db, &actor).await?,
-    ))
+    )
+    .await)
 }
 
 pub async fn set_analytics_consent(
@@ -1916,9 +1927,19 @@ pub async fn set_analytics_consent(
         ));
     }
     Ok(analytics_consent_response(
+        &state.db,
         &actor,
-        crate::services::analytics_consent_service::set(&state.db, &actor, body.enabled).await?,
-    ))
+        crate::services::analytics_consent_service::set(
+            &state.db,
+            &actor,
+            body.enabled,
+            crate::services::analytics_consent_service::PolicyVersion::parse(
+                body.policy_version.as_deref(),
+            )?,
+        )
+        .await?,
+    )
+    .await)
 }
 
 #[cfg(test)]
@@ -1940,14 +1961,29 @@ mod analytics_tests {
                 .await
                 .unwrap();
         }
-        let a = consent::set(&db, &first, false).await.unwrap();
-        let b = consent::set(&db, &second, false).await.unwrap();
+        let a = consent::set(
+            &db,
+            &first,
+            false,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
+        let b = consent::set(
+            &db,
+            &second,
+            false,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         let state = test_app_state(db.clone());
         assert!(
             set_analytics_consent(
                 State(state.clone()),
                 test_auth_user(&second),
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1965,6 +2001,7 @@ mod analytics_tests {
                 State(state.clone()),
                 agent,
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1977,6 +2014,7 @@ mod analytics_tests {
             State(state),
             test_auth_user(&first),
             Json(AnalyticsConsentRequest {
+                policy_version: None,
                 account_id: first.clone(),
                 enabled: true,
             }),

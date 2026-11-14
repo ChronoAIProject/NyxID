@@ -680,6 +680,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let user_routes = Router::new()
         .route(
+            "/me/crash-reports",
+            post(handlers::crash_reports::ingest)
+                .layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
             "/me/analytics/events",
             post(handlers::users::capture_analytics).layer(handlers::users::analytics_body_limit()),
         )
@@ -1190,6 +1195,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_feature_flags::list_feature_flags)
                 .post(handlers::admin_feature_flags::create_feature_flag),
         )
+        .route(
+            "/crash-reports/summary",
+            get(handlers::crash_reports::summary),
+        )
+        .route("/crash-reports", get(handlers::crash_reports::list))
+        .route("/crash-reports/{id}", get(handlers::crash_reports::detail))
         .route(
             "/security-readiness",
             get(handlers::health::security_readiness),

@@ -1624,11 +1624,16 @@ mod tests {
     }
 
     fn take_failure(remaining: &AtomicUsize) -> bool {
-        remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                value.checked_sub(1)
-            })
-            .is_ok()
+        let mut value = remaining.load(Ordering::SeqCst);
+        loop {
+            let Some(next) = value.checked_sub(1) else {
+                return false;
+            };
+            match remaining.compare_exchange_weak(value, next, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return true,
+                Err(current) => value = current,
+            }
+        }
     }
 
     async fn insert_owner(db: &mongodb::Database, email: &str) -> String {

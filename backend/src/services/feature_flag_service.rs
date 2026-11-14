@@ -105,6 +105,13 @@ const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const CRASH_REPORTS_FLAG_KEY: &str = "diagnostics:crash-reports";
+const CRASH_REPORTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CRASH_REPORTS_FLAG_KEY,
+    description: "Enable policy-2 crash diagnostics for the acting person.",
+    default_enabled: false,
+};
+
 /// Acting-person rollout for connected-service health and readiness monitoring.
 pub const SERVICE_MONITORING_FLAG_KEY: &str = "services:monitoring";
 const SERVICE_MONITORING_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -508,6 +515,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
+    CRASH_REPORTS_FLAG,
     FeatureFlagDef {
         key: super::platform_model_service::FLAG,
         description: "Platform model catalog; activation requires complete model execution and billing readiness.",
@@ -571,6 +579,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
+    CRASH_REPORTS_FLAG,
     FeatureFlagDef {
         key: super::platform_model_service::FLAG,
         description: "Platform model catalog; activation requires complete model execution and billing readiness.",

@@ -328,9 +328,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        crate::services::analytics_consent_service::set(&db, actor, true)
-            .await
-            .unwrap();
+        crate::services::analytics_consent_service::set(
+            &db,
+            actor,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         await_responsive_consent_reads(&db, actor).await;
         TelemetryClient {
             admission_slots: Arc::new(Semaphore::new(CHANNEL_CAPACITY)),
@@ -668,7 +673,14 @@ mod tests {
             analytics_account: Some(owner.into()),
             ..Default::default()
         };
-        consent::set(db, owner, false).await.unwrap();
+        consent::set(
+            db,
+            owner,
+            false,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         // Even a consenting account whose UUID equals the key ID cannot grant
         // permission to the key's human owner.
         db.collection::<crate::models::user::User>("users")
@@ -678,7 +690,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        consent::set(db, &key_id, true).await.unwrap();
+        consent::set(
+            db,
+            &key_id,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         emit_event(
             Some(&client),
             &auth.user_id.to_string(),
@@ -688,8 +707,22 @@ mod tests {
         )
         .await;
         assert!(rx.try_recv().is_err());
-        consent::set(db, &key_id, false).await.unwrap();
-        consent::set(db, owner, true).await.unwrap();
+        consent::set(
+            db,
+            &key_id,
+            false,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
+        consent::set(
+            db,
+            owner,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         emit_event(
             Some(&client),
             &auth.user_id.to_string(),
@@ -789,8 +822,22 @@ mod tests {
         )
         .await;
         assert_eq!(second_state.telemetry.as_ref().unwrap().tx.capacity(), 0);
-        consent::set(&second_state.db, actor, false).await.unwrap();
-        consent::set(&second_state.db, actor, true).await.unwrap();
+        consent::set(
+            &second_state.db,
+            actor,
+            false,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
+        consent::set(
+            &second_state.db,
+            actor,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         drop(first_state);
         drop(second_state);
         // A delayed client request must not obtain a new revision at server
@@ -821,7 +868,14 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            consent::set(&remote_db, id, true).await.unwrap();
+            consent::set(
+                &remote_db,
+                id,
+                true,
+                crate::services::analytics_consent_service::PolicyVersion::V1,
+            )
+            .await
+            .unwrap();
             track_until_enqueued(
                 &client,
                 db,
@@ -832,7 +886,14 @@ mod tests {
             )
             .await;
         }
-        consent::set(&remote_db, &withdrawn, false).await.unwrap();
+        consent::set(
+            &remote_db,
+            &withdrawn,
+            false,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         client
             .track(
                 &withdrawn,
@@ -879,7 +940,14 @@ mod tests {
                 None,
             )
             .await;
-        consent::set(&remote_db, &sentinel, true).await.unwrap();
+        consent::set(
+            &remote_db,
+            &sentinel,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         client
             .track(
                 &sentinel,

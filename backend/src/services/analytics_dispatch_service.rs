@@ -414,9 +414,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        let consent = super::super::analytics_consent_service::set(&db, &user, true)
-            .await
-            .unwrap();
+        let consent = super::super::analytics_consent_service::set(
+            &db,
+            &user,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         // Reconciliation starts with retained historical uncertainty. Seed that
         // history without requiring 32 consecutive sub-250ms admissions merely
         // to reach the behavior under test. The neighboring bound test exercises
@@ -490,9 +495,14 @@ mod tests {
             .await
             .is_err()
         );
-        let renewed = super::super::analytics_consent_service::set(&db, &user, true)
-            .await
-            .unwrap();
+        let renewed = super::super::analytics_consent_service::set(
+            &db,
+            &user,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         assert!(
             reconcile_active_dispatch(
                 &db,
@@ -617,9 +627,14 @@ mod tests {
             ))
             .await
             .unwrap();
-        let permission = crate::services::analytics_consent_service::set(&db, &id, true)
-            .await
-            .unwrap();
+        let permission = crate::services::analytics_consent_service::set(
+            &db,
+            &id,
+            true,
+            crate::services::analytics_consent_service::PolicyVersion::V1,
+        )
+        .await
+        .unwrap();
         for _ in 0..40 {
             let dispatch = begin(&db, &id, &permission.revision)
                 .await

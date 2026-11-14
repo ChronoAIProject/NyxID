@@ -149,6 +149,7 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 #[derive(Clone)]
 pub struct AppState {
     pub shutdown: services::shutdown::Runtime,
+    pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
@@ -1183,8 +1184,13 @@ async fn server_run(cli: Cli) {
 
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
+    let crash_reports = Arc::new(
+        services::crash_report_export::CrashConfig::from_env()
+            .expect("Invalid crash reporting configuration"),
+    );
     let state = AppState {
         shutdown: services::shutdown::process(),
+        crash_reports: crash_reports.clone(),
         #[cfg(test)]
         local_machine_platform: None,
         db: db.clone(),
@@ -1373,6 +1379,7 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
+    services::crash_report_export::worker::spawn(db.clone(), crash_reports);
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(

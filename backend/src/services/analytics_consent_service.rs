@@ -14,7 +14,34 @@ use mongodb::{
 use std::future::IntoFuture;
 
 /// Version of the optional, account-linked product analytics permission.
-pub const POLICY_VERSION: &str = "1";
+pub const POLICY_VERSION_V1: &str = "1";
+pub const POLICY_VERSION_DIAGNOSTICS: &str = "2";
+#[cfg(test)]
+pub const POLICY_VERSION: &str = POLICY_VERSION_V1;
+
+#[derive(Clone, Copy)]
+pub enum PolicyVersion {
+    V1,
+    Diagnostics,
+}
+
+impl PolicyVersion {
+    pub fn parse(value: Option<&str>) -> AppResult<Self> {
+        match value {
+            None | Some("1") => Ok(Self::V1),
+            Some("2") => Ok(Self::Diagnostics),
+            _ => Err(AppError::ValidationError(
+                "Invalid analytics policy version".into(),
+            )),
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => POLICY_VERSION_V1,
+            Self::Diagnostics => POLICY_VERSION_DIAGNOSTICS,
+        }
+    }
+}
 
 fn options() -> CollectionOptions {
     CollectionOptions::builder()
@@ -36,7 +63,12 @@ pub async fn read(db: &Database, user_id: &str) -> AppResult<AnalyticsConsent> {
         .ok_or_else(|| AppError::NotFound("Active personal account not found".into()))
 }
 
-pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<AnalyticsConsent> {
+pub async fn set(
+    db: &Database,
+    user_id: &str,
+    enabled: bool,
+    acknowledged: PolicyVersion,
+) -> AppResult<AnalyticsConsent> {
     // A random revision invalidates previously admitted work even on same-ms
     // withdraw/regrant or wall-clock rollback. Majority acknowledgement prevents
     // an acknowledged withdrawal being rolled back on ordinary primary failover.
@@ -47,7 +79,7 @@ pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<Analy
             active_person(user_id),
             vec![doc! {"$set": {"profile_config.analytics": {
                 "enabled": enabled, "changed_at": "$$NOW", "revision": &revision,
-                "policy_version": POLICY_VERSION
+                "policy_version": acknowledged.as_str()
             }}}],
         )
         .return_document(ReturnDocument::After)
@@ -59,11 +91,29 @@ pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<Analy
 /// Never cache positive permission. The caller saves this revision in the
 /// bounded queue at admission; queued jobs never acquire a replacement revision.
 pub async fn permitted_revision(db: &Database, user_id: &str) -> Option<String> {
+    permitted_revision_for(db, user_id, false).await
+}
+
+pub async fn permitted_diagnostics_revision(db: &Database, user_id: &str) -> Option<String> {
+    permitted_revision_for(db, user_id, true).await
+}
+
+pub async fn permits_diagnostics(db: &Database, user_id: &str, revision: &str) -> bool {
+    permitted_diagnostics_revision(db, user_id).await.as_deref() == Some(revision)
+}
+
+async fn permitted_revision_for(db: &Database, user_id: &str, diagnostics: bool) -> Option<String> {
     if uuid::Uuid::parse_str(user_id).is_err() {
         return None;
     }
     let mut filter = active_person(user_id);
     filter.insert("profile_config.analytics.enabled", true);
+    if diagnostics {
+        filter.insert(
+            "profile_config.analytics.policy_version",
+            POLICY_VERSION_DIAGNOSTICS,
+        );
+    }
     filter.insert(
         "profile_config.analytics.revision",
         doc! {"$type": "string", "$ne": ""},
@@ -135,7 +185,7 @@ mod tests {
         assert!(absent.revision.is_empty());
         for enabled in [true, false] {
             let before = db.run_command(doc! {"hello": 1}).await.unwrap();
-            let saved = set(&db, &id, enabled).await.unwrap();
+            let saved = set(&db, &id, enabled, PolicyVersion::V1).await.unwrap();
             let after = db.run_command(doc! {"hello": 1}).await.unwrap();
             assert_eq!(saved.enabled, enabled);
             assert_eq!(saved.policy_version.as_deref(), Some(POLICY_VERSION));
@@ -172,7 +222,7 @@ mod tests {
         let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&id));
         for choice in [None, Some(false), Some(true), Some(false)] {
             if let Some(enabled) = choice {
-                set(&db, &id, enabled).await.unwrap();
+                set(&db, &id, enabled, PolicyVersion::V1).await.unwrap();
             }
             audit_service::log_actor_event(
                 db.clone(),
@@ -230,7 +280,7 @@ mod tests {
             .await
             .unwrap();
         commands.lock().unwrap().clear();
-        let consent = set(&db, &id, true).await.unwrap();
+        let consent = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
         assert!(permits_dispatch(&db, &id, &consent.revision).await);
         let recorded = commands.lock().unwrap();
         let write = recorded
@@ -296,11 +346,11 @@ mod tests {
                 .is_none()
         );
         assert!(permitted_revision(&db, "pre-login").await.is_none());
-        let first = set(&db, &id, true).await.unwrap();
+        let first = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
         assert!(permits_dispatch(&db, &id, &first.revision).await);
-        set(&db, &id, false).await.unwrap();
+        set(&db, &id, false, PolicyVersion::V1).await.unwrap();
         assert!(!permits_dispatch(&db, &id, &first.revision).await);
-        let second = set(&db, &id, true).await.unwrap();
+        let second = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
         assert_ne!(first.revision, second.revision);
         assert!(!permits_dispatch(&db, &id, &first.revision).await);
         assert!(permits_dispatch(&db, &id, &second.revision).await);
@@ -312,16 +362,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!permits_dispatch(&db, &id, &second.revision).await);
-        assert!(set(&db, &id, true).await.is_err());
+        assert!(set(&db, &id, true, PolicyVersion::V1).await.is_err());
     }
 
     #[tokio::test]
     async fn clock_skew_and_same_timestamp_do_not_resurrect_old_permission() {
         let (db, id) = account().await;
-        let first = set(&db, &id, true).await.unwrap();
+        let first = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
         for millis in [0_i64, i64::MAX / 2, 0] {
-            set(&db, &id, false).await.unwrap();
-            let current = set(&db, &id, true).await.unwrap();
+            set(&db, &id, false, PolicyVersion::V1).await.unwrap();
+            let current = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
             db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id": &id}, doc! {"$set": {"profile_config.analytics.changed_at": bson::DateTime::from_millis(millis)}}).await.unwrap();
             assert!(!permits_dispatch(&db, &id, &first.revision).await);
             assert!(permits_dispatch(&db, &id, &current.revision).await);
@@ -331,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn reads_override_inherited_secondary_only_preference() {
         let (db, id) = account().await;
-        let current = set(&db, &id, true).await.unwrap();
+        let current = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
         let secondary_only = db.client().database_with_options(
             db.name(),
             mongodb::options::DatabaseOptions::builder()
@@ -355,8 +405,10 @@ mod tests {
             .insert_one(test_user(&other, UserType::Person))
             .await
             .unwrap();
-        let choices =
-            futures::future::join_all((0..16).map(|index| set(&db, &id, index % 2 == 0))).await;
+        let choices = futures::future::join_all(
+            (0..16).map(|index| set(&db, &id, index % 2 == 0, PolicyVersion::V1)),
+        )
+        .await;
         let mut revisions = std::collections::HashSet::new();
         for choice in choices {
             assert!(revisions.insert(choice.unwrap().revision));

@@ -2206,6 +2206,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
         shutdown: crate::services::shutdown::Runtime::default(),
+        crash_reports: Arc::new(Default::default()),
         local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),

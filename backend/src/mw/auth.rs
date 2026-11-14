@@ -664,6 +664,9 @@ fn is_delegated_native_path(path: &str) -> bool {
 /// never reach. Matching is segment-based so adjacent names such as
 /// `/nodesXYZ` and `/administer` remain ordinary default-allowed GET paths.
 fn delegated_read_denied_path(path: &str) -> bool {
+    if path.starts_with("/api/v1/admin/crash-reports") {
+        return true;
+    }
     if path == "/api/v1/llm/gateway/v1/assistant-model-context" {
         return true;
     }
@@ -5378,4 +5381,18 @@ pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> App
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod crash_management_boundary_tests {
+    #[test]
+    fn delegated_reads_cannot_open_crash_report_routes() {
+        for path in [
+            "/api/v1/admin/crash-reports",
+            "/api/v1/admin/crash-reports/summary",
+            "/api/v1/admin/crash-reports/123",
+        ] {
+            assert!(super::delegated_read_denied_path(path));
+        }
+    }
 }

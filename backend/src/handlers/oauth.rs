@@ -4275,7 +4275,7 @@ mod tests {
                 user.social_provider_id = Some(id.clone());
                 let email = user.email.clone();
                 db.collection::<crate::models::user::User>(USERS).insert_one(user).await.unwrap();
-                crate::services::analytics_consent_service::set(&db, &id, true).await.unwrap();
+                crate::services::analytics_consent_service::set(&db, &id, true, crate::services::analytics_consent_service::PolicyVersion::V1).await.unwrap();
                 let tele = TelemetryContext {surface: "mobile", client_version: None,
                     analytics_allowed: true, analytics_account: Some(id.clone())};
                 let now = Utc::now().timestamp();
