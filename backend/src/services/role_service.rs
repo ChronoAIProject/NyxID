@@ -111,25 +111,7 @@ async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> Ap
     let now = Utc::now();
 
     if let Some(existing) = roles.find_one(doc! { "slug": spec.slug }).await? {
-        roles
-            .update_one(
-                doc! { "_id": &existing.id },
-                doc! { "$set": {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "permissions": &permissions,
-                    "is_default": spec.is_default,
-                    "is_system": true,
-                    "client_id": null,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
-
-        return roles
-            .find_one(doc! { "_id": &existing.id })
-            .await?
-            .ok_or_else(|| AppError::Internal("System role disappeared after update".to_string()));
+        return normalize_system_role(db, spec, &existing).await;
     }
 
     let role = Role {
@@ -145,9 +127,44 @@ async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> Ap
         updated_at: now,
     };
 
-    roles.insert_one(&role).await?;
+    #[cfg(test)]
+    super::startup_seed_tests::missing(db, "role", spec.slug).await;
+    if let Some(existing) =
+        super::startup_seed_service::insert_or_read(&roles, &role, doc! {"slug": spec.slug}).await?
+    {
+        return normalize_system_role(db, spec, &existing).await;
+    }
     tracing::info!(slug = spec.slug, "Seeded system role");
     Ok(role)
+}
+
+async fn normalize_system_role(
+    db: &mongodb::Database,
+    spec: &SystemRoleSpec,
+    existing: &Role,
+) -> AppResult<Role> {
+    let roles = db.collection::<Role>(ROLES);
+    let permissions = permissions_vec(spec.permissions);
+    let now = Utc::now();
+    roles
+        .update_one(
+            doc! { "_id": &existing.id },
+            doc! { "$set": {
+                "name": spec.name,
+                "description": spec.description,
+                "permissions": &permissions,
+                "is_default": spec.is_default,
+                "is_system": true,
+                "client_id": null,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    roles
+        .find_one(doc! { "_id": &existing.id })
+        .await?
+        .ok_or_else(|| AppError::Internal("System role disappeared after update".to_string()))
 }
 
 async fn get_platform_role_by_slug(db: &mongodb::Database, slug: &str) -> AppResult<Role> {

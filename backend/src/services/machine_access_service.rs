@@ -162,6 +162,8 @@ async fn ensure_separation_cutover(db: &Database) -> AppResult<()> {
                 }
                 return Ok(());
             }
+            #[cfg(test)]
+            super::startup_seed_tests::missing(&db, "machine", model::SEPARATION_CUTOVER).await;
             db.collection::<Document>(SETTINGS).insert_one(doc! {
                 "_id":model::SEPARATION_CUTOVER,"created_at":bson::DateTime::now(),"snapshot_version":1,
             }).session(&mut *session).await?;
