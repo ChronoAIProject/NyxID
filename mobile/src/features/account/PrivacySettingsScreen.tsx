@@ -2,8 +2,7 @@ import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useState } from "react";
 import { Switch } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChartColumn, Smartphone } from "lucide-react-native";
-import { Download } from "lucide-react-native";
+import { ChartColumn, Download, Smartphone } from "lucide-react-native";
 import { File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -22,6 +21,7 @@ import {
 } from "../../lib/analyticsRelay";
 import { requestJson, requestRawText } from "../../lib/api/http";
 import { ApiError } from "../../lib/api/ApiError";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
 
 /** Settings › Privacy: optional usage analytics for the account and this device. */
 export function PrivacySettingsScreen(
@@ -71,17 +71,21 @@ export function PrivacySettingsScreen(
   });
   const exportData = useMutation({
     mutationFn: async () => {
-      const accountId = deviceConsent.accountId;
+      const accountId = getAuthAccountId();
       if (!accountId) throw new Error("auth_session_missing");
       const response = await requestRawText("/users/me/export", {
         method: "POST",
         expectedAccountId: accountId,
       });
-      const file = new File(Paths.cache, `nyxid-account-export-${Date.now()}.json`);
+      const file = new File(
+        Paths.cache,
+        `nyxid-account-export-${Date.now()}.json`,
+      );
       file.create();
       try {
         file.write(response.text);
-        if (!(await Sharing.isAvailableAsync())) throw new Error("sharing_unavailable");
+        if (!(await Sharing.isAvailableAsync()))
+          throw new Error("sharing_unavailable");
         await Sharing.shareAsync(file.uri, {
           mimeType: "application/json",
           UTI: "public.json",
@@ -95,16 +99,34 @@ export function PrivacySettingsScreen(
         }
       }
     },
-    onSuccess: () => setToast({ message: t("Your data export is ready."), kind: "success" }),
+    onSuccess: () =>
+      setToast({ message: t("Your data export is ready."), kind: "success" }),
     onError: (error: unknown) => {
       if (error instanceof ApiError && error.statusCode === 429) {
         const seconds = error.retryAfterMs ? Math.ceil(error.retryAfterMs / 1000) : 0;
-        const retry = seconds ? ` ${t("Try again in {{seconds}} seconds.", { seconds })}` : "";
-        setToast({ message: `${t("Your data export is temporarily rate limited.")}${retry}`, kind: "error" });
-      } else if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 405)) {
-        setToast({ message: t("Data export is not available on this server yet."), kind: "error" });
+        const minutes = seconds
+          ? Math.max(1, Math.ceil(seconds / 60))
+          : undefined;
+        const retry = minutes
+          ? ` ${minutes === 1 ? t("Try again in 1 minute.") : t("Try again in {{minutes}} minutes.", { minutes })}`
+          : "";
+        setToast({
+          message: `${t("Your data export is temporarily rate limited.")}${retry}`,
+          kind: "error",
+        });
+      } else if (
+        error instanceof ApiError &&
+        (error.statusCode === 404 || error.statusCode === 405)
+      ) {
+        setToast({
+          message: t("Data export is not available on this server yet."),
+          kind: "error",
+        });
       } else {
-        setToast({ message: t("We couldn't create your data export. Please try again."), kind: "error" });
+        setToast({
+          message: t("We couldn't create your data export. Please try again."),
+          kind: "error",
+        });
       }
     },
   });
@@ -127,10 +149,15 @@ export function PrivacySettingsScreen(
           <SettingsRow
             icon={Download}
             label={t("Export my data")}
-            detail={t("Creates a bounded JSON export. You can request one up to three times per hour.")}
+            detail={t(
+              "Creates a bounded JSON export. You can request one up to three times per hour.",
+            )}
             onPress={() => exportData.mutate()}
             disabled={exportData.isPending}
-            accessibilityState={{ disabled: exportData.isPending, busy: exportData.isPending }}
+            accessibilityState={{
+              disabled: exportData.isPending,
+              busy: exportData.isPending,
+            }}
           />
         </SettingsGroup>
         <SettingsGroup
