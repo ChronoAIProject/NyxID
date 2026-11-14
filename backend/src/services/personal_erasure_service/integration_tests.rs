@@ -758,6 +758,92 @@ impl crate::crypto::key_provider::KeyProvider for HeldProvider {
 }
 
 #[tokio::test]
+async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let other = uuid::Uuid::new_v4().to_string();
+    let org = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_many([
+            test_user(&other, UserType::Person),
+            test_user(&org, UserType::Org),
+        ])
+        .await
+        .unwrap();
+    let now = bson::DateTime::now();
+    db.collection::<Document>("invite_codes")
+        .insert_one(doc! {
+            "_id": "shared-invite",
+            "code": "NYX-SHARED",
+            "max_uses": 10_i32,
+            "used_count": 2_i32,
+            "created_by": &other,
+            "usages": [
+                {"user_id": &owner, "email": "deleted@example.test", "used_at": now},
+                {"user_id": &other, "email": "kept@example.test", "used_at": now},
+            ],
+        })
+        .await
+        .unwrap();
+    db.collection::<Document>("service_change_events")
+        .insert_many([
+            doc! {
+                "_id": "personal-history",
+                "owner_id": &owner,
+                "actor": {"person_id": &owner, "name": "Deleted Person", "api_key_id": "key", "app_id": "app"},
+                "action": "update",
+            },
+            doc! {
+                "_id": "org-history",
+                "owner_id": &org,
+                "actor": {"person_id": &owner, "name": "Deleted Person", "api_key_id": "key", "app_id": "app"},
+                "action": "update",
+                "sequence": 7_i64,
+            },
+        ])
+        .await
+        .unwrap();
+
+    accept(&db, &owner, &owner, None).await.unwrap();
+    until_source_removed(&state, &owner).await;
+
+    let invite = db
+        .collection::<Document>("invite_codes")
+        .find_one(doc! {"_id": "shared-invite"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(invite.get_i32("used_count"), Ok(2));
+    assert_eq!(invite.get_i32("max_uses"), Ok(10));
+    let usages = invite.get_array("usages").unwrap();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(
+        usages[0].as_document().unwrap().get_str("user_id"),
+        Ok(other.as_str())
+    );
+
+    assert!(db
+        .collection::<Document>("service_change_events")
+        .find_one(doc! {"_id": "personal-history"})
+        .await
+        .unwrap()
+        .is_none());
+    let org_history = db
+        .collection::<Document>("service_change_events")
+        .find_one(doc! {"_id": "org-history"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(org_history.get_i64("sequence"), Ok(7));
+    let actor = org_history.get_document("actor").unwrap();
+    assert_eq!(actor.get_str("name"), Ok("Deleted account"));
+    assert!(actor.get("person_id").is_some_and(|value| value.as_null().is_some()));
+    assert!(actor.get("api_key_id").is_some_and(|value| value.as_null().is_some()));
+    assert!(actor.get("app_id").is_some_and(|value| value.as_null().is_some()));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn held_actual_saved_login_and_trigger_cannot_recreate_rows_after_worker_source_purge() {
     for path in ["saved_login", "trigger"] {
         let (db, owner) = tests::fixture().await;
