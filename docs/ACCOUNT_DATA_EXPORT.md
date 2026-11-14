@@ -1,53 +1,64 @@
 # Account data export
 
-`POST /api/v1/users/me/export` downloads a JSON document for the authenticated
-first-party human account. OAuth-client, delegated, API-key, service-account,
-and relay credentials are rejected by the same human-only router and first-party
-client check used by account settings.
+`POST /api/v1/users/me/export` returns a JSON attachment for the authenticated
+first-party human account. The human-only route and
+`require_first_party_human` check reject OAuth-client, delegated, API-key,
+service-account and relay credentials. The response is named
+`nyxid-account-export-YYYY-MM-DD.json` and uses
+`format: "nyxid.account-export"`, `version: 1`, an RFC3339 UTC
+`generated_at`, the opaque `account_id`, `limits`, `truncated_sections`,
+`excluded`, and nested section/subsection objects.
 
-The response is an attachment named `nyxid-account-export-YYYY-MM-DD.json`.
-It has `format: "nyxid.account-export"`, `version: 1`, an RFC3339 `generated_at`,
-the opaque `account_id`, limits, `truncated_sections`, human-readable
-`excluded` categories, and section objects containing `items`, `total_count`,
-and `truncated`. Sections currently cover account profile, services, security
-session metadata, assistant messages, channel messages, account activity and
-audit metadata, machine job metadata, and the billing wallet summary, credit
-grants received, and bounded usage rollups. Empty sections remain present so
-clients can rely on the registry-defined section set.
+Each `sections.<section>.<subsection>` value is exactly one source collection:
 
-The registry-defined sections and their allowlisted fields are:
+```json
+{
+  "items": [],
+  "total_count": 42,
+  "truncated": false
+}
+```
 
-| Section | Fields included |
-| --- | --- |
-| `account` | Account ID, email, display name, avatar URL, email-verification state, and account timestamps |
-| `services` | Service IDs, slugs, type, active/deleted state, and lifecycle timestamps; other owner-scoped service metadata uses the common safe metadata fields |
-| `security` | Session IDs, creation/expiry/last-used timestamps, and user-agent metadata |
-| `assistant` | Owner-visible assistant message role/content/timestamps, conversation IDs, tool/action metadata, and retained file metadata |
-| `channels` | Owner-visible channel message IDs, conversation IDs, direction, text, and timestamps |
-| `account_activity` | Action receipt metadata, audit event type/status/timestamps, invite activity, and other owner-scoped activity metadata |
-| `machines` | Machine job IDs, status, and lifecycle timestamps |
-| `billing` | Wallet balance/reservation/status summary, grants received, and usage meter service/metric/model/quantity/status/timestamps |
+Rows are newest first. A subsection reads at most 10,000 rows and reports the
+unbounded matching `total_count`; if more rows exist, `truncated` is true and
+its fully qualified name (`section.subsection`) appears in
+`truncated_sections`. The complete serialized document is capped at 32 MiB;
+when that cap is reached the oldest rows are removed incrementally from the
+largest subsections until the document fits. Queries have a three-second
+MongoDB `maxTimeMS` bound. Each replica permits two concurrent exports and a
+person may start three exports per hour; a busy or rate-limited request returns
+`429` with `Retry-After`.
 
-Rows from additional registry entries are placed in the section named by that
-entry and use the common safe metadata allowlist (`_id`, owner IDs,
-service/conversation IDs, names/slugs, status/type/role/action, content
-type/filename/size, and lifecycle timestamps). The retained
-`downstream_services` section is restricted to opaque owner IDs and service
-operational metadata.
+The stable section set is `account`, `services`, `security`, `assistant`,
+`channels`, `account_activity`, `machines`, and `billing`. Empty sections are
+present so clients can discover the schema. The account section also contains
+`profile` and `org_memberships` subsections. The profile contains only the
+visible account email, display name, avatar URL, email-verification state, MFA
+state, social-provider name, profile preferences, and created/updated/last-login
+timestamps. Memberships contain organization/member IDs, role, and lifecycle
+timestamps.
 
-Passwords, authentication/session hashes, API keys and provider credentials,
-tokens, signatures, ciphertext, wrapped keys, nonces, OAuth state/code values,
-push tokens, webhook secrets, and transient coordination, lease, deduplication,
-and erasure bookkeeping are excluded. Uploaded and generated files are
-represented by metadata only (name/type/size and lifecycle timestamps where
-available); raw payloads are never included. While a file is retained, its
-filename, MIME type, byte size, creation time, and expiry are included in the
-assistant section.
+The remaining subsections are explicit registry mappings. They expose only
+user-visible metadata or content appropriate to that collection: service
+connections and service metadata; session lifecycle metadata; assistant
+conversation/message content and attachment metadata; channel message content
+and routing metadata; action, notification, machine-job and other account
+activity metadata; audit event type/time metadata for events authored by the
+person; and billing wallet summary, received grants and usage rollups. Every
+source collection has a named field allowlist, owner predicate, subsection name
+and newest-first sort in `account_export_service.rs`; there is no generic
+collection fallback. Uploaded and generated files are metadata only (name,
+MIME type, byte size, creation and expiry timestamps).
 
-Each section is capped at 1,000 rows and queries have a three-second server
-limit. The complete JSON is capped at 32 MiB; the server removes oldest rows
-from capped sections until it fits and lists those sections in
-`truncated_sections`. A person may request three exports per hour, and each
-replica builds at most two exports concurrently. Every successful export emits
-the chained metadata-only `user.data_exported` audit event with section counts,
-truncation names, format/version, and byte size.
+The export omits password and authentication hashes, session/token hashes,
+OAuth codes and states, raw access or refresh tokens, API-key prefixes and
+hints, push and webhook tokens, private keys, KMS/JWK identifiers, wrapped
+keys, DEKs, nonces, signatures, HMACs, ciphertext, binary payloads, encrypted
+file contents, transient lease/coordination/deduplication records, erasure
+bookkeeping, and retained financial or integrity content. MCP session IDs are
+credentials and are excluded. Decimal128 values are emitted as decimal strings;
+BSON documents and arrays are converted recursively, dates are RFC3339 strings,
+and BSON binary values are omitted. The successful response emits a chained
+metadata-only `user.data_exported` audit event containing format/version,
+subsection counts, truncation names and serialized byte size; it never records
+export content.

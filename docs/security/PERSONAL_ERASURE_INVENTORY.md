@@ -174,10 +174,7 @@ or authority for blanket deletion.
 
 ## Coverage and recovery checks
 
-The personal-data registry covers the production collection constants and
-literal collection calls. Registry tests fail when a collection is missing,
-duplicated, or drifts from the local inventory, joined-child specifications,
-export sections, or retained policy disclosures. The worker reconciliation pass
+The personal-data registry covers production collection constants and literal collection calls. Tests resolve aliases and associated constants, reject unregistered literals and constants, reject stale entries, compare every local inventory owner predicate with its registry entry, check export mappings and retained policy phrases, and keep the orphan sweep registry-driven. The worker tests cover bounded passes, lease fencing and completed-job reconciliation. The integration table covers seeded local, joined-child and redacted rows, bystanders, organization ownership, retained rows and interruption/resume when the MongoDB test replica set is available. The worker reconciliation pass
 also revisits completed jobs created before the current local-inventory revision
 under the surviving admission barrier, so mixed-fleet completion does not leave
 newly covered personal rows behind.
