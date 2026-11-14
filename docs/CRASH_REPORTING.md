@@ -294,12 +294,16 @@ one background-work guard from the interval tick through the stale-lease sweep,
 claim, send and fenced settlement. A draining replica checks before every
 further claim in the sixteen-row batch and finishes its current send and
 settlement before releasing that guard. A send completed during the drain
-settles normally, including `exported` on success. The HTTP timeout is ten
-seconds; the default shutdown budget is 600 seconds with five seconds reserved
-for cleanup, leaving a 595-second work deadline. If a shorter configured budget
-or second signal aborts an in-flight send, its persisted `dispatching` intent
-and lease remain. A later expired-lease sweep marks it `unknown` and never
-resends it. An expired or superseded lease cannot settle a report.
+settles normally, including `exported` on success. For the configured
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` budget `t`, the drain reserves `min(t / 10, 5 s)`
+for cleanup, and the work deadline is `t` minus that reserve.
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` overrides the default. With today's default of
+`t = 25 s`, the cleanup reserve is 2.5 seconds and the work deadline is 22.5
+seconds, which contains the ten-second exporter HTTP timeout. If a shorter
+configured budget or second signal aborts an in-flight send, its persisted
+`dispatching` intent and lease remain. A later expired-lease sweep marks it
+`unknown` and never resends it. An expired or superseded lease cannot settle a
+report.
 
 ## Sentry configuration and erasure acceptance
 
