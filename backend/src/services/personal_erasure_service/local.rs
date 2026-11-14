@@ -131,6 +131,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"approved_user_id":owner},
         ),
         (
+            m::oracle_session::COLLECTION_NAME,
+            doc! {"owner_user_id":owner},
+        ),
+        (
             m::device_code::COLLECTION_NAME,
             doc! {"approved_by_user_id":owner,"approved_org_id":bson::Bson::Null},
         ),

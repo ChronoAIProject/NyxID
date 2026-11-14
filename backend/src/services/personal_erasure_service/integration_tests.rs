@@ -787,6 +787,49 @@ async fn stuck_source_cleanup_recovers_without_repair_or_replaying_completed_dom
 }
 
 #[tokio::test]
+async fn departing_person_oracle_sessions_are_erased_without_touching_other_owner() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let other = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_one(test_user(&other, UserType::Person))
+        .await
+        .unwrap();
+    let sessions = crate::models::oracle_session::COLLECTION_NAME;
+    db.collection::<Document>(sessions)
+        .insert_many([
+            doc! {
+                "_id": format!("oracle-owner-{}", uuid::Uuid::new_v4()),
+                "owner_user_id": &owner,
+                "prompt": "owner",
+            },
+            doc! {
+                "_id": format!("oracle-other-{}", uuid::Uuid::new_v4()),
+                "owner_user_id": &other,
+                "prompt": "other",
+            },
+        ])
+        .await
+        .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
+    until_source_removed(&state, &owner).await;
+    assert_eq!(
+        db.collection::<Document>(sessions)
+            .count_documents(doc! {"owner_user_id": &owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.collection::<Document>(sessions)
+            .count_documents(doc! {"owner_user_id": &other})
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared_effect_evidence() {
     let (db, owner) = tests::fixture().await;
     let state = test_app_state(db.clone());

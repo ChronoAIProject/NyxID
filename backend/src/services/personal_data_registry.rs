@@ -1577,9 +1577,9 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "oracle_sessions",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
-        erasure: Erasure::Domain("oracle lifecycle"),
+        erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "oracle_sessions stores a person's Oracle conversation routing and lifecycle metadata; pool cleanup closes active sessions and removes closed session rows after settlement.",
+        why: "oracle_sessions stores a person's own Oracle conversation routing and lifecycle metadata keyed by owner_user_id; personal erasure removes only that person's rows while Oracle pool cleanup retains its existing pool semantics.",
     },
     Entry {
         collection: "oracle_tasks",
