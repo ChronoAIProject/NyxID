@@ -1,5 +1,6 @@
 use super::lago_client::{
-    LagoApi, LagoWalletTransaction, purchased_credit_expiry_transaction_name,
+    DispatchWindow, LagoApi, LagoWalletTransaction, ProviderDispatch,
+    purchased_credit_expiry_transaction_name,
 };
 use crate::errors::AppResult;
 use crate::models::billing_topup_session::{
@@ -13,12 +14,16 @@ use crate::models::credits::Credits;
 use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use mongodb::options::ReturnDocument;
 use std::collections::HashMap;
 use uuid::Uuid;
 pub const PURCHASED_CREDIT_LIFETIME_DAYS: i64 = 365;
 const EXPIRY_WALLET_BATCH: i64 = 100;
 const EXPIRY_PURCHASE_BATCH: usize = 100;
 const EXPIRY_OPERATION_LEASE_SECS: i64 = 600;
+// Lago v1.50 VoidService applies synchronously in the request. Waiting a full
+// day before retrying empty history is conservative protection against a double void.
+const EXPIRY_REDISPATCH_QUIET_SECS: i64 = 24 * 60 * 60;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExpiringPurchase {
     transaction_id: String,
@@ -155,6 +160,11 @@ pub async fn expire_purchased_credits(
                     settled_at: purchase.settled_at,
                 })
                 .collect(),
+            dispatch_attempts: 0,
+            processing_lease_until: None,
+            processing_lease_token: None,
+            dispatch_started_at: None,
+            unresolved_reported_at: None,
             lago_void_transaction_id: None,
             wallet_balance_applied: false,
             history_applied: false,
@@ -169,7 +179,7 @@ pub async fn expire_purchased_credits(
         let pending_credits = amount;
         let claim = db
             .collection::<BillingWallet>(BILLING_WALLETS)
-            .update_one(
+            .find_one_and_update(
                 doc! {
                     "_id": &wallet.id,
                     "$or": [
@@ -181,20 +191,29 @@ pub async fn expire_purchased_credits(
                     "$expr": { "$and": [
                         { "$eq": [{ "$ifNull": ["$reserved_credits", 0_i64] }, wallet.reserved_credits] },
                         { "$eq": [{ "$ifNull": ["$pending_lago_debits", 0_i64] }, wallet.pending_lago_debits] },
+                        // A completed expiry advances this generation before
+                        // clearing its operation; reject older purchase reads.
+                        { "$eq": [{ "$ifNull": ["$snapshot_generation", 0_i64] }, wallet.snapshot_generation] },
                     ] },
                 },
-                doc! {
-                    "$set": {
-                        "active_topup_expiry": operation_bson,
+                vec![
+                    doc! { "$set": {
+                        "active_topup_expiry": { "$literal": operation_bson },
                         "pending_topup_expiry_credits": pending_credits,
-                        "updated_at": bson::DateTime::from_chrono(now),
-                    },
-                },
+                        "updated_at": "$$NOW",
+                    }},
+                    doc! { "$set": {
+                        "active_topup_expiry.lease_until": expiry_deadline(),
+                        "active_topup_expiry.processing_lease_until": expiry_deadline(),
+                        "active_topup_expiry.processing_lease_token": "$active_topup_expiry.processing_token",
+                    }},
+                ],
             )
+            .return_document(ReturnDocument::After)
             .await?;
-        if claim.modified_count == 0 {
+        let Some(operation) = claim.and_then(|wallet| wallet.active_topup_expiry) else {
             continue;
-        }
+        };
         match complete_expiry_operation(db, lago, &wallet, operation, now).await {
             Ok(completed) => expired_transactions += completed,
             Err(error) => {
@@ -230,45 +249,133 @@ async fn prepare_expired_purchases(
     Ok(expired)
 }
 
+fn expiry_deadline() -> bson::Document {
+    doc! { "$dateAdd": { "startDate": "$$NOW", "unit": "second", "amount": EXPIRY_OPERATION_LEASE_SECS } }
+}
+
 async fn acquire_expiry_operation(
     db: &mongodb::Database,
     wallet: &BillingWallet,
-    mut operation: PurchasedCreditExpiryOperation,
-    now: DateTime<Utc>,
+    operation: PurchasedCreditExpiryOperation,
+    _now: DateTime<Utc>,
 ) -> AppResult<Option<PurchasedCreditExpiryOperation>> {
-    if operation.lease_until > now {
-        return Ok(None);
-    }
     let processing_token = Uuid::new_v4().to_string();
-    let lease_until = now + Duration::seconds(EXPIRY_OPERATION_LEASE_SECS);
-    let update = db
+    let updated = db
         .collection::<BillingWallet>(BILLING_WALLETS)
-        .update_one(
+        .find_one_and_update(
             doc! {
                 "_id": &wallet.id,
                 "active_topup_expiry.operation_id": &operation.operation_id,
-                "active_topup_expiry.lease_until": { "$lte": bson::DateTime::from_chrono(now) },
+                "$expr": { "$lte": [processing_deadline(), "$$NOW"] },
             },
-            doc! {
-                "$set": {
-                    "active_topup_expiry.processing_token": &processing_token,
-                    "active_topup_expiry.lease_until": bson::DateTime::from_chrono(lease_until),
-                    "active_topup_expiry.updated_at": bson::DateTime::from_chrono(now),
-                    "updated_at": bson::DateTime::from_chrono(now),
-                },
-            },
+            vec![doc! { "$set": {
+                "active_topup_expiry.processing_token": &processing_token,
+                "active_topup_expiry.lease_until": legacy_deadline(),
+                "active_topup_expiry.processing_lease_until": expiry_deadline(),
+                "active_topup_expiry.processing_lease_token": &processing_token,
+                "active_topup_expiry.updated_at": "$$NOW",
+                "updated_at": "$$NOW",
+            }}],
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+    Ok(updated.and_then(|wallet| wallet.active_topup_expiry))
+}
+
+async fn renew_expiry_operation(
+    db: &mongodb::Database,
+    wallet: &BillingWallet,
+    operation: &PurchasedCreditExpiryOperation,
+) -> AppResult<bool> {
+    let result = db
+        .collection::<BillingWallet>(BILLING_WALLETS)
+        .update_one(
+            live_operation_filter(wallet, operation),
+            vec![doc! { "$set": {
+                "active_topup_expiry.lease_until": legacy_deadline(),
+                "active_topup_expiry.processing_lease_until": expiry_deadline(),
+                "active_topup_expiry.processing_lease_token": &operation.processing_token,
+                "active_topup_expiry.updated_at": "$$NOW",
+            }}],
         )
         .await?;
-    if update.modified_count == 0 {
-        return Ok(None);
-    }
-    operation.processing_token = processing_token;
-    operation.lease_until = lease_until;
-    operation.updated_at = now;
-    Ok(Some(operation))
+    Ok(result.matched_count == 1)
 }
 
 pub(super) async fn complete_expiry_operation(
+    db: &mongodb::Database,
+    lago: &dyn LagoApi,
+    wallet: &BillingWallet,
+    operation: PurchasedCreditExpiryOperation,
+    now: DateTime<Utc>,
+) -> AppResult<u64> {
+    complete_with_renewal(
+        db,
+        lago,
+        wallet,
+        operation,
+        now,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+}
+
+async fn complete_with_renewal(
+    db: &mongodb::Database,
+    lago: &dyn LagoApi,
+    wallet: &BillingWallet,
+    operation: PurchasedCreditExpiryOperation,
+    now: DateTime<Utc>,
+    cadence: std::time::Duration,
+) -> AppResult<u64> {
+    let work = complete_expiry_operation_inner(db, lago, wallet, operation.clone(), now);
+    run_with_expiry_renewal(db, wallet, &operation, work, cadence).await
+}
+
+async fn run_with_expiry_renewal(
+    db: &mongodb::Database,
+    wallet: &BillingWallet,
+    operation: &PurchasedCreditExpiryOperation,
+    work: impl std::future::Future<Output = AppResult<u64>>,
+    cadence: std::time::Duration,
+) -> AppResult<u64> {
+    // Renewal touches the wallet too: keep polling the work while a renewal
+    // waits for its transaction, and drop cancelled work before releasing.
+    let result = tokio::select! {
+        result = work => result,
+        result = async {
+            let mut renewal = tokio::time::interval(cadence);
+            renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            renewal.tick().await;
+            loop {
+                renewal.tick().await;
+                if !renew_expiry_operation(db, wallet, operation).await? {
+                    return Ok(0);
+                }
+            }
+        } => result,
+    };
+    // Release upgraded processing immediately. Preserve the legacy deadline
+    // when a POST may be uncertain: old binaries ignore dispatch markers.
+    // A stored receipt or definite refusal can safely release both deadlines.
+    db.collection::<BillingWallet>(BILLING_WALLETS)
+        .update_one(
+            operation_filter(wallet, operation),
+            vec![doc! { "$set": {
+                "active_topup_expiry.processing_lease_until": bson::DateTime::from_millis(0),
+                "active_topup_expiry.processing_lease_token": &operation.processing_token,
+                "active_topup_expiry.lease_until": { "$cond": [
+                    { "$ne": [{ "$ifNull": ["$active_topup_expiry.lago_void_transaction_id", bson::Bson::Null] }, bson::Bson::Null] },
+                    bson::DateTime::from_millis(0),
+                    { "$max": ["$active_topup_expiry.lease_until", retry_deadline()] },
+                ] },
+            }}],
+        )
+        .await?;
+    result
+}
+
+async fn complete_expiry_operation_inner(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
     wallet: &BillingWallet,
@@ -281,11 +388,15 @@ pub(super) async fn complete_expiry_operation(
     let void_transaction_id = match operation.lago_void_transaction_id.clone() {
         Some(transaction_id) => transaction_id,
         None => {
-            // The provider POST has no idempotency-key field. Its unique name
-            // is therefore the recovery key: after a timeout or process crash,
-            // history is checked before any retry can create another debit.
+            // Names are receipt labels, not provider idempotency keys.
             let operation_name = purchased_credit_expiry_transaction_name(&operation.operation_id);
-            let transactions = lago.wallet_transactions(wallet_id).await?;
+            let transactions = match lago.wallet_transactions(wallet_id).await {
+                Ok(transactions) => transactions,
+                Err(error) => {
+                    report_unresolved(db, wallet, &operation).await?;
+                    return Err(error);
+                }
+            };
             let recovered = transactions
                 .iter()
                 .find(|transaction| transaction.name.as_deref() == Some(operation_name.as_str()))
@@ -293,8 +404,37 @@ pub(super) async fn complete_expiry_operation(
             let transaction_id = match recovered {
                 Some(transaction_id) => transaction_id,
                 None => {
-                    lago.void_wallet_credits(wallet_id, operation.amount, &operation.operation_id)
-                        .await?
+                    let Some(window) = start_dispatch(db, wallet, &operation).await? else {
+                        report_unresolved(db, wallet, &operation).await?;
+                        return Ok(0);
+                    };
+                    match lago
+                        .dispatch_wallet_void(
+                            wallet_id,
+                            operation.amount,
+                            &operation.operation_id,
+                            &window,
+                        )
+                        .await
+                    {
+                        ProviderDispatch::Applied(receipt) => receipt,
+                        ProviderDispatch::Refused(error) => {
+                            db.collection::<BillingWallet>(BILLING_WALLETS).update_one(
+                                operation_filter(wallet, &operation),
+                                doc! { "$set": {
+                                    "active_topup_expiry.dispatch_started_at": bson::Bson::Null,
+                                    "active_topup_expiry.unresolved_reported_at": bson::Bson::Null,
+                                    "active_topup_expiry.lease_until": bson::DateTime::from_millis(0),
+                                }},
+                            ).await?;
+                            return Err(error);
+                        }
+                        ProviderDispatch::AlreadyExists(error)
+                        | ProviderDispatch::Ambiguous(error) => {
+                            report_unresolved(db, wallet, &operation).await?;
+                            return Err(error);
+                        }
+                    }
                 }
             };
             let update = db
@@ -372,6 +512,244 @@ pub(super) async fn complete_expiry_operation(
     } else {
         0
     })
+}
+
+fn processing_deadline() -> bson::Document {
+    // An old takeover changes processing_token but ignores the additive fields.
+    // Its original lease must remain authoritative until it expires.
+    doc! { "$cond": [
+        { "$eq": ["$active_topup_expiry.processing_lease_token", "$active_topup_expiry.processing_token"] },
+        { "$ifNull": ["$active_topup_expiry.processing_lease_until", "$active_topup_expiry.lease_until"] },
+        "$active_topup_expiry.lease_until",
+    ] }
+}
+
+fn retry_deadline() -> bson::Document {
+    doc! { "$cond": [
+        { "$ne": [{ "$ifNull": ["$active_topup_expiry.dispatch_started_at", bson::Bson::Null] }, bson::Bson::Null] },
+        { "$dateAdd": { "startDate": "$active_topup_expiry.dispatch_started_at",
+            "unit": "second", "amount": EXPIRY_REDISPATCH_QUIET_SECS } },
+        bson::DateTime::from_millis(0),
+    ] }
+}
+
+fn legacy_deadline() -> bson::Document {
+    doc! { "$max": [expiry_deadline(), retry_deadline(), "$active_topup_expiry.lease_until"] }
+}
+
+async fn start_dispatch(
+    db: &mongodb::Database,
+    wallet: &BillingWallet,
+    operation: &PurchasedCreditExpiryOperation,
+) -> AppResult<Option<DispatchWindow>> {
+    let mut filter = live_operation_filter(wallet, operation);
+    filter.insert(
+        "active_topup_expiry.lago_void_transaction_id",
+        bson::Bson::Null,
+    );
+    filter.insert(
+        "active_topup_expiry.dispatch_started_at",
+        operation
+            .dispatch_started_at
+            .map(bson::DateTime::from_chrono),
+    );
+    let retry = operation.dispatch_started_at.is_some();
+    if retry {
+        filter.insert(
+            "$expr",
+            doc! { "$and": [
+                { "$gt": [processing_deadline(), "$$NOW"] },
+                { "$lte": [retry_deadline(), "$$NOW"] },
+            ] },
+        );
+    }
+    let update = vec![doc! { "$set": {
+        "active_topup_expiry.dispatch_started_at": "$$NOW",
+        "active_topup_expiry.dispatch_attempts": { "$add": [
+            { "$max": [ { "$ifNull": ["$active_topup_expiry.dispatch_attempts", 0_i64] }, if retry { 1_i64 } else { 0_i64 } ] }, 1_i64
+        ] },
+        "active_topup_expiry.processing_lease_until": processing_deadline(),
+        "active_topup_expiry.processing_lease_token": &operation.processing_token,
+        // Keep old binaries from dispatching during the uncertainty period.
+        "active_topup_expiry.lease_until": { "$dateAdd": {
+            "startDate": "$$NOW", "unit": "second", "amount": EXPIRY_REDISPATCH_QUIET_SECS,
+        } },
+    }}];
+    let concern = mongodb::options::WriteConcern::builder()
+        .w(mongodb::options::Acknowledgment::Majority)
+        .journal(true)
+        .build();
+    if !retry {
+        let saved = db
+            .collection::<BillingWallet>(BILLING_WALLETS)
+            .update_one(filter, update)
+            .write_concern(concern)
+            .await?;
+        return Ok((saved.matched_count == 1).then(DispatchWindow::capture));
+    }
+    // The timestamp CAS and metadata audit commit together: neither a crash
+    // nor a transaction retry can record two events for one admitted attempt.
+    let mut session = db.client().start_session().await?;
+    let database = db.clone();
+    let captured_wallet = wallet.clone();
+    let captured_operation = operation.clone();
+    let attempt = session
+        .start_transaction()
+        .write_concern(concern)
+        .and_run2(async move |session| {
+            let result = redispatch_in_session(
+                &database,
+                session,
+                &captured_wallet,
+                &captured_operation,
+                &filter,
+                &update,
+            )
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+    let window = attempt.map(|_| DispatchWindow::capture());
+    if let Some(attempt) = attempt {
+        tracing::warn!(wallet_id = %wallet.id, operation_id = %operation.operation_id, attempt,
+            "Retrying unresolved purchased-credit expiry after 24 hours without a receipt");
+    }
+    Ok(window)
+}
+
+async fn redispatch_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    wallet: &BillingWallet,
+    operation: &PurchasedCreditExpiryOperation,
+    filter: &bson::Document,
+    update: &[bson::Document],
+) -> AppResult<Option<i64>> {
+    let saved = db
+        .collection::<BillingWallet>(BILLING_WALLETS)
+        .find_one_and_update(filter.clone(), update.to_vec())
+        .return_document(ReturnDocument::After)
+        .session(&mut *session)
+        .await?;
+    let Some(active) = saved.and_then(|wallet| wallet.active_topup_expiry) else {
+        return Ok(None);
+    };
+    let key = crate::services::audit_service::audit_chain_hmac_key().ok_or_else(|| {
+        crate::errors::AppError::Internal("Audit key unavailable for expiry retry".into())
+    })?;
+    crate::services::audit_service::log_system_event_in_session(
+        db,
+        session,
+        key,
+        "billing_expiry_redispatched",
+        serde_json::json!({
+            "wallet_id": wallet.id,
+            "operation_id": operation.operation_id,
+            "attempt": active.dispatch_attempts,
+        }),
+    )
+    .await?;
+    Ok(Some(active.dispatch_attempts))
+}
+
+async fn report_unresolved(
+    db: &mongodb::Database,
+    wallet: &BillingWallet,
+    operation: &PurchasedCreditExpiryOperation,
+) -> AppResult<()> {
+    if operation.unresolved_reported_at.is_some() {
+        return Ok(());
+    }
+    let mut filter = operation_filter(wallet, operation);
+    filter.insert(
+        "active_topup_expiry.dispatch_started_at",
+        doc! { "$ne": bson::Bson::Null },
+    );
+    filter.insert(
+        "active_topup_expiry.lago_void_transaction_id",
+        bson::Bson::Null,
+    );
+    filter.insert(
+        "active_topup_expiry.unresolved_reported_at",
+        bson::Bson::Null,
+    );
+    let reported = db
+        .collection::<BillingWallet>(BILLING_WALLETS)
+        .update_one(
+            filter,
+            vec![doc! { "$set": {
+                "active_topup_expiry.unresolved_reported_at": "$$NOW",
+            }}],
+        )
+        .await?;
+    if reported.modified_count == 1 {
+        tracing::error!(owner_id = %wallet.owner_id, operation_id = %operation.operation_id,
+            "Purchased-credit expiry dispatch is unresolved; retrying history, then the void after 24 hours without a receipt");
+    }
+    Ok(())
+}
+
+pub(super) async fn unresolved_diagnostics(
+    db: &mongodb::Database,
+) -> AppResult<Vec<super::BillingStartupDiagnostic>> {
+    let filter = doc! {
+        "active_topup_expiry.dispatch_started_at": { "$ne": bson::Bson::Null },
+        "active_topup_expiry.lago_void_transaction_id": bson::Bson::Null,
+        "$or": [
+            { "active_topup_expiry.unresolved_reported_at": { "$ne": bson::Bson::Null } },
+            { "$expr": { "$lte": [processing_deadline(), "$$NOW"] } },
+        ],
+    };
+    let collection = db.collection::<BillingWallet>(BILLING_WALLETS);
+    let count = collection.count_documents(filter.clone()).await?;
+    if count == 0 {
+        return Ok(vec![]);
+    }
+    let wallets: Vec<BillingWallet> = collection
+        .find(filter)
+        .sort(doc! { "active_topup_expiry.dispatch_started_at": 1 })
+        .limit(5)
+        .await?
+        .try_collect()
+        .await?;
+    let detected_at = wallets
+        .first()
+        .and_then(|w| w.active_topup_expiry.as_ref())
+        .and_then(|op| op.unresolved_reported_at.or(op.dispatch_started_at))
+        .unwrap_or_else(Utc::now);
+    let samples = wallets
+        .into_iter()
+        .filter_map(|wallet| {
+            let operation = wallet.active_topup_expiry?;
+            Some(format!(
+                "wallet {} / operation {} / retry after {}",
+                wallet.id,
+                operation.operation_id,
+                operation
+                    .dispatch_started_at
+                    .map(|at| (at + Duration::seconds(EXPIRY_REDISPATCH_QUIET_SECS)).to_rfc3339())
+                    .unwrap_or_default()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Ok(vec![super::BillingStartupDiagnostic {
+        code: "billing_expiry_unresolved".into(),
+        summary: "Purchased-credit expiry needs a provider receipt".into(),
+        detail: format!("{count} unresolved operations; first samples: {samples}"),
+        remediation: "No operator action is required. Each pass reads Lago history; if it stays empty, one retry becomes eligible 24 hours after the last dispatch (sample deadlines above), then waits for the next reconcile pass.".into(),
+        detected_at,
+    }])
+}
+
+fn live_operation_filter(
+    wallet: &BillingWallet,
+    operation: &PurchasedCreditExpiryOperation,
+) -> bson::Document {
+    let mut filter = operation_filter(wallet, operation);
+    filter.insert("$expr", doc! { "$gt": [processing_deadline(), "$$NOW"] });
+    filter
 }
 
 fn operation_filter(
@@ -754,6 +1132,11 @@ mod tests {
                 amount: "0.125".parse().unwrap(),
                 settled_at: now - Duration::days(366),
             }],
+            dispatch_attempts: 0,
+            processing_lease_until: None,
+            processing_lease_token: None,
+            dispatch_started_at: None,
+            unresolved_reported_at: None,
             lago_void_transaction_id: Some("void-first".into()),
             wallet_balance_applied: true,
             history_applied: false,
@@ -1070,6 +1453,11 @@ mod tests {
                 amount: crate::models::credits::Credits::from_micros(3_000_000),
                 settled_at: paid_at,
             }],
+            dispatch_attempts: 0,
+            processing_lease_until: None,
+            processing_lease_token: None,
+            dispatch_started_at: None,
+            unresolved_reported_at: None,
             lago_void_transaction_id: None,
             wallet_balance_applied: false,
             history_applied: false,
@@ -1202,3 +1590,6 @@ mod tests {
         assert!(wallet.active_topup_expiry.is_none());
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests;

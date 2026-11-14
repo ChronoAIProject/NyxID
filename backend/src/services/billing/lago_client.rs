@@ -1,5 +1,5 @@
 use crate::models::credits::Credits;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 
 use crate::errors::{AppError, AppResult};
 
-const HTTP_TIMEOUT_SECS: u64 = 20;
+pub(super) const HTTP_TIMEOUT_SECS: u64 = 20;
+// Bound sender scheduling delay well below either dispatch quiet period.
+const DISPATCH_SEND_WINDOW_SECS: u64 = 30;
 /// Lago attaches invoices to wallet transactions asynchronously; the payment
 /// URL endpoint 422s until then. ~2.4s of retries covers a busy worker while
 /// keeping the interactive checkout call responsive.
@@ -21,6 +23,63 @@ const INVOICE_FINALIZE_MAX_ATTEMPTS: u32 = 10;
 const INVOICE_FINALIZE_RETRY_DELAY_MS: u64 = 600;
 const WALLET_TRANSACTION_PAGE_SIZE: usize = 100;
 const MAX_WALLET_TRANSACTION_PAGES: u32 = 100;
+
+/// Sender age starts when the durable dispatch marker commit returns.
+#[derive(Clone, Debug)]
+pub struct DispatchWindow {
+    monotonic: Instant,
+    wall: SystemTime,
+}
+
+impl DispatchWindow {
+    pub fn capture() -> Self {
+        Self {
+            monotonic: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+
+    fn ensure_fresh(&self) -> Result<(), LagoError> {
+        let limit = Duration::from_secs(DISPATCH_SEND_WINDOW_SECS);
+        if self.monotonic.elapsed() > limit
+            || self.wall.elapsed().map_or(true, |elapsed| elapsed > limit)
+        {
+            return Err(LagoError::retry(
+                "Dispatch send window elapsed; awaiting readback",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn aged_for_test(&self, monotonic: Duration, wall: Duration) -> Self {
+        Self {
+            monotonic: self.monotonic - monotonic,
+            wall: self.wall - wall,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "dispatch_test_support.rs"]
+pub(super) mod dispatch_test_support;
+
+/// Outcome of a non-idempotent provider dispatch, before any readback.
+#[derive(Debug)]
+pub enum ProviderDispatch<T> {
+    Applied(T),
+    AlreadyExists(AppError),
+    Refused(AppError),
+    Ambiguous(AppError),
+}
+impl<T> ProviderDispatch<T> {
+    fn from_legacy(result: AppResult<T>) -> Self {
+        match result {
+            Ok(value) => Self::Applied(value),
+            Err(error) => Self::Ambiguous(error),
+        }
+    }
+}
 
 #[async_trait]
 pub trait LagoApi: Send + Sync {
@@ -35,6 +94,24 @@ pub trait LagoApi: Send + Sync {
     }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String>;
     async fn ensure_subscription(&self, customer_id: &str, plan_code: &str) -> AppResult<String>;
+    /// Readback only; the caller owns dispatch and quiet-period retry authority.
+    async fn find_wallet(&self, _customer_id: &str) -> AppResult<Option<LagoWallet>> {
+        Ok(None)
+    }
+    /// Dispatch after the caller has durably recorded the creation attempt.
+    async fn create_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
+        self.ensure_wallet(customer_id).await
+    }
+    async fn dispatch_wallet_create(
+        &self,
+        customer_id: &str,
+        window: &DispatchWindow,
+    ) -> ProviderDispatch<LagoWallet> {
+        if let Err(error) = window.ensure_fresh() {
+            return classify_dispatch(error);
+        }
+        ProviderDispatch::from_legacy(self.create_wallet(customer_id).await)
+    }
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
         Ok(LagoWallet {
             id: customer_id.to_string(),
@@ -138,6 +215,21 @@ pub trait LagoApi: Send + Sync {
         Err(AppError::BillingProviderUnavailable(format!(
             "Lago wallet credit voiding is not supported for wallet '{wallet_id}'"
         )))
+    }
+    async fn dispatch_wallet_void(
+        &self,
+        wallet_id: &str,
+        amount: Credits,
+        operation_id: &str,
+        window: &DispatchWindow,
+    ) -> ProviderDispatch<String> {
+        if let Err(error) = window.ensure_fresh() {
+            return classify_dispatch(error);
+        }
+        ProviderDispatch::from_legacy(
+            self.void_wallet_credits(wallet_id, amount, operation_id)
+                .await,
+        )
     }
     /// Create or update a NyxID-owned sum metric and its standard charge on
     /// the configured plan. Fakes opt out unless a pricing test needs it.
@@ -457,11 +549,26 @@ impl LagoClient {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, LagoError> {
+        self.json_request_with_window(method, path, body, None)
+            .await
+    }
+
+    async fn json_request_with_window(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        window: Option<&DispatchWindow>,
+    ) -> Result<Value, LagoError> {
         let mut builder = self.request(method, path);
         if let Some(body) = body {
             builder = builder.json(&body);
         }
 
+        // No await between the dual-clock check and handing the request to reqwest.
+        if let Some(window) = window {
+            window.ensure_fresh()?;
+        }
         let response = builder.send().await.map_err(LagoError::from_reqwest)?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
@@ -520,8 +627,20 @@ impl LagoApi for LagoClient {
             .await
         {
             Ok(_) => Ok(owner.external_customer_id.clone()),
-            Err(error) if error.is_conflict_like() => Ok(owner.external_customer_id.clone()),
-            Err(error) => Err(lago_error_to_app(error)),
+            Err(error) => {
+                match self
+                    .get_one_by_external_id("customers", "customer", &owner.external_customer_id)
+                    .await?
+                {
+                    Some(existing)
+                        if value_string(&existing, &["external_id"]).as_deref()
+                            == Some(owner.external_customer_id.as_str()) =>
+                    {
+                        Ok(owner.external_customer_id.clone())
+                    }
+                    _ => Err(lago_error_to_app(error)),
+                }
+            }
         }
     }
 
@@ -550,11 +669,25 @@ impl LagoApi for LagoClient {
             .await
         {
             Ok(_) => Ok(subscription_external_id(customer_id, plan_code)),
-            Err(error) if error.is_conflict_like() => {
-                Ok(subscription_external_id(customer_id, plan_code))
+            Err(error) => {
+                match self
+                    .get_one_by_external_id("subscriptions", "subscription", &external_id)
+                    .await?
+                {
+                    Some(existing)
+                        if value_string(&existing, &["external_id"]).as_deref()
+                            == Some(external_id.as_str()) =>
+                    {
+                        Ok(external_id)
+                    }
+                    _ => Err(lago_error_to_app(error)),
+                }
             }
-            Err(error) => Err(lago_error_to_app(error)),
         }
+    }
+
+    async fn find_wallet(&self, customer_id: &str) -> AppResult<Option<LagoWallet>> {
+        self.get_wallet_by_customer_id(customer_id).await
     }
 
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
@@ -562,33 +695,49 @@ impl LagoApi for LagoClient {
             return Ok(wallet);
         }
 
+        self.create_wallet(customer_id).await
+    }
+
+    async fn create_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
+        match self
+            .dispatch_wallet_create(customer_id, &DispatchWindow::capture())
+            .await
+        {
+            ProviderDispatch::Applied(wallet) => Ok(wallet),
+            ProviderDispatch::Refused(error) => Err(error),
+            ProviderDispatch::AlreadyExists(error) | ProviderDispatch::Ambiguous(error) => {
+                self.find_wallet(customer_id).await?.ok_or(error)
+            }
+        }
+    }
+
+    async fn dispatch_wallet_create(
+        &self,
+        customer_id: &str,
+        window: &DispatchWindow,
+    ) -> ProviderDispatch<LagoWallet> {
         let body = json!({
             "wallet": {
                 "external_customer_id": customer_id,
                 "currency": "USD",
+                // Lago v1.50 has a unique active (customer_id, code) index.
+                "code": "nyxid",
                 // Lago requires a credit-to-currency rate on wallet creation;
                 // NyxID credits are denominated 1:1 with the wallet currency.
                 "rate_amount": "1",
             }
         });
         match self
-            .json_request(reqwest::Method::POST, "wallets", Some(body))
+            .json_request_with_window(reqwest::Method::POST, "wallets", Some(body), Some(window))
             .await
         {
-            Ok(value) => extract_wallet(&value).ok_or_else(|| {
-                AppError::BillingProviderUnavailable(
-                    "Lago wallet creation response did not include a wallet id".to_string(),
-                )
-            }),
-            Err(error) if error.is_conflict_like() => self
-                .get_wallet_by_customer_id(customer_id)
-                .await?
-                .ok_or_else(|| {
-                    AppError::BillingProviderUnavailable(
-                        "Lago reported an existing wallet but it could not be read".to_string(),
-                    )
-                }),
-            Err(error) => Err(lago_error_to_app(error)),
+            Ok(value) => match extract_wallet(&value) {
+                Some(wallet) => ProviderDispatch::Applied(wallet),
+                None => ProviderDispatch::Ambiguous(AppError::BillingProviderUnavailable(
+                    "Lago wallet creation response did not include a wallet id".into(),
+                )),
+            },
+            Err(error) => classify_dispatch(error),
         }
     }
 
@@ -890,39 +1039,62 @@ impl LagoApi for LagoClient {
         amount: Credits,
         operation_id: &str,
     ) -> AppResult<String> {
+        match self
+            .dispatch_wallet_void(wallet_id, amount, operation_id, &DispatchWindow::capture())
+            .await
+        {
+            ProviderDispatch::Applied(receipt) => Ok(receipt),
+            ProviderDispatch::Refused(error)
+            | ProviderDispatch::AlreadyExists(error)
+            | ProviderDispatch::Ambiguous(error) => Err(error),
+        }
+    }
+
+    async fn dispatch_wallet_void(
+        &self,
+        wallet_id: &str,
+        amount: Credits,
+        operation_id: &str,
+        window: &DispatchWindow,
+    ) -> ProviderDispatch<String> {
         if amount <= Credits::ZERO {
-            return Err(AppError::ValidationError(
-                "wallet void amount must be positive".to_string(),
+            return ProviderDispatch::Refused(AppError::ValidationError(
+                "wallet void amount must be positive".into(),
             ));
         }
-        // Lago wallet credits have five decimal places. Transaction amounts
-        // returned by Lago are therefore multiples of 10 microcredits.
-        let amount = credits_to_lago_void_amount(amount)?;
+        // Lago wallet credits have five decimal places.
+        let amount = match credits_to_lago_void_amount(amount) {
+            Ok(amount) => amount,
+            Err(error) => return ProviderDispatch::Refused(error),
+        };
         let transaction_name = purchased_credit_expiry_transaction_name(operation_id);
-        let value = self
-            .json_request(
+        let value = match self
+            .json_request_with_window(
                 reqwest::Method::POST,
                 "wallet_transactions",
-                Some(json!({
-                    "wallet_transaction": {
-                        "wallet_id": wallet_id,
-                        "voided_credits": amount,
-                        "name": transaction_name,
-                    }
-                })),
+                Some(json!({ "wallet_transaction": {
+                    "wallet_id": wallet_id,
+                    "voided_credits": amount,
+                    "name": transaction_name,
+                }})),
+                Some(window),
             )
             .await
-            .map_err(lago_error_to_app)?;
-        value
+        {
+            Ok(value) => value,
+            Err(error) => return classify_dispatch(error),
+        };
+        match value
             .get("wallet_transactions")
             .and_then(Value::as_array)
             .and_then(|items| items.first())
             .and_then(|item| value_string(item, &["lago_id", "id"]))
-            .ok_or_else(|| {
-                AppError::BillingProviderUnavailable(
-                    "Lago wallet void response had no transaction id".to_string(),
-                )
-            })
+        {
+            Some(receipt) => ProviderDispatch::Applied(receipt),
+            None => ProviderDispatch::Ambiguous(AppError::BillingProviderUnavailable(
+                "Lago wallet void response had no transaction id".into(),
+            )),
+        }
     }
 
     async fn wallet_balance_credits(&self, customer_id: &str) -> AppResult<Credits> {
@@ -1533,6 +1705,7 @@ pub enum LagoErrorKind {
 pub struct LagoError {
     pub status: Option<StatusCode>,
     pub code: Option<String>,
+    pub code_conflict: bool,
     pub message: String,
     pub kind: LagoErrorKind,
 }
@@ -1542,6 +1715,7 @@ impl LagoError {
         Self {
             status: None,
             code: None,
+            code_conflict: false,
             message: message.into(),
             kind: LagoErrorKind::Retry,
         }
@@ -1551,6 +1725,7 @@ impl LagoError {
         Self {
             status: Some(StatusCode::UNPROCESSABLE_ENTITY),
             code: Some(code.into()),
+            code_conflict: false,
             message: message.into(),
             kind: LagoErrorKind::DeadLetter,
         }
@@ -1560,6 +1735,7 @@ impl LagoError {
         Self {
             status: Some(StatusCode::UNPROCESSABLE_ENTITY),
             code: Some("transaction_id_taken".to_string()),
+            code_conflict: false,
             message: message.into(),
             kind: LagoErrorKind::Duplicate,
         }
@@ -1569,12 +1745,20 @@ impl LagoError {
         Self {
             status: error.status(),
             code: None,
+            code_conflict: false,
             message: error.to_string(),
             kind: LagoErrorKind::Unavailable,
         }
     }
 
     fn from_response(status: StatusCode, json: Value, raw_text: String) -> Self {
+        // v1.50 Wallet#unique_code_per_customer adds :taken, translated to
+        // error_details.code = ["value_already_exist"] in the 422 response.
+        let code_conflict = status == StatusCode::UNPROCESSABLE_ENTITY
+            && json
+                .pointer("/error_details/code")
+                .and_then(Value::as_array)
+                .is_some_and(|codes| codes.iter().any(|code| code == "value_already_exist"));
         let code = lago_error_code(&json);
         // Keep Lago's error_details in the message: a bare "Unprocessable
         // Entity" hides which field validation failed.
@@ -1589,6 +1773,7 @@ impl LagoError {
         Self {
             status: Some(status),
             code,
+            code_conflict,
             message,
             kind,
         }
@@ -1600,6 +1785,18 @@ impl LagoError {
         // required field) must surface instead of being read back as an
         // existing resource.
         self.status == Some(StatusCode::CONFLICT) || self.kind == LagoErrorKind::Duplicate
+    }
+}
+
+fn classify_dispatch<T>(error: LagoError) -> ProviderDispatch<T> {
+    if error.status == Some(StatusCode::CONFLICT) || error.code_conflict {
+        ProviderDispatch::AlreadyExists(lago_error_to_app(error))
+    } else if error.status.is_some_and(|status| status.is_client_error()) {
+        // Including 429: the provider rejected this attempt before applying it.
+        ProviderDispatch::Refused(lago_error_to_app(error))
+    } else {
+        // Transport failure, 5xx, and non-success responses without a refusal.
+        ProviderDispatch::Ambiguous(lago_error_to_app(error))
     }
 }
 
@@ -2049,7 +2246,7 @@ mod tests {
         LagoApi, LagoClient, LagoError, LagoErrorKind, LagoEvent, LagoEventProperties,
         OwnerProvisionInput, PlanRate, ServicePriceSync, WALLET_TRANSACTION_PAGE_SIZE,
         classify_lago_failure, decimal_credits, extract_active_wallet,
-        extract_wallet_balance_credits, subscription_external_id,
+        extract_wallet_balance_credits,
     };
 
     async fn spawn_lago_mock(app: axum::Router) -> String {
@@ -2947,6 +3144,221 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisioning_r2_client_dispatch_outcomes_are_typed() {
+        use super::ProviderDispatch;
+        for (status, body, expected) in [
+            (400, json!({}), "refused"),
+            (401, json!({}), "refused"),
+            (403, json!({}), "refused"),
+            (404, json!({}), "refused"),
+            (408, json!({}), "refused"),
+            (409, json!({}), "exists"),
+            (
+                422,
+                json!({"code":"validation_errors","error_details":{"code":["value_already_exist"]}}),
+                "exists",
+            ),
+            (
+                422,
+                json!({"code":"validation_errors","error_details":{"name":["value_is_mandatory"]}}),
+                "refused",
+            ),
+            (429, json!({}), "refused"),
+            (500, json!({}), "ambiguous"),
+            (503, json!({}), "ambiguous"),
+            (200, json!({}), "ambiguous"),
+        ] {
+            let app = axum::Router::new()
+                .route(
+                    "/api/v1/wallets",
+                    axum::routing::get(|| async { axum::Json(json!({"wallets":[]})) }).post(
+                        move || {
+                            let body = body.clone();
+                            async move {
+                                (
+                                    axum::http::StatusCode::from_u16(status).unwrap(),
+                                    axum::Json(body),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    "/api/v1/wallet_transactions",
+                    axum::routing::post(move || async move {
+                        (
+                            axum::http::StatusCode::from_u16(status).unwrap(),
+                            axum::Json(json!({})),
+                        )
+                    }),
+                );
+            let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+            fn outcome<T>(outcome: ProviderDispatch<T>) -> &'static str {
+                match outcome {
+                    ProviderDispatch::Applied(_) => "applied",
+                    ProviderDispatch::AlreadyExists(_) => "exists",
+                    ProviderDispatch::Refused(_) => "refused",
+                    ProviderDispatch::Ambiguous(_) => "ambiguous",
+                }
+            }
+            assert_eq!(
+                outcome(
+                    client
+                        .dispatch_wallet_create("owner", &super::DispatchWindow::capture())
+                        .await
+                ),
+                expected,
+                "wallet status {status}"
+            );
+            let void_expected = if status == 422 { "refused" } else { expected };
+            assert_eq!(
+                outcome(
+                    client
+                        .dispatch_wallet_void(
+                            "wallet",
+                            Credits::from_whole(3),
+                            "op",
+                            &super::DispatchWindow::capture()
+                        )
+                        .await
+                ),
+                void_expected,
+                "void status {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provisioning_2468_wallet_create_sends_a_stable_provider_code() {
+        use std::sync::{Arc, Mutex};
+        let body = Arc::new(Mutex::new(serde_json::Value::Null));
+        let recorded = body.clone();
+        let app = axum::Router::new().route(
+            "/api/v1/wallets",
+            axum::routing::get(|| async { axum::Json(json!({"wallets":[]})) }).post(
+                move |axum::Json(value): axum::Json<serde_json::Value>| {
+                    let body = recorded.clone();
+                    async move {
+                        *body.lock().unwrap() = value;
+                        axum::Json(json!({"wallet":{"lago_id":"canonical","credits_balance":"0"}}))
+                    }
+                },
+            ),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+        client.ensure_wallet("owner").await.unwrap();
+        assert_eq!(body.lock().unwrap()["wallet"]["code"], "nyxid");
+    }
+
+    #[tokio::test]
+    async fn provisioning_2468_wallet_create_has_stable_code_and_reads_back_ambiguous_result() {
+        use std::sync::{Arc, Mutex};
+        let calls = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let get_calls = calls.clone();
+        let post_calls = calls.clone();
+        let app = axum::Router::new().route("/api/v1/wallets",
+            axum::routing::get(move || {
+                let calls = get_calls.clone();
+                async move {
+                    let wallets = if calls.lock().unwrap().is_empty() { vec![] } else {
+                        vec![json!({"lago_id":"canonical", "status":"active", "credits_balance":"0"})]
+                    };
+                    axum::Json(json!({"wallets":wallets}))
+                }
+            }).post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let calls = post_calls.clone();
+                async move {
+                    calls.lock().unwrap().push(body);
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }));
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+        let result = client.ensure_wallet("owner").await;
+        assert!(
+            result.is_ok(),
+            "accepted ambiguous create must be read back: {result:?}"
+        );
+        assert_eq!(result.unwrap().id, "canonical");
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap()[0]["wallet"]["code"], "nyxid");
+    }
+
+    #[tokio::test]
+    async fn provisioning_2468_deterministic_creates_read_back_ambiguous_responses() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        for resource in ["customers", "subscriptions"] {
+            let accepted = Arc::new(AtomicBool::new(false));
+            let creates = Arc::new(AtomicUsize::new(0));
+            let for_get = accepted.clone();
+            let for_post = accepted.clone();
+            let for_count = creates.clone();
+            let wrapper = if resource == "customers" {
+                "customer"
+            } else {
+                "subscription"
+            };
+            let external_id = if resource == "customers" {
+                "owner"
+            } else {
+                "owner:starter"
+            };
+            let app = axum::Router::new()
+                .route(
+                    &format!("/api/v1/{resource}/{{external_id}}"),
+                    axum::routing::get(
+                        move |axum::extract::Path(id): axum::extract::Path<String>| {
+                            let accepted = for_get.clone();
+                            async move {
+                                assert_eq!(id, external_id);
+                                if accepted.load(Ordering::SeqCst) {
+                                    (
+                                        axum::http::StatusCode::OK,
+                                        axum::Json(json!({(wrapper):{"external_id":external_id}})),
+                                    )
+                                } else {
+                                    (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({})))
+                                }
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    &format!("/api/v1/{resource}"),
+                    axum::routing::post(move || {
+                        let accepted = for_post.clone();
+                        let creates = for_count.clone();
+                        async move {
+                            creates.fetch_add(1, Ordering::SeqCst);
+                            accepted.store(true, Ordering::SeqCst);
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        }
+                    }),
+                );
+            let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+            let result = if resource == "customers" {
+                client
+                    .ensure_customer(&OwnerProvisionInput {
+                        external_customer_id: "owner".into(),
+                        name: None,
+                        email: None,
+                    })
+                    .await
+            } else {
+                client.ensure_subscription("owner", "starter").await
+            };
+            assert!(
+                result.is_ok(),
+                "{resource} ambiguous response needs readback: {result:?}"
+            );
+            assert_eq!(result.unwrap(), external_id);
+            assert_eq!(creates.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn ensure_customer_gets_existing_customer_before_create() {
         async fn get_customer() -> axum::Json<serde_json::Value> {
             axum::Json(json!({
@@ -3353,7 +3765,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_subscription_treats_create_conflict_as_existing() {
+    async fn provisioning_2468_subscription_conflict_without_readback_is_not_success() {
         async fn subscription_not_found() -> axum::http::StatusCode {
             axum::http::StatusCode::NOT_FOUND
         }
@@ -3379,14 +3791,11 @@ mod tests {
         .await;
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
 
-        let subscription_id = client
-            .ensure_subscription("owner-1", "starter")
-            .await
-            .expect("ensure subscription");
-
-        assert_eq!(
-            subscription_id,
-            subscription_external_id("owner-1", "starter")
+        assert!(
+            client
+                .ensure_subscription("owner-1", "starter")
+                .await
+                .is_err()
         );
     }
 
