@@ -45,27 +45,23 @@ pub async fn handle_lago_webhook_event(
     lago: Option<&dyn LagoApi>,
     event_type: &str,
     payload: &Value,
+    tax_cache_ttl_secs: u64,
 ) -> AppResult<LagoWebhookOutcome> {
     if event_type.starts_with("customer.")
         || event_type.starts_with("subscription.")
         || event_type.starts_with("plan.")
     {
-        let profiles =
-            db.collection::<bson::Document>(crate::models::billing_tax_profile::COLLECTION_NAME);
         if let Some(customer) = extract_external_customer_id(payload) {
             if let Some(wallet) = db
                 .collection::<BillingWallet>(BILLING_WALLET)
                 .find_one(doc! {"lago_customer_id": &customer})
                 .await?
             {
-                profiles
-                    .update_many(
-                        doc! {"owner_id": &wallet.owner_id},
-                        doc! {"$set": {"fetched_at": bson::DateTime::from_millis(0)}},
-                    )
-                    .await?;
-                if let Some(lago) = lago
-                    && let Err(error) = super::taxes::refresh(db, lago, &wallet).await
+                let invalidated = super::taxes::invalidate_owner(db, &wallet.owner_id).await?;
+                if let Some(wallet) = invalidated
+                    && let Some(lago) = lago
+                    && let Err(error) =
+                        super::taxes::refresh(db, lago, &wallet, tax_cache_ttl_secs).await
                 {
                     // Keep the invalidated profile stale and complete unrelated
                     // entitlement handling (notably terminated subscriptions).
@@ -821,6 +817,8 @@ mod tests {
         let now = Utc::now();
         BillingWallet {
             snapshot_generation: 0,
+            tax_generation: 0,
+            tax_guard_token: None,
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.to_string(),
             lago_customer_id: owner_id.to_string(),
@@ -935,6 +933,7 @@ mod tests {
              "external_customer_id": owner_id }
              }
             ),
+            900,
         )
         .await
         .expect("handle webhook");
@@ -987,6 +986,7 @@ mod tests {
              }
              }
             ),
+            900,
         )
         .await
         .expect("handle webhook");
@@ -1030,6 +1030,7 @@ mod tests {
                             }
                         }
             ),
+            900,
         )
         .await
         .expect("handle webhook");
@@ -1071,6 +1072,7 @@ mod tests {
                 "invoice": { "lago_id": "invoice-deferred" },
                 "wallet": { "external_customer_id": "owner" }
             }),
+            900,
         )
         .await
         .unwrap();
@@ -1173,7 +1175,7 @@ mod tests {
             };
             let payload = json!({"wallet":{"external_customer_id":"owner"}});
             let (old_result, ()) = tokio::join!(
-                handle_lago_webhook_event(&db, Some(&old_lago), "wallet.updated", &payload),
+                handle_lago_webhook_event(&db, Some(&old_lago), "wallet.updated", &payload, 900),
                 async {
                     barrier.started.notified().await;
                     let newer = handle_lago_webhook_event(
@@ -1181,6 +1183,7 @@ mod tests {
                         Some(&new_lago),
                         "invoice.paid_credit_added",
                         &payload,
+                        900,
                     )
                     .await
                     .unwrap();
@@ -1319,7 +1322,7 @@ mod tests {
                     "wallet": {"external_customer_id": wallet.lago_customer_id},
                     "invoice": {"lago_id": "snapshot-paid"},
                 });
-                handle_lago_webhook_event(db, Some(lago), event, &payload)
+                handle_lago_webhook_event(db, Some(lago), event, &payload, 900)
                     .await
                     .unwrap();
             }
@@ -1426,9 +1429,15 @@ mod tests {
                 let database = db.clone();
                 let payload = json!({"wallet":{"external_customer_id":wallet.lago_customer_id}});
                 let task = tokio::spawn(async move {
-                    handle_lago_webhook_event(&database, Some(&lago), "wallet.updated", &payload)
-                        .await
-                        .unwrap()
+                    handle_lago_webhook_event(
+                        &database,
+                        Some(&lago),
+                        "wallet.updated",
+                        &payload,
+                        900,
+                    )
+                    .await
+                    .unwrap()
                 });
                 barrier.started.notified().await;
                 tasks.push((barrier, task));
@@ -1727,6 +1736,7 @@ mod tests {
                     Some(&new),
                     "wallet.updated",
                     &json!({"wallet":{"external_customer_id":wallet.lago_customer_id}}),
+                    900,
                 )
                 .await
                 .unwrap();
@@ -1922,7 +1932,7 @@ mod tests {
                 "lago_id": "unrelated-event-id",
             });
             assert!(
-                handle_lago_webhook_event(&db, Some(&failure), event, &payload)
+                handle_lago_webhook_event(&db, Some(&failure), event, &payload, 900)
                     .await
                     .is_err()
             );

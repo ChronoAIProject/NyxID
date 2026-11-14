@@ -933,6 +933,7 @@ async fn paid_provider_evidence(images: bool, family: bool) {
     };
     db.collection::<BillingTaxProfile>("billing_tax_profiles")
         .insert_one(BillingTaxProfile {
+            revision: 0,
             id: actor.into(),
             owner_id: actor.into(),
             subscription_id: "subscription".into(),

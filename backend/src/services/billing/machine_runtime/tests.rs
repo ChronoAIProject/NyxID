@@ -1768,6 +1768,17 @@ async fn runtime_price_retry_is_leased_bounded_and_retains_historical_versions()
     f.db.drop().await.unwrap();
 }
 
+fn assert_only_tax_guard_changed(mut before: Document, mut after: Document) {
+    // Cold tax publication must make a real wallet write to serialize with
+    // owner invalidation. Every identity, money and other metadata field stays.
+    assert_eq!(before.remove("tax_guard_token"), Some(bson::Bson::Null));
+    let Some(bson::Bson::String(token)) = after.remove("tax_guard_token") else {
+        panic!("cold tax publication must commit its wallet guard");
+    };
+    assert!(Uuid::parse_str(&token).is_ok());
+    assert_eq!(after, before);
+}
+
 #[tokio::test]
 async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_mutations() {
     let f = fixture("runtime_quote_preflight").await;
@@ -1807,7 +1818,15 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
     assert_eq!(view.credits_per_second, Some(f.rate.credits_per_second));
     assert!(!view.reservation_guarantee);
     assert_eq!(view.funds.unwrap().estimated_seconds, "250000");
-    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), before_wallet);
+    assert_only_tax_guard_changed(before_wallet, bson::to_document(&wallet(&f).await).unwrap());
+    let warm_wallet = bson::to_document(&wallet(&f).await).unwrap();
+    let warm = f
+        .billing
+        .machine_runtime_preflight(&f.owner, "remote-machine", None)
+        .await
+        .unwrap();
+    assert!(warm.ready);
+    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), warm_wallet);
     for collection in [
         QUOTE_COLLECTION,
         RUN_COLLECTION,

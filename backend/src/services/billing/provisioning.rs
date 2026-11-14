@@ -23,6 +23,13 @@ use super::lago_client::{
 const WALLET_CREATE_QUIET_SECS: u64 = HTTP_TIMEOUT_SECS * 6;
 use crate::services::coordination_service::{LeaseStore, LeaseToken, cluster_lease_runtime};
 
+#[derive(Clone, Copy)]
+pub struct WalletProvisioningOptions<'a> {
+    pub plan_code: &'a str,
+    pub default_overdraft_cap_credits: i64,
+    pub tax_cache_ttl_secs: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvisionedWallet {
     pub wallet: BillingWallet,
@@ -58,9 +65,13 @@ pub async fn ensure_owner_wallet(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
     owner_id: &str,
-    plan_code: &str,
-    default_overdraft_cap_credits: i64,
+    options: WalletProvisioningOptions<'_>,
 ) -> AppResult<ProvisionedWallet> {
+    let WalletProvisioningOptions {
+        plan_code,
+        default_overdraft_cap_credits,
+        tax_cache_ttl_secs,
+    } = options;
     super::exact_migration::require_ready(db).await?;
     if let Some(wallet) = get_wallet(db, owner_id).await? {
         return Ok(ProvisionedWallet {
@@ -134,7 +145,8 @@ pub async fn ensure_owner_wallet(
     }
     if let Ok(provisioned) = &result
         && provisioned.created
-        && let Err(error) = super::taxes::refresh(db, lago, &provisioned.wallet).await
+        && let Err(error) =
+            super::taxes::refresh(db, lago, &provisioned.wallet, tax_cache_ttl_secs).await
     {
         tracing::warn!(%owner_id, %error, "Initial Lago tax profile refresh failed");
     }
@@ -252,6 +264,8 @@ async fn provision_under_lease(
     let now = Utc::now();
     let wallet = BillingWallet {
         snapshot_generation: 0,
+        tax_generation: 0,
+        tax_guard_token: None,
         id: Uuid::new_v4().to_string(),
         owner_id: owner_id.to_string(),
         lago_customer_id: customer_id,
@@ -367,8 +381,7 @@ pub async fn create_topup_checkout(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
     owner_id: &str,
-    plan_code: &str,
-    default_overdraft_cap_credits: i64,
+    options: WalletProvisioningOptions<'_>,
     amount_credits: i64,
     idempotency_key: &str,
 ) -> AppResult<TopUpCheckout> {
@@ -399,8 +412,7 @@ pub async fn create_topup_checkout(
         }
     }
 
-    let provisioned =
-        ensure_owner_wallet(db, lago, owner_id, plan_code, default_overdraft_cap_credits).await?;
+    let provisioned = ensure_owner_wallet(db, lago, owner_id, options).await?;
     let Some(lago_wallet_id) = provisioned.wallet.lago_wallet_id.clone() else {
         return Err(AppError::BillingProviderUnavailable(
             "billing wallet is missing a Lago wallet id".to_string(),
@@ -556,8 +568,7 @@ pub async fn create_topup_checkout(
 pub async fn backfill_existing_owner_wallets(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
-    plan_code: &str,
-    default_overdraft_cap_credits: i64,
+    options: WalletProvisioningOptions<'_>,
 ) -> AppResult<BillingBackfillStats> {
     let mut cursor = db
         .collection::<User>(USERS)
@@ -566,9 +577,7 @@ pub async fn backfill_existing_owner_wallets(
     let mut stats = BillingBackfillStats::default();
     while let Some(user) = cursor.try_next().await? {
         stats.scanned += 1;
-        match ensure_owner_wallet(db, lago, &user.id, plan_code, default_overdraft_cap_credits)
-            .await
-        {
+        match ensure_owner_wallet(db, lago, &user.id, options).await {
             Ok(outcome) if outcome.created => stats.provisioned += 1,
             Ok(_) => stats.existing += 1,
             Err(error) => {
@@ -688,8 +697,8 @@ mod tests {
     use crate::test_utils::connect_test_database;
 
     use super::{
-        create_topup_checkout, deterministic_topup_session_id, ensure_owner_wallet,
-        normalize_idempotency_key,
+        WalletProvisioningOptions, create_topup_checkout, deterministic_topup_session_id,
+        ensure_owner_wallet, normalize_idempotency_key,
     };
 
     #[test]
@@ -708,6 +717,14 @@ mod tests {
         assert!(first.starts_with("btu_"));
     }
 
+    fn wallet_options(cap: i64) -> WalletProvisioningOptions<'static> {
+        WalletProvisioningOptions {
+            plan_code: "starter",
+            default_overdraft_cap_credits: cap,
+            tax_cache_ttl_secs: 900,
+        }
+    }
+
     #[tokio::test]
     async fn ensure_owner_wallet_is_idempotent_and_persists_lago_ids() {
         let Some(db) = connect_test_database("billing_provision_wallet").await else {
@@ -716,10 +733,10 @@ mod tests {
         let owner_id = insert_owner(&db, "owner@example.com").await;
         let lago = FakeLago::default();
 
-        let first = ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7)
+        let first = ensure_owner_wallet(&db, &lago, &owner_id, wallet_options(7))
             .await
             .expect("provision wallet");
-        let second = ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7)
+        let second = ensure_owner_wallet(&db, &lago, &owner_id, wallet_options(7))
             .await
             .expect("replay provision wallet");
 
@@ -786,8 +803,26 @@ mod tests {
         let lago = FakeLago::with_wallet_barrier(1);
 
         let (first, second) = tokio::join!(
-            ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7),
-            ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7),
+            ensure_owner_wallet(
+                &db,
+                &lago,
+                &owner_id,
+                WalletProvisioningOptions {
+                    plan_code: "starter",
+                    default_overdraft_cap_credits: 7,
+                    tax_cache_ttl_secs: 900
+                }
+            ),
+            ensure_owner_wallet(
+                &db,
+                &lago,
+                &owner_id,
+                WalletProvisioningOptions {
+                    plan_code: "starter",
+                    default_overdraft_cap_credits: 7,
+                    tax_cache_ttl_secs: 900
+                }
+            ),
         );
         let first = first.expect("first concurrent provision");
         let second = second.expect("second concurrent provision");
@@ -823,7 +858,7 @@ mod tests {
         let owner_id = insert_owner(&db, "wallet-failure@example.com").await;
         let lago = FakeLago::with_wallet_failures(1);
 
-        let error = ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7)
+        let error = ensure_owner_wallet(&db, &lago, &owner_id, wallet_options(7))
             .await
             .expect_err("first wallet provider call should fail");
         assert!(matches!(
@@ -838,7 +873,7 @@ mod tests {
             0
         );
 
-        let retry = ensure_owner_wallet(&db, &lago, &owner_id, "starter", 7)
+        let retry = ensure_owner_wallet(&db, &lago, &owner_id, wallet_options(7))
             .await
             .expect("retry wallet provisioning");
         assert!(retry.created);
@@ -863,7 +898,7 @@ mod tests {
         let owner = insert_owner(&db, "takeover@example.com").await;
         let lago = FakeLago::with_wallet_barrier(2);
         let (first, ()) = tokio::join!(
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0),
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)),
             async {
                 lago.wallet_entered.notified().await;
                 db.collection::<bson::Document>("coordination_leases")
@@ -873,7 +908,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                let error = ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+                let error = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
                     .await
                     .unwrap_err();
                 assert!(error.to_string().contains("unresolved"));
@@ -885,7 +920,7 @@ mod tests {
             first.is_err(),
             "a stale token cannot commit a wallet and erase a successor checkpoint"
         );
-        let recovered = ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+        let recovered = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
             .await
             .unwrap();
         assert!(recovered.created);
@@ -903,13 +938,13 @@ mod tests {
         let owner = insert_owner(&db, "hidden@example.com").await;
         let lago = FakeLago::with_wallet_failures(1);
         assert!(
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
                 .await
                 .is_err()
         );
         let receipt = lago.wallet_receipt.lock().unwrap().take().unwrap();
         for _ in 0..3 {
-            let error = ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+            let error = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("unresolved"));
@@ -918,7 +953,7 @@ mod tests {
         assert_eq!(lago.customer_calls.load(Ordering::SeqCst), 1);
         assert_eq!(lago.subscription_calls.load(Ordering::SeqCst), 1);
         *lago.wallet_receipt.lock().unwrap() = Some(receipt);
-        let recovered = ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+        let recovered = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
             .await
             .unwrap();
         assert!(recovered.created);
@@ -933,11 +968,11 @@ mod tests {
         let lago = FakeLago::default();
         lago.wallet_refusals.store(1, Ordering::SeqCst);
         assert!(
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
                 .await
                 .is_err()
         );
-        let retry = ensure_owner_wallet(&db, &lago, &owner, "starter", 0).await;
+        let retry = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)).await;
         let checkpoints = db
             .collection::<bson::Document>("coordination_leases")
             .count_documents(doc! {"_id": format!("billing:provision:{owner}")})
@@ -958,7 +993,7 @@ mod tests {
         let owner = insert_owner(&db, "quiet@example.com").await;
         let lago = FakeLago::with_wallet_failures(1);
         assert!(
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
                 .await
                 .is_err()
         );
@@ -972,7 +1007,7 @@ mod tests {
             .unwrap();
         for _ in 0..3 {
             assert!(
-                ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+                ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
                     .await
                     .is_err()
             );
@@ -986,8 +1021,8 @@ mod tests {
             .await
             .unwrap();
         let (a, b) = tokio::join!(
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0),
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)),
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
         );
         let count = db
             .collection::<bson::Document>("coordination_leases")
@@ -1012,14 +1047,14 @@ mod tests {
             ..FakeLago::with_wallet_barrier(2)
         };
         let (first, second) = tokio::join!(
-            ensure_owner_wallet(&db, &lago, &owner, "starter", 0),
+            ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)),
             async {
                 lago.wallet_entered.notified().await;
                 db.collection::<bson::Document>("coordination_leases").update_one(
                     doc! {"_id": format!("billing:provision:{owner}")},
                     doc! {"$set": {"expires_at": bson::DateTime::from_millis(0), "checkpoint.dispatch_started_at": bson::DateTime::from_millis(0)}}
                 ).await.unwrap();
-                let second = ensure_owner_wallet(&db, &lago, &owner, "starter", 0).await;
+                let second = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)).await;
                 if second.is_err() && lago.wallet_creates.load(Ordering::SeqCst) == 1 {
                     lago.wallet_barrier.as_ref().unwrap().wait().await;
                 }
@@ -1045,7 +1080,7 @@ mod tests {
     async fn provisioning_r2_success_removes_checkpoint() {
         let db = connect_test_database("provision_r2_cleanup").await.unwrap();
         let owner = insert_owner(&db, "cleanup@example.com").await;
-        ensure_owner_wallet(&db, &FakeLago::default(), &owner, "starter", 0)
+        ensure_owner_wallet(&db, &FakeLago::default(), &owner, wallet_options(0))
             .await
             .unwrap();
         let count = db
@@ -1072,7 +1107,7 @@ mod tests {
             dispatch_http: Some(http.clone()),
             ..Default::default()
         };
-        let result = ensure_owner_wallet(&db, &lago, &owner, "starter", 0).await;
+        let result = ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)).await;
         let saved = db
             .collection::<bson::Document>("coordination_leases")
             .find_one(doc! {"_id": format!("billing:provision:{owner}")})
@@ -1120,7 +1155,8 @@ mod tests {
             let lago = FakeLago::with_wallet_barrier(2);
             let shutdown = crate::services::shutdown::Runtime::default();
             let request = shutdown.request();
-            let mut operation = Box::pin(ensure_owner_wallet(&db, &lago, &owner, "starter", 0));
+            let mut operation =
+                Box::pin(ensure_owner_wallet(&db, &lago, &owner, wallet_options(0)));
             tokio::select! {
                 result = &mut operation => panic!("provisioning unexpectedly finished: {result:?}"),
                 () = lago.wallet_entered.notified() => {},
@@ -1203,14 +1239,14 @@ mod tests {
             .await
             .unwrap();
         commands.lock().unwrap().clear();
-        ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+        ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
             .await
             .unwrap();
         println!(
             "PROVISION_COMMANDS cold: {:?}",
             std::mem::take(&mut *commands.lock().unwrap())
         );
-        ensure_owner_wallet(&db, &lago, &owner, "starter", 0)
+        ensure_owner_wallet(&db, &lago, &owner, wallet_options(0))
             .await
             .unwrap();
         let warm = std::mem::take(&mut *commands.lock().unwrap());
@@ -1260,10 +1296,10 @@ mod tests {
         let owner_id = insert_owner(&db, "topup@example.com").await;
         let lago = FakeLago::default();
 
-        let first = create_topup_checkout(&db, &lago, &owner_id, "starter", 0, 50, "topup-1")
+        let first = create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), 50, "topup-1")
             .await
             .expect("create checkout");
-        let second = create_topup_checkout(&db, &lago, &owner_id, "starter", 0, 50, "topup-1")
+        let second = create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), 50, "topup-1")
             .await
             .expect("replay checkout");
 
@@ -1311,10 +1347,10 @@ mod tests {
         let owner_id = insert_owner(&db, "conflict@example.com").await;
         let lago = FakeLago::default();
 
-        create_topup_checkout(&db, &lago, &owner_id, "starter", 0, 50, "topup-1")
+        create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), 50, "topup-1")
             .await
             .expect("create checkout");
-        let error = create_topup_checkout(&db, &lago, &owner_id, "starter", 0, 51, "topup-1")
+        let error = create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), 51, "topup-1")
             .await
             .expect_err("amount mismatch must fail");
 
@@ -1331,7 +1367,7 @@ mod tests {
 
         for amount in [0_i64, -100] {
             let error =
-                create_topup_checkout(&db, &lago, &owner_id, "starter", 0, amount, "topup-np")
+                create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), amount, "topup-np")
                     .await
                     .expect_err("non-positive amount must be rejected");
             assert!(
@@ -1361,8 +1397,7 @@ mod tests {
             &db,
             &lago,
             &owner_id,
-            "starter",
-            0,
+            wallet_options(0),
             50,
             "topup-provider-failure",
         )
@@ -1385,8 +1420,7 @@ mod tests {
             &db,
             &lago,
             &owner_id,
-            "starter",
-            0,
+            wallet_options(0),
             50,
             "topup-provider-failure",
         )

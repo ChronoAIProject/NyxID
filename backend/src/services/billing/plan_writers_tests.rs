@@ -62,6 +62,9 @@ struct Provider {
     updates: Mutex<Vec<Value>>,
     get_gate: Gate,
     put_gate: Gate,
+    tax_gate: Gate,
+    tax_reads: AtomicUsize,
+    tax_rate: AtomicUsize,
     ignore_put: AtomicBool,
     wrong_flags: AtomicBool,
     stuck_codes: Mutex<Vec<String>>,
@@ -208,6 +211,19 @@ impl Fixture {
                 get(metric).put(update_metric),
             )
             .route("/api/v1/billable_metrics", post(create_metric))
+            .route("/api/v1/customers/owner", get(tax_admission::customer))
+            .route(
+                "/api/v1/subscriptions/sub",
+                get(tax_admission::subscription),
+            )
+            .route(
+                "/api/v1/billing_entities/entity",
+                get(tax_admission::entity),
+            )
+            .route(
+                "/api/v1/subscriptions/sub/entitlements",
+                get(tax_admission::entitlements),
+            )
             .with_state(provider.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -821,3 +837,6 @@ async fn already_synced_machine_resync_retries_dirty_tax_and_cache_completion() 
 
 #[path = "plan_sync_audit_tests.rs"]
 mod audit;
+
+#[path = "plan_writer_tax_tests.rs"]
+mod tax_admission;

@@ -95,6 +95,13 @@ pub struct BillingWallet {
     /// Provider-read fence; local reservation/settlement counters are separate.
     #[serde(default)]
     pub snapshot_generation: i64,
+    /// Orders owner tax invalidation independently of balance snapshots.
+    #[serde(default)]
+    pub tax_generation: i64,
+    /// A real write conflict for cold/changed-plan tax publication.
+    #[serde(default)]
+    #[schema(ignore)]
+    pub tax_guard_token: Option<String>,
     #[serde(default)]
     #[serde(with = "crate::models::credits::whole")]
     pub balance_credits: Credits,
@@ -166,6 +173,8 @@ mod tests {
         let now = Utc::now();
         let wallet = BillingWallet {
             snapshot_generation: 0,
+            tax_generation: 0,
+            tax_guard_token: None,
             id: "wallet-1".to_string(),
             owner_id: "owner-1".to_string(),
             lago_customer_id: "owner-1".to_string(),

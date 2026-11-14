@@ -1312,6 +1312,8 @@ mod tests {
         let now = Utc::now();
         BillingWallet {
             snapshot_generation: 0,
+            tax_generation: 0,
+            tax_guard_token: None,
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.to_string(),
             lago_customer_id: owner_id.to_string(),

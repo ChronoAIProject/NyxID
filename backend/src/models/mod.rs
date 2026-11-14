@@ -19,6 +19,7 @@ pub mod billing_plan_sync;
 pub mod billing_rate_cache;
 pub mod billing_rate_epoch;
 pub mod billing_target;
+pub mod billing_tax_plan_epoch;
 pub mod billing_tax_profile;
 pub mod billing_topup_session;
 pub mod billing_wallet;
