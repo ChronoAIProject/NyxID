@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::{
     platform_onboarding_test_support::{self as support, Fixture},
     platform_provisioning_service as provisioning, platform_runtime_service as runtime,

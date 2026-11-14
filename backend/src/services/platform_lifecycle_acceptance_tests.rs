@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::{
     channel_routing_service as routes, platform_bot_config_service as profiles,
     platform_onboarding_test_support as support, platform_provisioning_service as provisioning,

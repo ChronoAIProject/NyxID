@@ -121,10 +121,10 @@ impl ModelRequest {
             setup: false,
             approval_interactive: (!chat.guest
                 && !chat.collaboration_thread
-                && !chat
+                && chat
                     .org_agent_access
                     .as_ref()
-                    .is_some_and(|a| a.shared().is_some()))
+                    .is_none_or(|a| a.shared().is_none()))
             .then_some(false),
             presentation_loaded: false,
             completion: Arc::new(Completion {

@@ -67,7 +67,7 @@ impl Migration {
             )
             .find_one(doc! {"_id": key, "user_id": owner})
             .await?;
-            if !key.is_some_and(|key| key.credential_type == "node_managed") {
+            if key.is_none_or(|key| key.credential_type != "node_managed") {
                 continue;
             }
             if !access.can_write() || !access.allows_resource(&service.id) {

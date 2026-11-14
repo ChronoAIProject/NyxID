@@ -694,7 +694,7 @@ mod tests {
         )
         .unwrap();
         assert!(value.get("telegram_username").is_none());
-        assert!(value.to_string().find("nyxid_").is_none());
+        assert!(!value.to_string().contains("nyxid_"));
         assert_eq!(value["id"], channel.id);
     }
 

@@ -713,25 +713,23 @@ fn discord_command_text(data: &Value) -> AppResult<String> {
                     return Err(refused());
                 }
                 Ok(format!("/confirm {value}"))
-            } else {
-                if value.trim_start().starts_with('/')
-                    || value.contains("nyx_pli_")
-                    || value.contains("#intent_token=")
-                    || value
-                        .split_whitespace()
-                        .next()
-                        .is_some_and(|verb| verb.eq_ignore_ascii_case("confirm"))
-                {
-                    Ok("/unsupported".into())
-                } else if value
+            } else if value.trim_start().starts_with('/')
+                || value.contains("nyx_pli_")
+                || value.contains("#intent_token=")
+                || value
                     .split_whitespace()
                     .next()
-                    .is_some_and(|verb| verb.eq_ignore_ascii_case("faq"))
-                {
-                    Ok(text_controls(value))
-                } else {
-                    Ok(value.into())
-                }
+                    .is_some_and(|verb| verb.eq_ignore_ascii_case("confirm"))
+            {
+                Ok("/unsupported".into())
+            } else if value
+                .split_whitespace()
+                .next()
+                .is_some_and(|verb| verb.eq_ignore_ascii_case("faq"))
+            {
+                Ok(text_controls(value))
+            } else {
+                Ok(value.into())
             }
         }
         _ => Err(refused()),

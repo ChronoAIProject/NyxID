@@ -250,8 +250,8 @@ mod tests {
             json["capabilities"][0]["reasonCode"],
             "service_not_connected"
         );
-        assert!(json.to_string().find(&actor_id).is_none());
-        assert!(json.to_string().find(&other_user_id).is_none());
+        assert!(!json.to_string().contains(&actor_id));
+        assert!(!json.to_string().contains(&other_user_id));
     }
 
     fn assert_no_secret_shape(value: &Value) {

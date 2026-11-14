@@ -486,7 +486,7 @@ async fn forward_inner(
     let readback = path.starts_with("/_nyxid/approvals/")
         && path.ends_with("/status")
         && request.method() == axum::http::Method::GET;
-    if !path.starts_with("/s/") && !path.starts_with("/git/") && !(negotiated && readback) {
+    if !(path.starts_with("/s/") || path.starts_with("/git/") || negotiated && readback) {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
     if let Some(services) = &external_services {

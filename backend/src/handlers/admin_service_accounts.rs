@@ -700,7 +700,7 @@ mod tests {
         assert!(value.get("description").is_none());
         assert!(value.get("secret_prefix").is_none());
         assert!(value.get("allowed_scopes").is_none());
-        assert!(value.to_string().find("nyxid_").is_none());
+        assert!(!value.to_string().contains("nyxid_"));
     }
 
     async fn seed_admin(db: &mongodb::Database) -> String {
