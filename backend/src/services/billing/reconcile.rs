@@ -435,7 +435,7 @@ impl BillingReconciler {
     /// Pull wallet balances from Lago into the local cache. Webhooks are the
     /// primary balance signal, but deployments Lago cannot reach (or missed
     /// deliveries) would otherwise never converge.
-    async fn refresh_wallet_balances(
+    pub(super) async fn refresh_wallet_balances(
         &self,
         lago: &dyn LagoApi,
         stats: &mut ReconcileStats,
@@ -460,13 +460,9 @@ impl BillingReconciler {
                     if !continue_reconcile() {
                         break;
                     }
-                    if webhook::refresh_wallet_balance(
-                        &self.db,
-                        &wallet.lago_customer_id,
-                        balance_credits,
-                    )
-                    .await?
-                    .is_some()
+                    if webhook::refresh_wallet_balance(&self.db, &wallet, balance_credits)
+                        .await?
+                        .is_some()
                     {
                         stats.wallet_balance_refreshes += 1;
                     }
@@ -675,21 +671,50 @@ pub fn decide_lago_push(
     }
 }
 
-async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
+pub(super) async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    let database = db.clone();
+    let row_id = row_id.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result = ack_in_session(&database, session, &row_id).await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+async fn ack_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    row_id: &str,
+) -> AppResult<()> {
     let now = Utc::now();
     let expires_at = now + Duration::days(ACKED_RETENTION_DAYS);
-    db.collection::<UsageMeterRow>(USAGE_METER)
-        .update_one(
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
             doc! { "_id": row_id, "lago_acked": false },
-            doc! {
-                "$set": {
-                    "lago_acked": true,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                    "expires_at": bson::DateTime::from_chrono(expires_at),
-                }
-            },
+            doc! { "$set": {
+                "lago_acked": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+                "expires_at": bson::DateTime::from_chrono(expires_at),
+            } },
         )
+        .session(&mut *session)
         .await?;
+    if let Some(wallet_id) = row.and_then(|row| row.wallet_id) {
+        // The acknowledgement can make pending debits clearable. A
+        // provider read started before it cannot decide that clearing.
+        db.collection::<BillingWallet>(BILLING_WALLET)
+            .update_one(
+                doc! { "_id": wallet_id },
+                doc! { "$inc": { "snapshot_generation": 1_i64 } },
+            )
+            .session(&mut *session)
+            .await?;
+    }
     Ok(())
 }
 

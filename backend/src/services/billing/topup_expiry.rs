@@ -268,7 +268,7 @@ async fn acquire_expiry_operation(
     Ok(Some(operation))
 }
 
-async fn complete_expiry_operation(
+pub(super) async fn complete_expiry_operation(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
     wallet: &BillingWallet,
@@ -322,8 +322,13 @@ async fn complete_expiry_operation(
         // include the current period's un-invoiced usage. Subtract the same
         // current_usage amount as refresh_wallet_balances before publishing
         // the post-void local balance, or expiry could re-expose spent credit.
-        let balance = super::webhook::provider_effective_balance(lago, wallet).await?;
-        if super::webhook::apply_balance(db, &wallet.id, balance, Some(&operation))
+        let snapshot = db
+            .collection::<BillingWallet>(BILLING_WALLETS)
+            .find_one(doc! { "_id": &wallet.id })
+            .await?
+            .ok_or_else(|| crate::errors::AppError::Internal("expiry wallet disappeared".into()))?;
+        let balance = super::webhook::provider_effective_balance(lago, &snapshot).await?;
+        if super::webhook::apply_balance(db, &snapshot, balance, Some(&operation))
             .await?
             .is_none()
         {
@@ -945,6 +950,7 @@ mod tests {
         let paid_at = now - Duration::days(PURCHASED_CREDIT_LIFETIME_DAYS + 1);
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: "wallet-1".to_string(),
                 owner_id: "owner-1".to_string(),
                 lago_customer_id: "customer-1".to_string(),
@@ -1072,6 +1078,7 @@ mod tests {
         };
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: "wallet-recover".to_string(),
                 owner_id: "owner-recover".to_string(),
                 lago_customer_id: "customer-recover".to_string(),
@@ -1143,6 +1150,7 @@ mod tests {
         let paid_at = now - Duration::days(PURCHASED_CREDIT_LIFETIME_DAYS + 1);
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: "wallet-race".to_string(),
                 owner_id: "owner-race".to_string(),
                 lago_customer_id: "customer-race".to_string(),

@@ -79,6 +79,9 @@ pub struct BillingWallet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lago_subscription_id: Option<String>,
     pub plan_kind: PlanKind,
+    /// Provider-read fence; local reservation/settlement counters are separate.
+    #[serde(default)]
+    pub snapshot_generation: i64,
     #[serde(default)]
     #[serde(with = "crate::models::credits::whole")]
     pub balance_credits: Credits,
@@ -149,6 +152,7 @@ mod tests {
     fn available_balance_subtracts_holds_and_pending_debits() {
         let now = Utc::now();
         let wallet = BillingWallet {
+            snapshot_generation: 0,
             id: "wallet-1".to_string(),
             owner_id: "owner-1".to_string(),
             lago_customer_id: "owner-1".to_string(),

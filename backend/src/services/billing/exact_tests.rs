@@ -702,7 +702,7 @@ async fn v2_postings_balance_commit_every_field_and_reconciliation_detects_corru
         .await
         .unwrap();
     exact_migration::run(&db).await.unwrap();
-    webhook::refresh_wallet_balance(&db, "owner", "7.12345".parse().unwrap())
+    webhook::refresh_test_balance(&db, "owner", "7.12345".parse().unwrap())
         .await
         .unwrap();
     assert_accounts(&db).await;
@@ -1137,7 +1137,7 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .await
         .unwrap();
     assert_accounts(&db).await;
-    webhook::refresh_wallet_balance(&db, &owner, "10.12345".parse().unwrap())
+    webhook::refresh_test_balance(&db, &owner, "10.12345".parse().unwrap())
         .await
         .unwrap();
     assert_accounts(&db).await;
@@ -1166,10 +1166,19 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         )
         .await
         .unwrap();
-    webhook::apply_balance(&db, "wallet", Credits::from_whole(10), Some(&operation))
-        .await
-        .unwrap()
-        .unwrap();
+    webhook::apply_balance(
+        &db,
+        &db.collection::<crate::models::billing_wallet::BillingWallet>("billing_wallet")
+            .find_one(doc! {"_id":"wallet"})
+            .await
+            .unwrap()
+            .unwrap(),
+        Credits::from_whole(10),
+        Some(&operation),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     db.collection::<Document>("billing_wallet")
         .update_one(doc! {}, doc! { "$unset": { "active_topup_expiry": "" } })
         .await

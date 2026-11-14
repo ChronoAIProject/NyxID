@@ -88,22 +88,33 @@ pub async fn handle_lago_webhook_event(
         super::exact_migration::require_ready(db).await?;
         let Some(wallet) = db
             .collection::<BillingWallet>(BILLING_WALLET)
-            .find_one(doc! { "lago_customer_id": &customer_id })
+            .find_one_and_update(
+                doc! { "lago_customer_id": &customer_id },
+                doc! { "$inc": { "snapshot_generation": 1_i64 } },
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
             .await?
         else {
             return Ok(ignored_for_customer(customer_id));
         };
-        let balance_credits = provider_effective_balance(lago, &wallet).await?;
+        let invoice_dedupe_key = if event_type == "invoice.paid_credit_added" {
+            extract_paid_credit_dedupe_key(payload)
+        } else {
+            None
+        };
+        let balance_credits = match provider_effective_balance(lago, &wallet).await {
+            Ok(balance) => balance,
+            Err(error) => {
+                queue_refresh(db, &wallet.id, invoice_dedupe_key).await?;
+                return Err(error);
+            }
+        };
         return Ok(
             match refresh_wallet_balance_with_receipt(
                 db,
-                &customer_id,
+                &wallet,
                 balance_credits,
-                if event_type == "invoice.paid_credit_added" {
-                    extract_paid_credit_dedupe_key(payload)
-                } else {
-                    None
-                },
+                invoice_dedupe_key.clone(),
             )
             .await?
             {
@@ -114,7 +125,7 @@ pub async fn handle_lago_webhook_event(
                             &outcome.owner_id,
                             &customer_id,
                             outcome.balance_credits,
-                            extract_paid_credit_dedupe_key(payload),
+                            invoice_dedupe_key,
                         )
                         .await;
                     }
@@ -197,47 +208,46 @@ fn is_lago_entitlement_event(event_type: &str) -> bool {
     )
 }
 
+/// `snapshot` must be loaded before the provider read, never after it.
 pub async fn refresh_wallet_balance(
     db: &mongodb::Database,
-    customer_id: &str,
+    snapshot: &BillingWallet,
     balance_credits: Credits,
 ) -> AppResult<Option<WalletRefreshOutcome>> {
-    refresh_wallet_balance_with_receipt(db, customer_id, balance_credits, None).await
+    refresh_wallet_balance_with_receipt(db, snapshot, balance_credits, None).await
 }
 
 async fn refresh_wallet_balance_with_receipt(
     db: &mongodb::Database,
-    customer_id: &str,
+    snapshot: &BillingWallet,
     balance_credits: Credits,
     invoice_dedupe_key: Option<String>,
 ) -> AppResult<Option<WalletRefreshOutcome>> {
     super::exact_migration::require_ready(db).await?;
-    let Some(wallet) = db
-        .collection::<BillingWallet>(BILLING_WALLET)
-        .find_one(doc! { "lago_customer_id": customer_id })
-        .await?
-    else {
-        return Ok(None);
-    };
-    let outcome = apply_balance(db, &wallet.id, balance_credits, None).await?;
+    let outcome = apply_balance(db, snapshot, balance_credits, None).await?;
     if outcome.is_none() {
-        let set = doc! {
-            "requested_at": bson::DateTime::from_chrono(Utc::now()),
-            "token": uuid::Uuid::new_v4().to_string(),
-        };
-        let mut update = doc! { "$set": set };
-        if let Some(invoice_dedupe_key) = invoice_dedupe_key {
-            update.insert(
-                "$addToSet",
-                doc! { "invoice_dedupe_keys": invoice_dedupe_key },
-            );
-        }
-        db.collection::<bson::Document>("billing_wallet_refresh_requests")
-            .update_one(doc! { "_id": &wallet.id }, update)
-            .upsert(true)
-            .await?;
+        queue_refresh(db, &snapshot.id, invoice_dedupe_key).await?;
     }
     Ok(outcome)
+}
+
+async fn queue_refresh(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    invoice_dedupe_key: Option<String>,
+) -> AppResult<()> {
+    let mut update = doc! { "$set": {
+        "requested_at": bson::DateTime::from_chrono(Utc::now()),
+        "token": uuid::Uuid::new_v4().to_string(),
+    } };
+    if let Some(key) = invoice_dedupe_key {
+        update.insert("$addToSet", doc! { "invoice_dedupe_keys": key });
+    }
+    db.collection::<bson::Document>("billing_wallet_refresh_requests")
+        .update_one(doc! { "_id": wallet_id }, update)
+        .upsert(true)
+        .await?;
+    Ok(())
 }
 
 /// All provider snapshots use settled balance less accrued, uninvoiced usage.
@@ -337,7 +347,7 @@ pub(super) async fn service_refresh_requests(
         };
         let result = async {
             let balance = provider_effective_balance(lago, &wallet).await?;
-            apply_balance(db, id, balance, None).await
+            apply_balance(db, &wallet, balance, None).await
         }
         .await;
         if !matches!(result, Ok(Some(_))) {
@@ -396,14 +406,14 @@ pub(super) async fn service_refresh_requests(
 /// its own journal is durable, so refresh cannot absorb an unjournaled debit.
 pub(super) async fn apply_balance(
     db: &mongodb::Database,
-    wallet_id: &str,
+    snapshot: &BillingWallet,
     balance: Credits,
     expiry: Option<&crate::models::billing_wallet::PurchasedCreditExpiryOperation>,
 ) -> AppResult<Option<WalletRefreshOutcome>> {
     for attempt in 0..16 {
         let mut session = db.client().start_session().await?;
         let database = db.clone();
-        let wallet_identifier = wallet_id.to_string();
+        let starting_snapshot = snapshot.clone();
         let expiry_operation = expiry.cloned();
         let result = session
             .start_transaction()
@@ -415,10 +425,9 @@ pub(super) async fn apply_balance(
             )
             .and_run2(async move |session| {
                 let db = &database;
-                let wallet_id = wallet_identifier.as_str();
                 let expiry = expiry_operation.as_ref();
                 let operation =
-                    apply_provider_snapshot(db, wallet_id, balance, expiry, session).await;
+                    apply_provider_snapshot(db, &starting_snapshot, balance, expiry, session).await;
                 crate::services::api_key_mutation_service::transaction_result(operation)
             })
             .await;
@@ -547,11 +556,12 @@ fn find_string_by_keys(value: &Value, keys: &[&str]) -> Option<String> {
 
 async fn apply_provider_snapshot(
     db: &mongodb::Database,
-    wallet_id: &str,
+    snapshot: &BillingWallet,
     balance: Credits,
     expiry: Option<&crate::models::billing_wallet::PurchasedCreditExpiryOperation>,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<Option<WalletRefreshOutcome>> {
+    let wallet_id = &snapshot.id;
     let wallets = db.collection::<BillingWallet>(BILLING_WALLET);
     let Some(wallet) = wallets
         .find_one(doc! { "_id": wallet_id, "active_settlement": bson::Bson::Null })
@@ -560,6 +570,19 @@ async fn apply_provider_snapshot(
     else {
         return Ok(None);
     };
+    // Reservation/settlement counters may advance while Lago is read. Use the
+    // current pending amount below; only provider-visible acknowledgements and
+    // balance changes invalidate the read. Millisecond comparison matches BSON.
+    if wallet.snapshot_generation != snapshot.snapshot_generation
+        || wallet.balance_credits != snapshot.balance_credits
+        || wallet.balance_synced_at.timestamp_millis()
+            != snapshot.balance_synced_at.timestamp_millis()
+        || wallet.lago_customer_id != snapshot.lago_customer_id
+        || wallet.lago_subscription_id != snapshot.lago_subscription_id
+        || wallet.pending_lago_debits < snapshot.pending_lago_debits
+    {
+        return Ok(None);
+    }
     if let Some(expiry) = expiry {
         if !wallet.active_topup_expiry.as_ref().is_some_and(|current| {
             current.operation_id == expiry.operation_id
@@ -650,7 +673,10 @@ async fn apply_provider_snapshot(
         set.insert("active_topup_expiry.updated_at", now);
     }
     wallets
-        .update_one(doc! { "_id": wallet_id }, doc! { "$set": set })
+        .update_one(
+            doc! { "_id": wallet_id },
+            doc! { "$set": set, "$inc": { "snapshot_generation": 1_i64 } },
+        )
         .session(&mut *session)
         .await?;
     Ok(Some(WalletRefreshOutcome {
@@ -658,6 +684,20 @@ async fn apply_provider_snapshot(
         balance_credits: balance,
         pending_debits_cleared: clear && wallet.pending_lago_debits != Credits::ZERO,
     }))
+}
+
+#[cfg(test)]
+pub(crate) async fn refresh_test_balance(
+    db: &mongodb::Database,
+    customer: &str,
+    balance: Credits,
+) -> AppResult<Option<WalletRefreshOutcome>> {
+    let wallet = db
+        .collection::<BillingWallet>(BILLING_WALLET)
+        .find_one(doc! {"lago_customer_id": customer})
+        .await?
+        .ok_or_else(|| AppError::Internal("test wallet missing".into()))?;
+    refresh_wallet_balance(db, &wallet, balance).await
 }
 
 #[cfg(test)]
@@ -690,6 +730,9 @@ mod tests {
         balance_credits: i64,
         accrued_cents: Option<serde_json::Value>,
         balance_read_barrier: Option<Arc<BalanceReadBarrier>>,
+        balance_reads: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        usage_reads: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        balance_error: bool,
     }
     #[async_trait]
     impl LagoApi for BalanceLago {
@@ -727,6 +770,9 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<LagoUsage> {
+            if let Some(reads) = &self.usage_reads {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -742,9 +788,17 @@ mod tests {
             })
         }
         async fn wallet_balance(&self, _customer_id: &str) -> crate::errors::AppResult<i64> {
+            if let Some(reads) = &self.balance_reads {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             if let Some(barrier) = &self.balance_read_barrier {
                 barrier.started.notify_one();
                 barrier.resume.notified().await;
+            }
+            if self.balance_error {
+                return Err(crate::errors::AppError::BillingProviderUnavailable(
+                    "test provider read failed".into(),
+                ));
             }
             Ok(self.balance_credits)
         }
@@ -758,6 +812,7 @@ mod tests {
     fn wallet(owner_id: &str, pending_lago_debits: i64) -> BillingWallet {
         let now = Utc::now();
         BillingWallet {
+            snapshot_generation: 0,
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.to_string(),
             lago_customer_id: owner_id.to_string(),
@@ -1050,7 +1105,7 @@ mod tests {
         let effective = super::provider_effective_balance(&lago, &saved)
             .await
             .unwrap();
-        super::refresh_wallet_balance(&db, "owner", effective)
+        super::refresh_wallet_balance(&db, &saved, effective)
             .await
             .unwrap();
         assert_eq!(
@@ -1077,6 +1132,1027 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_late_provider_read_is_dropped() {
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        for (old, new) in [(25, 40), (100, 60)] {
+            let db =
+                crate::test_utils::connect_transaction_test_database("snapshot_wallet_race").await;
+            let wallet = wallet("owner", 0);
+            db.collection::<BillingWallet>("billing_wallet")
+                .insert_one(&wallet)
+                .await
+                .unwrap();
+            crate::services::billing::exact_migration::migrate_one(
+                &db,
+                "billing_wallet",
+                &wallet.id,
+            )
+            .await
+            .unwrap();
+            let barrier = Arc::new(BalanceReadBarrier::default());
+            let old_lago = BalanceLago {
+                balance_credits: old,
+                balance_read_barrier: Some(barrier.clone()),
+                ..Default::default()
+            };
+            let new_lago = BalanceLago {
+                balance_credits: new,
+                ..Default::default()
+            };
+            let payload = json!({"wallet":{"external_customer_id":"owner"}});
+            let (old_result, ()) = tokio::join!(
+                handle_lago_webhook_event(&db, Some(&old_lago), "wallet.updated", &payload),
+                async {
+                    barrier.started.notified().await;
+                    let newer = handle_lago_webhook_event(
+                        &db,
+                        Some(&new_lago),
+                        "invoice.paid_credit_added",
+                        &payload,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(newer.action, LagoWebhookAction::WalletRefreshed);
+                    barrier.resume.notify_one();
+                }
+            );
+            let saved = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                saved.balance_credits,
+                Credits::from_whole(new),
+                "late provider snapshot overwrote newer balance"
+            );
+            assert_eq!(
+                old_result.unwrap().action,
+                LagoWebhookAction::WalletRefreshDeferred
+            );
+            assert_eq!(
+                db.collection::<Document>("billing_ledger")
+                    .count_documents(doc! {"movement":"wallet_adjusted"})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.collection::<Document>("billing_wallet_refresh_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+            super::super::account_reconciliation::run_once(&db)
+                .await
+                .unwrap();
+            let status = db
+                .collection::<crate::models::chain_verify_status::ChainVerifyStatus>(
+                    "chain_verify_status",
+                )
+                .find_one(doc! {"_id":"billing_accounts"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                status.outcome,
+                crate::models::chain_verify_status::ChainVerifyOutcome::Ok
+            );
+            db.drop().await.unwrap();
+        }
+    }
+
+    async fn snapshot_expiry_operation(
+        db: &mongodb::Database,
+        wallet: &BillingWallet,
+    ) -> crate::models::billing_wallet::PurchasedCreditExpiryOperation {
+        let now = Utc::now();
+        let operation = crate::models::billing_wallet::PurchasedCreditExpiryOperation {
+            operation_id: "expiry".into(),
+            processing_token: "worker".into(),
+            lease_until: now + Duration::minutes(10),
+            amount: crate::models::credits::Credits::from_whole(1),
+            items: vec![crate::models::billing_wallet::PurchasedCreditExpiryItem {
+                lago_purchase_transaction_id: "purchase".into(),
+                reference_id: "purchase".into(),
+                amount: crate::models::credits::Credits::from_whole(1),
+                settled_at: now - Duration::days(366),
+            }],
+            lago_void_transaction_id: Some("void".into()),
+            wallet_balance_applied: false,
+            history_applied: true,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<mongodb::bson::Document>("billing_wallet")
+            .update_one(
+                doc! { "_id": &wallet.id },
+                doc! { "$set": {
+                    "active_topup_expiry": mongodb::bson::to_bson(&operation).unwrap(),
+                    "pending_topup_expiry_credits": operation.amount,
+                } },
+            )
+            .await
+            .unwrap();
+        operation
+    }
+
+    async fn snapshot_entry(
+        db: &mongodb::Database,
+        wallet: &BillingWallet,
+        lago: &BalanceLago,
+        entry: &str,
+    ) {
+        match entry {
+            "reconcile" => {
+                let runner = super::super::reconcile::BillingReconciler::new(
+                    db.clone(),
+                    None,
+                    Arc::new(crate::test_utils::test_app_config()),
+                );
+                runner
+                    .refresh_wallet_balances(
+                        lago,
+                        &mut super::super::reconcile::ReconcileStats::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            "deferred" => {
+                super::queue_refresh(db, &wallet.id, None).await.unwrap();
+                // A second worker may only take over after the first lease expires.
+                db.collection::<mongodb::bson::Document>("billing_wallet_refresh_requests")
+                    .update_one(
+                        doc! {"_id":&wallet.id},
+                        doc! {"$set":{"lease_until":mongodb::bson::DateTime::from_millis(0)}},
+                    )
+                    .await
+                    .unwrap();
+                super::service_refresh_requests(db, lago).await.unwrap();
+            }
+            "webhook" | "paid_credit" => {
+                let event = if entry == "paid_credit" {
+                    "invoice.paid_credit_added"
+                } else {
+                    "wallet.updated"
+                };
+                let payload = json!({
+                    "wallet": {"external_customer_id": wallet.lago_customer_id},
+                    "invoice": {"lago_id": "snapshot-paid"},
+                });
+                handle_lago_webhook_event(db, Some(lago), event, &payload)
+                    .await
+                    .unwrap();
+            }
+            "expiry" => {
+                let now = Utc::now();
+                let operation = snapshot_expiry_operation(db, wallet).await;
+                assert_eq!(
+                    super::super::topup_expiry::complete_expiry_operation(
+                        db, lago, wallet, operation, now
+                    )
+                    .await
+                    .unwrap(),
+                    1
+                );
+            }
+            _ => panic!("unknown test entry"),
+        }
+    }
+
+    async fn assert_snapshot_accounts(db: &mongodb::Database) {
+        super::super::account_reconciliation::run_once(db)
+            .await
+            .unwrap();
+        let status = db
+            .collection::<crate::models::chain_verify_status::ChainVerifyStatus>(
+                "chain_verify_status",
+            )
+            .find_one(doc! {"_id":"billing_accounts"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            status.outcome,
+            crate::models::chain_verify_status::ChainVerifyOutcome::Ok,
+            "{:?}",
+            status.break_detail
+        );
+    }
+
+    async fn assert_refresh_queue_converges(
+        db: &mongodb::Database,
+        balance: i64,
+        expected_fetches: usize,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let lago = BalanceLago {
+            balance_credits: balance,
+            balance_reads: Some(reads.clone()),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            super::service_refresh_requests(db, &lago).await.unwrap();
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                expected_fetches,
+                "an empty queue must not fetch again"
+            );
+            assert_eq!(
+                db.collection::<mongodb::bson::Document>("billing_wallet_refresh_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.balance_credits,
+            crate::models::credits::Credits::from_whole(balance)
+        );
+        assert_snapshot_accounts(db).await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_webhook_burst_publishes_last_and_drains_once() {
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        const BURST: usize = 8;
+        for last_finishes_first in [false, true] {
+            let db =
+                crate::test_utils::connect_transaction_test_database("wallet_webhook_burst").await;
+            let wallet = wallet("owner", 0);
+            db.collection::<BillingWallet>("billing_wallet")
+                .insert_one(&wallet)
+                .await
+                .unwrap();
+            super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+                .await
+                .unwrap();
+            let mut tasks = Vec::new();
+            for n in 0..BURST {
+                let barrier = Arc::new(BalanceReadBarrier::default());
+                let lago = BalanceLago {
+                    balance_credits: 20 + n as i64,
+                    balance_read_barrier: Some(barrier.clone()),
+                    ..Default::default()
+                };
+                let database = db.clone();
+                let payload = json!({"wallet":{"external_customer_id":wallet.lago_customer_id}});
+                let task = tokio::spawn(async move {
+                    handle_lago_webhook_event(&database, Some(&lago), "wallet.updated", &payload)
+                        .await
+                        .unwrap()
+                });
+                barrier.started.notified().await;
+                tasks.push((barrier, task));
+            }
+            // All generations were captured before any response may publish.
+            // Exercise both the last read finishing first and finishing last.
+            let (last_barrier, last_task) = tasks.pop().unwrap();
+            let mut last_task = Some(last_task);
+            if last_finishes_first {
+                last_barrier.resume.notify_one();
+                assert_eq!(
+                    last_task.take().unwrap().await.unwrap().action,
+                    LagoWebhookAction::WalletRefreshed
+                );
+            }
+            for (barrier, _) in &tasks {
+                barrier.resume.notify_one();
+            }
+            for (_, task) in tasks {
+                assert_eq!(
+                    task.await.unwrap().action,
+                    LagoWebhookAction::WalletRefreshDeferred
+                );
+                assert_eq!(
+                    db.collection::<Document>("billing_wallet_refresh_requests")
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+            if let Some(last_task) = last_task {
+                last_barrier.resume.notify_one();
+                assert_eq!(
+                    last_task.await.unwrap().action,
+                    LagoWebhookAction::WalletRefreshed
+                );
+            }
+            let final_balance = 20 + BURST as i64 - 1;
+            let saved = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.balance_credits, Credits::from_whole(final_balance));
+            assert_eq!(saved.snapshot_generation, BURST as i64 + 1);
+            assert_eq!(
+                db.collection::<Document>("billing_ledger")
+                    .count_documents(doc! {"movement":"wallet_adjusted"})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_refresh_queue_converges(&db, final_balance, 1).await;
+            assert_eq!(
+                db.collection::<Document>("billing_ledger")
+                    .count_documents(doc! {"movement":"wallet_adjusted"})
+                    .await
+                    .unwrap(),
+                1
+            );
+            db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_whole_replacement_dropping_generation_still_rejects() {
+        use crate::models::credits::Credits;
+        use mongodb::bson::{DateTime, Document};
+        // A legacy replacement after publication drops the additive generation.
+        // At zero the balance, timestamp or pending-debit decrease detects it; at seven the reset
+        // itself suffices even when the observable balance/time are unchanged.
+        for (generation, pending, new_balance, change_timestamp) in [
+            (0, 0, 40, false),
+            (0, 0, 10, true),
+            (0, 7, 10, false),
+            (7, 0, 10, false),
+        ] {
+            let db =
+                crate::test_utils::connect_transaction_test_database("wallet_generation_reset")
+                    .await;
+            let mut wallet = wallet("owner", pending);
+            wallet.snapshot_generation = generation;
+            db.collection::<BillingWallet>("billing_wallet")
+                .insert_one(&wallet)
+                .await
+                .unwrap();
+            super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+                .await
+                .unwrap();
+            let barrier = Arc::new(BalanceReadBarrier::default());
+            let old = BalanceLago {
+                balance_credits: 25,
+                balance_read_barrier: Some(barrier.clone()),
+                ..Default::default()
+            };
+            tokio::join!(snapshot_entry(&db, &wallet, &old, "reconcile"), async {
+                barrier.started.notified().await;
+                let snapshot = db
+                    .collection::<BillingWallet>("billing_wallet")
+                    .find_one(doc! {})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    super::refresh_wallet_balance(&db, &snapshot, Credits::from_whole(new_balance))
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                let mut legacy = db
+                    .collection::<Document>("billing_wallet")
+                    .find_one(doc! {})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                legacy.remove("snapshot_generation");
+                // Preserve unrelated raw migration metadata while simulating
+                // an old whole-document writer omitting the unknown field.
+                let synced = if change_timestamp {
+                    wallet.balance_synced_at + Duration::seconds(1)
+                } else {
+                    wallet.balance_synced_at
+                };
+                legacy.insert("balance_synced_at", DateTime::from_chrono(synced));
+                db.collection::<Document>("billing_wallet")
+                    .replace_one(doc! {"_id":&wallet.id}, legacy)
+                    .await
+                    .unwrap();
+                barrier.resume.notify_one();
+            });
+            let saved = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.snapshot_generation, 0);
+            assert_eq!(saved.balance_credits, Credits::from_whole(new_balance));
+            assert_eq!(
+                db.collection::<Document>("billing_ledger")
+                    .count_documents(doc! {"movement":"wallet_adjusted"})
+                    .await
+                    .unwrap(),
+                u64::from(new_balance != 10 || pending != 0)
+            );
+            assert_eq!(
+                db.collection::<Document>("billing_wallet_refresh_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_refresh_queue_converges(&db, new_balance, 1).await;
+            db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_entry_point_matrix_and_expired_queue_lease() {
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        for (old_entry, new_entry) in [
+            ("reconcile", "deferred"),
+            ("deferred", "reconcile"),
+            ("deferred", "webhook"),
+            ("webhook", "deferred"),
+            ("reconcile", "expiry"),
+            ("deferred", "expiry"),
+            ("reconcile", "paid_credit"),
+            ("deferred", "paid_credit"),
+            ("deferred", "deferred"),
+        ] {
+            for (old, new) in [(25, 40), (100, 60)] {
+                let db =
+                    crate::test_utils::connect_transaction_test_database("snapshot_wallet_matrix")
+                        .await;
+                let wallet = wallet("owner", 0);
+                db.collection::<BillingWallet>("billing_wallet")
+                    .insert_one(&wallet)
+                    .await
+                    .unwrap();
+                super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+                    .await
+                    .unwrap();
+                let barrier = Arc::new(BalanceReadBarrier::default());
+                let old_lago = BalanceLago {
+                    balance_credits: old,
+                    balance_read_barrier: Some(barrier.clone()),
+                    ..Default::default()
+                };
+                let new_lago = BalanceLago {
+                    balance_credits: new,
+                    ..Default::default()
+                };
+                let mut request_after_winner = None;
+                let ((), ()) =
+                    tokio::join!(snapshot_entry(&db, &wallet, &old_lago, old_entry), async {
+                        barrier.started.notified().await;
+                        snapshot_entry(&db, &wallet, &new_lago, new_entry).await;
+                        assert_snapshot_accounts(&db).await;
+                        request_after_winner = db
+                            .collection::<Document>("billing_wallet_refresh_requests")
+                            .find_one(doc! {})
+                            .await
+                            .unwrap();
+                        barrier.resume.notify_one();
+                    });
+                let saved = db
+                    .collection::<BillingWallet>("billing_wallet")
+                    .find_one(doc! {})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    saved.balance_credits,
+                    Credits::from_whole(new),
+                    "{old_entry} -> {new_entry}, {old} -> {new}"
+                );
+                assert_eq!(
+                    db.collection::<Document>("billing_ledger")
+                        .count_documents(doc! {"movement":"wallet_adjusted"})
+                        .await
+                        .unwrap(),
+                    1
+                );
+                let already_serviced = old_entry == "deferred" && new_entry == "deferred";
+                let expected_fetches = usize::from(!already_serviced);
+                assert_eq!(
+                    db.collection::<Document>("billing_wallet_refresh_requests")
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    expected_fetches as u64
+                );
+                if old_entry == "deferred" {
+                    let request = db
+                        .collection::<Document>("billing_wallet_refresh_requests")
+                        .find_one(doc! {})
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        request.as_ref().and_then(|row| row.get("token")),
+                        request_after_winner
+                            .as_ref()
+                            .and_then(|row| row.get("token")),
+                        "a deferred loser must not rotate or recreate the request",
+                    );
+                    if let Some(request) = request {
+                        assert!(!request.contains_key("lease_token"));
+                        assert!(!request.contains_key("lease_until"));
+                    }
+                }
+                assert_snapshot_accounts(&db).await;
+                assert_refresh_queue_converges(&db, new, expected_fetches).await;
+                db.drop().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_expiry_loses_to_webhook_and_resumes_from_receipt() {
+        use super::super::topup_expiry::complete_expiry_operation;
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        let db =
+            crate::test_utils::connect_transaction_test_database("snapshot_expiry_loser").await;
+        let wallet = wallet("owner", 0);
+        db.collection::<BillingWallet>("billing_wallet")
+            .insert_one(&wallet)
+            .await
+            .unwrap();
+        super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+            .await
+            .unwrap();
+        let operation = snapshot_expiry_operation(&db, &wallet).await;
+        let barrier = Arc::new(BalanceReadBarrier::default());
+        let old = BalanceLago {
+            balance_credits: 25,
+            balance_read_barrier: Some(barrier.clone()),
+            ..Default::default()
+        };
+        let new = BalanceLago {
+            balance_credits: 40,
+            ..Default::default()
+        };
+        let (result, ()) = tokio::join!(
+            complete_expiry_operation(&db, &old, &wallet, operation, Utc::now()),
+            async {
+                barrier.started.notified().await;
+                // The notification invalidates the read, but its own refresh
+                // respects the active expiry bridge and queues instead.
+                let result = handle_lago_webhook_event(
+                    &db,
+                    Some(&new),
+                    "wallet.updated",
+                    &json!({"wallet":{"external_customer_id":wallet.lago_customer_id}}),
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.action, LagoWebhookAction::WalletRefreshDeferred);
+                barrier.resume.notify_one();
+            }
+        );
+        assert_eq!(result.unwrap(), 0);
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.balance_credits, wallet.balance_credits);
+        assert_eq!(saved.pending_topup_expiry_credits, Credits::from_whole(1));
+        let pending = saved.active_topup_expiry.clone().unwrap();
+        assert_eq!(pending.lago_void_transaction_id.as_deref(), Some("void"));
+        assert!(!pending.wallet_balance_applied);
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {
+                    "movement":{"$in":["wallet_adjusted","topup_expired"]}
+                })
+                .await
+                .unwrap(),
+            0
+        );
+        assert_snapshot_accounts(&db).await;
+        assert_eq!(
+            complete_expiry_operation(&db, &new, &saved, pending, Utc::now())
+                .await
+                .unwrap(),
+            1
+        );
+        super::service_refresh_requests(&db, &new).await.unwrap();
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.balance_credits, Credits::from_whole(40));
+        assert_eq!(saved.pending_topup_expiry_credits, Credits::ZERO);
+        assert!(saved.active_topup_expiry.is_none());
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {"movement":"topup_expired"})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<Document>("billing_wallet_refresh_requests")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_snapshot_accounts(&db).await;
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_r3_expiry_rejection_uses_its_receipt_without_queueing() {
+        use super::super::topup_expiry::complete_expiry_operation;
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db =
+            crate::test_utils::connect_transaction_test_database("snapshot_expiry_no_queue").await;
+        let wallet = wallet("owner", 0);
+        db.collection::<BillingWallet>("billing_wallet")
+            .insert_one(&wallet)
+            .await
+            .unwrap();
+        super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+            .await
+            .unwrap();
+        let operation = snapshot_expiry_operation(&db, &wallet).await;
+        let barrier = Arc::new(BalanceReadBarrier::default());
+        let old = BalanceLago {
+            balance_credits: 25,
+            balance_read_barrier: Some(barrier.clone()),
+            ..Default::default()
+        };
+        let (result, ()) = tokio::join!(
+            complete_expiry_operation(&db, &old, &wallet, operation, Utc::now()),
+            async {
+                barrier.started.notified().await;
+                db.collection::<Document>("billing_wallet")
+                    .update_one(
+                        doc! {"_id": &wallet.id},
+                        doc! {"$inc": {"snapshot_generation": 1_i64}},
+                    )
+                    .await
+                    .unwrap();
+                barrier.resume.notify_one();
+            }
+        );
+        assert_eq!(result.unwrap(), 0);
+        let queued = db
+            .collection::<Document>("billing_wallet_refresh_requests")
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let balance_reads = Arc::new(AtomicUsize::new(0));
+        let usage_reads = Arc::new(AtomicUsize::new(0));
+        let fresh = BalanceLago {
+            balance_credits: 40,
+            balance_reads: Some(balance_reads.clone()),
+            usage_reads: Some(usage_reads.clone()),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            super::service_refresh_requests(&db, &fresh).await.unwrap();
+        }
+        let worker_reads = (
+            balance_reads.load(Ordering::SeqCst),
+            usage_reads.load(Ordering::SeqCst),
+        );
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        let pending = saved.active_topup_expiry.clone().unwrap();
+        assert_eq!(pending.lago_void_transaction_id.as_deref(), Some("void"));
+        assert!(!pending.wallet_balance_applied);
+        // BalanceLago has no void implementation: recovery must use the receipt.
+        assert_eq!(
+            complete_expiry_operation(&db, &fresh, &saved, pending, Utc::now())
+                .await
+                .unwrap(),
+            1
+        );
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.balance_credits, Credits::from_whole(40));
+        assert_eq!(saved.pending_topup_expiry_credits, Credits::ZERO);
+        assert!(saved.active_topup_expiry.is_none());
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {"movement": "topup_expired"})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_snapshot_accounts(&db).await;
+        db.drop().await.unwrap();
+        assert_eq!(
+            queued, 0,
+            "expiry already has a durable retry; it must not create a refresh request"
+        );
+        assert_eq!(
+            worker_reads,
+            (0, 0),
+            "idle refresh ticks must not poll a pending expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_r3_provider_failure_queues_only_paid_credit_receipts() {
+        use mongodb::bson::Document;
+        let mut observations = Vec::new();
+        for (event, paid) in [
+            ("wallet.updated", false),
+            ("invoice.paid_credit_added", true),
+        ] {
+            let db = crate::test_utils::connect_transaction_test_database("snapshot_error_receipt")
+                .await;
+            let wallet = wallet("owner", 0);
+            db.collection::<BillingWallet>("billing_wallet")
+                .insert_one(&wallet)
+                .await
+                .unwrap();
+            super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+                .await
+                .unwrap();
+            let failure = BalanceLago {
+                balance_error: true,
+                ..Default::default()
+            };
+            let payload = json!({
+                "wallet": {"external_customer_id": wallet.lago_customer_id},
+                "invoice": {"lago_id": "paid-receipt"},
+                "lago_id": "unrelated-event-id",
+            });
+            assert!(
+                handle_lago_webhook_event(&db, Some(&failure), event, &payload)
+                    .await
+                    .is_err()
+            );
+            let queued = db
+                .collection::<Document>("billing_wallet_refresh_requests")
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            let keys = queued.get_array("invoice_dedupe_keys").ok().cloned();
+            let fresh = BalanceLago {
+                balance_credits: 40,
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                super::service_refresh_requests(&db, &fresh).await.unwrap();
+            }
+            assert_eq!(
+                db.collection::<Document>("billing_wallet_refresh_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let memos = db
+                .collection::<Document>("billing_ledger")
+                .count_documents(doc! {"movement": "wallet_credited"})
+                .await
+                .unwrap();
+            assert_snapshot_accounts(&db).await;
+            db.drop().await.unwrap();
+            observations.push((event, paid, keys, memos));
+        }
+        for (event, paid, keys, memos) in observations {
+            let expected = paid.then(|| {
+                vec![mongodb::bson::Bson::String(
+                    "lago-invoice:paid-receipt".into(),
+                )]
+            });
+            assert_eq!(
+                keys, expected,
+                "{event} must only retain a receipt for a paid-credit event"
+            );
+            assert_eq!(memos, u64::from(paid), "{event} memo count");
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_detects_old_style_write() {
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        let db =
+            crate::test_utils::connect_transaction_test_database("snapshot_wallet_legacy").await;
+        let wallet = wallet("owner", 0);
+        db.collection::<BillingWallet>("billing_wallet")
+            .insert_one(&wallet)
+            .await
+            .unwrap();
+        super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+            .await
+            .unwrap();
+        let barrier = Arc::new(BalanceReadBarrier::default());
+        let old_lago = BalanceLago {
+            balance_credits: 25,
+            balance_read_barrier: Some(barrier.clone()),
+            ..Default::default()
+        };
+        tokio::join!(
+            snapshot_entry(&db, &wallet, &old_lago, "reconcile"),
+            async {
+                barrier.started.notified().await;
+                // New transaction maintains real checkpoints; erase only its additive
+                // generation to emulate the legacy transaction's observable shape.
+                let snapshot = db
+                    .collection::<BillingWallet>("billing_wallet")
+                    .find_one(doc! {})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                super::refresh_wallet_balance(&db, &snapshot, Credits::from_whole(40))
+                    .await
+                    .unwrap();
+                db.collection::<Document>("billing_wallet")
+                    .update_one(doc! {}, doc! {"$unset":{"snapshot_generation":""}})
+                    .await
+                    .unwrap();
+                barrier.resume.notify_one();
+            }
+        );
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.balance_credits, Credits::from_whole(40));
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {"movement":"wallet_adjusted"})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_snapshot_accounts(&db).await;
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_ack_command_cost_and_duplicate_do_not_reinvalidate() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorded = commands.clone();
+        let handler = EventHandler::<CommandEvent>::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{}", event.command_name, collection));
+            }
+        });
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "wallet_ack_counts",
+            handler,
+        )
+        .await
+        .unwrap();
+        let wallet = wallet("owner", 0);
+        db.collection::<BillingWallet>("billing_wallet")
+            .insert_one(&wallet)
+            .await
+            .unwrap();
+        let row = usage_row("owner", &wallet.id, false);
+        db.collection::<UsageMeterRow>("usage_meter")
+            .insert_one(&row)
+            .await
+            .unwrap();
+        for first in [true, false] {
+            commands.lock().unwrap().clear();
+            super::super::reconcile::mark_lago_acked(&db, &row.id)
+                .await
+                .unwrap();
+            let measured = std::mem::take(&mut *commands.lock().unwrap());
+            let expected = if first {
+                vec![
+                    "findAndModify:usage_meter",
+                    "update:billing_wallet",
+                    "commitTransaction:",
+                ]
+            } else {
+                vec!["findAndModify:usage_meter", "commitTransaction:"]
+            };
+            assert_eq!(measured, expected);
+            println!("WALLET_ACK_COMMANDS first={first}: {measured:?}");
+            let saved = db
+                .collection::<BillingWallet>("billing_wallet")
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.snapshot_generation, 1);
+            assert_eq!(saved.balance_credits, wallet.balance_credits);
+            assert_eq!(saved.pending_lago_debits, wallet.pending_lago_debits);
+            assert!(
+                db.collection::<UsageMeterRow>("usage_meter")
+                    .find_one(doc! {"_id":&row.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lago_acked
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_order_wallet_ack_invalidates_pending_clear() {
+        use crate::models::credits::Credits;
+        use mongodb::bson::Document;
+        let db = crate::test_utils::connect_transaction_test_database("snapshot_wallet_ack").await;
+        let wallet = wallet("owner", 7);
+        db.collection::<BillingWallet>("billing_wallet")
+            .insert_one(&wallet)
+            .await
+            .unwrap();
+        super::super::exact_migration::migrate_one(&db, "billing_wallet", &wallet.id)
+            .await
+            .unwrap();
+        let row = usage_row("owner", &wallet.id, false);
+        db.collection::<UsageMeterRow>("usage_meter")
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let barrier = Arc::new(BalanceReadBarrier::default());
+        let old_lago = BalanceLago {
+            balance_credits: 10,
+            balance_read_barrier: Some(barrier.clone()),
+            ..Default::default()
+        };
+        tokio::join!(
+            snapshot_entry(&db, &wallet, &old_lago, "reconcile"),
+            async {
+                barrier.started.notified().await;
+                super::super::reconcile::mark_lago_acked(&db, &row.id)
+                    .await
+                    .unwrap();
+                barrier.resume.notify_one();
+            }
+        );
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.pending_lago_debits, Credits::from_whole(7));
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .count_documents(doc! {"movement":"wallet_adjusted"})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_snapshot_accounts(&db).await;
+        super::service_refresh_requests(
+            &db,
+            &BalanceLago {
+                balance_credits: 3,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let saved = db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.pending_lago_debits, Credits::ZERO);
+        assert_eq!(saved.balance_credits, Credits::from_whole(3));
+        assert_snapshot_accounts(&db).await;
+        db.drop().await.unwrap();
     }
 
     async fn assert_deferred_refresh_interleaving(replace_lease: bool) {
@@ -1106,7 +2182,7 @@ mod tests {
         let defer = |balance, invoice: &str| {
             super::refresh_wallet_balance_with_receipt(
                 &db,
-                "owner",
+                &wallet,
                 Credits::from_whole(balance),
                 Some(format!("lago-invoice:{invoice}")),
             )

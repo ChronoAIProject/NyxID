@@ -1573,6 +1573,7 @@ async fn admitted_funded_call_settles_frozen_usage_once_after_price_and_credenti
         .await
         .unwrap();
     let wallet = BillingWallet {
+        snapshot_generation: 0,
         id: Uuid::new_v4().to_string(),
         owner_id: owner.clone(),
         lago_customer_id: owner.clone(),
@@ -2273,6 +2274,7 @@ async fn fund_sms(f: &mut Fixture) {
         .db
         .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
         .insert_one(BillingWallet {
+            snapshot_generation: 0,
             id: Uuid::new_v4().to_string(),
             owner_id: f.b.user_id.clone(),
             lago_customer_id: f.b.user_id.clone(),
