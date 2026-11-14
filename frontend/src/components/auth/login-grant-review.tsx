@@ -4,10 +4,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { ChevronDown, KeyRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { AgentKeySummary } from "@/schemas/agent-key-login";
-import type {
-  AccessEntry,
-  PermissionComparison,
-} from "@/lib/login-permissions";
+import type { AccessEntry } from "@/lib/login-permissions";
 import { PermissionIcon } from "./login-permission-picker";
 import { AgentKeyIssuanceNotice } from "./agent-key-permissions";
 
@@ -56,7 +53,6 @@ export function AccessEntries({
 
 export function LoginGrantReview({
   apiKey,
-  comparison,
   kind,
   children,
   customize,
@@ -65,7 +61,6 @@ export function LoginGrantReview({
   nameField,
 }: {
   apiKey: AgentKeySummary;
-  comparison: PermissionComparison;
   kind: "existing" | "new";
   children: ReactNode;
   customize: ReactNode;
@@ -108,20 +103,7 @@ export function LoginGrantReview({
         </div>
       </div>
       {nameField}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-11">
-        <p className="font-medium">{t("Allow this device to access")}</p>
-        <span
-          className={
-            comparison.extras.length ? "text-warning" : "text-muted-foreground"
-          }
-        >
-          {comparison.matches
-            ? comparison.exact
-              ? t("Exact match")
-              : t("Matched + {{count}} extra permissions", { count: comparison.extras.length })
-            : t("Selection needed")}
-        </span>
-      </div>
+      {/* The access rows render the sticky "Allow this device to access" bar. */}
       {children}
       {(apiKey.allow_all_services ||
         apiKey.allow_auto_connected_services ||
