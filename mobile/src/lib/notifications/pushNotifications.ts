@@ -12,11 +12,13 @@ import * as TaskManager from "expo-task-manager";
 import { AppState, Platform } from "react-native";
 import { onlineManager } from "@tanstack/react-query";
 import { mobileApi } from "../api/mobileApi";
+import { isApiError } from "../api/ApiError";
 import { signalApprovalStateMayHaveChanged } from "./approvalRefreshSignal";
 import {
   beginPushDeliveryStateHydration,
   isPushDeliverySuppressed as readPushDeliverySuppressed,
   setPushDeliverySuppressed,
+  pushDeliveryStateHydrated,
 } from "./pushDeliveryState";
 
 type PushActivateResult = {
@@ -33,6 +35,7 @@ type PushActivateOptions = {
 
 const PUSH_TOKEN_STORE_KEY = "nyxid.push.device_token";
 const PUSH_PENDING_UNBIND_KEY = "nyxid.push.pending_unbind";
+const PENDING_UNBIND_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PUSH_PENDING_SYNC_SIGNAL_KEY = "nyxid.push.pending_sync_signal";
 const BACKGROUND_NOTIFICATION_TASK = "NYXID_BACKGROUND_NOTIFICATION_TASK";
 
@@ -67,10 +70,14 @@ type PendingPushUnbind = {
   provider: "apns" | "fcm";
   platform: "ios" | "android";
   createdAt: string;
+  nativeUnregisterPending?: boolean;
 };
 
 function enqueuePushOperation<T>(operation: () => Promise<T>): Promise<T> {
-  const run = pushOperationQueue.then(operation, operation);
+  const run = pushOperationQueue.then(async () => {
+    await pushDeliveryStateHydrated();
+    return operation();
+  });
   pushOperationQueue = run.then(
     () => undefined,
     () => undefined,
@@ -78,11 +85,10 @@ function enqueuePushOperation<T>(operation: () => Promise<T>): Promise<T> {
   return run;
 }
 
-async function readPendingUnbind(): Promise<PendingPushUnbind | null> {
+async function loadPendingUnbind(): Promise<PendingPushUnbind | null> {
   try {
     const raw = await SecureStore.getItemAsync(PUSH_PENDING_UNBIND_KEY);
     if (!raw) {
-      setPushDeliverySuppressed(false);
       return null;
     }
     const value = JSON.parse(raw) as Partial<PendingPushUnbind>;
@@ -90,15 +96,14 @@ async function readPendingUnbind(): Promise<PendingPushUnbind | null> {
       typeof value.token !== "string" ||
       (value.platform !== "ios" && value.platform !== "android") ||
       (value.provider !== "apns" && value.provider !== "fcm") ||
-      typeof value.createdAt !== "string"
+      typeof value.createdAt !== "string" ||
+      (value.nativeUnregisterPending !== undefined &&
+        typeof value.nativeUnregisterPending !== "boolean")
     ) {
-      setPushDeliverySuppressed(false);
       return null;
     }
-    setPushDeliverySuppressed(true);
     return value as PendingPushUnbind;
   } catch {
-    setPushDeliverySuppressed(false);
     return null;
   }
 }
@@ -119,7 +124,38 @@ async function clearPendingUnbind(): Promise<void> {
 
 // Hydrate before notification taps are wired by the app shell. The runtime
 // initializer awaits the same read before installing its listeners.
-beginPushDeliveryStateHydration(readPendingUnbind());
+beginPushDeliveryStateHydration(
+  loadPendingUnbind().then((pending) => {
+    setPushDeliverySuppressed(Boolean(pending));
+  }),
+);
+
+async function retryNativeUnregistration(
+  pending: PendingPushUnbind,
+): Promise<PendingPushUnbind> {
+  if (!pending.nativeUnregisterPending) return pending;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      if (
+        Platform.OS === "web" ||
+        typeof Notifications.unregisterForNotificationsAsync !== "function"
+      )
+        break;
+      await Notifications.unregisterForNotificationsAsync();
+    } catch {
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
+    const updated = { ...pending, nativeUnregisterPending: false };
+    await setPendingUnbind(updated);
+    return updated;
+  }
+  if (__DEV__) console.warn("[push] native unregister unavailable");
+  return pending;
+}
 
 const NOTIFICATION_DEDUPE_WINDOW_MS = 2000;
 const lastShownAtByNotificationKey = new Map<string, number>();
@@ -212,7 +248,8 @@ function configureNotificationHandler() {
     handleNotification: async (notification) => {
       const content = notification.request.content;
 
-      if (await readPendingUnbind()) {
+      await pushDeliveryStateHydrated();
+      if (readPushDeliverySuppressed()) {
         return SUPPRESS_OS_NOTIFICATION;
       }
 
@@ -628,7 +665,11 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
   let networkSubscription: (() => void) | null = null;
 
   try {
-    await readPendingUnbind();
+    await pushDeliveryStateHydrated();
+    await enqueuePushOperation(async () => {
+      const pending = await loadPendingUnbind();
+      if (pending) await retryNativeUnregistration(pending);
+    });
     configureNotificationHandler();
     await ensureAndroidChannels();
     await ensureBackgroundTaskRegistered();
@@ -672,15 +713,11 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
       if (token) void syncTokenWithBackend(token, false);
     });
     appStateSubscription = AppState.addEventListener("change", (state) => {
-      if (state === "active" && readPushDeliverySuppressed() && getAuthAccountId())
+      if (state === "active" && readPushDeliverySuppressed())
         void activatePushAfterLogin({ forceRegister: true });
     });
     networkSubscription = onlineManager.subscribe(() => {
-      if (
-        onlineManager.isOnline() &&
-        readPushDeliverySuppressed() &&
-        getAuthAccountId()
-      )
+      if (onlineManager.isOnline() && readPushDeliverySuppressed())
         void activatePushAfterLogin({ forceRegister: true });
     });
   } catch (error) {
@@ -722,7 +759,7 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
     // DELETE still has a chance to detach that uncertain registration.
     const token = lastKnownNativeToken?.token ?? storedToken;
     const platform = lastKnownNativeToken?.platform ?? resolvePlatform();
-    const pending = await readPendingUnbind();
+    const pending = await loadPendingUnbind();
     const provider =
       lastKnownNativeToken?.provider ??
       (platform === "ios" || platform === "android"
@@ -741,21 +778,15 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
       lastKnownNativeToken = undefined;
       return true;
     } catch {
-      try {
-        if (
-          Platform.OS !== "web" &&
-          typeof Notifications.unregisterForNotificationsAsync === "function"
-        )
-          await Notifications.unregisterForNotificationsAsync();
-      } catch {
-        if (__DEV__) console.warn("[push] native unregister unavailable");
-      }
-      await setPendingUnbind({
+      const failedUnbind: PendingPushUnbind = {
         token,
         provider,
         platform,
         createdAt: new Date().toISOString(),
-      });
+        nativeUnregisterPending: true,
+      };
+      await setPendingUnbind(failedUnbind);
+      await retryNativeUnregistration(failedUnbind);
       await clearLocalPushRegistrationState();
       lastKnownNativeToken = undefined;
       return false;
@@ -778,8 +809,9 @@ export async function activatePushAfterLogin(
 ): Promise<PushActivateResult> {
   const forceRegister = options.forceRegister === true;
   return enqueuePushOperation(async () => {
-    const pending = await readPendingUnbind();
+    const pending = await loadPendingUnbind();
     if (pending) return rebindPendingToken(pending);
+    if (!getAuthAccountId()) return signedOutPushResult();
     return activatePushAfterLoginInQueue(forceRegister);
   });
 }
@@ -797,7 +829,7 @@ async function syncTokenWithBackend(
     };
   }
   return enqueuePushOperation(async () => {
-    const pending = await readPendingUnbind();
+    const pending = await loadPendingUnbind();
     if (pending) return rebindPendingToken(pending);
     return syncTokenWithBackendInQueue(token, forceRegister);
   });
@@ -849,6 +881,16 @@ async function activatePushAfterLoginInQueue(
 async function rebindPendingToken(
   pending: PendingPushUnbind,
 ): Promise<PushActivateResult> {
+  const createdAt = Date.parse(pending.createdAt);
+  if (
+    !Number.isFinite(createdAt) ||
+    Date.now() - createdAt > PENDING_UNBIND_MAX_AGE_MS
+  ) {
+    await clearPendingUnbind();
+    if (!getAuthAccountId()) return signedOutPushResult();
+    return activatePushAfterLoginInQueue(true);
+  }
+  await retryNativeUnregistration(pending);
   const accountId = getAuthAccountId();
   if (!accountId) {
     return {
@@ -866,6 +908,17 @@ async function rebindPendingToken(
       platform: pending.platform,
     });
   } catch (error) {
+    if (
+      isApiError(error) &&
+      error.statusCode >= 400 &&
+      error.statusCode < 500 &&
+      ![401, 408, 429].includes(error.statusCode)
+    ) {
+      // Register detaches other accounts before its device-cap check. Invalid
+      // token formats fail before detach but cannot receive pushes anyway.
+      await clearPendingUnbind();
+      return activatePushAfterLoginInQueue(true);
+    }
     if (__DEV__) console.warn("[push] pending token rebind failed", error);
     return {
       permission: "granted",
@@ -879,6 +932,16 @@ async function rebindPendingToken(
   await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, pending.token);
   await clearPendingUnbind();
   return activatePushAfterLoginInQueue(false, pending.token);
+}
+
+function signedOutPushResult(): PushActivateResult {
+  return {
+    permission: "granted",
+    token: null,
+    registered: false,
+    mode: "none",
+    reason: "register_failed",
+  };
 }
 
 async function syncTokenWithBackendInQueue(

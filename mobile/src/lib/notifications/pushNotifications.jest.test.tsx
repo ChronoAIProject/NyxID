@@ -2,6 +2,8 @@ import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import { AppState, type AppStateStatus } from "react-native";
 import { mobileApi } from "../api/mobileApi";
+import { ApiError } from "../api/ApiError";
+import { setPushDeliverySuppressed } from "./pushDeliveryState";
 import { setAuthAccountId } from "../auth/authAccount";
 import {
   activatePushAfterLogin,
@@ -13,6 +15,7 @@ const mockStore = new Map<string, string>();
 let mockRefresh: (token: unknown) => void;
 let notificationListener: ((notification: any) => void) | undefined;
 let appStateListener: ((state: AppStateStatus) => void) | undefined;
+let mockHandler: Notifications.NotificationHandler | null;
 jest.mock("../env", () => ({
   NYXID_APP_SCHEME: "nyxid",
   NYXID_TRUSTED_FRONTEND_URLS: [],
@@ -44,7 +47,9 @@ jest.mock("expo-notifications", () => {
     data: "same-native-token",
   }));
   return {
-    setNotificationHandler: jest.fn(),
+    setNotificationHandler: jest.fn((handler) => {
+      mockHandler = handler;
+    }),
     addNotificationReceivedListener: (listener: (notification: any) => void) => {
       notificationListener = listener;
       return { remove() {} };
@@ -62,7 +67,23 @@ jest.mock("expo-notifications", () => {
   };
 });
 beforeEach(() => {
+  AppState.currentState = "active";
   mockStore.clear();
+  setPushDeliverySuppressed(false);
+  jest.mocked(SecureStore.setItemAsync).mockImplementation(async (key, value) => {
+    mockStore.set(key, value);
+  });
+  jest.mocked(SecureStore.deleteItemAsync).mockImplementation(async (key) => {
+    mockStore.delete(key);
+  });
+  jest
+    .mocked(Notifications.unregisterForNotificationsAsync)
+    .mockReset()
+    .mockResolvedValue();
+  jest
+    .mocked(Notifications.getDevicePushTokenAsync)
+    .mockReset()
+    .mockResolvedValue({ type: "ios", data: "same-native-token" } as never);
   setAuthAccountId("one");
   appStateListener = undefined;
   jest.spyOn(AppState, "addEventListener").mockImplementation((_event, listener) => {
@@ -124,8 +145,9 @@ test("native invalidation failure is guarded and still clears cached registratio
     .mockRejectedValueOnce(new Error("offline"));
   jest
     .mocked(Notifications.unregisterForNotificationsAsync)
-    .mockRejectedValueOnce(new Error("unsupported runtime"));
+    .mockRejectedValue(new Error("unsupported runtime"));
   await expect(deactivatePushOnLogout()).resolves.toBe(false);
+  expect(Notifications.unregisterForNotificationsAsync).toHaveBeenCalledTimes(3);
   expect(warning).toHaveBeenCalledWith("[push] native unregister unavailable");
   warning.mockRestore();
   expect(mockStore.has("nyxid.push.device_token")).toBe(false);
@@ -207,6 +229,7 @@ test("pending unbind suppresses notification presentation until a later registra
 });
 
 test("pending rebind succeeds before same-token native registration and does not rotate", async () => {
+  setPushDeliverySuppressed(true);
   mockStore.set(
     "nyxid.push.pending_unbind",
     JSON.stringify({
@@ -227,6 +250,7 @@ test("pending rebind succeeds before same-token native registration and does not
 });
 
 test("pending rebind rotates a changed native token from the stored token", async () => {
+  setPushDeliverySuppressed(true);
   mockStore.set(
     "nyxid.push.pending_unbind",
     JSON.stringify({
@@ -252,6 +276,7 @@ test("pending rebind rotates a changed native token from the stored token", asyn
 });
 
 test("failed pending rebind never fetches a native token and active retries the record", async () => {
+  setPushDeliverySuppressed(true);
   mockStore.set(
     "nyxid.push.pending_unbind",
     JSON.stringify({
@@ -288,5 +313,198 @@ test("runtime token refresh does no API work while signed out; next login regist
   setAuthAccountId("two");
   await activatePushAfterLogin();
   expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(1);
+  stop();
+});
+
+function seedPending(createdAt = new Date().toISOString()) {
+  setPushDeliverySuppressed(true);
+  mockStore.set(
+    "nyxid.push.pending_unbind",
+    JSON.stringify({
+      token: "pending-token", provider: "apns", platform: "ios", createdAt,
+    }),
+  );
+}
+function pushError(statusCode: number) {
+  return new ApiError({
+    statusCode, errorCode: 1000, errorKey: "rejected", message: "Rejected",
+  });
+}
+const visibleNotification = (id: string) => ({
+  request: {
+    identifier: id, content: { title: "Approval", body: "Review", data: {} },
+  },
+});
+
+test("notification handling cannot clear suppression while a pending record write is delayed", async () => {
+  const stop = await initializeNotificationRuntime();
+  AppState.currentState = "inactive";
+  mockStore.set("nyxid.push.device_token", "same-native-token");
+  jest
+    .mocked(mobileApi.unregisterPushToken)
+    .mockRejectedValueOnce(new Error("offline"));
+  let release!: () => void;
+  let writing!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    writing = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  jest
+    .mocked(SecureStore.setItemAsync)
+    .mockImplementationOnce(async (key, value) => {
+      writing();
+      await blocked;
+      mockStore.set(key, value);
+    });
+  const logout = deactivatePushOnLogout();
+  await entered;
+  expect(isPushDeliverySuppressed()).toBe(true);
+  const presentation = await mockHandler!.handleNotification(
+    visibleNotification("setting") as never,
+  );
+  expect(presentation.shouldShowAlert).toBe(false);
+  expect(isPushDeliverySuppressed()).toBe(true);
+  release();
+  await logout;
+  stop();
+});
+
+test("notification handling cannot restore suppression while a pending record clear is delayed", async () => {
+  seedPending();
+  const stop = await initializeNotificationRuntime();
+  AppState.currentState = "inactive";
+  let release!: () => void;
+  let clearing!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    clearing = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  jest.mocked(SecureStore.deleteItemAsync).mockImplementationOnce(async (key) => {
+    clearing();
+    await blocked;
+    mockStore.delete(key);
+  });
+  const registration = activatePushAfterLogin();
+  await entered;
+  expect(isPushDeliverySuppressed()).toBe(false);
+  const presentation = await mockHandler!.handleNotification(
+    visibleNotification("clearing") as never,
+  );
+  expect(presentation.shouldShowAlert).toBe(true);
+  expect(isPushDeliverySuppressed()).toBe(false);
+  release();
+  await registration;
+  stop();
+});
+
+test.each([400, 403, 404, 409, 422])(
+  "terminal rebind HTTP %s drops suppression and attempts normal registration",
+  async (status) => {
+    seedPending();
+    jest
+      .mocked(mobileApi.registerPushToken)
+      .mockRejectedValueOnce(pushError(status))
+      .mockResolvedValueOnce({ registered: true } as never);
+    const result = await activatePushAfterLogin();
+    expect(result.registered).toBe(true);
+    expect(mockStore.has("nyxid.push.pending_unbind")).toBe(false);
+    expect(isPushDeliverySuppressed()).toBe(false);
+    expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(2);
+    expect(mobileApi.registerPushToken).toHaveBeenLastCalledWith(
+      expect.objectContaining({ token: "same-native-token" }),
+    );
+  },
+);
+
+test.each([401, 408, 429, 503])(
+  "retryable rebind HTTP %s keeps the pending record and suppression",
+  async (status) => {
+    seedPending();
+    const warning = jest.spyOn(console, "warn").mockImplementation(() => {});
+    jest.mocked(mobileApi.registerPushToken).mockRejectedValueOnce(pushError(status));
+    expect((await activatePushAfterLogin()).registered).toBe(false);
+    expect(mockStore.has("nyxid.push.pending_unbind")).toBe(true);
+    expect(isPushDeliverySuppressed()).toBe(true);
+    expect(Notifications.getDevicePushTokenAsync).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(
+      "[push] pending token rebind failed", expect.any(ApiError),
+    );
+  },
+);
+
+test("a terminal rebind failure surfaces the normal registration result", async () => {
+  seedPending();
+  const warning = jest.spyOn(console, "warn").mockImplementation(() => {});
+  const capError = pushError(400);
+  jest.mocked(mobileApi.registerPushToken)
+    .mockRejectedValueOnce(capError)
+    .mockRejectedValueOnce(capError);
+  expect(await activatePushAfterLogin()).toMatchObject({
+    registered: false, reason: "register_failed",
+  });
+  expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(2);
+  expect(mockStore.has("nyxid.push.pending_unbind")).toBe(false);
+  expect(isPushDeliverySuppressed()).toBe(false);
+  expect(warning).toHaveBeenCalledWith("[push] register token failed", capError);
+});
+
+test("a pending record older than seven days gives up and uses normal registration", async () => {
+  seedPending(new Date(Date.now() - 7 * 86400000 - 1).toISOString());
+  jest
+    .mocked(mobileApi.registerPushToken)
+    .mockResolvedValueOnce({ registered: true } as never);
+  expect((await activatePushAfterLogin()).registered).toBe(true);
+  expect(mockStore.has("nyxid.push.pending_unbind")).toBe(false);
+  expect(isPushDeliverySuppressed()).toBe(false);
+  expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(1);
+  expect(mobileApi.registerPushToken).toHaveBeenCalledWith(
+    expect.objectContaining({ token: "same-native-token" }),
+  );
+});
+
+test("native unregister retries twice before its third attempt succeeds", async () => {
+  mockStore.set("nyxid.push.device_token", "same-native-token");
+  jest
+    .mocked(mobileApi.unregisterPushToken)
+    .mockRejectedValueOnce(new Error("offline"));
+  jest
+    .mocked(Notifications.unregisterForNotificationsAsync)
+    .mockRejectedValueOnce(new Error("busy"))
+    .mockRejectedValueOnce(new Error("busy"));
+  expect(await deactivatePushOnLogout()).toBe(false);
+  expect(Notifications.unregisterForNotificationsAsync).toHaveBeenCalledTimes(3);
+  expect(
+    JSON.parse(mockStore.get("nyxid.push.pending_unbind")!).nativeUnregisterPending,
+  ).toBe(false);
+  expect(isPushDeliverySuppressed()).toBe(true);
+});
+
+test("exhausted native unregister is retained and active retries even while signed out", async () => {
+  const stop = await initializeNotificationRuntime();
+  const warning = jest.spyOn(console, "warn").mockImplementation(() => {});
+  mockStore.set("nyxid.push.device_token", "same-native-token");
+  jest
+    .mocked(mobileApi.unregisterPushToken)
+    .mockRejectedValueOnce(new Error("offline"));
+  jest
+    .mocked(Notifications.unregisterForNotificationsAsync)
+    .mockRejectedValue(new Error("busy"));
+  await deactivatePushOnLogout();
+  expect(Notifications.unregisterForNotificationsAsync).toHaveBeenCalledTimes(3);
+  expect(
+    JSON.parse(mockStore.get("nyxid.push.pending_unbind")!).nativeUnregisterPending,
+  ).toBe(true);
+  setAuthAccountId(null);
+  appStateListener!("active");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(Notifications.unregisterForNotificationsAsync).toHaveBeenCalledTimes(6);
+  expect(mockStore.has("nyxid.push.pending_unbind")).toBe(true);
+  expect(isPushDeliverySuppressed()).toBe(true);
+  expect(mobileApi.registerPushToken).not.toHaveBeenCalled();
+  expect(warning).toHaveBeenCalledTimes(2);
   stop();
 });
