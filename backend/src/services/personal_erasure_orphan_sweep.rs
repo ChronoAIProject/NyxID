@@ -42,6 +42,10 @@ struct OrphanGroup {
     owner_id: String,
     row_ids: Vec<Bson>,
     disposition: Erasure,
+    /// Joined-child rows have no owner field. `owner_id` is the parent id and
+    /// this marker tells apply to remove the row only because its parent is
+    /// gone, never because an account id looked dead.
+    joined_parent: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -154,7 +158,56 @@ async fn aggregate_groups(
             owner_id: owner_id.to_owned(),
             row_ids,
             disposition,
+            joined_parent: None,
         });
+    }
+    Ok(groups)
+}
+
+/// Find joined children whose authoritative parent no longer exists. These
+/// rows are safe to sweep even when the parent was an organization resource;
+/// the orphan condition is structural, not an owner-liveness guess.
+async fn aggregate_joined_children(
+    db: &mongodb::Database,
+    collection: &'static str,
+    parent: &'static str,
+    field: &'static str,
+) -> AppResult<Vec<OrphanGroup>> {
+    let mut cursor = db
+        .collection::<Document>(collection)
+        .aggregate(owner_pipeline(field))
+        .allow_disk_use(true)
+        .max_time(AGGREGATE_TIMEOUT)
+        .await?;
+    let mut groups = Vec::new();
+    while let Some(row) = cursor.try_next().await? {
+        let Ok(parent_id) = row.get_str("_id") else {
+            continue;
+        };
+        if Uuid::parse_str(parent_id).is_err() {
+            continue;
+        }
+        let parent_exists = db
+            .collection::<Document>(parent)
+            .find_one(doc! {"_id": parent_id})
+            .projection(doc! {"_id": 1})
+            .max_time(AGGREGATE_TIMEOUT)
+            .await?
+            .is_some();
+        if parent_exists {
+            continue;
+        }
+        let row_ids = row.get_array("row_ids").cloned().unwrap_or_default();
+        if !row_ids.is_empty() {
+            groups.push(OrphanGroup {
+                collection,
+                field,
+                owner_id: parent_id.to_owned(),
+                row_ids,
+                disposition: Erasure::JoinedChild { parent },
+                joined_parent: Some(parent),
+            });
+        }
     }
     Ok(groups)
 }
@@ -208,6 +261,15 @@ async fn live_owner_ids(
 async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
     let mut all = Vec::new();
     for entry in personal_data_registry::entries() {
+        if let Erasure::JoinedChild { parent } = entry.erasure {
+            if let Some((field, parent_collection)) = joined_child_spec(entry.collection, parent) {
+                all.extend(
+                    aggregate_joined_children(db, entry.collection, parent_collection, field)
+                        .await?,
+                );
+            }
+            continue;
+        }
         if !matches!(entry.erasure, Erasure::LocalInventory | Erasure::Redacted) {
             continue;
         }
@@ -228,6 +290,30 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
         ))
     });
     Ok(all)
+}
+
+fn joined_child_spec(
+    collection: &str,
+    parent: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (collection, parent) {
+        ("assistant_agent_learning_rejections", "assistant_agents") => {
+            Some(("agent_id", "assistant_agents"))
+        }
+        ("channel_event_logs", "channel_conversations") => {
+            Some(("conversation_id", "channel_conversations"))
+        }
+        ("channel_send_claims", "channel_conversations") => {
+            // Claims use `<conversation_id>:<claim_id>` ids rather than a
+            // dedicated parent field; they are handled by the owning domain.
+            None
+        }
+        ("service_history_heads", "user_services") => Some(("_id", "user_services")),
+        ("service_pool_health_observations", "service_pools") => {
+            Some(("pool_id", "service_pools"))
+        }
+        _ => None,
+    }
 }
 
 fn row_id_hash(row_ids: &[Bson]) -> AppResult<String> {
@@ -353,8 +439,15 @@ async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<(
     for chunk in ids.chunks_mut(APPLY_BATCH) {
         let mut filter = Document::new();
         filter.insert("_id", doc! {"$in": chunk.to_vec()});
-        filter.insert(group.field, group.owner_id.as_str());
+        if group.joined_parent.is_none() {
+            filter.insert(group.field, group.owner_id.as_str());
+        }
         match group.disposition {
+            Erasure::JoinedChild { .. } => {
+                db.collection::<Document>(group.collection)
+                    .delete_many(filter)
+                    .await?;
+            }
             Erasure::LocalInventory => {
                 db.collection::<Document>(group.collection)
                     .delete_many(filter)
@@ -502,6 +595,7 @@ mod tests {
             owner_id: Uuid::new_v4().to_string(),
             row_ids: vec![Bson::String("b".into()), Bson::String("a".into())],
             disposition: Erasure::LocalInventory,
+                joined_parent: None,
         }];
         let mut two = one.clone();
         two[0].field = "other_owner";
@@ -531,6 +625,7 @@ mod tests {
                 },
                 row_ids: vec![Bson::String(index.to_string())],
                 disposition: Erasure::LocalInventory,
+                joined_parent: None,
             })
             .collect::<Vec<_>>();
         let (reports, count) = reports(&groups);

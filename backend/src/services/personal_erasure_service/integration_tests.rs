@@ -790,13 +790,13 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
             doc! {
                 "_id": "personal-history",
                 "owner_id": &owner,
-                "actor": {"person_id": &owner, "name": "Deleted Person", "api_key_id": "key", "app_id": "app"},
+                "actor": {"person_id": &owner, "name": "Deleted Person", "display_name": "Deleted Person", "email": "deleted@example.test", "api_key_id": "key", "app_id": "app"},
                 "action": "update",
             },
             doc! {
                 "_id": "org-history",
                 "owner_id": &org,
-                "actor": {"person_id": &owner, "name": "Deleted Person", "api_key_id": "key", "app_id": "app"},
+                "actor": {"person_id": &owner, "name": "Deleted Person", "display_name": "Deleted Person", "email": "deleted@example.test", "api_key_id": "key", "app_id": "app"},
                 "action": "update",
                 "sequence": 7_i64,
             },
@@ -838,21 +838,11 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
     assert_eq!(org_history.get_i64("sequence"), Ok(7));
     let actor = org_history.get_document("actor").unwrap();
     assert_eq!(actor.get_str("name"), Ok("Deleted account"));
-    assert!(
-        actor
-            .get("person_id")
-            .is_some_and(|value| value.as_null().is_some())
-    );
-    assert!(
-        actor
-            .get("api_key_id")
-            .is_some_and(|value| value.as_null().is_some())
-    );
-    assert!(
-        actor
-            .get("app_id")
-            .is_some_and(|value| value.as_null().is_some())
-    );
+    assert_eq!(actor.get_str("person_id"), Ok(owner.as_str()));
+    assert_eq!(actor.get_str("api_key_id"), Ok("key"));
+    assert_eq!(actor.get_str("app_id"), Ok("app"));
+    assert_eq!(actor.get_str("display_name"), Ok("Deleted account"));
+    assert!(actor.get("email").is_none());
     db.drop().await.unwrap();
 }
 

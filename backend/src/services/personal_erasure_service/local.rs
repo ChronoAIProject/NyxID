@@ -692,6 +692,10 @@ async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
         },
         doc! {"$set": {
         "actor.name": "Deleted account",
+        "actor.display_name": "Deleted account",
+        }, "$unset": {
+        "actor.email": "",
+        "actor.email_address": "",
         }},
     )
     .await?
