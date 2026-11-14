@@ -1549,7 +1549,7 @@ async fn upsert_override_row(
         })?;
 
     if flag_key == CRASH_REPORTS_FLAG_KEY {
-        super::crash_report_service::invalidate_rollout_cache(db);
+        super::crash_report_service::invalidate_rollout_cache(db).await;
     }
     Ok(row)
 }
@@ -1635,7 +1635,7 @@ pub async fn set_platform_override(
             )
         })?;
     if flag_key == CRASH_REPORTS_FLAG_KEY {
-        super::crash_report_service::invalidate_rollout_cache(db);
+        super::crash_report_service::invalidate_rollout_cache(db).await;
     }
     Ok(row)
 }
@@ -1663,7 +1663,7 @@ pub async fn clear_platform_override(
         })
         .await?;
     if flag_key == CRASH_REPORTS_FLAG_KEY {
-        super::crash_report_service::invalidate_rollout_cache(db);
+        super::crash_report_service::invalidate_rollout_cache(db).await;
     }
     Ok(row)
 }
@@ -1720,7 +1720,7 @@ pub async fn clear_platform_org_override(
         })
         .await?;
     if flag_key == CRASH_REPORTS_FLAG_KEY {
-        super::crash_report_service::invalidate_rollout_cache(db);
+        super::crash_report_service::invalidate_rollout_cache(db).await;
     }
     Ok(row)
 }

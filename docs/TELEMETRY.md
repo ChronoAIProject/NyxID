@@ -48,6 +48,21 @@ The backend's `telemetry::dispatch_inventory_tests` enumerates direct `track` ca
 
 `NYXID_TELEMETRY_DSN` selects the operator's PostHog ingestion project; `NYXID_TELEMETRY_HOST` selects its ingest host. The built-in default is `https://us.i.posthog.com`. `NYXID_SHARE_ANALYTICS` is an alternative operator configuration. Without a configured backend destination no product event dispatches. A configured destination never grants account or device permission. Public configuration may describe availability to clients; it supplies no consent authority.
 
+`GET /api/v1/public/config` also has an optional `crash_diagnostics_offered`
+discovery field, emitted only as `true` for a Global or Cohort diagnostics rollout
+and omitted when Off or Killed. Its value starts false and comes only from process
+memory on the public request path. A tracked worker evaluates rollout at startup
+and every 60 seconds; local admin flag writes refresh it through cache invalidation
+before returning (a maximum 200 ms read), while other replicas converge at their
+next successful periodic evaluation. Read failures retain the last value. The
+independent manifest worker keeps its 15-minute cadence.
+
+The web consent banner can query preferences when product telemetry is active or
+the diagnostics discovery field is true, retaining the session cache. Only the
+authenticated preference response determines the person's real diagnostics offer
+and consent. A Cohort non-member makes at most one cached GET per session and sees
+no diagnostics banner. The public hint never grants capture authority.
+
 Operators must establish their own deployed-provider register, disclosures, processing locations, retention windows, contracts and transfer arrangements. Source defaults do not prove legal roles, contracts or regional processing. Security logs and database/backups have separate retention arrangements.
 
 ## Erasure status

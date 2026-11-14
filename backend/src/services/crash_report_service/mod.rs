@@ -1,6 +1,7 @@
 //! First-party, policy-2 diagnostic admission and owner-linked local storage.
 pub mod admin;
 pub(crate) mod logging;
+pub mod public_config;
 pub mod releases;
 pub mod validation;
 use crate::{
@@ -47,11 +48,12 @@ static NEGATIVE_SCOPES: std::sync::LazyLock<
 fn cache_key(db: &Database) -> String {
     db.name().to_owned()
 }
-pub fn invalidate_rollout_cache(db: &Database) {
+pub async fn invalidate_rollout_cache(db: &Database) {
     NEGATIVE_SCOPES
         .lock()
         .expect("rollout cache")
         .remove(&cache_key(db));
+    public_config::invalidate(db).await;
 }
 async fn has_enabled_scope(db: &Database) -> AppResult<bool> {
     let key = cache_key(db);

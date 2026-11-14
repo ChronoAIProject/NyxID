@@ -47,6 +47,23 @@ Unknown pauses capture and preserves pending records. Only definite withdrawal,
 account change or `not_offered` purges them. The default-off path caches only
 absence of enabled flag scopes, for at most five seconds; it never caches a
 positive decision.
+
+`GET /api/v1/public/config` exposes the optional discovery hint
+`crash_diagnostics_offered: true` when the rollout is Global or Cohort. It omits
+the field for Off or Killed, preserving the default-off response shape. The hint
+starts false and the public handler reads only process memory for this field,
+without database commands or person-specific state. A tracked, drain-aware worker
+evaluates `admin::rollout` at startup and every 60 seconds, separately from the
+unchanged 15-minute manifest refresh. Local admin flag writes recompute the hint
+through rollout-cache invalidation before returning, with a 200 ms read bound;
+other replicas converge on their next successful refresh within the cadence.
+Failed reads retain the last value. This hint only permits the banner's cached
+preference GET; it grants no offer or consent authority. With product telemetry
+active or this hint set, a banner candidate reads preferences at most once per
+session, and explicit saves update that cache. A Cohort non-member on a crash-only
+deployment sees no banner because their preference response does not offer
+diagnostics.
+
 Web offers the updated consent
 banner and a Privacy review dialog. Mobile offers an account-bound one-time
 Review / Not now alert and a Privacy review row. Not now retains the old choice.
@@ -244,9 +261,6 @@ pauses on 13401/503 and disarms only on definitive 13400. The web session stops
 only for 13400/13401; a later available permission refresh clears that stop.
 Unknown/5xx permits a later refresh. Capture timestamps are capped at forty bytes
 before parsing and stored/exported as normalized UTC RFC3339 values.
-The consent banner skips preference reads when public telemetry configuration
-is off and otherwise reuses its answer for the session; explicit saves update
-that cache.
 
 `client_error_reports` has UUID IDs, a unique owner/event index, owner revision,
 closed report, derived fields, receive/expiry timestamps and fenced export state.

@@ -256,7 +256,7 @@ pub async fn mutate(
     if result.is_ok()
         && let Some(db) = crash_cache_db
     {
-        super::crash_report_service::invalidate_rollout_cache(&db);
+        super::crash_report_service::invalidate_rollout_cache(&db).await;
     }
     result
 }

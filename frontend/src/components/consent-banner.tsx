@@ -26,7 +26,7 @@ export function ConsentBanner() {
   const permission = useQuery({
     queryKey: ["analytics-consent", accountId],
     queryFn: () => readAnalyticsConsent(accountId!),
-    enabled: candidate && telemetryActive,
+    enabled: candidate && (telemetryActive || cfg?.crash_diagnostics_offered === true),
     staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
@@ -57,11 +57,8 @@ export function ConsentBanner() {
   }
   if (!accountId || (asked && (!update || previouslyDismissed || dismissed === accountId))) return null;
 
-  // Default-off contract: when the backend's /public/config reports
-  // no telemetry DSN AND share-back is not opted in, the app has
-  // nothing to capture — rendering the banner would be user-visible
-  // drift from a pre-telemetry deploy. Short-circuit here. The banner
-  // still renders normally on any deploy where telemetry could fire.
+  // The public rollout hint only permits a preference read. A crash-only
+  // deployment needs the person's actual policy-2 offer before showing a banner.
   if (!telemetryActive && current !== 2) return null;
 
   return (

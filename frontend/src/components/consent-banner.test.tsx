@@ -6,21 +6,23 @@ import { ConsentBanner } from "./consent-banner";
 import { useConsentStore } from "@/stores/consent-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-const mocks = vi.hoisted(() => ({read:vi.fn(),save:vi.fn(),telemetry:true}));
+const mocks = vi.hoisted(() => ({read:vi.fn(),save:vi.fn(),telemetry:true,crashOffered:false}));
 vi.mock("@/lib/analytics-consent",()=>({readAnalyticsConsent:mocks.read,saveAnalyticsConsent:mocks.save}));
-vi.mock("@/hooks/use-public-config",()=>({usePublicConfig:()=>({data:{telemetry_share_analytics:mocks.telemetry}})}));
+vi.mock("@/hooks/use-public-config",()=>({usePublicConfig:()=>({data:{telemetry_share_analytics:mocks.telemetry,crash_diagnostics_offered:mocks.crashOffered || undefined}})}));
 const original = "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Change this in Settings → Privacy.";
 const initialAuth=useAuthStore.getState(),initialConsent=useConsentStore.getState();
 let client:QueryClient;
 beforeEach(()=>{
   localStorage.clear();
   mocks.telemetry=true;
+  mocks.crashOffered=false;
   useAuthStore.setState({user:{id:"owner"} as User});
   useConsentStore.setState({accountId:"owner",asked:false,enabled:false,policy:1});
   mocks.read.mockReset().mockResolvedValue({account_id:"owner",enabled:true,policy_version:"1",current_policy_version:"1",diagnostics_offered:false});
   mocks.save.mockReset().mockResolvedValue({});
   client=new QueryClient({defaultOptions:{queries:{retry:false}}});
 });
+
 afterEach(()=>{cleanup();client.clear();useAuthStore.setState(initialAuth);useConsentStore.setState(initialConsent);});
 function show(){return render(<QueryClientProvider client={client}><ConsentBanner/></QueryClientProvider>);}
 it("flag-off first-time banner retains the exact existing disclosure and account/browser choice",async()=>{
@@ -106,4 +108,52 @@ it("a failed banner preference read does not retry on remount focus or reconnect
     await Promise.resolve();
   });
   expect(mocks.read).toHaveBeenCalledOnce();
+});
+
+it.each([
+  { telemetry: false, crash: false, requests: 0 },
+  { telemetry: true, crash: false, requests: 1 },
+  { telemetry: false, crash: true, requests: 1 },
+  { telemetry: true, crash: true, requests: 1 },
+])("banner discovery with telemetry=$telemetry and crash=$crash makes $requests preference requests", async ({ telemetry, crash, requests }) => {
+  mocks.telemetry = telemetry;
+  mocks.crashOffered = crash;
+  useConsentStore.setState({ asked: true, enabled: true, policy: 1 });
+  mocks.read.mockResolvedValue({
+    account_id: "owner", enabled: true, policy_version: "1",
+    current_policy_version: crash ? "2" : "1", diagnostics_offered: crash,
+  });
+  const first = show();
+  if (requests) {
+    await waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
+  }
+  first.unmount();
+  show();
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+  });
+  expect(mocks.read).toHaveBeenCalledTimes(requests);
+  if (crash) {
+    expect(screen.getByText(/^Analytics updated:/)).toBeInTheDocument();
+  } else {
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  }
+});
+
+it("a cohort non-member makes one cached preference GET per session and sees no banner", async () => {
+  mocks.telemetry = false;
+  mocks.crashOffered = true;
+  const first = show();
+  await waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
+  first.unmount();
+  show();
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"));
+    onlineManager.setOnline(false);
+    onlineManager.setOnline(true);
+    await Promise.resolve();
+  });
+  expect(mocks.read).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

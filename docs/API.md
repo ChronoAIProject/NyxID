@@ -11,6 +11,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Error Codes](#error-codes)
 - [Endpoints](#endpoints)
   - [Health](#health)
+  - [Public Configuration](#public-configuration)
   - [Interactive Documentation](#interactive-documentation)
   - [Auth](#auth)
   - [Social Auth](#social-auth)
@@ -204,6 +205,25 @@ curl http://localhost:3001/health
 ```
 
 ---
+
+### Public Configuration
+
+#### GET /api/v1/public/config
+
+Returns public deployment configuration without authentication: frontend, MCP and
+node URLs, version, configured social providers, registration/email gates,
+`mobile_new_domains`, and optional telemetry configuration.
+
+The optional boolean `crash_diagnostics_offered` is included only as `true` when
+the diagnostics rollout is Global or Cohort; Off or Killed omits the field. It is
+a process-local discovery hint with no per-person data and adds no database reads
+to this endpoint. It starts false until the first successful startup evaluation.
+A tracked worker refreshes it every 60 seconds; local admin flag writes refresh
+it immediately through cache invalidation with a 200 ms read bound. Other replicas
+converge on the next successful refresh; failures keep the previous value. The
+manifest refresh remains a separate 15-minute task. Clients may use the hint to
+ask for preferences; actual offer and consent authority remain in the authenticated
+`/users/me/preferences/analytics` response.
 
 ### Interactive Documentation
 

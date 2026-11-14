@@ -96,6 +96,9 @@ pub struct PublicConfigResponse {
     /// Global `mobile:new-domains` admin flag. Mobile builds that embed both
     /// production domain sets read it from both API hosts at launch.
     pub mobile_new_domains: bool,
+    /// Process-local rollout discovery hint, independent of account permission.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub crash_diagnostics_offered: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
     /// when telemetry is off. See docs/TELEMETRY.md §3.
@@ -179,6 +182,9 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
         invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
         mobile_new_domains,
+        crash_diagnostics_offered: crate::services::crash_report_service::public_config::offered(
+            &state.db,
+        ),
         telemetry_dsn,
         telemetry_host,
         telemetry_share_analytics,
@@ -287,6 +293,7 @@ mod tests {
             invite_code_required: true,
             email_auth_enabled: true,
             mobile_new_domains: true,
+            crash_diagnostics_offered: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -312,6 +319,7 @@ mod tests {
             invite_code_required: false,
             email_auth_enabled: false,
             mobile_new_domains: false,
+            crash_diagnostics_offered: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -322,6 +330,7 @@ mod tests {
         assert!(json.get("telemetry_host").is_none());
         // telemetry_share_analytics false => skipped (Not::not)
         assert!(json.get("telemetry_share_analytics").is_none());
+        assert!(json.get("crash_diagnostics_offered").is_none());
         // Mobile launches must distinguish an explicit off from an older backend.
         assert_eq!(json["mobile_new_domains"], false);
     }
@@ -337,6 +346,7 @@ mod tests {
             invite_code_required: false,
             email_auth_enabled: false,
             mobile_new_domains: false,
+            crash_diagnostics_offered: false,
             telemetry_dsn: Some("phc_test123".to_string()),
             telemetry_host: Some("https://us.i.posthog.com".to_string()),
             telemetry_share_analytics: true,
@@ -345,5 +355,110 @@ mod tests {
         assert_eq!(json["telemetry_dsn"], "phc_test123");
         assert_eq!(json["telemetry_host"], "https://us.i.posthog.com");
         assert_eq!(json["telemetry_share_analytics"], true);
+    }
+
+    #[tokio::test]
+    async fn public_config_crash_hint_omits_off_and_killed_includes_global_and_cohort_without_reads()
+     {
+        use crate::{
+            models::user::{COLLECTION_NAME as USERS, User, UserType},
+            services::{
+                crash_report_service::{FLAG, admin, public_config as hint},
+                feature_flag_service::{self as flags, FlagTarget},
+                security_readiness_service as readiness,
+            },
+            test_utils::*,
+        };
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let seen = commands.clone();
+        let db = connect_test_database_with_command_handler(
+            "crash_public_config_reads",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    seen.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&id, UserType::Person))
+            .await
+            .unwrap();
+        readiness::ready_test_replica(&db).await;
+        let state = test_app_state(db.clone());
+        for expected in [
+            admin::Rollout::Off,
+            admin::Rollout::Global,
+            admin::Rollout::Killed,
+            admin::Rollout::Cohort,
+        ] {
+            match expected {
+                admin::Rollout::Global | admin::Rollout::Killed => {
+                    flags::set_platform_override(
+                        &db,
+                        FLAG,
+                        &FlagTarget::Global,
+                        expected == admin::Rollout::Global,
+                        &id,
+                    )
+                    .await
+                    .unwrap();
+                }
+                admin::Rollout::Cohort => {
+                    flags::set_platform_override(
+                        &db,
+                        FLAG,
+                        &FlagTarget::User(id.clone()),
+                        true,
+                        &id,
+                    )
+                    .await
+                    .unwrap();
+                    flags::clear_platform_override(&db, FLAG, &FlagTarget::Global)
+                        .await
+                        .unwrap();
+                }
+                admin::Rollout::Off => {}
+            }
+            assert_eq!(admin::rollout(&db).await.unwrap(), expected);
+            commands.lock().unwrap().clear();
+            let value =
+                serde_json::to_value(public_config(State(state.clone())).await.unwrap().0).unwrap();
+            let offered = matches!(expected, admin::Rollout::Global | admin::Rollout::Cohort);
+            if offered {
+                assert_eq!(value["crash_diagnostics_offered"], true);
+            } else {
+                assert!(value.get("crash_diagnostics_offered").is_none());
+            }
+            assert_eq!(hint::offered(&db), offered);
+            let reads = commands.lock().unwrap().clone();
+            assert_eq!(
+                reads.len(),
+                2,
+                "only the existing public flag reads: {reads:?}"
+            );
+            for (command, key) in reads
+                .iter()
+                .zip(["auth:invitation-code", "mobile:new-domains"])
+            {
+                assert_eq!(
+                    command.get_str("find").unwrap(),
+                    crate::models::feature_flag_override::COLLECTION_NAME
+                );
+                assert_eq!(
+                    command
+                        .get_document("filter")
+                        .unwrap()
+                        .get_str("flag_key")
+                        .unwrap(),
+                    key
+                );
+            }
+        }
     }
 }
