@@ -7,18 +7,9 @@ pub(crate) fn is_supported_mobile_redirect_uri(uri: &str) -> bool {
 }
 
 pub(crate) fn validate_app_return_uri(uri: &str, configured_schemes: &[String]) -> AppResult<()> {
-    let Some((scheme, _)) = uri.split_once("://") else {
-        return Err(AppError::ValidationError("Invalid app_return_uri".into()));
-    };
-    let valid_scheme = scheme == "nyxid"
-        || configured_schemes
-            .iter()
-            .any(|configured| configured == scheme);
-    let valid = uri.len() <= 512
-        && !uri.chars().any(|c| c.is_control() || c.is_whitespace())
-        && valid_scheme
-        && uri == format!("{scheme}://services/oauth-return")
-        && url::Url::parse(uri).is_ok();
+    let valid = std::iter::once("nyxid")
+        .chain(configured_schemes.iter().map(String::as_str))
+        .any(|scheme| uri == format!("{scheme}://services/oauth-return"));
     if !valid {
         return Err(AppError::ValidationError("Invalid app_return_uri".into()));
     }

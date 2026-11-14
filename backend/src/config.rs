@@ -1122,7 +1122,7 @@ fn parse_mobile_app_return_schemes(raw: Option<&str>) -> Result<Vec<String>, &'s
     }
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err("expected lowercase non-web mobile URL schemes");
+        return Ok(Vec::new());
     }
     let mut schemes = Vec::new();
     for value in raw.split(',').map(str::trim) {
@@ -2708,6 +2708,11 @@ mod mobile_app_return_scheme_tests {
             ["acme-nyx", "foo+bar"]
         );
         assert!(parse_mobile_app_return_schemes(None).unwrap().is_empty());
+        assert!(
+            parse_mobile_app_return_schemes(Some(" "))
+                .unwrap()
+                .is_empty()
+        );
         for invalid in [
             "ACME-NYX",
             "1acme",
@@ -2715,7 +2720,6 @@ mod mobile_app_return_scheme_tests {
             "https",
             "exp",
             "javascript",
-            " ",
             "acme nyx",
             "acme,",
             ",acme",
