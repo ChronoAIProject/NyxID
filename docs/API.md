@@ -9777,4 +9777,3 @@ exact decimal payloads, validation, audit and activation semantics.
 `POST /api/v1/users/me/export` returns the bounded `nyxid.account-export` JSON
 attachment described in [ACCOUNT_DATA_EXPORT.md](ACCOUNT_DATA_EXPORT.md). It is
 first-party human only and rate limited to three requests per account per hour.
-
