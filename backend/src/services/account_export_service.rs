@@ -105,6 +105,33 @@ fn get_path<'a>(row: &'a Document, path: &str) -> Option<&'a Bson> {
     }
     Some(value)
 }
+
+fn insert_path(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    value: serde_json::Value,
+) {
+    let mut segments = path.split('.').peekable();
+    let Some(first) = segments.next() else {
+        return;
+    };
+    if let Some(next) = segments.next() {
+        let entry = target
+            .entry(first.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(object) = entry.as_object_mut() else {
+            return;
+        };
+        let remaining = std::iter::once(next)
+            .chain(segments)
+            .collect::<Vec<_>>()
+            .join(".");
+        insert_path(object, &remaining, value);
+    } else {
+        target.insert(first.to_owned(), value);
+    }
+}
+
 fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
     let mut result = serde_json::Map::new();
     for field in fields {
@@ -112,7 +139,7 @@ fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
             continue;
         }
         if let Some(value) = get_path(row, field).and_then(bson_json) {
-            result.insert((*field).to_owned(), value);
+            insert_path(&mut result, field, value);
         }
     }
     serde_json::Value::Object(result)
@@ -1116,6 +1143,14 @@ mod tests {
         assert!(value.get("_id").is_none());
         assert!(value.get("token").is_none());
         assert!(value.get("encrypted_blob").is_none());
+    }
+
+    #[test]
+    fn safe_items_keep_nested_allowlisted_paths_structured() {
+        let row = doc! {"actor": {"person_id": "opaque", "name": "Deleted account"}};
+        let value = safe_item(&row, &["actor.person_id", "actor.name"]);
+        assert_eq!(value["actor"]["person_id"], "opaque");
+        assert_eq!(value["actor"]["name"], "Deleted account");
     }
 
     #[test]

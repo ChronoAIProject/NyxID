@@ -34,6 +34,266 @@ async fn until_source_removed(state: &crate::AppState, owner: &str) {
     );
 }
 
+fn replace_owner(value: &mut bson::Bson, owner: &str) {
+    match value {
+        bson::Bson::String(value) if value == owner => {}
+        bson::Bson::Document(document) => {
+            for value in document.values_mut() {
+                replace_owner(value, owner);
+            }
+        }
+        bson::Bson::Array(values) => {
+            for value in values {
+                replace_owner(value, owner);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn seed_from_inventory_filter(filter: &Document, owner: &str, id: &str) -> Document {
+    fn copy(document: &Document, owner: &str) -> Document {
+        let mut output = Document::new();
+        for (key, value) in document {
+            if key.starts_with('$') {
+                let bson::Bson::Array(values) = value else {
+                    continue;
+                };
+                if let Some(bson::Bson::Document(first)) = values.first() {
+                    output.extend(copy(first, owner));
+                }
+                continue;
+            }
+            let value = match value {
+                bson::Bson::Document(operators) => {
+                    if let Some(value) = operators.get("$in").and_then(|value| value.as_array()) {
+                        value
+                            .first()
+                            .cloned()
+                            .unwrap_or(bson::Bson::String("seed".into()))
+                    } else if operators.get_bool("$exists").ok() == Some(false) {
+                        continue;
+                    } else if operators.contains_key("$ne") {
+                        bson::Bson::String("seed-not-equal".into())
+                    } else if operators.contains_key("$type") {
+                        match operators.get_str("$type").unwrap_or_default() {
+                            "binData" => bson::Bson::Binary(bson::Binary {
+                                subtype: bson::spec::BinarySubtype::Generic,
+                                bytes: vec![1],
+                            }),
+                            "date" => bson::Bson::DateTime(bson::DateTime::now()),
+                            _ => bson::Bson::String("seed".into()),
+                        }
+                    } else if let Some(value) = operators.get("$eq") {
+                        value.clone()
+                    } else {
+                        bson::Bson::Document(copy(operators, owner))
+                    }
+                }
+                value => value.clone(),
+            };
+            let mut value = value;
+            replace_owner(&mut value, owner);
+            output.insert(key, value);
+        }
+        output
+    }
+
+    let mut row = copy(filter, owner);
+    row.insert("_id", id);
+    row.insert("fixture_marker", "registry-table");
+    row
+}
+
+fn assert_owner_row_is_absent_or_redacted(
+    row: Option<Document>,
+    entry: &crate::services::personal_data_registry::Entry,
+    owner: &str,
+) {
+    match entry.erasure {
+        crate::services::personal_data_registry::Erasure::Redacted => {
+            let row = row.expect("redacted shared row must remain");
+            let encoded = serde_json::to_string(&row).unwrap();
+            assert!(!encoded.contains("deleted@example.test"));
+            assert!(!encoded.contains("Deleted Person"));
+            if entry.collection == "invite_codes" {
+                assert_eq!(row.get_i32("used_count"), Ok(1));
+                assert_eq!(row.get_array("usages").unwrap().len(), 1);
+                assert_eq!(
+                    row.get_array("usages").unwrap()[0]
+                        .as_document()
+                        .unwrap()
+                        .get_str("user_id"),
+                    Ok(owner)
+                );
+            }
+        }
+        _ => assert!(row.is_none(), "target row survived in {}", entry.collection),
+    }
+}
+
+/// Registry-driven behavioral coverage. The inventory is the table of cases,
+/// so adding a new local predicate automatically adds a target/bystander case.
+#[tokio::test]
+async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let other = uuid::Uuid::new_v4().to_string();
+    let org = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_many([
+            test_user(&other, UserType::Person),
+            test_user(&org, UserType::Org),
+        ])
+        .await
+        .unwrap();
+
+    let mut target_rows = Vec::new();
+    let mut bystander_rows = Vec::new();
+    let mut retained_rows = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, (collection, filter)) in super::local::inventory(&owner).into_iter().enumerate() {
+        let target_id = format!("registry-target-{index}");
+        let bystander_id = format!("registry-bystander-{index}");
+        let target = seed_from_inventory_filter(&filter, &owner, &target_id);
+        let bystander = seed_from_inventory_filter(&filter, &other, &bystander_id);
+        // `_id` owner selectors intentionally use the account id. Keep the
+        // generated ids for every other collection so repeated inventory
+        // predicates cannot collide.
+        let target = if filter.get_str("_id").ok() == Some(owner.as_str()) {
+            let mut row = target;
+            row.insert("_id", owner.clone());
+            row
+        } else {
+            target
+        };
+        let bystander = if filter.get_str("_id").ok() == Some(owner.as_str()) {
+            let mut row = bystander;
+            row.insert("_id", other.clone());
+            row
+        } else {
+            bystander
+        };
+        if seen.insert((collection, target.get("_id").cloned().unwrap())) {
+            db.collection::<Document>(collection)
+                .insert_one(target.clone())
+                .await
+                .unwrap();
+            db.collection::<Document>(collection)
+                .insert_one(bystander.clone())
+                .await
+                .unwrap();
+            target_rows.push((collection, target.get("_id").cloned().unwrap()));
+            bystander_rows.push((
+                collection,
+                bystander.get("_id").cloned().unwrap(),
+                bystander,
+            ));
+        }
+    }
+
+    for (index, entry) in crate::services::personal_data_registry::entries()
+        .iter()
+        .enumerate()
+    {
+        if !matches!(
+            entry.erasure,
+            crate::services::personal_data_registry::Erasure::Retained(_)
+        ) {
+            continue;
+        }
+        let id = format!("registry-retained-{index}");
+        let mut row = doc! {"_id": &id, "fixture_marker": "registry-retained"};
+        if let crate::services::personal_data_registry::OwnerSelector::Fields(fields) = entry.owner
+        {
+            for field in fields {
+                if *field != "_id" && !field.contains('.') {
+                    row.insert(*field, &owner);
+                }
+            }
+        }
+        db.collection::<Document>(entry.collection)
+            .insert_one(row)
+            .await
+            .unwrap();
+        retained_rows.push((entry.collection, id));
+    }
+
+    db.collection::<Document>("invite_codes")
+        .insert_one(doc! {
+            "_id": "registry-invite",
+            "used_count": 1_i32,
+            "max_uses": 2_i32,
+            "usages": [{"user_id": &owner, "email": "deleted@example.test", "used_at": bson::DateTime::now()}],
+        })
+        .await
+        .unwrap();
+    db.collection::<Document>("service_change_events")
+        .insert_one(doc! {
+            "_id": "registry-org-history",
+            "owner_id": &org,
+            "actor": {"person_id": &owner, "name": "Deleted Person", "email": "deleted@example.test"},
+        })
+        .await
+        .unwrap();
+
+    accept(&db, &owner, &owner, None).await.unwrap();
+    // Force one lease expiry between pages to cover interruption/resumption.
+    step(&state).await;
+    db.collection::<Document>(JOBS)
+        .update_many(
+            doc! {"user_id": &owner},
+            doc! {"$set": {"lease_expires_at": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    until_source_removed(&state, &owner).await;
+
+    for (collection, id) in target_rows {
+        let row = db
+            .collection::<Document>(collection)
+            .find_one(doc! {"_id": id})
+            .await
+            .unwrap();
+        let entry = crate::services::personal_data_registry::find(collection).unwrap();
+        assert_owner_row_is_absent_or_redacted(row, entry, &owner);
+    }
+    for (collection, id, expected) in bystander_rows {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap(),
+            Some(expected),
+            "bystander changed in {collection}"
+        );
+    }
+    for (collection, id) in retained_rows {
+        assert!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .is_some(),
+            "retained row disappeared from {collection}"
+        );
+    }
+    let invite = db
+        .collection::<Document>("invite_codes")
+        .find_one(doc! {"_id": "registry-invite"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        invite.get_array("usages").unwrap()[0]
+            .as_document()
+            .unwrap()
+            .get("email")
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
 async fn seed_orphan_delivery_intents(db: &Database, owner: &str) -> Vec<(&'static str, Document)> {
     let intents = crate::models::node_credential_desired::COLLECTION_NAME;
     let receipts = super::super::personal_erasure_registry::REVOCATION_RECEIPTS;
