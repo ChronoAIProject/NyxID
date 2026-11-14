@@ -326,7 +326,16 @@ build ID, and hidden source maps. An explicitly malformed UUID fails the build;
 local builds without an ID generate a random UUID. The publish workflow derives
 one deterministic UUIDv5 from repository, commit SHA and workflow run ID in a
 single prerequisite job and passes it to both architecture builds. Only the
-amd64 frontend build receives the optional upload secret, so symbols upload once. The build collector moves all maps out of dist into
+amd64 frontend build receives the optional upload secret, so symbols upload once.
+Cross-architecture reproducibility was verified at `8cf56b4aa`: with identical
+build arguments, the `linux/amd64` and `linux/arm64` frontend builder stages
+produced byte-identical JS bundles, all 456 source maps and the collected
+crash-artifacts tree; with a pinned `SOURCE_DATE_EPOCH`, all 1,494 output files
+were identical. Without a pinned epoch, as in CI, only the upstream
+release-integrity manifest's `generated_at` timestamp differed, which no crash
+artifact references, so arm64 frames symbolicate against the maps uploaded once
+from amd64.
+The build collector moves all maps out of dist into
 `crash-artifacts/web/<artifact>/`, copies matching assets, writes a manifest and
 fails if a map or sourceMappingURL remains public. nginx also rejects `.map`.
 The runtime image copies only dist. The builder installs the artifact uploader
