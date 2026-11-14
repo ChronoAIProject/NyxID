@@ -755,6 +755,7 @@ impl BillingService {
             quantity: None,
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            usage_checkpoint: None,
             pool_attempt: None,
             machine_usage: None,
             status: UsageStatus::Reserved,

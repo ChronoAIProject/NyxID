@@ -664,6 +664,10 @@ pub(crate) async fn consume(
         .clone();
     let maximum = plan.tariff.tariff().bounds.max_response_bytes as usize;
     let mut decoder = stream::Decoder::new(native).with_contract(&plan.tariff.tariff().contract);
+    let mut checkpoints = ctx.billing.stream_checkpoints(
+        &metered,
+        sender.is_some() && native != adapters::Native::Gemini,
+    );
     let mut buffer = Zeroizing::new(Vec::new());
     let mut size = 0usize;
     let mut clean = false;
@@ -676,7 +680,31 @@ pub(crate) async fn consume(
                 .filter(|n| *n <= maximum)
                 .ok_or_else(adapters::invalid_response)?;
             if let Some(sender) = sender {
-                for text in decoder.push(&chunk)? {
+                let texts = match decoder.push(&chunk) {
+                    Ok(texts) => texts,
+                    Err(error) => {
+                        checkpoints.invalidate().await;
+                        return Err(error);
+                    }
+                };
+                if checkpoints.is_enabled()
+                    && let Some((protocol, mut evidence, final_report)) = decoder.checkpoint()
+                {
+                    if evidence.cache_write == Some(0) {
+                        for ttl in &plan.tariff.tariff().contract.cache_write_ttls {
+                            evidence.writes.entry(*ttl).or_insert(0);
+                        }
+                    }
+                    let charges = plan
+                        .tariff
+                        .usage(&evidence)
+                        .ok()
+                        .and_then(|u| u.model_charges);
+                    checkpoints
+                        .model_observation(protocol, evidence, final_report, charges)
+                        .await;
+                }
+                for text in texts {
                     if !text.is_empty() {
                         sender
                             .send(Ok(adapters::chunk(
@@ -886,6 +914,8 @@ pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<u64> {
         let id = row
             .get_str("_id")
             .map_err(|_| adapters::invalid_response())?;
+        // The expired attempt was claimed above; its executor no longer owns it.
+        billing::usage_checkpoint::recover_request(db, id, None).await?;
         // A crash after saving evidence is already recoverable through PR 2.
         let known = db
             .collection::<Document>("usage_meter")

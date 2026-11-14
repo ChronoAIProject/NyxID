@@ -737,12 +737,39 @@ pub struct BoundedUsageEvents {
 }
 impl BoundedUsageEvents {
     pub fn push(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            if let Some(Ok(event)) = self.decoder.push_byte(byte)
-                && let Some((usage, mode)) =
-                    extract_reported_usage_from_sse_event(event.event_type.as_deref(), &event.data)
-            {
-                self.accumulator.observe(usage, mode);
+        self.push_with(bytes, true, |_| {});
+    }
+    pub(crate) fn push_observed(
+        &mut self,
+        bytes: &[u8],
+        capture_usage: bool,
+    ) -> Vec<ObservedUsageEvent> {
+        let mut events = Vec::new();
+        self.push_with(bytes, capture_usage, |event| events.push(event));
+        events
+    }
+    fn push_with(
+        &mut self,
+        bytes: &[u8],
+        capture_usage: bool,
+        mut observe: impl FnMut(ObservedUsageEvent),
+    ) {
+        for event in self.decoder.push(bytes) {
+            match event {
+                Ok(event) => {
+                    if let Ok(value) = serde_json::from_str(&event.data) {
+                        if capture_usage
+                            && let Some((usage, mode)) = extract_reported_usage_from_value(
+                                event.event_type.as_deref(),
+                                &value,
+                            )
+                        {
+                            self.accumulator.observe(usage, mode);
+                        }
+                        observe(Ok((event.event_type, value)));
+                    }
+                }
+                Err(error) => observe(Err(error)),
             }
         }
     }
@@ -758,6 +785,9 @@ impl BoundedUsageEvents {
         })
     }
 }
+
+pub(crate) type ObservedUsageEvent =
+    Result<(Option<String>, serde_json::Value), super::sse_parser::EventDecodeError>;
 
 /// Bounded callers supply already-captured bodies; no additional body reads.
 pub fn usage_from_body(body: &[u8], path: &str, successful: bool) -> Option<ReportedLlmUsage> {
@@ -833,12 +863,19 @@ pub fn extract_reported_usage_from_sse_event(
     }
 
     let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    extract_reported_usage_from_value(event_type, &value)
+}
+
+pub(crate) fn extract_reported_usage_from_value(
+    event_type: Option<&str>,
+    value: &serde_json::Value,
+) -> Option<(ReportedLlmUsage, UsageAggregationMode)> {
     let image_event = event_type.or_else(|| value.get("type").and_then(serde_json::Value::as_str));
     if matches!(
         image_event,
         Some("image_generation.completed" | "image_edit.completed")
     ) {
-        let mut usage = extract_reported_usage(&value).unwrap_or_default();
+        let mut usage = extract_reported_usage(value).unwrap_or_default();
         usage.image_output_tokens = usage.completion_tokens;
         usage.images = 1;
         usage.completed_image_index = Some(
@@ -850,7 +887,7 @@ pub fn extract_reported_usage_from_sse_event(
         );
         return Some((usage, UsageAggregationMode::Delta));
     }
-    let usage = extract_reported_usage(&value)?;
+    let usage = extract_reported_usage(value)?;
 
     let mode = match event_type {
         Some("message_start")
@@ -858,7 +895,7 @@ pub fn extract_reported_usage_from_sse_event(
         | Some("response.completed")
         | Some("response.incomplete") => UsageAggregationMode::Snapshot,
         Some("usage.delta") | Some("response.usage.delta") => UsageAggregationMode::Delta,
-        _ if has_explicit_total(&value) => UsageAggregationMode::Snapshot,
+        _ if has_explicit_total(value) => UsageAggregationMode::Snapshot,
         _ => return None,
     };
 

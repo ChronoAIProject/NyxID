@@ -6459,11 +6459,25 @@ async fn execute_resolved_proxy_inner<'a>(
                                     let mut response_len: i64 = 0;
                                     let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
                                     let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
+                                    let mut checkpoints = stream_billing.stream_checkpoints(
+                                        &stream_metered,
+                                        node_is_sse && (200..300).contains(&status)
+                                            && crate::services::billing::usage_checkpoint::supports_path(&usage_path),
+                                    );
                                     loop {
                                         match tokio::time::timeout(idle_timeout, rx.recv()).await {
                                             Ok(Some(StreamChunk::Data(bytes))) => {
                                                 response_len += bytes.len() as i64;
-                                                if capture_usage && node_is_sse { usage_events.push(&bytes); }
+                                                if checkpoints.is_enabled() {
+                                                    for event in usage_events.push_observed(&bytes, capture_usage) {
+                                                        match event {
+                                                            Ok((kind, value)) => {
+                                                                checkpoints.observe_value(kind.as_deref(), &value).await;
+                                                            }
+                                                            Err(_) => checkpoints.invalidate().await,
+                                                        }
+                                                    }
+                                                } else if capture_usage && node_is_sse { usage_events.push(&bytes); }
                                                 if let Some(buffer) = captured.as_mut() {
                                                     if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
                                                     else { captured = None; }

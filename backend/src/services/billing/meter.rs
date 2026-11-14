@@ -967,6 +967,7 @@ pub(super) fn reserved_row(
         quantity: None,
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        usage_checkpoint: None,
         pool_attempt: ctx.pool_attempt.clone(),
         machine_usage: ctx.machine_usage.clone(),
         status: UsageStatus::Reserved,
@@ -1039,6 +1040,39 @@ async fn finalize_matching(
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
+    let literal_set = finalization_fields(
+        quantity,
+        model,
+        request_usage,
+        reported_model,
+        pending_resale_quantity,
+        finalized_at,
+    );
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let claimed = collection
+        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
+        .with_options(
+            mongodb::options::FindOneAndUpdateOptions::builder()
+                .return_document(mongodb::options::ReturnDocument::After)
+                .build(),
+        )
+        .await?;
+
+    let Some(claimed) = claimed else {
+        return Ok(None);
+    };
+
+    Ok(Some(claimed))
+}
+
+pub(super) fn finalization_fields(
+    quantity: i64,
+    model: Option<String>,
+    request_usage: Option<&PlatformUsage>,
+    reported_model: Option<&str>,
+    pending_resale_quantity: Option<i64>,
+    finalized_at: chrono::DateTime<Utc>,
+) -> bson::Document {
     let model_for_row = model.clone();
     let mut set = doc! {
         "status": "finalized",
@@ -1084,21 +1118,7 @@ async fn finalize_matching(
             "$pool_attempt"
         ]},
     );
-    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
-    let claimed = collection
-        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
-        .with_options(
-            mongodb::options::FindOneAndUpdateOptions::builder()
-                .return_document(mongodb::options::ReturnDocument::After)
-                .build(),
-        )
-        .await?;
-
-    let Some(claimed) = claimed else {
-        return Ok(None);
-    };
-
-    Ok(Some(claimed))
+    literal_set
 }
 
 pub(super) async fn materialize_pending_resale_intent(

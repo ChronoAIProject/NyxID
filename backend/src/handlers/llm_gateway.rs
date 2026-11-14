@@ -2409,11 +2409,17 @@ async fn build_filtered_response(
                 .as_ref()
                 .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
+            let checkpoint_eligible = status.is_success()
+                && crate::services::billing::usage_checkpoint::supports_path(
+                    downstream_response.url().path(),
+                );
             crate::turn_trace::spawn_cleanup(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let mut checkpoints =
+                    stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
 
                 loop {
                     match {
@@ -2426,21 +2432,14 @@ async fn build_filtered_response(
                     } {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
-                            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                            while let Some(event) = parse_next_sse_event(&mut buffer) {
-                                if let Some((mut usage, mode)) =
-                                    llm_usage_service::extract_reported_usage_from_sse_event(
-                                        event.event_type.as_deref(),
-                                        &event.data,
-                                    )
-                                {
-                                    if !status.is_success() {
-                                        usage.images = 0;
-                                    }
-                                    accumulator.observe(usage, mode);
-                                }
-                            }
+                            crate::services::proxy_http_response::observe_sse_chunk(
+                                &mut buffer,
+                                &mut accumulator,
+                                &mut checkpoints,
+                                &bytes,
+                                status.is_success(),
+                            )
+                            .await;
 
                             if tx.send(Ok(bytes)).await.is_err() {
                                 break;
@@ -2714,12 +2713,22 @@ async fn build_translated_sse_response(
         .as_ref()
         .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
+    let checkpoint_eligible = downstream_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(crate::mw::security_headers::is_sse_media_type)
+        && crate::services::billing::usage_checkpoint::supports_path(
+            downstream_response.url().path(),
+        );
     crate::turn_trace::spawn_cleanup(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
         let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
         let mut response_len: i64 = 0;
+        let mut checkpoints =
+            stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
 
         loop {
             match {
@@ -2734,13 +2743,18 @@ async fn build_translated_sse_response(
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                     while let Some(event) = parse_next_sse_event(&mut buffer) {
-                        if let Some((usage, mode)) =
-                            llm_usage_service::extract_reported_usage_from_sse_event(
-                                event.event_type.as_deref(),
-                                &event.data,
-                            )
-                        {
-                            accumulator.observe(usage, mode);
+                        if let Ok(value) = serde_json::from_str(&event.data) {
+                            checkpoints
+                                .observe_value(event.event_type.as_deref(), &value)
+                                .await;
+                            if let Some((usage, mode)) =
+                                llm_usage_service::extract_reported_usage_from_value(
+                                    event.event_type.as_deref(),
+                                    &value,
+                                )
+                            {
+                                accumulator.observe(usage, mode);
+                            }
                         }
 
                         if let Some(translated) =

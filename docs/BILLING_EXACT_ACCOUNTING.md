@@ -442,6 +442,30 @@ Compact headlines compute their displayed digits with integer arithmetic. Chart
 geometry may use Number projections; money labels retain exact decimals. CLI
 output prefers exact amounts, including top-up verification arithmetic.
 
+### Stream usage checkpoints
+
+Funded HTTP event streams make a best-effort checkpoint of protocol-confirmed
+final usage before forwarding its event, using the relay's existing event and
+JSON parsing. A write waits at most one second. A database error, timeout or
+lost row predicate logs one metadata-only reason and disables checkpointing for
+that stream; bytes and normal finalization continue unchanged. Text, interim,
+private ChatGPT, Gemini, individual image and unknown reports add no writes.
+Anthropic interim counters merge in memory. Duplicate final reports are skipped;
+a later ambiguous report can withdraw a prior eligible checkpoint once.
+
+The optional meter `usage_checkpoint` remains separate from final quantities.
+Recovery promotes only a usable final report, atomically with its meter
+quantities, then uses ordinary idempotent settlement. Pool recovery respects the
+attempt lease; ordinary checkpoint recovery uses the existing reservation-abandon
+delay and reconcile cadence. Missing classes retain the existing unknown-usage
+policy. Non-streamed and metering-only requests add no checkpoint work.
+
+Old binaries ignore the optional field and retain their previous crash exposure;
+an old pool recoverer may still release an unknown attempt before a new recoverer
+uses its checkpoint. New recovery never charges an already released row.
+Rollback needs no data change, and promoted final quantities remain recoverable
+by either binary. Voice retains its existing durable duration/response windows.
+
 ### Usage dashboard filters and models
 
 The admin Usage page keeps its shared filters directly below the heading. Users

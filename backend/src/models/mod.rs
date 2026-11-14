@@ -137,6 +137,7 @@ pub mod trigger;
 pub mod trigger_delivery;
 pub mod usage_allowance;
 pub mod usage_allowance_period;
+pub mod usage_checkpoint;
 pub mod usage_meter;
 pub mod user;
 pub mod user_api_key;
