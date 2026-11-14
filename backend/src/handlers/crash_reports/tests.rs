@@ -118,6 +118,7 @@ async fn ingestion_auth_consent_device_readiness_kill_and_encoding_matrix() {
     consent::set_acknowledging(&db, &id, false, consent::PolicyVersion::Diagnostics)
         .await
         .unwrap();
+    crate::test_utils::await_responsive_majority_io(&db).await;
     assert!(matches!(
         ingest(
             State(state.clone()),
@@ -129,6 +130,13 @@ async fn ingestion_auth_consent_device_readiness_kill_and_encoding_matrix() {
         .await,
         Err(AppError::CrashReportConsentRequired)
     ));
+    let denied = db
+        .collection::<bson::Document>(COUNTERS)
+        .find_one(bson::doc! {"platform": "web", "outcome": "consent_denied"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(denied.get_i64("count").unwrap(), 1);
     flags::set_platform_override(&db, service::FLAG, &FlagTarget::Global, false, &id)
         .await
         .unwrap();
@@ -361,6 +369,92 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
             .unwrap();
         assert!(!format!("{stored:?}").contains(text));
     }
+}
+
+#[tokio::test]
+async fn insert_failures_distinguish_unavailable_invalid_and_consent_denied_counters() {
+    use consent::ConsentPermission;
+
+    let (db, id, revision) = account("crash_insert_error_counters").await;
+    // Exercise the real insert gate with a bounded-deadline failure, independent
+    // of MongoDB latency and without delaying the admission or rate-limit paths.
+    let unknown = consent::bounded_consent_read(std::future::pending(), std::time::Duration::ZERO)
+        .await
+        .for_revision(&revision);
+    assert_eq!(unknown, ConsentPermission::Unknown);
+    for (permission, invalid, status, outcome) in [
+        (
+            unknown,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ),
+        (
+            ConsentPermission::Denied,
+            false,
+            StatusCode::FORBIDDEN,
+            "consent_denied",
+        ),
+        (
+            ConsentPermission::Permitted(()),
+            true,
+            StatusCode::BAD_REQUEST,
+            "invalid",
+        ),
+    ] {
+        let mut report = report();
+        if invalid {
+            report.app_version = "invalid/version".into();
+        }
+        let error = service::insert_with_consent(
+            &db,
+            &crate::services::crash_report_export::CrashConfig::default(),
+            "test",
+            &id,
+            &revision,
+            report,
+            std::future::ready(permission),
+        )
+        .await
+        .unwrap_err();
+        let response = insert_error(&db, Platform::Web, error)
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.status(), status);
+        let counter = db
+            .collection::<bson::Document>(COUNTERS)
+            .find_one(bson::doc! {"platform": "web", "outcome": outcome})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(counter.get_i64("count").unwrap(), 1);
+    }
+    assert_eq!(
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .count_documents(bson::doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+
+    for error in [
+        AppError::Internal("test internal failure".into()),
+        AppError::DatabaseError(mongodb::error::Error::custom("test database failure")),
+    ] {
+        let response = insert_error(&db, Platform::Web, error)
+            .await
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let counter = db
+        .collection::<bson::Document>(COUNTERS)
+        .find_one(bson::doc! {"platform": "web", "outcome": "unavailable"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(counter.get_i64("count").unwrap(), 3);
 }
 
 #[tokio::test]

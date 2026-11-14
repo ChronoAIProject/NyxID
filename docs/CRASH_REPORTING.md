@@ -253,7 +253,10 @@ closed report, derived fields, receive/expiry timestamps and fenced export state
 Retention is 1–30 days (default 30); every read filters live expiry as well as the
 Mongo TTL. Personal erasure deletes these owner-linked rows through the existing
 erasure inventory and admission barrier. `client_error_report_counters` retains
-only anonymous hourly platform/outcome counts, with a 30-day TTL.
+only anonymous hourly platform/outcome counts, with a 30-day TTL. After rate
+limiting, insert failures count as `consent_denied` for confirmed consent denial,
+`invalid` for validation errors, and `unavailable` for unknown consent or other
+database/internal failures. Pre-admission eligibility refusals remain uncounted.
 
 NyxID keeps its fingerprint for local grouping only; Sentry receives no custom
 fingerprint, preserving symbolicated grouping. Web uses the browser context;

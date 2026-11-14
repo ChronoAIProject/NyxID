@@ -208,7 +208,7 @@ pub async fn insert(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_with_consent(
+pub(crate) async fn insert_with_consent(
     db: &Database,
     config: &CrashConfig,
     environment: &str,

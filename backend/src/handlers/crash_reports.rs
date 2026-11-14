@@ -124,20 +124,22 @@ pub async fn ingest(
             *response.status_mut() = StatusCode::ACCEPTED;
             Ok(response)
         }
-        Err(error) => {
-            service::count(
-                &state.db,
-                Some(platform),
-                if matches!(error, AppError::CrashReportConsentRequired) {
-                    "consent_denied"
-                } else {
-                    "invalid"
-                },
-            )
-            .await;
-            Err(error)
-        }
+        Err(error) => insert_error(&state.db, platform, error).await,
     }
+}
+
+async fn insert_error(
+    db: &mongodb::Database,
+    platform: Platform,
+    error: AppError,
+) -> AppResult<Response> {
+    let outcome = match &error {
+        AppError::CrashReportConsentRequired => "consent_denied",
+        AppError::ValidationError(_) => "invalid",
+        _ => "unavailable",
+    };
+    service::count(db, Some(platform), outcome).await;
+    Err(error)
 }
 
 // Dedicated admin projections deliberately have no owner or consent fields.
