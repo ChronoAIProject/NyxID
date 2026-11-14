@@ -2157,5 +2157,18 @@ mod export_http_tests {
         drop((permit_a, permit_b));
         let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
         assert_eq!(status, StatusCode::OK);
+        for _ in 0..2 {
+            let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, headers, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            headers
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|value| value > 0)
+        );
     }
 }
