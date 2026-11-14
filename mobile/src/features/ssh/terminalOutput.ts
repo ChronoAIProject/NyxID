@@ -12,6 +12,7 @@ export class TerminalOutput {
     private overflow: () => void,
   ) {}
   push(data: ArrayBuffer) {
+    if (data.byteLength === 0) return;
     if (this.bytes + data.byteLength > 262144) {
       this.clear();
       this.overflow();

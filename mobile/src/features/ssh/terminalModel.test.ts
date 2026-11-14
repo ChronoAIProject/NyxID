@@ -176,6 +176,25 @@ test("native output encoding works without the browser btoa global", async () =>
   }
 });
 
+test("empty terminal frames cannot create an endless acknowledged output loop", async () => {
+  const sent: { data: string; id: number }[] = [];
+  const output = new TerminalOutput((data, id) => sent.push({ data, id }), () => assert.fail("unexpected overflow"));
+  try {
+    output.push(new ArrayBuffer(0));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(sent.length, 0);
+    output.push(Uint8Array.of(65).buffer);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(sent.length, 1);
+    assert.equal(Buffer.from(sent[0]!.data, "base64").toString(), "A");
+    output.ack(sent[0]!.id);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(sent.length, 1);
+  } finally {
+    output.clear();
+  }
+});
+
 test("the executed offline bridge emits real escape keys, uses xterm paste, and exposes no network APIs", () => {
   const html = terminalDocument({
     background: "#000000",
