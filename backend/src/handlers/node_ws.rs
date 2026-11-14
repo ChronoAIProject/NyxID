@@ -119,6 +119,8 @@ enum NodeMessage {
     // capability type is shared with `node_ws_manager`.
     #[serde(rename = "credential_update_ack")]
     CredentialUpdateAck {
+        #[serde(default, flatten)]
+        version: Option<crate::services::node_ws_manager::CredentialVersion>,
         #[serde(default)]
         request_id: Option<String>,
         #[serde(default)]
@@ -1354,6 +1356,31 @@ async fn handle_node_connection(
     let mut writer_task = tokio::spawn(run_node_writer(ws_sink, rx, close_rx, node_id.clone()));
     let mut writer_finished = false;
 
+    {
+        let retry_state = state.clone();
+        let retry_node = node_id.clone();
+        state.shutdown.spawn(async move {
+            retry_state
+                .node_ws_manager
+                .await_cluster_capability_resolution(
+                    &retry_node,
+                    std::time::Duration::from_millis(500),
+                )
+                .await;
+            if crate::services::node_credential_delivery::retry_node(
+                &retry_state.db,
+                &retry_state.encryption_keys,
+                &retry_state.node_ws_manager,
+                &retry_node,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!("Reconnect credential delivery awaits background retry");
+            }
+        });
+    }
+
     // Reader loop: process incoming messages from the node
     let node_id_reader = node_id.clone();
     let db = state.db.clone();
@@ -1765,10 +1792,12 @@ async fn handle_node_connection(
                 );
             }
             NodeMessage::CredentialUpdateAck {
+                version,
                 request_id,
                 service_slug,
                 status,
                 error,
+                ..
             } => {
                 let slug = service_slug.as_deref().unwrap_or("unknown");
                 let st = status.as_deref().unwrap_or("unknown");
@@ -1795,7 +1824,9 @@ async fn handle_node_connection(
                 if let Some(req_id) = request_id {
                     use crate::services::node_ws_manager::CredentialAckOutcome;
                     let outcome = if st == "ok" {
-                        CredentialAckOutcome::Ok
+                        version
+                            .map(CredentialAckOutcome::Versioned)
+                            .unwrap_or(CredentialAckOutcome::Ok)
                     } else {
                         CredentialAckOutcome::Err(
                             error.unwrap_or_else(|| "unknown node error".to_string()),
@@ -3912,6 +3943,23 @@ mod tests {
     }
 
     #[test]
+    fn node_credential_order_2472_receipt_decodes_additive_generation() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = serde_json::json!({"type":"credential_update_ack", "request_id":"receipt", "status":"ok",
+            "credential_id": id, "credential_generation": 3});
+        let msg: NodeMessage = serde_json::from_value(value).unwrap();
+        let NodeMessage::CredentialUpdateAck {
+            version: Some(version),
+            ..
+        } = msg
+        else {
+            panic!("missing receipt generation");
+        };
+        assert_eq!(version.credential_generation, 3);
+        assert!(version.credential_id == id);
+    }
+
+    #[test]
     fn node_message_deserialize_credential_update_ack_minimal() {
         let json = r#"{"type": "credential_update_ack"}"#;
         let msg: NodeMessage = serde_json::from_str(json).unwrap();
@@ -3921,6 +3969,7 @@ mod tests {
                 service_slug,
                 status,
                 error,
+                ..
             } => {
                 assert!(request_id.is_none());
                 assert!(service_slug.is_none());
@@ -3947,6 +3996,7 @@ mod tests {
                 service_slug,
                 status,
                 error,
+                ..
             } => {
                 assert_eq!(request_id.as_deref(), Some("req-42"));
                 assert_eq!(service_slug.as_deref(), Some("openai"));

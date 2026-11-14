@@ -73,6 +73,7 @@ pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
 pub mod node;
+pub mod node_credential_desired;
 pub mod node_pending_credential;
 pub mod node_registration_token;
 pub mod node_service_binding;

@@ -7,6 +7,7 @@ use mongodb::bson::doc;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+#[cfg(test)]
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::services::node_service;
@@ -41,11 +42,11 @@ impl ActorScope {
         }
     }
 
-    fn permits_node(&self, node_id: &str) -> bool {
+    pub(super) fn permits_node(&self, node_id: &str) -> bool {
         self.allow_all_nodes || self.allowed_node_ids.iter().any(|id| id == node_id)
     }
 
-    fn permits_service(&self, service_id: &str) -> bool {
+    pub(super) fn permits_service(&self, service_id: &str) -> bool {
         self.allow_all_services || self.allowed_service_ids.iter().any(|id| id == service_id)
     }
 }
@@ -98,28 +99,6 @@ pub async fn push_credential_to_node_if_owned(
     if services.is_empty() {
         return;
     }
-
-    let api_key = match crate::services::service_history::collection::<UserApiKey>(
-        db,
-        USER_API_KEYS,
-    )
-    .find_one(doc! { "_id": api_key_id })
-    .await
-    {
-        Ok(Some(k)) => k,
-        _ => {
-            tracing::warn!(api_key_id = %api_key_id, "UserApiKey not found for owned credential push");
-            return;
-        }
-    };
-
-    let credential = match decrypt_api_key_credential(&api_key, encryption_keys).await {
-        Some(c) => c,
-        None => {
-            tracing::warn!(api_key_id = %api_key_id, "No credential to push");
-            return;
-        }
-    };
 
     for svc in &services {
         let Some(node_id) = svc.node_id.as_deref() else {
@@ -176,25 +155,17 @@ pub async fn push_credential_to_node_if_owned(
             continue;
         }
 
-        let target_url =
-            match crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                .find_one(doc! { "_id": &svc.endpoint_id })
-                .await
-            {
-                Ok(Some(ep)) if !ep.url.is_empty() => Some(ep.url),
-                _ => None,
-            };
-        let params = build_credential_params(svc, &credential, target_url);
-        if let Err(e) = node_ws_manager
-            .send_credential_update_clustered(node_id, &params)
-            .await
+        if super::node_credential_delivery::deliver_slot(
+            db,
+            encryption_keys,
+            node_ws_manager,
+            node_id,
+            &svc.slug,
+        )
+        .await
+        .is_err()
         {
-            tracing::warn!(
-                node_id = %node_id,
-                service_slug = %svc.slug,
-                error = %e,
-                "Failed to push credential to owned node (node may be offline)"
-            );
+            tracing::warn!("Credential delivery failed; durable intent retained");
         }
     }
 }
@@ -243,62 +214,19 @@ pub async fn push_credential_to_node_if_routed(
         return;
     }
 
-    // Load the UserApiKey to get the decrypted credential
-    let api_key = match crate::services::service_history::collection::<UserApiKey>(
-        db,
-        USER_API_KEYS,
-    )
-    .find_one(doc! { "_id": api_key_id })
-    .await
-    {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            tracing::warn!(api_key_id = %api_key_id, "UserApiKey not found for credential push");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to load UserApiKey for credential push");
-            return;
-        }
-    };
-
-    // Decrypt the credential
-    let credential = match decrypt_api_key_credential(&api_key, encryption_keys).await {
-        Some(c) => c,
-        None => {
-            tracing::warn!(api_key_id = %api_key_id, "No credential to push");
-            return;
-        }
-    };
-
     for svc in &services {
-        let node_id = match &svc.node_id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        // Load endpoint URL for target_url field
-        let target_url =
-            match crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                .find_one(doc! { "_id": &svc.endpoint_id })
-                .await
-            {
-                Ok(Some(ep)) if !ep.url.is_empty() => Some(ep.url),
-                _ => None,
-            };
-
-        let params = build_credential_params(svc, &credential, target_url);
-
-        if let Err(e) = node_ws_manager
-            .send_credential_update_clustered(node_id, &params)
+        if let Some(node) = svc.node_id.as_deref()
+            && super::node_credential_delivery::deliver_slot(
+                db,
+                encryption_keys,
+                node_ws_manager,
+                node,
+                &svc.slug,
+            )
             .await
+            .is_err()
         {
-            tracing::warn!(
-                node_id = %node_id,
-                service_slug = %svc.slug,
-                error = %e,
-                "Failed to push credential to node (node may be offline)"
-            );
+            tracing::warn!("Credential delivery failed; durable intent retained");
         }
     }
 }
@@ -309,6 +237,7 @@ pub async fn push_credential_to_node_if_routed(
 /// `UserService` mutation, so a push failure leaves no partial state
 /// behind (fourth-round Codex review P1).
 pub struct StrictPushTarget<'a> {
+    pub service_id: &'a str,
     pub target_node_id: &'a str,
     pub service_slug: &'a str,
     pub auth_method: &'a str,
@@ -316,32 +245,9 @@ pub struct StrictPushTarget<'a> {
     pub target_url: Option<&'a str>,
 }
 
-/// Strict variant of `push_credential_to_node_if_routed` used by the
-/// `PUT /keys` flow that just stored a fresh credential server-side. The
-/// caller gates subsequent `UserService` writes and
-/// `activate_node_managed_api_key` on a successful return here — if this
-/// function errors (node offline, WS buffer full, serialization failure),
-/// the handler aborts the request so the credential stays on the server
-/// for a later retry instead of being silently lost (first Codex review
-/// P1), and no routing/auth mutation has been persisted yet.
-///
-/// Takes `target` fields directly rather than re-reading `UserService`
-/// from the database — the caller knows the *effective* post-update
-/// values (`node_id`, `auth_method`, endpoint URL, …) and we need to
-/// push to *those*, not to whatever the DB still shows from before.
-///
-/// **Best-effort delivery semantics.** "Strict" here means the WS frame
-/// was queued on the node's outbound channel — it does NOT wait for a
-/// `credential_update_ack` from the node. If the node accepts the frame
-/// but later fails to persist it (keychain / config write error), the
-/// handler still returns success and commits routing mutations.
-/// Follow-up: add request-id + oneshot pending waiter so callers can
-/// block on `credential_update_ack` with a timeout (twentieth-round
-/// Codex P1). The existing push-before-mutation ordering and the
-/// server-side credential preservation in `reconcile_provider_key_for_
-/// service_routing` mean a failed node-side apply leaves the server copy
-/// intact for the user to retry via the same PUT, so the worst case is
-/// temporary proxy failure, not credential loss.
+/// Preserve push-before-routing semantics. The returned preparation must remain
+/// pending through the caller's writes; expiry recovers committed state after
+/// failure. Old agents retain queue-only behavior; correlated agents must ack.
 pub async fn push_credential_to_node_strict(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -349,30 +255,15 @@ pub async fn push_credential_to_node_strict(
     user_id: &str,
     api_key_id: &str,
     target: StrictPushTarget<'_>,
-) -> AppResult<()> {
-    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-        .find_one(doc! { "_id": api_key_id, "user_id": user_id })
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound("API key disappeared before credential push could run".to_string())
-        })?;
-
-    let credential = decrypt_api_key_credential(&api_key, encryption_keys)
-        .await
-        .ok_or_else(|| {
-            AppError::Internal(
-                "Failed to decrypt credential for node push; secret cannot be delivered"
-                    .to_string(),
-            )
-        })?;
-
-    let params = build_credential_params_from_fields(
-        target.service_slug,
-        target.auth_method,
-        target.auth_key_name,
-        &credential,
-        target.target_url.map(str::to_string),
-    );
+) -> AppResult<super::node_credential_delivery::Preparation> {
+    let (preparation, params) = super::node_credential_delivery::prepare_update(
+        db,
+        encryption_keys,
+        user_id,
+        Some(api_key_id),
+        &target,
+    )
+    .await?;
 
     // Capability-aware delivery. New node agents advertise
     // `credential_ack_correlation` in their `status_update` — the
@@ -421,7 +312,7 @@ pub async fn push_credential_to_node_strict(
             "Pushed credential in legacy mode (node has not advertised credential_ack_correlation)"
         );
     }
-    Ok(())
+    Ok(preparation)
 }
 
 /// Strict variant of `push_no_auth_to_node`: returns an error if the
@@ -441,22 +332,19 @@ pub async fn push_credential_to_node_strict(
 /// really need the downgrade can upgrade the agent or manually run
 /// `nyxid node credentials remove` first.
 pub async fn push_no_auth_to_node_strict(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     node_ws_manager: &Arc<NodeWsManager>,
-    node_id: &str,
-    service_slug: &str,
-    target_url: Option<&str>,
-) -> AppResult<()> {
-    let params = CredentialUpdateParams {
-        target_revision: None,
-        service_slug: service_slug.to_string(),
-        injection_method: "none".to_string(),
-        header_name: None,
-        header_value: None,
-        param_name: None,
-        param_value: None,
-        target_url: target_url.map(str::to_string),
-    };
-
+    owner: &str,
+    target: StrictPushTarget<'_>,
+) -> AppResult<super::node_credential_delivery::Preparation> {
+    let StrictPushTarget {
+        service_id,
+        target_node_id: node_id,
+        service_slug,
+        target_url,
+        ..
+    } = target;
     // Short-circuit on a disconnected node so the caller sees a
     // retryable `NodeOffline` (503 / 8001) instead of the
     // "legacy agent" `BadRequest` below —
@@ -499,13 +387,29 @@ pub async fn push_no_auth_to_node_strict(
         .capabilities
         .credential_ack_correlation
     {
+        let (preparation, params) = super::node_credential_delivery::prepare_update(
+            db,
+            encryption_keys,
+            owner,
+            None,
+            &StrictPushTarget {
+                service_id,
+                target_node_id: node_id,
+                service_slug,
+                auth_method: "none",
+                auth_key_name: "",
+                target_url,
+            },
+        )
+        .await?;
         node_ws_manager
             .send_credential_update_and_wait_clustered(
                 node_id,
                 &params,
                 std::time::Duration::from_secs(10),
             )
-            .await
+            .await?;
+        Ok(preparation)
     } else {
         Err(AppError::BadRequest(format!(
             "Cannot downgrade service '{service_slug}' to no-auth: node '{node_id}' is a legacy \
@@ -556,7 +460,7 @@ pub async fn push_oauth_credential_to_nodes(
 }
 
 /// Build CredentialUpdateParams from a UserService and decrypted credential.
-fn build_credential_params(
+pub(super) fn build_credential_params(
     svc: &UserService,
     credential: &str,
     target_url: Option<String>,
@@ -573,7 +477,7 @@ fn build_credential_params(
 /// Build `CredentialUpdateParams` from raw fields. Used by the strict
 /// push path when the caller has post-update values that don't yet
 /// reflect what's in the DB.
-fn build_credential_params_from_fields(
+pub(super) fn build_credential_params_from_fields(
     service_slug: &str,
     auth_method: &str,
     auth_key_name: &str,
@@ -582,16 +486,18 @@ fn build_credential_params_from_fields(
 ) -> CredentialUpdateParams {
     match auth_method {
         "ifttt_webhook" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "ifttt_webhook".to_string(),
             header_name: None,
-            header_value: Some(credential.to_string()),
+            header_value: Some(zeroize::Zeroizing::new(credential.to_string())),
             param_name: None,
             param_value: None,
             target_url,
         },
         "bearer" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
@@ -606,55 +512,60 @@ fn build_credential_params_from_fields(
             // token should register the service with `auth_method:
             // "header"` and embed the `Bearer ` prefix in the credential.
             header_name: Some("Authorization".to_string()),
-            header_value: Some(format!("Bearer {credential}")),
+            header_value: Some(zeroize::Zeroizing::new(format!("Bearer {credential}"))),
             param_name: None,
             param_value: None,
             target_url,
         },
         "header" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some(auth_key_name.to_string()),
-            header_value: Some(credential.to_string()),
+            header_value: Some(zeroize::Zeroizing::new(credential.to_string())),
             param_name: None,
             param_value: None,
             target_url,
         },
         "query" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "query_param".to_string(),
             header_name: None,
             header_value: None,
             param_name: Some(auth_key_name.to_string()),
-            param_value: Some(credential.to_string()),
+            param_value: Some(zeroize::Zeroizing::new(credential.to_string())),
             target_url,
         },
         "basic" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some("Authorization".to_string()),
-            header_value: Some(format!(
+            header_value: Some(zeroize::Zeroizing::new(format!(
                 "Basic {}",
                 base64::engine::general_purpose::STANDARD.encode(credential)
-            )),
+            ))),
             param_name: None,
             param_value: None,
             target_url,
         },
         "path" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "path_prefix".to_string(),
             header_name: Some(auth_key_name.to_string()),
-            header_value: Some(credential.to_string()),
+            header_value: Some(zeroize::Zeroizing::new(credential.to_string())),
             param_name: None,
             param_value: None,
             target_url,
         },
         "none" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             // No-auth placeholder: node keeps the slug entry (so
             // `proxy_executor` can resolve `target_url`) but stops
@@ -676,21 +587,23 @@ fn build_credential_params_from_fields(
         // field). The node agent's ws_client + credential_store
         // re-parse the JSON inside proxy_executor at signing time.
         "aws_sigv4" => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "aws_sigv4".to_string(),
             header_name: None,
-            header_value: Some(credential.to_string()),
+            header_value: Some(zeroize::Zeroizing::new(credential.to_string())),
             param_name: None,
             param_value: None,
             target_url,
         },
         _ => CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some(auth_key_name.to_string()),
-            header_value: Some(credential.to_string()),
+            header_value: Some(zeroize::Zeroizing::new(credential.to_string())),
             param_name: None,
             param_value: None,
             target_url,
@@ -699,7 +612,7 @@ fn build_credential_params_from_fields(
 }
 
 /// Decrypt the active credential from a UserApiKey.
-async fn decrypt_api_key_credential(
+pub(super) async fn decrypt_api_key_credential(
     api_key: &UserApiKey,
     encryption_keys: &EncryptionKeys,
 ) -> Option<zeroize::Zeroizing<String>> {
@@ -728,6 +641,10 @@ async fn decrypt_api_key_credential(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "credential_push_order_tests.rs"]
+mod order_tests;
 
 #[cfg(test)]
 mod tests {
@@ -866,7 +783,10 @@ mod tests {
             build_credential_params_from_fields("my-svc", "bearer", "ignored", "tok123", None);
         assert_eq!(params.injection_method, "header");
         assert_eq!(params.header_name, Some("Authorization".to_string()));
-        assert_eq!(params.header_value, Some("Bearer tok123".to_string()));
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some("Bearer tok123".to_string())).as_deref()
+        );
         assert!(params.param_name.is_none());
         assert!(params.param_value.is_none());
         assert!(params.target_url.is_none());
@@ -883,7 +803,10 @@ mod tests {
         );
         assert_eq!(params.injection_method, "ifttt_webhook");
         assert!(params.header_name.is_none());
-        assert_eq!(params.header_value.as_deref(), Some("test_key"));
+        assert_eq!(
+            params.header_value.as_ref().map(|value| value.as_str()),
+            Some("test_key")
+        );
         assert!(params.param_name.is_none());
         assert!(params.param_value.is_none());
     }
@@ -899,7 +822,10 @@ mod tests {
         );
         assert_eq!(params.injection_method, "header");
         assert_eq!(params.header_name, Some("X-API-Key".to_string()));
-        assert_eq!(params.header_value, Some("secret".to_string()));
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some("secret".to_string())).as_deref()
+        );
         assert_eq!(
             params.target_url,
             Some("https://api.example.com".to_string())
@@ -914,7 +840,10 @@ mod tests {
         assert!(params.header_name.is_none());
         assert!(params.header_value.is_none());
         assert_eq!(params.param_name, Some("api_key".to_string()));
-        assert_eq!(params.param_value, Some("secret".to_string()));
+        assert!(
+            params.param_value.as_ref().map(|value| value.as_str())
+                == (Some("secret".to_string())).as_deref()
+        );
     }
 
     #[test]
@@ -923,9 +852,9 @@ mod tests {
             build_credential_params_from_fields("my-svc", "basic", "ignored", "user:pa:ss", None);
         assert_eq!(params.injection_method, "header");
         assert_eq!(params.header_name, Some("Authorization".to_string()));
-        assert_eq!(
-            params.header_value,
-            Some("Basic dXNlcjpwYTpzcw==".to_string())
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some("Basic dXNlcjpwYTpzcw==".to_string())).as_deref()
         );
     }
 
@@ -934,7 +863,10 @@ mod tests {
         let params = build_credential_params_from_fields("tg-bot", "path", "bot", "tok123", None);
         assert_eq!(params.injection_method, "path_prefix");
         assert_eq!(params.header_name, Some("bot".to_string()));
-        assert_eq!(params.header_value, Some("tok123".to_string()));
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some("tok123".to_string())).as_deref()
+        );
     }
 
     #[test]
@@ -960,7 +892,10 @@ mod tests {
         let params = build_credential_params_from_fields("bedrock", "aws_sigv4", "", cred, None);
         assert_eq!(params.injection_method, "aws_sigv4");
         assert!(params.header_name.is_none());
-        assert_eq!(params.header_value, Some(cred.to_string()));
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some(cred.to_string())).as_deref()
+        );
         assert!(params.param_name.is_none());
     }
 
@@ -975,7 +910,10 @@ mod tests {
         );
         assert_eq!(params.injection_method, "header");
         assert_eq!(params.header_name, Some("X-Custom".to_string()));
-        assert_eq!(params.header_value, Some("value".to_string()));
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some("value".to_string())).as_deref()
+        );
     }
 
     #[test]
@@ -1048,7 +986,10 @@ mod tests {
         assert_eq!(params.service_slug, "openai");
         assert_eq!(params.injection_method, "header");
         assert_eq!(params.header_name, Some("Authorization".to_string()));
-        assert_eq!(params.header_value, Some("Bearer sk-test-key".to_string()));
+        assert!(
+            params.header_value.as_ref().map(|value| value.as_str())
+                == (Some("Bearer sk-test-key".to_string())).as_deref()
+        );
         assert_eq!(
             params.target_url,
             Some("https://api.openai.com".to_string())
@@ -1096,6 +1037,33 @@ mod no_auth_strict_push_tests {
         (mgr, rx, "node-1")
     }
 
+    async fn push_no_auth_fixture(
+        manager: &Arc<NodeWsManager>,
+        node: &str,
+        slug: &str,
+        url: Option<&str>,
+    ) -> AppResult<super::super::node_credential_delivery::Preparation> {
+        let db =
+            crate::test_utils::connect_transaction_test_database("strict_no_auth_delivery").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        super::super::node_credential_delivery::ensure_indexes(&db).await?;
+        push_no_auth_to_node_strict(
+            &db,
+            &state.encryption_keys,
+            manager,
+            "fixture-owner",
+            StrictPushTarget {
+                service_id: "fixture-service",
+                target_node_id: node,
+                service_slug: slug,
+                auth_method: "none",
+                auth_key_name: "",
+                target_url: url,
+            },
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn strict_no_auth_push_sends_none_injection_and_awaits_ack() {
         let (mgr, mut rx, node_id) = spawn_modern_agent();
@@ -1123,8 +1091,7 @@ mod no_auth_strict_push_tests {
         });
 
         let result =
-            push_no_auth_to_node_strict(&mgr, node_id, "demo", Some("https://new.example.com"))
-                .await;
+            push_no_auth_fixture(&mgr, node_id, "demo", Some("https://new.example.com")).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         ack_task.await.expect("responder panicked");
     }
@@ -1137,10 +1104,9 @@ mod no_auth_strict_push_tests {
         mgr.register_connection("legacy-node", tx);
         mgr.mark_status_update_received("legacy-node");
 
-        let err =
-            push_no_auth_to_node_strict(&mgr, "legacy-node", "demo", Some("https://example.com"))
-                .await
-                .expect_err("legacy agent should reject no-auth downgrade");
+        let err = push_no_auth_fixture(&mgr, "legacy-node", "demo", Some("https://example.com"))
+            .await
+            .expect_err("legacy agent should reject no-auth downgrade");
 
         // We specifically surface BadRequest (not NodeOffline) so the
         // user sees a clear, actionable error instead of "transient".
@@ -1167,7 +1133,7 @@ mod no_auth_strict_push_tests {
         // false, so the helper has to check connection state
         // explicitly — this test locks that in.
         let mgr = Arc::new(NodeWsManager::new(30, 100));
-        let err = push_no_auth_to_node_strict(&mgr, "missing-node", "demo", None)
+        let err = push_no_auth_fixture(&mgr, "missing-node", "demo", None)
             .await
             .expect_err("disconnected node must fail the strict downgrade");
 
@@ -1180,3 +1146,7 @@ mod no_auth_strict_push_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "node_credential_delivery_tests.rs"]
+mod delivery_tests;

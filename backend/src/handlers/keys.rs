@@ -2022,16 +2022,25 @@ pub async fn update_key(
             unified_key_service::OauthClientCredentialsInput::None
         };
 
-        unified_key_service::ensure_user_api_key_for_update(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
-            &key_id,
-            body.auth_method.as_deref(),
-            body.credential.as_deref(),
-            body.node_id.as_deref(),
-            preferred_label,
-            oauth_client_credentials,
+        crate::services::node_credential_delivery::with_prepared_actor(
+            actor.clone(),
+            credential_push_service::ActorScope {
+                allow_all_nodes: true,
+                allowed_node_ids: vec![],
+                allow_all_services: false,
+                allowed_service_ids: vec![key_id.clone()],
+            },
+            unified_key_service::ensure_user_api_key_for_update(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                &key_id,
+                body.auth_method.as_deref(),
+                body.credential.as_deref(),
+                body.node_id.as_deref(),
+                preferred_label,
+                oauth_client_credentials,
+            ),
         )
         .await?;
     }
@@ -2256,6 +2265,7 @@ pub async fn update_key(
     // mutation), so we don't need to re-check here — the request has
     // aborted with 400 long before reaching this point.
 
+    let mut delivery_preparations = Vec::new();
     let should_push = (credential_provided_nonempty || stored_credential_ready_to_push)
         && effective_node_id_for_push.is_some();
 
@@ -2263,21 +2273,24 @@ pub async fn update_key(
         && let Some(ref node_id) = effective_node_id_for_push
         && let Some(ref ak_id) = refreshed_api_key_id
     {
-        credential_push_service::push_credential_to_node_strict(
-            &state.db,
-            &state.encryption_keys,
-            &state.node_ws_manager,
-            &user_id_str,
-            ak_id,
-            credential_push_service::StrictPushTarget {
-                target_node_id: node_id,
-                service_slug: view.slug.as_str(),
-                auth_method: effective_auth_method_for_push.as_str(),
-                auth_key_name: effective_auth_key_name_for_push.as_str(),
-                target_url: effective_endpoint_url_for_push.as_deref(),
-            },
-        )
-        .await?;
+        delivery_preparations.push(
+            credential_push_service::push_credential_to_node_strict(
+                &state.db,
+                &state.encryption_keys,
+                &state.node_ws_manager,
+                &user_id_str,
+                ak_id,
+                credential_push_service::StrictPushTarget {
+                    service_id: &key_id,
+                    target_node_id: node_id,
+                    service_slug: view.slug.as_str(),
+                    auth_method: effective_auth_method_for_push.as_str(),
+                    auth_key_name: effective_auth_key_name_for_push.as_str(),
+                    target_url: effective_endpoint_url_for_push.as_deref(),
+                },
+            )
+            .await?,
+        );
     }
 
     // Same-node downgrade to `auth_method: "none"` is pushed BEFORE
@@ -2323,13 +2336,23 @@ pub async fn update_key(
         // stale URL and left the node disagreeing with the DB — the
         // stale-URL bug flagged in the PR #437 review.
         let target_url_for_no_auth = effective_endpoint_url_for_push.as_deref();
-        credential_push_service::push_no_auth_to_node_strict(
-            &state.node_ws_manager,
-            current_nid,
-            view.slug.as_str(),
-            target_url_for_no_auth,
-        )
-        .await?;
+        delivery_preparations.push(
+            credential_push_service::push_no_auth_to_node_strict(
+                &state.db,
+                &state.encryption_keys,
+                &state.node_ws_manager,
+                &user_id_str,
+                credential_push_service::StrictPushTarget {
+                    service_id: &key_id,
+                    target_node_id: current_nid,
+                    service_slug: view.slug.as_str(),
+                    auth_method: "none",
+                    auth_key_name: "",
+                    target_url: target_url_for_no_auth,
+                },
+            )
+            .await?,
+        );
     }
 
     let spec_url_update = match body.openapi_spec_url.as_deref() {
@@ -2553,81 +2576,26 @@ pub async fn update_key(
         .await?;
     }
 
-    // When `node_id` actually changed (or was cleared), tell the
-    // previous node to drop its locally-cached credential for this
-    // service. Otherwise reassigning a service from node A to node B
-    // leaves the secret persisted on A, which is a security regression
-    // whenever a user moves a routed service between nodes
-    // (seventeenth-round Codex P1). Fire-and-forget: if the old node
-    // is offline, nothing we can do right now; when it reconnects it
-    // won't see the service in `NodeServiceBinding` either.
-    if let Some(ref new_node_id_raw) = body.node_id {
-        let new_effective = if new_node_id_raw.is_empty() {
-            None
-        } else {
-            Some(new_node_id_raw.as_str())
-        };
-        let old_effective = view.node_id.as_deref().filter(|n| !n.is_empty());
-        if let Some(old_nid) = old_effective
-            && old_effective != new_effective
-        {
-            // Old-node writability was pre-validated by
-            // `validate_update_inputs` before the commit — so if we got
-            // here the actor is authorized. The post-commit cleanup
-            // itself is best-effort: the reassignment is already
-            // durable, and returning an error now would leave clients
-            // staring at a failed PUT while the stored routing has
-            // actually moved (twenty-ninth-round Codex P1). Log ack /
-            // queue failures and surface them to the operator through
-            // structured logs instead.
-            //
-            // Capability gating: `credential_remove` was introduced
-            // alongside `credential_ack_correlation`, so legacy agents
-            // that did not advertise that flag also do not implement
-            // the remove frame — sending it to them would be silently
-            // dropped as an unknown message. Instead of pretending a
-            // queue success meant the secret was cleared, log a
-            // warning with an explicit operator hint so the residual
-            // credential gets removed manually (thirtieth-round Codex
-            // P1). Wait briefly for the post-reconnect capability
-            // handshake to complete, otherwise an upgraded agent
-            // could be misclassified as legacy here
-            // (twenty-ninth-round Codex P2).
-            state
-                .node_ws_manager
-                .await_cluster_capability_resolution(old_nid, std::time::Duration::from_millis(500))
-                .await;
-            if state
-                .node_ws_manager
-                .cluster_session_info(old_nid)
-                .await
-                .capabilities
-                .credential_ack_correlation
-            {
-                if let Err(e) = state
-                    .node_ws_manager
-                    .send_credential_remove_and_wait_clustered(
-                        old_nid,
-                        view.slug.as_str(),
-                        std::time::Duration::from_secs(10),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        node_id = %old_nid,
-                        service_slug = %view.slug,
-                        error = %e,
-                        "credential_remove on previous node did not ack cleanly — secret may linger; run `nyxid node credentials remove` on that node to clean up"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    node_id = %old_nid,
-                    service_slug = %view.slug,
-                    "previous node is a legacy agent without credential_remove support — secret likely remains in its local config. Run `nyxid node credentials remove {}` on that node to clean up, then upgrade the node agent",
-                    view.slug
-                );
-            }
+    // The service mutation transaction queued the old node's removal. Resolve
+    // current state again so a concurrent rebind cannot replay a stale removal.
+    if body.node_id.is_some()
+        && let Some(old_node) = view.node_id.as_deref().filter(|node| !node.is_empty())
+        && body.node_id.as_deref() != Some(old_node)
+        && crate::services::node_credential_delivery::deliver_slot(
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            old_node,
+            &view.slug,
+        )
+        .await
+        .is_err()
+    {
+        tracing::warn!("Previous-node credential removal awaits durable retry");
+    }
+    for preparation in delivery_preparations {
+        if preparation.finish().await.is_err() {
+            tracing::warn!("Credential preparation completion deferred until expiry");
         }
     }
 

@@ -136,6 +136,7 @@ impl Migration {
             "unsupported"
         } else {
             let params = CredentialUpdateParams {
+                version: None,
                 service_slug: service.slug.clone(),
                 injection_method: "target_url".into(),
                 target_url: Some(self.new_url.clone()),
