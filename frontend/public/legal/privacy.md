@@ -58,6 +58,7 @@ The information processed depends on the features you use and their configuratio
 - IP address and approximate geolocation (for security and audit)
 - User-agent string and device type
 - Timestamps of login events and API requests
+- Optional crash diagnostics: app version/build, coarse runtime and system version, error categories and sanitized code locations, only with the updated analytics permission described in section 8
 
 Servers receive technical metadata with HTTPS requests for security and audit. Optional product analytics is a separate data flow described in section 8.
 
@@ -100,6 +101,7 @@ We do **not** sell, rent, or trade your personal information. Data can be shared
 Depending on enabled features and operator configuration, data can reach:
 
 - Product analytics services: optional events, a pseudonymous account identifier and filtered event metadata, only with analytics permission as described in section 8. The shipped integration is PostHog, when enabled. Its built-in host is the US ingestion endpoint; self-hosters can configure a different host for their own analytics project.
+- Crash diagnostics services: sanitized diagnostic reports may be exported by the server to operator-configured Sentry web/mobile projects. These events contain no account/user identifiers, IP address, user agent, cookies or message content. Local reports are linked to the account; vendor reports expire within 30 days.
 - Push-delivery services: device tokens and the notifications needed for enabled approval and NyxBot notification features. Supported integrations include Firebase Cloud Messaging and Apple Push Notification service. NyxID itself does not send account email. When billing is enabled, billing and payment providers may receive your email address as a billing contact and may send invoices or receipts under the operator's configuration.
 - SMS and voice-call providers: when you choose a phone channel, Twilio receives the phone number, message content and delivery metadata needed for Twilio Messaging SMS, or the call metadata and conversation audio needed for Twilio ConversationRelay voice calls. These paths are optional and are used only when enabled for the feature.
 - Providers you connect: account identifiers, authorization credentials, messages or request content needed for the connection or operation you initiate.
@@ -176,9 +178,13 @@ You can download a self-service JSON export from **Settings → Privacy → Down
 
 **Optional product analytics.** Analytics requires account permission, which defaults off, and an account-bound choice on each device. Web and mobile Settings provide separate account and device controls. The CLI provides `nyxid telemetry enable|disable|status` for the selected account/device and `account-enable|account-disable` for account permission. Turning account permission off applies to future analytics dispatch across devices. Turning a device choice off stops that device's optional events and does not change another device's choice. Browser Do-Not-Track/Global Privacy Control and CLI `DO_NOT_TRACK` or `NYXID_TELEMETRY=off` further restrict collection.
 
-Client events pass through authenticated NyxID checks. Pending events lose permission after withdrawal, regrant or an account switch. Events already sent cannot be recalled. Pre-login analytics, session replay, automatic screen/DOM capture and raw exception collection are disabled. Security audit and essential operational records are separate from product analytics.
+Client events pass through authenticated NyxID checks. Pending events lose permission after withdrawal, regrant or an account switch. Events already sent cannot be recalled. Pre-login analytics, session replay, automatic screen/DOM capture are disabled. Security audit and essential operational records are separate from product analytics.
 
 Events can be keyed to the NyxID account UUID, which is a pseudonymous personal identifier. Explicit event categories and bounded metadata exclude raw credentials, request bodies, messages, form contents and URLs. Raw-event and aggregate retention depend on the analytics project settings; ask the deployment operator for the applicable period. Account deletion requests provider erasure; queue acceptance alone does not guarantee provider completion. Contact us for confirmed status.
+
+Updated analytics permission (policy 2) optionally includes automatic crash and error diagnostics. It requires a new account acknowledgement and a policy-2 device choice; existing policy-1 permission continues to cover categorical usage analytics only. Choosing Not now keeps the existing choice. Diagnostics include app version/build, coarse system/runtime versions, finite error categories and sanitized code locations. They exclude messages, raw stacks, URLs, function names, credentials, email, device names, IP and user agent. Reports remain linked to the account only in NyxID and are retained for up to 30 days. Account deletion removes that local link. Optional Sentry exports contain no account/user/IP/UA/cookie identifiers and expire under project retention of 30 days or less.
+
+Web covers JavaScript errors, unhandled rejections, render and resource failures while the page is running. iOS also captures native signal crashes; Android captures only JavaScript errors and JavaScript fatal errors. Android native JVM/NDK crashes are not captured. Counts reflect consented reports and do not represent every crash. Mobile may retain up to three sanitized records on-device for up to 24 hours for the same account and consent revision. The iOS protected, backup-excluded crash file can contain register values between a crash and the next launch; it is sanitized in memory and deleted at the next processing opportunity, or deleted unread when there is no current binding. Registers and exception reasons never enter reports. Logout, withdrawal, account switch or a reported consent/availability denial purges local diagnostics.
 
 Self-hosters of NyxID can run with analytics disabled by default, or point at their own analytics project.
 

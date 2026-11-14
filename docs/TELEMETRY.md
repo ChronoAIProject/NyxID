@@ -7,7 +7,7 @@ Nyxbot failures use `nyxbot.error` through the same authenticated relay. See
 
 ## Permission and dispatch
 
-An account's `profile_config.analytics` is default off. An authenticated first-party human can read or change it with `GET` or `PUT /api/v1/users/me/preferences/analytics`. A mutation includes its expected `account_id`; the server checks it against the authenticated subject before writing. Each explicit choice stores the server's policy version (`"1"`) and a database-generated change time, and receives a new random revision even when the boolean is unchanged. Older records without a policy version retain an unknown version; the server does not invent a historical acknowledgement. Responses are `no-store`.
+An account's `profile_config.analytics` is default off. An authenticated first-party human can read or change it with `GET` or `PUT /api/v1/users/me/preferences/analytics`. A mutation includes its expected `account_id`; the server checks it against the authenticated subject before writing. Each explicit choice stores its acknowledged policy version (`"1"` when omitted by legacy clients; `"2"` only on explicit updated acknowledgement) and a database-generated change time, and receives a new random revision even when the boolean is unchanged. Older records without a policy version retain an unknown version; the server does not invent a historical acknowledgement. Responses are `no-store`.
 
 Account permission is necessary on every surface. A device's account-bound local choice and DNT can only narrow it. A surface/version header classifies a request; it grants no permission. Authenticated requests eligible for analytics carry both `X-NyxID-Analytics: enabled` and `X-NyxID-Analytics-Account` matching the authenticated actor. Agent/API-key activity cannot acquire analytics permission merely from its surface header. Anonymous and partially authenticated login/MFA events are denied. A full-login event needs an explicitly authenticated context; pre-auth contexts remain denied after reconstruction.
 
@@ -75,3 +75,30 @@ failed service invocations. Its only event properties are the finite
 [SERVICE_MONITORING.md](SERVICE_MONITORING.md#automatic-failure-diagnostics).
 It uses the same account/device consent gates as other product events; the
 separate operational log counter and security audit do not depend on consent.
+
+## Policy 2 crash diagnostics
+
+[CRASH_REPORTING.md](CRASH_REPORTING.md) defines the closed schema, admission,
+native buffer, private artifacts and fenced server exporter. Existing categorical
+analytics remains policy agnostic. Diagnostics additionally requires policy 2 on
+the account and device, serving `diagnostics:crash-reports` readiness and flag,
+first-party human authority, device headers, and fresh revision checks on
+admission and before export. DNT/GPC deny. Web and iOS report automatically;
+Android reports **JavaScript errors and JavaScript fatal errors only**. Android
+native JVM/NDK crashes are **not captured**.
+
+Reports live in `client_error_reports` for at most 30 days; every read filters
+expiry, and personal erasure removes owner-linked rows. Anonymous hourly
+`client_error_report_counters` expire after 30 days. Raw messages, URLs, function
+names, register values, credentials and request metadata are excluded. iOS's
+protected on-device raw file can contain registers until next-launch processing;
+all raw-file branches purge it. The sanitized consent-bound mobile buffer has
+three records / 256 KiB / 24-hour limits and is purged on authority loss.
+
+Before enabling Sentry export the owner must accept the erasure approach:
+**separate web/mobile projects**, **project retention ≤30 days**, **Prevent
+Storing of IP Addresses enabled**, and **server-side data scrubbing enabled**.
+Vendor events carry no account/user/IP/UA/cookie identifiers. NyxID's local rows
+are the only event-to-person link and personal erasure deletes them. Exported
+events expire under vendor retention; no supported per-event deletion guarantee
+is assumed. These deployed operator settings require direct verification.

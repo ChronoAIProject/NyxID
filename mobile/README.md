@@ -443,3 +443,20 @@ server default and uses the existing voice session/stream/control contract.
 Real GPT transcription and spoken responses require an authenticated real NyxID
 backend with provider access, flags and credits. Synthetic fixture transcripts
 and contract tests establish lifecycle behavior only.
+
+## Crash diagnostics and release artifacts
+
+Policy-2 consent gates automatic iOS native/JS diagnostics and Android JS errors
+and JS fatal errors. Android JVM/NDK native crashes are not captured. All data
+uses the authenticated NyxID relay. The local Expo module pins PLCrashReporter
+1.12.0 and is called only from JS, without app/scene delegate hooks. See
+[CRASH_REPORTING.md](../docs/CRASH_REPORTING.md) for the protected native buffer,
+raw-file purge points, fatal-handler ordering and tests.
+
+Release scripts generate an artifact UUID, preserve the Hermes composed map and
+bundle, and preserve iOS dSYMs with UUIDs immediately after archive. Private
+artifacts live in `release/crash-artifacts/<platform>/<version>-<build>-<artifact>`.
+Install the build uploader with `npm ci --prefix tools/crash-artifacts` from the
+repo root. Upload runs only with CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN, _ORG and
+_PROJECT_MOBILE together. Keep those build secrets outside Expo public config.
+The report's app version/build always comes from the installed native binary.

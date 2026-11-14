@@ -908,3 +908,27 @@ once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
 
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
+
+## Crash diagnostics
+
+See [CRASH_REPORTING.md](CRASH_REPORTING.md) for owner acceptance, project
+settings and readiness required before activation. All diagnostics defaults off.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CRASH_REPORTS_SENTRY_DSN_WEB` | empty | Optional HTTPS Sentry web project DSN; invalid values fail startup. |
+| `CRASH_REPORTS_SENTRY_DSN_MOBILE` | empty | Optional separate mobile project DSN; no vendor SDK on clients. |
+| `CRASH_REPORTS_RETENTION_DAYS` | `30` | Local retention, integer 1–30. |
+| `CRASH_REPORTS_EXPORT_INTERVAL_SECS` | `10` | Export batch cadence, 0 disables worker, maximum 86400. |
+| `CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN` | empty | Build-only symbol upload token; never VITE-prefixed or in runtime image. |
+| `CRASH_ARTIFACTS_SENTRY_ORG` | empty | Build-only Sentry organization. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_WEB` | empty | Build-only web artifact project. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_MOBILE` | empty | Build-only mobile artifact project. |
+| `NYXID_CRASH_ARTIFACT_ID` | generated per mobile build | UUID embedded in `extra.crashArtifactId`; no authority or secret. |
+
+Docker accepts optional BuildKit secret `crash_artifacts_sentry`, a JSON object
+containing the auth-token, organization and web-project variables. Configuring
+only part of the required upload settings fails the build. Runtime export and
+build upload credentials are independent. Vendor projects must have retention
+≤30 days, IP storage prevention and server-side scrubbing on, separate projects,
+and owner acceptance of local-link deletion plus vendor expiry.

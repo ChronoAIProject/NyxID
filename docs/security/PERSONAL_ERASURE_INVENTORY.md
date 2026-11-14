@@ -860,3 +860,13 @@ exports still retain their query timeouts and report unavailable subsections.
 | `service_pool_member_health.owner_id` | **ShortTtl**: service_pool_health_service::HEALTH_RETENTION_MS=3600000; current health expires one hour after an observation. |
 | `telegram_bot_claims.owner_user_id` | **SmallOrResourceBounded**: telegram_new_claims uniquely fences manager/bot claims. Redeemed claims intentionally unset purge_after, so their bound is bot provisioning metadata, not the initial 15-minute expiry. |
 | `telegram_bot_requests.owner_user_id` | **SmallOrResourceBounded**: telegram_new_service keeps one active provisioning request per actor. Terminal requests purge after one day; provisioning/connected are exempt from expiry and are resource lifecycle records, not short-TTL event history. |
+
+## Crash diagnostics collections
+
+`client_error_reports` is owner-linked by `user_id` and is deleted by the local
+personal-erasure inventory. Admission uses the existing owner erasure barrier.
+`client_error_report_counters` contains only anonymous hourly platform/outcome
+counts with a 30-day TTL and has no owner to erase. Crash rows expire within 30
+days and all reads enforce expiry. Sentry events have no person/account/IP/UA
+mapping; local row removal deletes the only event-to-person link. Vendor expiry
+and owner acceptance are specified in [CRASH_REPORTING.md](../CRASH_REPORTING.md).
