@@ -125,13 +125,15 @@ old report into the buffer does not extend its lifetime. JS revalidation also
 rejects records individually and keeps the binding and other valid records.
 Writes are synchronous, atomic and fsynced before native return. JS revalidates
 both the binding and the closed record before upload. Successful sends remove
-the record. Only a 4xx with a NyxID JSON error envelope and numeric code can
-authoritatively reject that record, except 429 (retry later), 13401 (pause and
-keep) and 13400 (disarm/purge). Envelope-less proxy/captive-portal 4xx responses
-pause and retain the record. Diagnostics requests do not trigger authentication
-refresh or session invalidation, so a proxy 401 cannot indirectly purge the
-buffer. Other failed sends may survive only within that consent-bound buffer
-and its limits.
+the record. Only report-specific refusals with a NyxID JSON error envelope and
+numeric code drop that record: 400, 404 (except 13400), 409, 410, 413, 415 and 422.
+Code 13400 disarms/purges; 13401 pauses and keeps the record. Authentication and
+transport refusals (401, other 403s, 407 and 408), 429, and envelope-less
+proxy/captive-portal responses pause and retain it. Diagnostics requests retain
+the normal single 401 token-refresh retry, but never invalidate the session on
+authentication failure. An expired token therefore removes a buffered record
+only after a successful retry; a failed refresh keeps it for later. Other failed
+sends may survive only within that consent-bound buffer and its limits.
 Interrupted atomic-write staging files are deleted on the next buffer trim or
 disarm, including iOS temporary files and Android AtomicFile sidecars. They are
 never adopted as records. The Swift filesystem proof checks this cleanup while

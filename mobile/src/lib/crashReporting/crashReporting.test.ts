@@ -511,7 +511,9 @@ for (const [status, enabled, policy, action] of [
   if (action==="available") assert.equal(h.sent.length,1);
 });
 for (const [statusCode,errorCode,action] of [
-  [400,1000,"drop"],[401,1000,"drop"],[403,1000,"drop"],[404,1000,"drop"],[422,1000,"drop"],
+  [400,1000,"drop"],[401,1000,"pause"],[403,1000,"pause"],[404,1000,"drop"],
+  [407,1000,"pause"],[408,1000,"pause"],[409,1000,"drop"],[410,1000,"drop"],
+  [413,1000,"drop"],[415,1000,"drop"],[422,1000,"drop"],
   [429,1000,"pause"],[503,1000,"pause"],[500,1000,"pause"],[0,0,"pause"],
   [403,13401,"pause"],[404,13400,"disarm"],
 ] as const) test(`HTTP ${statusCode}/${errorCode} ${action}s the persisted record`,async()=>{

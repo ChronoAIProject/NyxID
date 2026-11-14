@@ -97,11 +97,9 @@ export function createCrashRelay(
       }
       if (
         authoritative &&
-        error.statusCode >= 400 &&
-        error.statusCode < 500 &&
-        error.statusCode !== 429
+        [400, 404, 409, 410, 413, 415, 422].includes(error.statusCode)
       )
-        return true; // An authoritative refusal drops this record only.
+        return true; // A report-specific refusal drops this record only.
       paused();
       return false;
     } finally {

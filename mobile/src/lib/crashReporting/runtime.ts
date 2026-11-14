@@ -23,7 +23,6 @@ export const crashLifecycle =
           requestJson(path, {
             ...options,
             // A diagnostics refusal must not turn a proxy 401 into sign-out.
-            retryOnAuthFailure: false,
             invalidateSessionOnAuthFailure: false,
           }),
         uuid: Crypto.randomUUID,
