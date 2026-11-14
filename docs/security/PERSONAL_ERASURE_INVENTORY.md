@@ -9,93 +9,118 @@ reviewable as collections change.
 
 ## Owner-index rollout
 
-The startup sequence never drops, renames, or rebuilds an existing index. It
-reuses any existing index whose first key is the erasure owner predicate and
-adds only the audited gaps below. The names are stable, so a rolling deploy
+These WS5 startup additions never drop, rename, or rebuild an existing index. They
+reuse any existing index whose first key is the erasure owner predicate and
+add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions.
+not change retention or ownership decisions. The final manifest adds 16 indexes,
+reduced from the earlier 67; the 51 other gaps add no index.
 
-Each row below is a real missing prefix, so its owner query would otherwise
-scan the whole collection before the page limit could be applied. The listed
-collections are the user-facing or lifecycle collections that can grow with
-account activity; collections already covered by an existing compound or
-single-field prefix receive no additional index.
+Each row below is a real missing prefix on a collection that grows with
+events, messages, requests, or deliveries. Without it, the owner query would
+scan the whole collection before the page limit could be applied. Small or
+resource-bounded collections, short-lived rows, and joined children bounded by
+their parent are explicitly classified in the registry tests and receive no
+new index. `channel_send_claims` is also covered by its composite `_id` prefix.
+
+`db::create_connection` awaits the base `db::ensure_indexes` call
+(`backend/src/db.rs:86-92`), and `main` awaits
+`ensure_startup_indexes` (`backend/src/main.rs:814-818`). That awaits
+`ensure_indexes` → `ensure_owner_index_gaps` → `create_index(...).await`
+(`backend/src/services/personal_erasure_service.rs:107-132`), before either
+listener binds (`backend/src/main.rs:1715-1723`). Therefore every row below is an
+awaited startup build: on a large existing collection MongoDB may hold startup
+until the one-time index build completes. This follows the existing startup
+precedent for large collections, where `ensure_indexes` awaits feature-owned
+index creation such as `assistant_wire_logs` (`backend/src/db.rs:399-411`),
+`refresh_tokens` (`backend/src/db.rs:545-569`),
+`trigger_deliveries` (`backend/src/db.rs:2202-2236`),
+`mcp_session_notifications` (`backend/src/db.rs:1431-1449`),
+`invocation_diagnostics` (`backend/src/db.rs:2551-2573`), and
+`service_pool_health_observations` (`backend/src/db.rs:2794-2812`). No deferred
+or background build mechanism is introduced. A concrete additive precedent
+on a large event collection is the awaited `usage_rollup_actor_window` index on
+`usage_meter` (`backend/src/services/billing/usage_rollup.rs:151-169`), reached
+through `backend/src/db.rs:3363`. The same path awaits new v6 covering indexes
+for hourly/daily billing summaries (`backend/src/services/billing/usage_rollup.rs:235-250`)
+before serving. This change follows those synchronous additions. A first build
+scans the existing data and consumes database CPU/I/O and index storage while
+other replicas continue serving; compatible existing prefixes skip creation.
+No production build duration is assumed here; seeded timing and query plans
+are part of PM end-to-end verification.
 
 The checked-in origin/main startup fixture in the registry tests is generated
 from `db::ensure_indexes` plus origin/main's security-readiness and personal
 erasure index calls. The upgrade tests run that fixture first, run the branch
 sequence twice, and then replay the fixture to prove mixed-fleet compatibility.
+Paths in the tables below are relative to `backend/src`.
 
-| Collection | Key | New index name |
-| --- | --- | --- |
-| `agent_key_login_requests` | `approved_user_id` | `personal_erasure_owner_agent_key_login_requests_approved_user_id` |
-| `assistant_agent_consents` | `owner_id` | `personal_erasure_owner_assistant_agent_consents_owner_id` |
-| `assistant_agent_learning_members` | `member_user_id` | `personal_erasure_owner_assistant_agent_learning_members_member_user_id` |
-| `assistant_agent_learning_runs` | `owner_id` | `personal_erasure_owner_assistant_agent_learning_runs_owner_id` |
-| `assistant_agent_learning_skill_roots` | `owner_id` | `personal_erasure_owner_assistant_agent_learning_skill_roots_owner_id` |
-| `assistant_agent_private_notes` | `actor_user_id` | `personal_erasure_owner_assistant_agent_private_notes_actor_user_id` |
-| `assistant_agent_shares` | `owner_id` | `personal_erasure_owner_assistant_agent_shares_owner_id` |
-| `assistant_agent_sharing` | `owner_id` | `personal_erasure_owner_assistant_agent_sharing_owner_id` |
-| `assistant_async_quotas` | `user_id` | `personal_erasure_owner_assistant_async_quotas_user_id` |
-| `assistant_checkpoints` | `user_id` | `personal_erasure_owner_assistant_checkpoints_user_id` |
-| `assistant_group_agent_access` | `owner_id` | `personal_erasure_owner_assistant_group_agent_access_owner_id` |
-| `assistant_group_agent_proposals` | `proposed_by` | `personal_erasure_owner_assistant_group_agent_proposals_proposed_by` |
-| `assistant_group_invites` | `accepted_by_user_id` | `personal_erasure_owner_assistant_group_invites_accepted_by_user_id` |
-| `assistant_group_invites` | `intended_user_id` | `personal_erasure_owner_assistant_group_invites_intended_user_id` |
-| `assistant_group_invites` | `issuer_user_id` | `personal_erasure_owner_assistant_group_invites_issuer_user_id` |
-| `assistant_group_mention_notifications` | `user_id` | `personal_erasure_owner_assistant_group_mention_notifications_user_id` |
-| `assistant_group_messages` | `user_id` | `personal_erasure_owner_assistant_group_messages_user_id` |
-| `assistant_group_read_states` | `user_id` | `personal_erasure_owner_assistant_group_read_states_user_id` |
-| `assistant_group_requests` | `user_id` | `personal_erasure_owner_assistant_group_requests_user_id` |
-| `assistant_learning_migrations` | `owner_id` | `personal_erasure_owner_assistant_learning_migrations_owner_id` |
-| `assistant_skill_draft_attempts` | `user_id` | `personal_erasure_owner_assistant_skill_draft_attempts_user_id` |
-| `assistant_voice_announcements` | `user_id` | `personal_erasure_owner_assistant_voice_announcements_user_id` |
-| `assistant_voice_windows` | `user_id` | `personal_erasure_owner_assistant_voice_windows_user_id` |
-| `assistant_wire_logs` | `user_id` | `personal_erasure_owner_assistant_wire_logs_user_id` |
-| `auth_device_codes` | `approved_user_id` | `personal_erasure_owner_auth_device_codes_approved_user_id` |
-| `auth_device_codes_v2` | `approved_user_id` | `personal_erasure_owner_auth_device_codes_v2_approved_user_id` |
-| `authorization_codes` | `user_id` | `personal_erasure_owner_authorization_codes_user_id` |
-| `channel_adapter_accounts` | `user_id` | `personal_erasure_owner_channel_adapter_accounts_user_id` |
-| `channel_adapter_allocations` | `user_id` | `personal_erasure_owner_channel_adapter_allocations_user_id` |
-| `channel_adapter_events` | `user_id` | `personal_erasure_owner_channel_adapter_events_user_id` |
-| `channel_delivery_receipts` | `user_id` | `personal_erasure_owner_channel_delivery_receipts_user_id` |
-| `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` |
-| `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` |
-| `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` |
-| `channel_email_subscriptions` | `user_id` | `personal_erasure_owner_channel_email_subscriptions_user_id` |
-| `channel_reply_deliveries` | `user_id` | `personal_erasure_owner_channel_reply_deliveries_user_id` |
-| `device_codes` | `approved_by_user_id` | `personal_erasure_owner_device_codes_approved_by_user_id` |
-| `encrypted_record_migration_findings` | `owner_uuid` | `personal_erasure_owner_encrypted_record_migration_findings_owner_uuid` |
-| `encrypted_record_migration_runs` | `owner_uuid` | `personal_erasure_owner_encrypted_record_migration_runs_owner_uuid` |
-| `feature_flag_overrides` | `target_key` | `personal_erasure_owner_feature_flag_overrides_target_key` |
-| `invite_codes` | `usages.user_id` | `personal_erasure_owner_invite_codes_usages_user_id` |
-| `invocation_diagnostics` | `actor_user_id` | `personal_erasure_owner_invocation_diagnostics_actor_user_id` |
-| `login_approvals` | `user_id` | `personal_erasure_owner_login_approvals_user_id` |
-| `mcp_session_notifications` | `user_id` | `personal_erasure_owner_mcp_session_notifications_user_id` |
-| `mfa_challenges` | `user_id` | `personal_erasure_owner_mfa_challenges_user_id` |
-| `nyxbot_events` | `user_id` | `personal_erasure_owner_nyxbot_events_user_id` |
-| `oauth_consent_requests` | `user_id` | `personal_erasure_owner_oauth_consent_requests_user_id` |
-| `openclaw_channel_mappings` | `user_id` | `personal_erasure_owner_openclaw_channel_mappings_user_id` |
-| `org_invites` | `created_by` | `personal_erasure_owner_org_invites_created_by` |
-| `platform_guide_selections` | `user_id` | `personal_erasure_owner_platform_guide_selections_user_id` |
-| `platform_native_replies` | `user_id` | `personal_erasure_owner_platform_native_replies_user_id` |
-| `platform_onboarding_binding_requests` | `user_id` | `personal_erasure_owner_platform_onboarding_binding_requests_user_id` |
-| `platform_personal_decision_spacing` | `user_id` | `personal_erasure_owner_platform_personal_decision_spacing_user_id` |
-| `platform_personal_setup_selections` | `user_id` | `personal_erasure_owner_platform_personal_setup_selections_user_id` |
-| `refresh_tokens` | `user_id` | `personal_erasure_owner_refresh_tokens_user_id` |
-| `service_account_key_read_grants` | `owner_id` | `personal_erasure_owner_service_account_key_read_grants_owner_id` |
-| `service_change_events` | `actor.person_id` | `personal_erasure_owner_service_change_events_actor_person_id` |
-| `service_pool_member_health` | `owner_id` | `personal_erasure_owner_service_pool_member_health_owner_id` |
-| `telegram_bot_claims` | `owner_user_id` | `personal_erasure_owner_telegram_bot_claims_owner_user_id` |
-| `telegram_bot_requests` | `user_id` | `personal_erasure_owner_telegram_bot_requests_user_id` |
-| `telegram_managed_bot_events` | `user_id` | `personal_erasure_owner_telegram_managed_bot_events_user_id` |
-| `trigger_deliveries` | `user_id` | `personal_erasure_owner_trigger_deliveries_user_id` |
-| `trigger_work` | `user_id` | `personal_erasure_owner_trigger_work_user_id` |
-| `channel_send_claims` | `conversation_id` | `personal_erasure_owner_channel_send_claims_conversation_id` |
-| `platform_delivery_tests` | `installation_id` | `personal_erasure_owner_platform_delivery_tests_installation_id` |
-| `platform_setup_steps` | `setup_id` | `personal_erasure_owner_platform_setup_steps_setup_id` |
-| `service_pool_health_observations` | `pool_id` | `personal_erasure_owner_service_pool_health_observations_pool_id` |
+| Collection | Key | New index name | Why this gap is kept | Startup/build behavior |
+| --- | --- | --- | --- | --- |
+| `assistant_group_messages` | `user_id` | `personal_erasure_owner_assistant_group_messages_user_id` | Per-message group inserts (`services/collaboration_group_service/requests.rs:76`, `runtime.rs:530`), with no message TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `assistant_group_requests` | `user_id` | `personal_erasure_owner_assistant_group_requests_user_id` | Per-addressed-group-message inserts (`services/collaboration_group_service/requests.rs:226-261`); no TTL or completed-history cap, and local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `nyxbot_events` | `user_id` | `personal_erasure_owner_nyxbot_events_user_id` | Per-inbound-event inserts (`handlers/nyxbot.rs:5275-5296`), retained for 24 hours (seven days with media, `handlers/nyxbot.rs:5665-5669`) at message volume; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `trigger_deliveries` | `user_id` | `personal_erasure_owner_trigger_deliveries_user_id` | Per-delivery inserts (`services/trigger_service.rs:1006-1049`); configured TTL defaults to 72 hours, leaving a high-volume stream for local cleanup. | Awaited before listeners; a large build can delay startup, following `db.rs:2202-2236`. |
+| `trigger_work` | `user_id` | `personal_erasure_owner_trigger_work_user_id` | Per-run and per-notice work inserts (`services/trigger_schedule.rs:328-338,1572-1580`), plus schedule rows; no TTL bounds stalled work before owner cleanup. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `channel_adapter_events` | `user_id` | `personal_erasure_owner_channel_adapter_events_user_id` | Per-call-turn/SMS event inserts (`services/call_channels/session.rs:271,424`); event receipts have no TTL, and settled rows need owner cleanup. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `channel_delivery_receipts` | `user_id` | `personal_erasure_owner_channel_delivery_receipts_user_id` | Per-message receipt upserts (`services/channel_delivery_service.rs:115-178`), with 30-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `channel_reply_deliveries` | `user_id` | `personal_erasure_owner_channel_reply_deliveries_user_id` | Per-reply inserts (`services/channel_reply_delivery.rs:24-57`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` | Per-inbound-email receipt writes (`services/channel_adapters/aurinko_lifecycle.rs:319-386`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` | Per-email-send inserts (`services/channel_adapters/aurinko_lifecycle.rs:505-519`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` | Per-webhook-batch upserts (`services/channel_adapters/aurinko_lifecycle.rs:283-290`), with 31-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `mcp_session_notifications` | `user_id` | `personal_erasure_owner_mcp_session_notifications_user_id` | Per-notification outbox; retention defaults to 30 days (`models/mcp_session.rs:20,931-941`), allowing a large notification stream. | Awaited before listeners; a large build can delay startup, following `db.rs:1431-1449`. |
+| `refresh_tokens` | `user_id` | `personal_erasure_owner_refresh_tokens_user_id` | Per-rotation inserts (`services/token_service.rs:970-1064`), with configurable expiry (default seven days); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `db.rs:545-569`. |
+| `service_change_events` | `actor.person_id` | `personal_erasure_owner_service_change_events_actor_person_id` | Per-service-change journal (`models/service_change_event.rs`, `services/service_history/transaction.rs`), with no TTL; shared-history redaction filters by actor person ID. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `service_pool_health_observations` | `pool_id` | `personal_erasure_owner_service_pool_health_observations_pool_id` | Per-request observation stream (`services/service_pool_health_service.rs:290-304`); a one-hour TTL still admits all live request volume, and joined-child cleanup needs `pool_id`. | Awaited before listeners; a large build can delay startup, following `db.rs:2794-2812`. |
+| `assistant_group_mention_notifications` | `user_id` | `personal_erasure_owner_assistant_group_mention_notifications_user_id` | One insert per mentioned participant (`services/collaboration_group_service/notifications.rs:119-139`), with seven-day TTL (`mod.rs:271-280`); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+
+Two proposed KEEP entries are deliberately dropped after tracing their writers:
+`assistant_wire_logs.user_id` is opt-in diagnostic capture (request header plus
+a default-off flag, `backend/src/handlers/assistant.rs:185-210`) with a 15-minute
+TTL (`backend/src/services/assistant_wire_log_service.rs:9,24-36`).
+`invocation_diagnostics.actor_user_id` is default-off, access-token failed-request
+handle issuance (`backend/src/config.rs:1110`,
+`backend/src/handlers/invocation_diagnostics.rs:94-115`), with a 60-second TTL
+and 10-second duplicate-issuance throttle
+(`backend/src/services/invocation_diagnostic_service.rs:46-48,202-240`). These
+are short-lived diagnostic flows, so bounded cleanup does not justify a new
+startup build and ongoing write cost.
+
+One proposed DROP is kept: `assistant_group_requests.user_id`. The writer
+inserts a row for each addressed group message
+(`backend/src/services/collaboration_group_service/requests.rs:226-261`), the
+model has no expiry (`backend/src/models/assistant_group.rs:129-148`), and
+admission removes pending agents without deleting the request
+(`backend/src/services/collaboration_group_service/requests.rs:360-365`).
+The 16-request admission cap applies only to pending requests
+(`backend/src/services/collaboration_group_service/requests.rs:133`); it does
+not bound completed history. The collection therefore grows with group
+activity, and its owner erasure/source query otherwise scans the stream.
+The remaining 49 proposed drops stay excluded; their checked predicate
+classifications distinguish small/resource lifecycles, short TTLs,
+parent-bounded children, and the existing claim `_id` prefix. No existing
+deployed index is removed by this reduction.
+
+The excluded predicates are reviewed as follows (paths below are relative to
+`backend/src`; the exact field list is `OWNER_INDEX_BOUNDED` in the registry):
+
+| Dropped collections | Writer/lifecycle evidence for bounded cleanup |
+| --- | --- |
+| `agent_key_login_requests`, `auth_device_codes`, `auth_device_codes_v2`, `authorization_codes`, `device_codes`, `login_approvals`, `mfa_challenges`, `oauth_consent_requests` | Login/consent protocols write expiring rows, rather than a retained event stream (`services/auth_agent_key_login_service.rs:39,201`, `services/token_service.rs:568`, and the corresponding expiry indexes in `db.rs`). |
+| `assistant_agent_sharing`, `assistant_agent_shares`, `assistant_agent_private_notes`, `assistant_agent_consents` | Sharing policy, recipient grant, private note and connection consent state belongs to agent/recipient/connection lifecycles (`models/assistant_sharing.rs`, `services/shared_agent_service.rs`); this is resource state rather than the message stream. |
+| `assistant_agent_learning_members`, `assistant_agent_learning_runs`, `assistant_agent_learning_skill_roots`, `assistant_learning_migrations` | Opt-in membership and explicit learning/publication work (`services/assistant_agent_learning.rs:331-367,792-907`); bounded feature lifecycle rather than every assistant message. |
+| `assistant_async_quotas`, `assistant_checkpoints` | One quota counter per owner (`services/async_service_operation.rs:251`) and one replaced checkpoint per conversation (`services/assistant_nyxagent.rs:1962-2030`); resource state rather than an append-only history. |
+| `assistant_group_agent_access`, `assistant_group_agent_proposals`, `assistant_group_invites`, `assistant_group_read_states` | Group access/invite lifecycle and one read-state per participant (`services/collaboration_group_service/membership.rs`, `notifications.rs:103-105`); invites/proposals also expire (`mod.rs:282-296`). |
+| `assistant_skill_draft_attempts`, `assistant_voice_windows`, `assistant_voice_announcements` | Explicit draft attempts expire after a day (`db.rs:138-152`); voice windows are bounded by a voice session (`services/voice/runtime.rs:797-828`), and announcements are expiring coordination (`models/assistant_voice_announcement.rs:20`). |
+| `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`models/channel_email.rs:10-22`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
+| `encrypted_record_migration_findings`, `encrypted_record_migration_runs` | Migration-generation diagnostics/progress (`services/encrypted_record_migration.rs:1085-1112,1289-1303`), not hot request writes. |
+| `feature_flag_overrides`, `invite_codes`, `org_invites` | Administrative targeting and invite lifecycles; embedded invite usage is bounded by the authored invite's usage policy (`models/invite_code.rs`, `services/feature_flag_service.rs`, `services/org_invite_service.rs`). |
+| `platform_guide_selections`, `platform_native_replies`, `platform_onboarding_binding_requests`, `platform_personal_decision_spacing`, `platform_personal_setup_selections` | Guide/setup/binding selection, reply and spacing coordination (`services/platform_guide_service.rs`, `services/platform_native_reply_service.rs`, `services/platform_personal_owner_lifecycle.rs`); low-volume setup flows. |
+| `platform_delivery_tests`, `platform_setup_steps` | Joined installation/setup lifecycle children (`models/platform_installation.rs:5-7,90-103`); bounded steps/tests per parent. |
+| `service_account_key_read_grants`, `service_pool_member_health` | Owner grant configuration (`models/service_account_key_read_grant.rs`) and one current health row per member/context, with one-hour expiry (`services/service_pool_health_service.rs:14-15,250-283`); observations remain separately indexed. |
+| `telegram_bot_claims`, `telegram_bot_requests`, `telegram_managed_bot_events` | Bot provisioning/claim lifecycle; request admission lasts 15 minutes and terminal request purge follows lifecycle checks (`services/telegram_new_service.rs:391-392,626`), while managed events track bot creation. |
+| `channel_send_claims` | The model has no `conversation_id` field (`models/channel_send_claim.rs:6-14`); cleanup uses an anchored composite `_id` regex (`services/personal_erasure_service/local.rs`, `services/personal_erasure_orphan_sweep.rs:330-332`), served by `_id_`. |
 
 ## Pre-job orphan sweep
 
