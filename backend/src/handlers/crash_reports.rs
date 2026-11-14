@@ -358,6 +358,10 @@ impl From<service::admin::VersionData> for VersionResponse {
 mod tests;
 
 /// Release registration is an explicit admin write, never an operator/delegated action.
+#[derive(Serialize)]
+struct RegisterReleaseResponse {
+    status: &'static str,
+}
 pub async fn register_release(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -374,5 +378,7 @@ pub async fn register_release(
         Some(&auth.user_id.to_string()),
     )
     .await?;
-    Ok(no_store(serde_json::json!({"status":"registered"})))
+    Ok(no_store(RegisterReleaseResponse {
+        status: "registered",
+    }))
 }
