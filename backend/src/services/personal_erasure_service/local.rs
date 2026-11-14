@@ -432,7 +432,92 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         m::assistant_agent_learning::MEMBERS_COLLECTION_NAME,
         doc! {"member_user_id":owner},
     ));
+    // Collections added after the original inventory. Keep these selectors
+    // explicit so a mixed-fleet rollout cannot silently leave personal rows.
+    rows.extend([
+        ("assistant_action_receipts", doc! {"user_id": owner}),
+        ("assistant_voice_windows", doc! {"user_id": owner}),
+        ("assistant_wire_logs", doc! {"user_id": owner}),
+        ("auth_device_code_reservations", doc! {"approved_user_id": owner}),
+        ("channel_adapter_accounts", doc! {"user_id": owner}),
+        ("mcp_session_notifications", doc! {"user_id": owner}),
+        ("openclaw_channel_mappings", doc! {"user_id": owner}),
+        ("telegram_bot_requests", doc! {"user_id": owner}),
+        ("telegram_bot_claims", doc! {"owner_user_id": owner}),
+        ("telegram_managed_bot_events", doc! {"user_id": owner}),
+        (
+            "feature_flag_overrides",
+            doc! {"target_kind": "user", "target_key": owner},
+        ),
+        ("invocation_diagnostics", doc! {"actor_user_id": owner}),
+        ("managed_executions", doc! {"actor_user_id": owner}),
+        ("platform_personal_setup_selections", doc! {"user_id": owner}),
+        ("platform_guide_selections", doc! {"user_id": owner}),
+        ("platform_native_replies", doc! {"user_id": owner}),
+        ("platform_onboarding_binding_requests", doc! {"user_id": owner}),
+        ("platform_onboarding_bindings", doc! {"user_id": owner}),
+        ("platform_personal_decision_spacing", doc! {"user_id": owner}),
+        ("encrypted_record_migration_findings", doc! {"owner_uuid": owner}),
+        ("encrypted_record_migration_runs", doc! {"owner_uuid": owner}),
+        ("nyxbot_gateway_releases", doc! {"owner_user_id": owner}),
+        ("assistant_group_agent_access", doc! {"user_id": owner}),
+        ("assistant_group_transfers", doc! {"user_id": owner}),
+        (
+            "assistant_learning_publication_targets",
+            doc! {"owner_id": owner},
+        ),
+        ("assistant_learning_migrations", doc! {"owner_id": owner}),
+        ("ownership_transfers", doc! {"actor_user_id": owner}),
+        ("catalog_skill_revisions", doc! {"actor_id": owner}),
+        ("catalog_skill_operations", doc! {"actor_id": owner}),
+        ("credit_schedule_periods", doc! {"target_user_ids": owner}),
+        ("usage_allowance_periods", doc! {"owner_user_id": owner}),
+        ("org_channel_guest_budgets", doc! {"user_id": owner}),
+        ("org_channel_guest_holds", doc! {"user_id": owner}),
+    ]);
     rows
+}
+
+/// Redact shared records after personal ownership has been removed. These
+/// updates preserve counters and ordering/integrity fields while removing the
+/// departing person's human-readable identity.
+async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
+    let mut changed = false;
+    let event_filter = doc! {"owner_id": owner};
+    let event_update = doc! {"$set": {
+        "owner_id": bson::Bson::Null,
+        "actor.name": "Deleted account",
+        "actor.person_id": bson::Bson::Null,
+        "actor.api_key_id": bson::Bson::Null,
+        "actor.app_id": bson::Bson::Null,
+    }};
+    changed |= db.collection::<Document>("service_change_events").update_many(event_filter, event_update.clone()).await?.modified_count > 0;
+    let actor_filter = doc! {"actor.person_id": owner};
+    let actor_update = doc! {"$set": {
+        "actor.name": "Deleted account",
+        "actor.person_id": bson::Bson::Null,
+        "actor.api_key_id": bson::Bson::Null,
+        "actor.app_id": bson::Bson::Null,
+    }};
+    changed |= db.collection::<Document>("service_change_events").update_many(actor_filter, actor_update.clone()).await?.modified_count > 0;
+    changed |= db.collection::<Document>("service_history_heads").update_many(doc! {"owner_id": owner}, event_update).await?.modified_count > 0;
+
+    // Invite usage is embedded in an invite owned by another account. Keep
+    // used_count/max_uses and the code itself, but remove the person's usage
+    // identity (including the legacy email field).
+    let mut cursor = db.collection::<Document>("invite_codes").find(doc! {"usages.user_id": owner}).limit(PAGE).await?;
+    let mut rows = Vec::new();
+    while let Some(row) = cursor.try_next().await? { rows.push(row); }
+    for row in rows {
+        let id = row.get("_id").cloned().ok_or_else(|| AppError::Internal("Invite code identity missing".into()))?;
+        let usages = row.get_array("usages").cloned().unwrap_or_default();
+        let filtered: Vec<bson::Bson> = usages.into_iter().filter(|usage| {
+            usage.as_document().and_then(|doc| doc.get_str("user_id").ok()) != Some(owner)
+        }).collect();
+        db.collection::<Document>("invite_codes").update_one(doc! {"_id": id, "usages.user_id": owner}, doc! {"$set": {"usages": filtered}}).await?;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 async fn erase_page(
@@ -723,6 +808,9 @@ async fn retain_settled_evidence(db: &Database, job: &PersonalErasureJob) -> App
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(&state.db);
+    if redact_shared(&db, &job.user_id).await? {
+        return Ok(false);
+    }
     if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
         return Ok(false);
     }
