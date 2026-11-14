@@ -24,8 +24,12 @@ class NyxCrashReporterModule : Module() {
     try { stream.write(data); stream.fd.sync(); atomic.finishWrite(stream) } catch (error: Exception) { atomic.failWrite(stream); throw error }
   }
   private fun records() = directory.listFiles()?.filter { it.name.startsWith("event-") && it.extension == "json" }?.sortedBy { it.name } ?: emptyList()
-  private fun disarm() { bindingFile().delete(); records().forEach { it.delete() } }
+  private fun purgeInterruptedWrites() {
+    directory.listFiles()?.filter { it.isFile && it.name != "binding.json" && !(it.name.startsWith("event-") && it.extension == "json") }?.forEach { it.delete() }
+  }
+  private fun disarm() { directory.listFiles()?.filter { it.isFile }?.forEach { it.delete() } }
   private fun trim() {
+    purgeInterruptedWrites()
     val now = System.currentTimeMillis()
     val files = records().filter { file ->
       val valid = runCatching { file.length() <= 32768 && now - JSONObject(file.readText()).getLong("storedAt") in -300000..86400000 }.getOrDefault(false)

@@ -83,6 +83,10 @@ Writes are synchronous, atomic and fsynced before native return. JS revalidates
 both the binding and the closed record before upload. Successful sends remove
 the record; denied authority purges it. Other failed sends may survive only
 within that consent-bound buffer and its limits.
+Interrupted atomic-write staging files are deleted on the next buffer trim or
+disarm, including iOS temporary files and Android AtomicFile sidecars. They are
+never adopted as records. The Swift filesystem proof checks this cleanup while
+preserving committed records and the raw-report directory for its explicit purge.
 
 PLCrashReporter uses a BSD signal handler, no symbolication and
 `shouldRegisterUncaughtExceptionHandler = false`, with a 256 KiB raw report cap.
