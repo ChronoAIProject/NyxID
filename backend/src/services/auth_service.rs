@@ -130,7 +130,7 @@ pub struct RegisterResult {
     /// `true` when a new user was actually inserted; `false` when the email
     /// already existed and a fake success was returned for email-enumeration
     /// protection. Callers that hold a reserved invite code must use this to
-    /// know whether to record or release the reservation.
+    /// know whether to release the reservation. Redemption commits with insertion.
     pub actually_created: bool,
 }
 
@@ -147,7 +147,7 @@ pub async fn register_user(
     email: &str,
     password_raw: &str,
     display_name: Option<&str>,
-    invite_code_id: Option<&str>,
+    invite_reservation: Option<&super::invite_code_service::InviteReservation>,
     auto_verify_email: bool,
 ) -> AppResult<RegisterResult> {
     // Validate password length
@@ -219,7 +219,7 @@ pub async fn register_user(
         is_operator: false,
         role_ids: default_role_ids,
         group_ids: vec![],
-        invite_code_id: invite_code_id.map(String::from),
+        invite_code_id: invite_reservation.map(|r| r.invite_code_id.clone()),
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,
@@ -231,7 +231,11 @@ pub async fn register_user(
         profile_config: Default::default(),
     };
 
-    db.collection::<User>(USERS).insert_one(&new_user).await?;
+    if let Some(reservation) = invite_reservation {
+        super::invite_code_service::commit_signup(db, reservation, &new_user).await?;
+    } else {
+        db.collection::<User>(USERS).insert_one(&new_user).await?;
+    }
 
     tracing::info!(user_id = %user_id, "User registered");
 

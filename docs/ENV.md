@@ -715,6 +715,20 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 
 Invitation codes are controlled by the global `auth:invitation-code` feature flag under Admin > Feature Flags. It defaults to enabled; disable it for public registration. `INVITE_CODE_REQUIRED` is no longer read.
 
+Signup reserves capacity for five minutes. The next reservation attempt for that
+code atomically reclaims expired pending signups; no background sweep is needed
+to make capacity available. Admin responses subtract expired reservations using
+database time without rewriting the stored count; live reservations still hold
+capacity. Redemption and account creation commit together. An
+expired reservation may finish if it has not been reclaimed; after reclaim the
+old signup cannot create an account. Session failures after account creation do
+not refund a committed use. Legacy usages and counters are retained; only new
+reservations carry the identity needed for automatic reclaim. During rollout,
+old replicas retain their previous crash-compensation behavior. Rolling back
+keeps the rows readable but suspends reclaim until an upgraded replica handles
+the code again.
+
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false**. Existing accounts, including prepared reviewer accounts, can use `/login?enable_email=true` to display the existing email/password login form without enabling email registration. This query parameter only controls form visibility; normal password, MFA and session checks apply. The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
