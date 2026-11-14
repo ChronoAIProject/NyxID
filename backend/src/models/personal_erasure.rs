@@ -54,6 +54,11 @@ pub struct PersonalErasureJob {
     pub owner_deletion_policy: Option<String>,
     pub status: ErasureStatus,
     pub inventory_version: u32,
+    /// Revision of the local personal-data inventory that was run after all
+    /// domains completed. Old replicas omit this field and therefore remain
+    /// eligible for the bounded reconciliation pass.
+    #[serde(default)]
+    pub local_inventory_revision: u32,
     pub domains: Vec<DomainCheckpoint>,
     pub lease_token: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

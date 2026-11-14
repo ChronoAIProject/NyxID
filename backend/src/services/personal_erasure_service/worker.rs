@@ -20,6 +20,72 @@ async fn claim(db: &Database) -> AppResult<Option<PersonalErasureJob>> {
         .write_concern(WriteConcern::majority()).await?)
 }
 
+/// Claim one already-completed job whose local pass predates the current
+/// inventory. The account tombstone remains in place, so new writers stay
+/// fenced while this repair runs.
+async fn claim_completed_reconciliation(
+    db: &Database,
+) -> AppResult<Option<PersonalErasureJob>> {
+    let durable = super::super::transaction_service::durable_database(db);
+    let db = &durable;
+    Ok(db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one_and_update(
+            doc! {
+                "inventory_version": INVENTORY_VERSION,
+                "status": "complete",
+                "local_inventory_revision": {"$lt": super::local::LOCAL_INVENTORY_REVISION},
+                "$expr": {"$and": [
+                    {"$lte": [{"$ifNull": ["$lease_expires_at", bson::DateTime::from_millis(0)]}, "$$NOW"]},
+                    {"$lte": [{"$ifNull": ["$retry_at", bson::DateTime::from_millis(0)]}, "$$NOW"]}
+                ]}
+            },
+            vec![doc! {"$set": {
+                "lease_token": uuid::Uuid::new_v4().to_string(),
+                "updated_at": "$$NOW",
+                "lease_expires_at": {"$dateAdd": {"startDate": "$$NOW", "unit": "second", "amount": LEASE_SECONDS}}
+            }}],
+        )
+        .sort(doc! {"updated_at": 1, "_id": 1})
+        .return_document(ReturnDocument::After)
+        .write_concern(WriteConcern::majority())
+        .await?)
+}
+
+async fn reconcile_completed_once(state: &crate::AppState) -> AppResult<bool> {
+    let durable = super::super::transaction_service::durable_database(&state.db);
+    let db = &durable;
+    let Some(job) = claim_completed_reconciliation(db).await? else {
+        return Ok(false);
+    };
+    let lease = job
+        .lease_token
+        .as_deref()
+        .ok_or_else(|| AppError::Conflict("Erasure reconciliation lease unavailable".into()))?;
+    let clean = super::local::pass(state, &job).await?;
+    if !clean {
+        // Release the lease; the next tick can continue the bounded pass.
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &job.id, "status": "complete", "lease_token": lease},
+                vec![doc! {"$set": {"lease_token": bson::Bson::Null, "lease_expires_at": bson::Bson::Null, "updated_at": "$$NOW"}}],
+            )
+            .write_concern(WriteConcern::majority())
+            .await?;
+        return Ok(true);
+    }
+    // The lease token is part of the stamp fence. A stale holder can never
+    // advance a job after another replica has claimed the repair.
+    db.collection::<Document>(JOBS)
+        .update_one(
+            doc! {"_id": &job.id, "status": "complete", "lease_token": lease, "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]}},
+            vec![doc! {"$set": {"local_inventory_revision": super::local::LOCAL_INVENTORY_REVISION, "lease_token": bson::Bson::Null, "lease_expires_at": bson::Bson::Null, "updated_at": "$$NOW"}}],
+        )
+        .write_concern(WriteConcern::majority())
+        .await?;
+    Ok(true)
+}
+
 fn lease_filter(job: &PersonalErasureJob) -> AppResult<Document> {
     let lease = job
         .lease_token
@@ -153,6 +219,7 @@ async fn checkpoint(
             "domains":domain_expressions,
             "status":status,"updated_at":"$$NOW",
             "completed_at":if complete {bson::Bson::String("$$NOW".into())} else {bson::Bson::Null},
+            "local_inventory_revision": if complete {bson::Bson::Int32(super::local::LOCAL_INVENTORY_REVISION as i32)} else {bson::Bson::Int32(job.local_inventory_revision as i32)},
             "lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,
             "retry_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":retry_seconds}},
         }},
@@ -426,6 +493,9 @@ pub(crate) fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()
             }
             if process_one(&state).await.is_err() {
                 tracing::warn!("Personal erasure pass remains pending; durable lease will retry");
+            }
+            if reconcile_completed_once(&state).await.is_err() {
+                tracing::warn!("Completed personal erasure inventory reconciliation remains pending");
             }
         }
     })

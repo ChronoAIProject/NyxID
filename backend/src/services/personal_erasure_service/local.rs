@@ -8,6 +8,10 @@ use futures::TryStreamExt;
 
 const PAGE: i64 = 32;
 
+/// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
+/// the durable domain shape and intentionally remains unchanged for old jobs.
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 2;
+
 fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![

@@ -1020,6 +1020,7 @@ mod tests {
             owner_deletion_policy: None,
             status: crate::models::personal_erasure::ErasureStatus::Complete,
             inventory_version: 1,
+            local_inventory_revision: 0,
             domains: vec![crate::models::personal_erasure::DomainCheckpoint {
                 retry_generation: 0,
                 last_retry_key_hash: None,

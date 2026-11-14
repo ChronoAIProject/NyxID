@@ -3432,6 +3432,7 @@ mod operator_route_tests {
             owner_deletion_policy: None,
             status: ErasureStatus::OperatorAction,
             inventory_version: 1,
+            local_inventory_revision: 0,
             domains: vec![
                 DomainCheckpoint {
                     domain: "local_inventory".into(),
