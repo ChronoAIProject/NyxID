@@ -728,13 +728,32 @@ fn empty_sections() -> BTreeMap<String, BTreeMap<String, ExportSubsection>> {
         .map(|section| (section.to_owned(), BTreeMap::new()))
         .collect()
 }
-fn byte_size(export: &AccountExport) -> usize {
-    serde_json::to_vec(export)
-        .map(|v| v.len())
-        .unwrap_or(usize::MAX)
-}
 fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
-    let mut current = byte_size(export);
+    // Serialize the fixed envelope once, then account for each item as it is
+    // admitted or removed. This keeps cap enforcement linear in the number of
+    // rows instead of repeatedly serializing the complete export (which was
+    // quadratic for a large message subsection).
+    let mut skeleton = export.clone();
+    for subsections in skeleton.sections.values_mut() {
+        for subsection in subsections.values_mut() {
+            subsection.items.clear();
+        }
+    }
+    skeleton.truncated_sections.clear();
+    let mut current = serde_json::to_vec(&skeleton)
+        .map(|value| value.len())
+        .unwrap_or(usize::MAX);
+    for subsections in export.sections.values() {
+        for subsection in subsections.values() {
+            let item_bytes: usize = subsection
+                .items
+                .iter()
+                .map(|item| serde_json::to_vec(item).map(|value| value.len()).unwrap_or(0))
+                .sum();
+            current = current.saturating_add(item_bytes);
+            current = current.saturating_add(subsection.items.len().saturating_sub(1));
+        }
+    }
     let mut truncated = BTreeSet::new();
     while current > max_bytes {
         let Some((section, subsection, value)) = export
@@ -751,10 +770,25 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
         let Some(item) = value.items.pop() else {
             break;
         };
-        current =
-            current.saturating_sub(serde_json::to_vec(&item).map(|v| v.len() + 1).unwrap_or(0));
-        value.truncated = true;
-        truncated.insert(format!("{section}.{subsection}"));
+        let item_bytes = serde_json::to_vec(&item).map(|value| value.len()).unwrap_or(0);
+        current = current.saturating_sub(item_bytes);
+        if !value.items.is_empty() {
+            current = current.saturating_sub(1);
+        }
+        if !value.truncated {
+            // JSON `true` is one byte shorter than `false`.
+            current = current.saturating_sub(1);
+            value.truncated = true;
+        }
+        let name = format!("{section}.{subsection}");
+        if truncated.insert(name.clone()) {
+            // `truncated_sections` is an array of strings. The first item has
+            // no comma; later additions do.
+            current = current.saturating_add(name.len() + 2);
+            if truncated.len() > 1 {
+                current = current.saturating_add(1);
+            }
+        }
     }
     export.truncated_sections = truncated.into_iter().collect();
 }
@@ -1051,6 +1085,43 @@ mod tests {
     }
 
     #[test]
+    fn export_sentinel_fields_and_mcp_session_identity_are_excluded() {
+        let row = doc! {
+            "_id": "mcp-session-credential",
+            "user_id": "account",
+            "content": {
+                "message": "visible sentinel-free content",
+                "token_value": "SECRET_SENTINEL",
+                "nested": [{"amount": Bson::Decimal128("12.50".parse().unwrap())}],
+            },
+            "password_hash": "SECRET_SENTINEL",
+            "session_token_hash": "SECRET_SENTINEL",
+            "payload_encrypted": Bson::Binary(bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![0xaa, 0xbb],
+            }),
+        };
+        let value = safe_item(
+            &row,
+            &[
+                "_id",
+                "user_id",
+                "content",
+                "password_hash",
+                "session_token_hash",
+                "payload_encrypted",
+            ],
+        );
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert!(!bytes.windows("SECRET_SENTINEL".len()).any(|window| {
+            window == "SECRET_SENTINEL".as_bytes()
+        }));
+        assert!(value.get("_id").is_none());
+        assert_eq!(value["content"]["nested"][0]["amount"], "12.50");
+        assert_eq!(value["content"]["message"], "visible sentinel-free content");
+    }
+
+    #[test]
     fn byte_cap_marks_only_popped_subsections_as_truncated() {
         let mut sections = BTreeMap::new();
         sections.insert(
@@ -1082,7 +1153,7 @@ mod tests {
         enforce_cap_with_limit(&mut export, 400);
         assert!(export.sections["assistant"]["messages"].truncated);
         assert_eq!(export.truncated_sections, vec!["assistant.messages"]);
-        assert!(byte_size(&export) <= 400);
+        assert!(serde_json::to_vec(&export).unwrap().len() <= 400);
     }
     #[test]
     fn registry_export_mapping_is_one_to_one() {
