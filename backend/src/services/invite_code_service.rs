@@ -608,7 +608,7 @@ mod tests {
         crate::services::auth_service::register_user(
             &db,
             "alice@example.com",
-            "password123",
+            &crate::crypto::token::generate_random_token(),
             None,
             Some(&id),
             true,
@@ -642,7 +642,7 @@ mod tests {
         crate::services::auth_service::register_user(
             &db,
             "alice@example.com",
-            "password123",
+            &crate::crypto::token::generate_random_token(),
             None,
             Some(&id1),
             true,
@@ -715,7 +715,7 @@ mod tests {
         crate::services::auth_service::register_user(
             &db,
             "eve@example.com",
-            "password123",
+            &crate::crypto::token::generate_random_token(),
             None,
             Some(&id),
             true,

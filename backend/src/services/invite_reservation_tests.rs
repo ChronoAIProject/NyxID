@@ -80,7 +80,7 @@ async fn signup_storage_command_counts() {
     crate::services::auth_service::register_user(
         &db,
         "direct@example.test",
-        "password123",
+        &crate::crypto::token::generate_random_token(),
         None,
         None,
         true,
@@ -96,7 +96,7 @@ async fn signup_storage_command_counts() {
     let user = crate::services::auth_service::register_user(
         &db,
         "invited@example.test",
-        "password123",
+        &crate::crypto::token::generate_random_token(),
         None,
         Some(&reservation),
         true,
@@ -167,7 +167,7 @@ async fn reclaim_before_commit_refuses_slow_signup_and_cannot_release_successor(
     let error = crate::services::auth_service::register_user(
         &db,
         "slow@example.test",
-        "password123",
+        &crate::crypto::token::generate_random_token(),
         None,
         Some(&old),
         true,
@@ -557,7 +557,7 @@ async fn password_handler_keeps_default_gate_and_public_signup_does_not_touch_in
     let request = |email: &str, code: Option<String>| {
         Json(RegisterRequest {
             email: email.into(),
-            password: "password123".into(),
+            password: crate::crypto::token::generate_random_token(),
             display_name: None,
             invite_code: code,
         })
