@@ -470,52 +470,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "user_provider_tokens" => Some(("services", "user_provider_tokens")),
         "user_service_connections" => Some(("services", "user_service_connections")),
         "user_services" => Some(("services", "user_services")),
-        "assistant_agent_learning_members" => {
-            Some(("assistant", "assistant_agent_learning_members"))
-        }
-        "assistant_agent_learning_proposals" => {
-            Some(("assistant", "assistant_agent_learning_proposals"))
-        }
-        "assistant_agent_learning_skill_roots" => {
-            Some(("assistant", "assistant_agent_learning_skill_roots"))
-        }
-        "assistant_cma_session_origins" => {
-            Some(("account_activity", "assistant_cma_session_origins"))
-        }
-        "assistant_group_agent_access" => {
-            Some(("account_activity", "assistant_group_agent_access"))
-        }
-        "assistant_group_execution_slots" => {
-            Some(("account_activity", "assistant_group_execution_slots"))
-        }
-        "assistant_group_mention_notifications" => {
-            Some(("assistant", "assistant_group_mention_notifications"))
-        }
-        "assistant_learning_migrations" => {
-            Some(("account_activity", "assistant_learning_migrations"))
-        }
-        "assistant_learning_publication_targets" => {
-            Some(("account_activity", "assistant_learning_publication_targets"))
-        }
-        "assistant_notification_push_budgets" => {
-            Some(("account", "assistant_notification_push_budgets"))
-        }
-        "assistant_notification_push_sources" => {
-            Some(("account", "assistant_notification_push_sources"))
-        }
         "assistant_voice_sessions" => Some(("account_activity", "assistant_voice_sessions")),
-        "async_service_operation_artifacts" => {
-            Some(("assistant", "async_service_operation_artifacts"))
-        }
-        "encrypted_record_migration_findings" => {
-            Some(("account_activity", "encrypted_record_migration_findings"))
-        }
-        "encrypted_record_migration_runs" => {
-            Some(("account_activity", "encrypted_record_migration_runs"))
-        }
-        "generated_artifact_content_series" => {
-            Some(("account", "generated_artifact_content_series"))
-        }
         "node_pending_credentials" => Some(("services", "node_pending_credentials")),
         "oracle_login_snapshots" => Some(("account", "oracle_login_snapshots")),
         "oracle_sessions" => Some(("assistant", "oracle_sessions")),
@@ -526,36 +481,12 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "org_channel_link_challenges" => Some(("account_activity", "org_channel_link_challenges")),
         "org_channel_messages" => Some(("channels", "org_channel_messages")),
         "org_channel_sender_links" => Some(("channels", "org_channel_sender_links")),
-        "platform_discord_control_installation_history" => {
-            Some(("account", "platform_discord_control_installation_history"))
-        }
-        "platform_discord_control_installations" => {
-            Some(("account", "platform_discord_control_installations"))
-        }
-        "platform_onboarding_binding_requests" => {
-            Some(("account_activity", "platform_onboarding_binding_requests"))
-        }
-        "platform_onboarding_bindings" => {
-            Some(("account_activity", "platform_onboarding_bindings"))
-        }
         "platform_personal_bindings" => Some(("account", "platform_personal_bindings")),
-        "platform_personal_decision_spacing" => {
-            Some(("account_activity", "platform_personal_decision_spacing"))
-        }
         "platform_personal_link_challenges" => {
             Some(("account_activity", "platform_personal_link_challenges"))
         }
         "platform_personal_link_intents" => {
             Some(("account_activity", "platform_personal_link_intents"))
-        }
-        "platform_personal_setup_selections" => {
-            Some(("account_activity", "platform_personal_setup_selections"))
-        }
-        "platform_public_deployment_activations" => {
-            Some(("account", "platform_public_deployment_activations"))
-        }
-        "platform_public_deployment_proofs" => {
-            Some(("account", "platform_public_deployment_proofs"))
         }
         "users" => Some(("account", "users")),
         _ => None,
@@ -1033,7 +964,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "channel_adapter_events" => CHANNEL_RECORD_FIELDS,
         "channel_adapter_resource_claims" => CHANNEL_RECORD_FIELDS,
         "channel_adapter_sessions" => CHANNEL_RECORD_FIELDS,
-        "channel_bots" => CHANNEL_RECORD_FIELDS,
+        "channel_bots" => CHANNEL_BOT_FIELDS,
         "channel_connect_links" => CHANNEL_RECORD_FIELDS,
         "channel_conversations" => CHANNEL_RECORD_FIELDS,
         "channel_delivery_receipts" => CHANNEL_RECORD_FIELDS,
@@ -1056,7 +987,6 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "encrypted_record_migration_runs" => ACCOUNT_RECORD_FIELDS,
         "execution_permission_deliveries" => ACCOUNT_RECORD_FIELDS,
         "feature_flag_overrides" => ACTIVITY_RECORD_FIELDS,
-        "generated_artifact_content_series" => ACCOUNT_RECORD_FIELDS,
         "invite_codes" => INVITE_USAGE_FIELDS,
         "invocation_diagnostics" => ACTIVITY_RECORD_FIELDS,
         "lark_base_write_photos" => ACCOUNT_RECORD_FIELDS,
@@ -1082,7 +1012,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "mfa_challenges" => ACCOUNT_RECORD_FIELDS,
         "mfa_factors" => SECURITY_RECORD_FIELDS,
         "node_registration_tokens" => ACCOUNT_RECORD_FIELDS,
-        "nodes" => MACHINE_RECORD_FIELDS,
+        "nodes" => NODE_FIELDS,
         "notification_channels" => SECURITY_RECORD_FIELDS,
         "nyxbot_channels" => CHANNEL_RECORD_FIELDS,
         "nyxbot_event_bindings" => ASSISTANT_RECORD_FIELDS,

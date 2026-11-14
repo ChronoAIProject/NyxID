@@ -326,7 +326,7 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
     // Only orphan owners reach this point. Stream their sorted ids after the
     // liveness filter so a live account can never create a giant group document.
     for group in &mut all {
-        let filter = if let Some(parent) = group.joined_parent {
+        let filter = if group.joined_parent.is_some() {
             if group.collection == "channel_send_claims" && group.field == "_id" {
                 doc! {"_id": {"$regex": format!("^{}:", regex::escape(&group.owner_id))}}
             } else {
