@@ -929,7 +929,12 @@ authorized download chips with explicit model limitations. See
 This section concerns NyxID acting as CMAEG's `nyxbot` provider, not the generic
 `/channel-events` ingress. Generic ingress remains ADR-013 passthrough. NyxBot's
 existing assistant history owns answer content; additive `nyxbot_events.delivery`
-metadata arbitrates streamed versus delayed answers. The implementation contract
+metadata arbitrates streamed versus delayed answers. Late gateway answers now recover
+expired text preparations under current authority, with a fenced MongoDB-time
+lease. The claim becomes irreversible immediately before the gateway request;
+a missing or ambiguous receipt still forbids any resend. Interrupted sends add
+a fixed notice only to an existing authorized owner thread. No provider
+idempotency guarantee or public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
 With `assistant:channel-media` enabled, a supported relay media activity whose source

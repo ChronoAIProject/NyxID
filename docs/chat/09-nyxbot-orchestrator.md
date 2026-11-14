@@ -865,14 +865,37 @@ use the original inbound ID through the normal live route-key reply path;
 followed native threads retain the original source binding and adapter checks.
 Unsupported/expired targets are never redirected to the top-level chat.
 
-Immediately before dispatch a Mongo compare-and-set changes `pending` to
-`sending` with a unique claim ID. Only that claim may record the outcome. No
-replica reclaims `sending`, `unknown` or `streamed`: external delivery may have
-occurred. A confirmed gateway receipt records `sent`; missing/ambiguous receipts
-are `unknown`. These barriers survive crashes and prevent duplicate NyxID
-attempts. They cannot guarantee external delivery after an ambiguous network
-failure (see the CMA contract request in `CHANNEL_EVENT_GATEWAY.md`). Audit and
-warnings contain only event/conversation/turn IDs, transport and fixed outcomes.
+Late answers first claim a MongoDB-time `preparing_text` lease (180 seconds).
+This state proves only that the next text part has not crossed its send barrier;
+images keep their independent claims. Credential resolution, thread lookups and
+request preparation remain recoverable. The existing 15-second worker reclaims
+expired preparations under current authority. It stores only the saved-message
+ID, plan hash, numeric image-notice inputs, next-part cursor and receipt IDs on
+`nyxbot_events`, never a second copy of the answer.
+
+Immediately before a provider effect, an exact, unexpired preparation claim
+changes to `sending`. A slow worker whose preparation was reclaimed cannot
+send. Each confirmed direct-text part commits its receipt and advances the
+cursor atomically; a survivor sends only the remaining unsent suffix. Existing
+platform splitting and formatting rules are unchanged. A gateway POST or email
+reply remains one operation; NyxID does not infer receipts for its internal
+parts. Provider sends are bounded to 120 seconds per part.
+
+No replica retries `sending`, `unknown` or `streamed`. An interrupted new send
+becomes terminal `unknown` after its database-time deadline; an old `sending`
+row without that deadline is classified after 2,100 seconds without a check.
+This is an uncertainty decision, never proof of failure or permission to resend.
+When the saved result belongs to an existing owner-visible thread, the same
+transaction appends one fixed “Delivery unconfirmed” event there. It creates no
+resend control, new content store or readback access. Guest/private execution
+surfaces and public-manager expiry contracts are unchanged. Audit and warnings
+contain only IDs, transport and fixed outcomes.
+
+An ordinary rolling upgrade needs no operator action. Old workers ignore
+`preparing_text` and cannot claim it; new workers still respect all historical
+send/stream barriers. During a binary rollback, unfinished new preparations
+remain parked until a compatible worker returns. Do not reset their state or
+remove receipts to make an old worker process them.
 
 Before guaranteeing source retention, drain old queue writers and upgrade all
 replicas. Older writers using `$slice: -20` can evict accepted sources; mixed

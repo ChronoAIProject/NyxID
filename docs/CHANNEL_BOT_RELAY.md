@@ -2797,3 +2797,15 @@ not resolve unknown creation/deletion, override operator review, switch existing
 native bots back to relay, or shorten the persisted 90-second post-delete drain.
 A missing release proof remains blocked for review. No message contents, tokens
 or upstream prose are added to health or repair metadata.
+
+### Recovering late assistant answers
+
+Late NyxBot answers retain their saved transcript and use a metadata-only
+preparation lease on the originating event. A crash while preparing direct text
+can be recovered by another replica; the exact claim is checked again at the
+provider boundary. Confirmed parts are skipped. An interrupted send remains
+uncertain and is never resent, while an existing authorized owner thread shows
+one “Delivery unconfirmed” notice. Attachments keep their separate existing
+send barriers. Generic relay calls remain passthrough and gain no content store.
+See [the late-answer contract](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes)
+for timeouts and rolling-upgrade/rollback behavior.

@@ -696,6 +696,7 @@ impl PlatformAdapter for DiscordAdapter {
                 .ok_or_else(media::upload_failed);
         }
         crate::services::channel_platform::revalidate_post_effect().await?;
+        crate::services::channel_turn_preparation::effect().await?;
         let resp: serde_json::Value = request
             .send()
             .await

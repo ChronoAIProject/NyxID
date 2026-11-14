@@ -278,3 +278,5 @@ pub mod platform_model_tariff;
 pub mod execution_permission_channel;
 
 pub mod assistant_tool_result;
+
+pub mod channel_turn_preparation;

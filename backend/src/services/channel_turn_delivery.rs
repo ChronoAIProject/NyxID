@@ -238,6 +238,7 @@ pub async fn claim_stream(db: &Database, event: &str, status: &str) -> AppResult
 }
 
 /// One irreversible outbound attempt, shared by the callback and all sweepers.
+#[cfg(test)]
 pub async fn claim_send(db: &Database, event: &str, claim: &str) -> AppResult<bool> {
     Ok(db
         .collection::<bson::Document>(EVENTS)
@@ -250,6 +251,7 @@ pub async fn claim_send(db: &Database, event: &str, claim: &str) -> AppResult<bo
         == 1)
 }
 
+#[cfg(test)]
 pub async fn finish(db: &Database, event: &str, claim: &str, status: &str) -> AppResult<()> {
     db.collection::<bson::Document>(EVENTS)
         .update_one(
