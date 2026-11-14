@@ -17,11 +17,13 @@ use chrono::{Duration, Utc};
 use mongodb::bson::{Document, doc};
 
 pub fn spawn(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) = tick(&state).await {
                 tracing::warn!(code = error.error_code(), "Trigger scheduler tick deferred");
             }
@@ -30,6 +32,9 @@ pub fn spawn(state: AppState) {
 }
 
 pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
+    let Some(_pass) = state.shutdown.background() else {
+        return Ok(0);
+    };
     let due = schedules::due(&state.db, Utc::now()).await?;
     let count = due.len();
     // Bounded concurrency lets a slow recipient use its own lease without
@@ -37,25 +42,48 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
     use futures::{StreamExt, stream};
     stream::iter(due)
         .for_each_concurrent(16, |candidate| async move {
+            let Some(_claim) = state.shutdown.background() else {
+                return;
+            };
             let result: AppResult<()> = async {
-                if let Some(job) = schedules::claim(
+                if let Some(job) = schedules::claim_for_replica(
                     &state.db,
                     candidate.get_str("_id").unwrap_or_default(),
                     Utc::now(),
+                    &state.replica_identity.generation_id,
                 )
                 .await?
                 {
+                    let release = schedules::retain_shutdown_release(
+                        &state.db,
+                        &job,
+                        &state.replica_identity.generation_id,
+                        &state.shutdown,
+                    );
                     if job.get_str("kind").ok() == Some("schedule") {
                         if let Some(run) =
                             schedules::claim_occurrence(&state.db, &job, Utc::now()).await?
-                            && let Some(run_job) =
-                                schedules::claim(&state.db, &run.id, Utc::now()).await?
+                            && let Some(run_job) = schedules::claim_for_replica(
+                                &state.db,
+                                &run.id,
+                                Utc::now(),
+                                &state.replica_identity.generation_id,
+                            )
+                            .await?
                         {
+                            let run_release = schedules::retain_shutdown_release(
+                                &state.db,
+                                &run_job,
+                                &state.replica_identity.generation_id,
+                                &state.shutdown,
+                            );
                             Box::pin(run_job_once(state, &run_job)).await?;
+                            run_release.completed();
                         }
                     } else {
                         Box::pin(run_job_once(state, &job)).await?;
                     }
+                    release.completed();
                 }
                 Ok(())
             }

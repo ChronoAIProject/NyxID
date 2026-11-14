@@ -1546,7 +1546,7 @@ async fn sync_refreshed_credentials_to_unified_keys(
     let ws = state.node_ws_manager.clone();
     let uid = user_id.to_string();
     let pid = provider_id.to_string();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         credential_push_service::push_oauth_credential_to_nodes(&db, &enc, &ws, &uid, &pid).await;
     });
     Ok(())
@@ -1588,7 +1588,7 @@ async fn sync_provider_credentials_to_unified_keys(
         let ws = state.node_ws_manager.clone();
         let uid = user_id.to_string();
         let pid = provider_id.to_string();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             credential_push_service::push_oauth_credential_to_nodes(&db, &enc, &ws, &uid, &pid)
                 .await;
         });

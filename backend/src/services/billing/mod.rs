@@ -763,7 +763,7 @@ impl BillingService {
         let db = self.db.clone();
         #[cfg(test)]
         let gate = self.settlement_gate.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             #[cfg(test)]
             if let Some(gate) = gate
                 && gate.wait().await.is_err()

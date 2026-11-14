@@ -51,6 +51,9 @@ async fn claim_notice(db: &Database) -> AppResult<Option<Document>> {
 
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     for _ in 0..16 {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let Some(row) = claim_notice(&state.db).await? else {
             break;
         };

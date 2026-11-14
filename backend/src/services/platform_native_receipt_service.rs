@@ -164,15 +164,25 @@ pub(crate) async fn sweep_with_service(
     service: &super::telegram_new_service::TelegramNewService<'_>,
 ) -> AppResult<()> {
     for _ in 0..8 {
+        let Some(_work) = state.shutdown.background() else {
+            break;
+        };
         let Some(row) = claim_recovery(&state.db).await? else {
             break;
         };
         let claim = row.get_str("claim_id").map_err(|_| closed())?;
+        let release = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+            db: state.db.clone(), collection: COLLECTION,
+            filter: doc! {"_id": row.get_str("_id").map_err(|_| closed())?, "generation": row.get_i64("generation").map_err(|_| closed())?, "claim_id": claim, "phase": "recovering"},
+            update: doc! {"$set": {"retry_at": bson::DateTime::from_millis(0)}},
+        });
         let result = recover_notice(state, service, &row).await;
         state.db.collection::<Document>(COLLECTION).update_one(doc! {"_id": row.get_str("_id").map_err(|_| closed())?, "generation": row.get_i64("generation").map_err(|_| closed())?,
             "claim_id": &claim, "phase": "recovering", "$expr": {"$gt": ["$retry_at", "$$NOW"]}},
             vec![doc! {"$set": {"phase": if result.is_ok() {"completed"} else if row.get_i64("attempts").map_err(|_| closed())? >= 5 {"interrupted"} else {"recoverable"}, "claim_id": bson::Bson::Null,
                 "retry_at": {"$dateAdd": {"startDate": "$$NOW", "unit": "second", "amount": 60_i64}}}}]).await?;
+        release.completed();
     }
     Ok(())
 }

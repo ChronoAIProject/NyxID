@@ -178,9 +178,11 @@ starting another unit. Sweep rows, price components, and schedule chunks have
 cooperative stop points. A stopped credit-schedule walk leaves its existing
 300-second period lease to expire: that progress row has no exact ownership token
 to release safely, and deterministic grant IDs make chunk replay safe. A graceful
-shutdown must stop future ticks and await the active pass and token release.
-With ownership intact this is the whole pass; after renewal loss it is the
-current unit. Aborting the future is not a safe drain. An already
+shutdown stops future ticks and requests the same cooperative stop, then awaits
+the current unit and exact-token release. Renewal continues while that unit
+finishes. If the hard shutdown deadline aborts the pass, shutdown deliberately
+leaves its lease to the shared TTL (30 seconds by default); bulk shutdown release
+never transfers this ownership under an uncertain provider operation. An already
 sent provider request cannot be recalled by a MongoDB lease, and an in-flight
 unit may finish after expiry. Existing row claims, financial locks and dedupe
 remain necessary. This supervisor does not serialize request-time plan writers,

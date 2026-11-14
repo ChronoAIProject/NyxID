@@ -2909,6 +2909,9 @@ pub async fn sweep(
         .await?;
     let mut processed = 0;
     while let Some(row) = rows.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         // A process lost after claim may have sent. Never replay the attempt.
         if row.state == DeliveryState::Dispatching {
             let versioned = state.db.collection::<bson::Document>(COLLECTION_NAME)

@@ -581,7 +581,7 @@ pub async fn update_external_api_key(
             allow_all_services: auth_user.allow_all_services,
             allowed_service_ids: auth_user.allowed_service_ids.clone(),
         };
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             credential_push_service::push_credential_to_node_if_owned(
                 &db, &enc, &ws, &uid, &act, &ak, scope,
             )

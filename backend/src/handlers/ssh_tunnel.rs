@@ -319,7 +319,7 @@ pub async fn ssh_tunnel_ws(
 
     // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             Box::pin(async move {
                 let work = Box::pin(async {
                     handle_ssh_socket(
@@ -346,7 +346,7 @@ pub async fn ssh_tunnel_ws(
                     let _ = work.await;
                 }
             })
-        })
+        }))
         .into_response())
 }
 

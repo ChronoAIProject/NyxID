@@ -1880,7 +1880,7 @@ pub async fn delete(
         let credential = credentials_by_id.remove(&row.id);
         let state = state.clone();
         let auth = auth.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let result: AppResult<()> = async {
                 if let Some(credential) = credential
                     && credential.api_key_id == row.credential_api_key_id
@@ -2484,9 +2484,10 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
     ) -> Option<tokio::task::JoinHandle<()>> {
         let state = self.state.clone();
         let row = row.clone();
-        Some(tokio::spawn(
-            async move { capacity_notice(&state, &row).await },
-        ))
+        Some(
+            crate::services::shutdown::process()
+                .spawn(async move { capacity_notice(&state, &row).await }),
+        )
     }
 
     async fn request(
@@ -2658,7 +2659,7 @@ pub(crate) async fn start_turn_with_voice(
             .await?
             .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
     let (sender, receiver) = broadcast::channel(256);
-    tokio::spawn(
+    state.shutdown.spawn(
         run_turn(
             state.clone(),
             auth,
@@ -2798,7 +2799,11 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
             yield Ok(Event::default().event(name).data(data.to_string()));
         }
     };
-    Ok(sse_response(stream))
+    let mut response = sse_response(stream);
+    response
+        .extensions_mut()
+        .insert(crate::services::shutdown::RecoverableSubscription);
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]

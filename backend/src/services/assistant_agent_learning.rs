@@ -1378,7 +1378,7 @@ pub async fn run_now(state: &AppState, actor: &str, agent_id: &str) -> AppResult
     };
     let id = run.id.clone();
     let worker_state = state.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) = process_with_state(&worker_state, run).await {
             tracing::warn!(
                 error_code = error.error_code(),
@@ -1399,6 +1399,9 @@ async fn tick(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for config in configs {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         if !flag_on(
             &state.db,
             &config
@@ -1459,11 +1462,13 @@ async fn tick(state: &AppState) -> AppResult<()> {
 }
 
 pub fn spawn(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) = tick(&state).await {
                 tracing::warn!(
                     error_code = error.error_code(),

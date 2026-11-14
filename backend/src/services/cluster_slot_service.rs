@@ -67,7 +67,7 @@ impl RenewableSlotGuard {
         let renewal_token = token.clone();
         let renewal_stop = stop.clone();
         let renewal_lost = lost.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_worker(async move {
             loop {
                 tokio::select! {
                     () = renewal_stop.cancelled() => return,
@@ -139,8 +139,8 @@ impl Drop for RenewableSlotGuard {
         self.stop.cancel();
         let db = self.db.clone();
         let token = self.token.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 if let Err(error) = SlotStore::release(&db, &token).await {
                     tracing::warn!(
                         namespace = %token.namespace,

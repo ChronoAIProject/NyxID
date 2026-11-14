@@ -216,7 +216,7 @@ pub async fn send_device_notification(
         if !successful_device_ids.is_empty() {
             let db_clone = db.clone();
             let channel_id = channel.id.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 update_device_last_used(&db_clone, &channel_id, &successful_device_ids).await;
             });
         }
@@ -225,7 +225,7 @@ pub async fn send_device_notification(
     if !tokens_to_remove.is_empty() {
         let db = db.clone();
         let channel_id = channel.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
         });
     }
@@ -488,7 +488,7 @@ async fn deliver_best_effort(
         if !successful_device_ids.is_empty() {
             let db = db.clone();
             let channel_id = channel.id.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 update_device_last_used(&db, &channel_id, &successful_device_ids).await;
             });
         }
@@ -497,7 +497,7 @@ async fn deliver_best_effort(
     if !tokens_to_remove.is_empty() {
         let db = db.clone();
         let channel_id = channel.id;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
         });
     }
@@ -842,7 +842,7 @@ pub async fn send_approval_notification(
         if !successful_device_ids.is_empty() {
             let db_clone = db.clone();
             let channel_id = channel.id.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 update_device_last_used(&db_clone, &channel_id, &successful_device_ids).await;
             });
         }
@@ -852,7 +852,7 @@ pub async fn send_approval_notification(
     if !tokens_to_remove.is_empty() {
         let db = db.clone();
         let channel_id = channel.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
         });
     }

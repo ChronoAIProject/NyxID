@@ -1149,7 +1149,7 @@ pub(crate) async fn create_key_with_service_id(
             .expect("pushable credential requires api key")
             .id
             .clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             credential_push_service::push_credential_to_node_if_routed(
                 &db, &enc, &ws, &uid, &key_id,
             )

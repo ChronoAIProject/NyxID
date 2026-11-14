@@ -6270,7 +6270,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             // Record success metrics (fire-and-forget)
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ =
                                     node_metrics_service::record_success(db_clone, nid, latency_ms)
                                         .await;
@@ -6629,7 +6629,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
                             let err_msg = "Node credential missing".to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
                                     .await;
                             });
@@ -6681,7 +6681,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
                             let err_msg = "Node offline or timeout".to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
                                     .await;
                             });
@@ -8399,8 +8399,10 @@ async fn bridge_websockets(
 
     let mut shared_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     shared_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let shutdown = crate::services::shutdown::process();
     loop {
         tokio::select! {
+            () = shutdown.stopped() => break,
             _ = shared_tick.tick(), if shared.is_some() => {
                 if let Some(binding) = &shared
                     && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
@@ -8590,8 +8592,15 @@ async fn bridge_websockets(
     }
 
     // Close both sides -- runs regardless of which side triggered the break.
-    let _ = downstream_sink.close().await;
-    let _ = client_sink.close().await;
+    if shutdown.is_stopped() {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let _ = tokio::join!(downstream_sink.close(), client_sink.close());
+        })
+        .await;
+    } else {
+        let _ = downstream_sink.close().await;
+        let _ = client_sink.close().await;
+    }
 
     stats.duration = start.elapsed();
     stats.realtime_llm_usage = realtime_llm_usage.finalize();
@@ -8744,58 +8753,60 @@ async fn handle_ws_passthrough(
     };
 
     Ok(ws_upgrade
-        .on_upgrade(move |client_ws| async move {
-            let stats = bridge_websockets(
-                client_ws,
-                downstream.stream,
-                sid.clone(),
-                collect_realtime_llm_usage,
-                ws_frame_injections,
-                credential,
-                db.clone(),
-                user_id_str.clone(),
-                ak_id.clone(),
-                ak_name.clone(),
-                req_ip.clone(),
-                req_ua.clone(),
-                slot_cancel,
-                shared.clone(),
-            )
-            .await;
-            drop(guard);
-            drop(service_lease);
-            let platform_usage = websocket_platform_usage(&stats);
-            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
-            settle_meter_async(
-                billing,
-                metered_for_settle,
-                platform_usage,
-                resale_usage,
-                None,
-            )
-            .await;
+        .on_upgrade(state.shutdown.clone().upgrade_completion_callback(
+            move |client_ws| async move {
+                let stats = bridge_websockets(
+                    client_ws,
+                    downstream.stream,
+                    sid.clone(),
+                    collect_realtime_llm_usage,
+                    ws_frame_injections,
+                    credential,
+                    db.clone(),
+                    user_id_str.clone(),
+                    ak_id.clone(),
+                    ak_name.clone(),
+                    req_ip.clone(),
+                    req_ua.clone(),
+                    slot_cancel,
+                    shared.clone(),
+                )
+                .await;
+                drop(guard);
+                drop(service_lease);
+                let platform_usage = websocket_platform_usage(&stats);
+                let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
+                settle_meter_async(
+                    billing,
+                    metered_for_settle,
+                    platform_usage,
+                    resale_usage,
+                    None,
+                )
+                .await;
 
-            let mut disconnect_event = serde_json::json!({
-                "service_id": sid,
-                "duration_secs": stats.duration.as_secs(),
-                "acting_client_id": &acting_client_id,
-            });
-            crate::services::shared_agent_transport::annotate(
-                &mut disconnect_event,
-                shared.as_ref(),
-            );
-            add_websocket_usage_provenance(&mut disconnect_event, &stats);
-            audit_service::log_async(
-                db,
-                Some(user_id_str),
-                "proxy_ws_disconnect".to_string(),
-                Some(disconnect_event),
-                req_ip,
-                req_ua,
-                ak_id,
-                ak_name,
-            );
-        })
+                let mut disconnect_event = serde_json::json!({
+                    "service_id": sid,
+                    "duration_secs": stats.duration.as_secs(),
+                    "acting_client_id": &acting_client_id,
+                });
+                crate::services::shared_agent_transport::annotate(
+                    &mut disconnect_event,
+                    shared.as_ref(),
+                );
+                add_websocket_usage_provenance(&mut disconnect_event, &stats);
+                audit_service::log_async(
+                    db,
+                    Some(user_id_str),
+                    "proxy_ws_disconnect".to_string(),
+                    Some(disconnect_event),
+                    req_ip,
+                    req_ua,
+                    ak_id,
+                    ak_name,
+                );
+            },
+        ))
         .into_response())
 }
 
@@ -9057,62 +9068,68 @@ async fn handle_ws_passthrough_via_node(
     state.billing.mark_forwarded(&metered).await?;
 
     Ok(ws_upgrade
-        .on_upgrade(move |client_ws| async move {
-            let stats = bridge_websockets_via_node(
-                client_ws,
-                ws_proxy_session.frames,
-                &node_dispatch,
-                &node_id_owned,
-                &sess_id,
-                sid.clone(),
-                collect_realtime_llm_usage,
-                db.clone(),
-                user_id_str.clone(),
-                ak_id.clone(),
-                ak_name.clone(),
-                owner_for_audit.clone(),
-                actor_for_audit.clone(),
-                req_ip.clone(),
-                req_ua.clone(),
-                slot_cancel,
-            )
-            .await;
+        .on_upgrade(state.shutdown.clone().upgrade_completion_callback(
+            move |client_ws| async move {
+                let stats = bridge_websockets_via_node(
+                    client_ws,
+                    ws_proxy_session.frames,
+                    &node_dispatch,
+                    &node_id_owned,
+                    &sess_id,
+                    sid.clone(),
+                    collect_realtime_llm_usage,
+                    db.clone(),
+                    user_id_str.clone(),
+                    ak_id.clone(),
+                    ak_name.clone(),
+                    owner_for_audit.clone(),
+                    actor_for_audit.clone(),
+                    req_ip.clone(),
+                    req_ua.clone(),
+                    slot_cancel,
+                )
+                .await;
 
-            // Best-effort close the node-side session.
-            let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
-            drop(guard);
-            drop(service_lease);
-            let platform_usage = websocket_platform_usage(&stats);
-            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
-            settle_meter_async(
-                billing,
-                metered_for_settle,
-                platform_usage,
-                resale_usage,
-                None,
-            )
-            .await;
+                // Best-effort close the node-side session.
+                let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
+                drop(guard);
+                drop(service_lease);
+                let platform_usage = websocket_platform_usage(&stats);
+                let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
+                settle_meter_async(
+                    billing,
+                    metered_for_settle,
+                    platform_usage,
+                    resale_usage,
+                    None,
+                )
+                .await;
 
-            let mut disconnect_event = serde_json::json!({
-                "service_id": sid,
-                "duration_secs": stats.duration.as_secs(),
-                "acting_client_id": &acting_client_id,
-                "routed_via": "node",
-                "node_id": node_id_owned,
-            });
-            add_websocket_usage_provenance(&mut disconnect_event, &stats);
-            add_owner_user_id_if_shared(&mut disconnect_event, &owner_for_audit, &actor_for_audit);
-            audit_service::log_async(
-                db,
-                Some(user_id_str),
-                "proxy_ws_disconnect".to_string(),
-                Some(disconnect_event),
-                req_ip,
-                req_ua,
-                ak_id,
-                ak_name,
-            );
-        })
+                let mut disconnect_event = serde_json::json!({
+                    "service_id": sid,
+                    "duration_secs": stats.duration.as_secs(),
+                    "acting_client_id": &acting_client_id,
+                    "routed_via": "node",
+                    "node_id": node_id_owned,
+                });
+                add_websocket_usage_provenance(&mut disconnect_event, &stats);
+                add_owner_user_id_if_shared(
+                    &mut disconnect_event,
+                    &owner_for_audit,
+                    &actor_for_audit,
+                );
+                audit_service::log_async(
+                    db,
+                    Some(user_id_str),
+                    "proxy_ws_disconnect".to_string(),
+                    Some(disconnect_event),
+                    req_ip,
+                    req_ua,
+                    ak_id,
+                    ak_name,
+                );
+            },
+        ))
         .into_response())
 }
 
@@ -9154,8 +9171,10 @@ async fn bridge_websockets_via_node(
     ));
     tokio::pin!(idle_timeout);
 
+    let shutdown = crate::services::shutdown::process();
     loop {
         tokio::select! {
+            () = shutdown.stopped() => break,
             () = slot_cancel.cancelled() => {
                 tracing::warn!(service_id = %service_id, "Node WS passthrough capacity slot was lost");
                 break;
@@ -9310,7 +9329,12 @@ async fn bridge_websockets_via_node(
         }
     }
 
-    let _ = client_sink.close().await;
+    if shutdown.is_stopped() {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(100), client_sink.close()).await;
+    } else {
+        let _ = client_sink.close().await;
+    }
     stats.duration = start.elapsed();
     stats.realtime_llm_usage = realtime_llm_usage.finalize();
     stats

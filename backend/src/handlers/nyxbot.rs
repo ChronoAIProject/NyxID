@@ -2523,6 +2523,9 @@ pub(crate) async fn process_watches(state: &AppState) -> AppResult<()> {
         )
         .await?;
     for watch in watches {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         resolve(state, &watch).await;
     }
     Ok(())
@@ -2552,9 +2555,16 @@ fn resolve<'a>(state: &'a AppState, watch: &'a NyxbotWatch) -> futures::future::
 pub fn spawn_live_dispatch(state: AppState) {
     use crate::services::assistant_live::LiveEvent;
     let mut events = state.assistant_live.subscribe();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         loop {
-            let event = match events.recv().await {
+            let received = tokio::select! {
+                () = state.shutdown.intake_stopped() => break,
+                result = events.recv() => result,
+            };
+            let Some(_work) = state.shutdown.background() else {
+                break;
+            };
+            let event = match received {
                 Ok(event) => event,
                 Err(broadcast::error::RecvError::Lagged(_)) => LiveEvent::Resync,
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -2562,7 +2572,7 @@ pub fn spawn_live_dispatch(state: AppState) {
             if let LiveEvent::Machine { ref id, .. } = event {
                 let state = state.clone();
                 let id = id.clone();
-                tokio::spawn(async move {
+                state.shutdown.clone().spawn(async move {
                     if let Ok(Some(node)) =
                         crate::services::node_service::get_node_by_id(&state.db, &id).await
                     {
@@ -2603,7 +2613,7 @@ pub fn spawn_live_dispatch(state: AppState) {
                 }
                 LiveEvent::Resync => {
                     let state = state.clone();
-                    tokio::spawn(async move {
+                    state.shutdown.clone().spawn(async move {
                         if let Err(error) = process_watches(&state).await {
                             tracing::debug!(%error, "NyxBot watch resync deferred");
                         }
@@ -2614,7 +2624,7 @@ pub fn spawn_live_dispatch(state: AppState) {
             };
             // Linking may call the gateway: never hold up the next event.
             let state = state.clone();
-            tokio::spawn(async move {
+            state.shutdown.clone().spawn(async move {
                 if let Err(error) = resolve_matching(&state, filter).await {
                     tracing::debug!(%error, "NyxBot live watch deferred");
                 }
@@ -3502,7 +3512,7 @@ async fn owner_linked(state: &AppState, row: &NyxbotChannel, method: &str) -> In
             identifier(&row.bot_label),
             identifier(&agent_name)
         );
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             super::assistant_team::notify(
                 &state,
                 &owner,
@@ -4776,7 +4786,7 @@ async fn put_conversation_inner(
         {
             // The gateway is waiting on this PUT. Remote proof must not make
             // a re-entrant request on that path or delay its unchanged 404.
-            tokio::spawn(releases::repair_binding_on_refusal(
+            crate::services::shutdown::process().spawn(releases::repair_binding_on_refusal(
                 state,
                 row,
                 "conversation_put",

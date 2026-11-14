@@ -146,7 +146,7 @@ pub(super) async fn open(
         .max_message_size(4096)
         .max_frame_size(4096)
         .on_failed_upgrade(move |_| {
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 let _ = crate::services::voice::diagnostics::finish::<()>(
                     &failed_state.db,
                     &failed_user,
@@ -156,20 +156,22 @@ pub(super) async fn open(
                 .await;
             });
         })
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             Box::pin(async move {
                 let (input, output) = if call.protocol
                     == Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
                 {
                     let (tx, rx) = tokio::sync::mpsc::channel(64);
                     let (out, stream) = tokio::sync::mpsc::channel(64);
-                    tokio::spawn(Box::pin(crate::services::voice::grok_runtime::serve(
-                        state.clone(),
-                        call.clone(),
-                        socket_id.clone(),
-                        rx,
-                        out,
-                    )));
+                    crate::services::shutdown::process().spawn(Box::pin(
+                        crate::services::voice::grok_runtime::serve(
+                            state.clone(),
+                            call.clone(),
+                            socket_id.clone(),
+                            rx,
+                            out,
+                        ),
+                    ));
                     (Some(tx), Some(stream))
                 } else {
                     (None, None)
@@ -188,7 +190,7 @@ pub(super) async fn open(
                     crate::services::voice::session::release_stream(&state.db, &call, &socket_id)
                         .await;
             })
-        }))
+        })))
 }
 
 async fn serve(
@@ -208,6 +210,7 @@ async fn serve(
     let mut startup_reported = false;
     let result = async { loop {
         tokio::select! {
+            () = state.shutdown.interrupted() => return Ok(()),
             frame=socket.next()=>{
                 if frame_window.elapsed()>=std::time::Duration::from_secs(1) {frame_window=tokio::time::Instant::now();frames=0;}
                 frames+=1;if frames>if input.is_some() {80} else {20} {return Err(AppError::RateLimited);}

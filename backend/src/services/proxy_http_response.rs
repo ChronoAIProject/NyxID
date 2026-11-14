@@ -56,7 +56,7 @@ pub(crate) fn relay_response<'a>(
         // non-SSE bodies with an explicit cap/deadline, including chunked JSON.
         context.should_stream = context.is_sse;
         Box::pin(async move {
-            crate::turn_trace::spawn(async move {
+            crate::turn_trace::spawn_cleanup(async move {
                 Box::pin(relay_response_inner(&state, context, downstream_response)).await
             })
             .await
@@ -117,7 +117,7 @@ async fn relay_response_inner(
             let model_protocol = crate::services::assistant_model_observer::protocol(path);
             let model_request = model_request.clone().filter(|_| status.is_success());
 
-            crate::turn_trace::spawn(async move {
+            crate::turn_trace::spawn_cleanup(async move {
                 let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
@@ -131,11 +131,12 @@ async fn relay_response_inner(
                 let mut framing_fault_recorded = false;
 
                 loop {
-                    let next = until_client_disconnect(
-                        &task_cancellation,
-                        tokio::time::timeout(idle_timeout, upstream_stream.next()),
-                    )
-                    .await;
+                    let shutdown = crate::services::shutdown::process();
+                    let next = tokio::select! {
+                        biased;
+                        () = shutdown.stopped() => Err(crate::downstream_disconnect::ClientDisconnected),
+                        result = until_client_disconnect(&task_cancellation, tokio::time::timeout(idle_timeout, upstream_stream.next())) => result,
+                    };
                     match next {
                         Err(_) => {
                             if let Some(model_request) = &model_request {
@@ -611,7 +612,7 @@ async fn relay_response_inner(
             // Poll funding separately from the deep proxy stack, and await its
             // durable release before allowing the provider retry.
             let billing = state.billing.clone();
-            let settlement = crate::turn_trace::spawn(async move {
+            let settlement = crate::turn_trace::spawn_cleanup(async move {
                 Box::pin(billing.settle(
                     &metered,
                     PlatformUsage::default(),
@@ -700,14 +701,16 @@ pub(crate) async fn observe_model_response(
     let protocol = crate::services::assistant_model_observer::protocol(path);
     let (parts, body) = response.into_parts();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
-    crate::turn_trace::spawn(async move {
+    crate::turn_trace::spawn_cleanup(async move {
         let mut body = body.into_data_stream();
         let mut observer = crate::services::assistant_model_observer::StreamObserver::new(protocol);
         let mut provider_fault_recorded = false;
         let mut framing_fault_recorded = false;
+        let shutdown = crate::services::shutdown::process();
         loop {
             let chunk = tokio::select! {
                 biased;
+                () = shutdown.stopped() => { let _ = request.fault("consumer_cancelled", false).await; let _ = request.complete().await; return; }
                 _ = tx.closed() => { let _ = request.fault("consumer_cancelled", false).await; let _ = request.complete().await; return; }
                 chunk = body.next() => chunk,
             };

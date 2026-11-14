@@ -348,7 +348,7 @@ pub async fn upgrade(
     Ok(ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             relay(
                 state,
                 node,
@@ -358,7 +358,7 @@ pub async fn upgrade(
                 zeroize::Zeroizing::new(secret.to_vec()),
                 socket,
             )
-        }))
+        })))
 }
 
 fn signed(node: &str, operation: Operation, parameters: Value, secret: &[u8]) -> Request {

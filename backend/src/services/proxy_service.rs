@@ -3491,7 +3491,7 @@ async fn finish_resolution(
         // Fire-and-forget: update last_used_at only for execution materialization.
         let db_clone = db.clone();
         let key_id = api_key.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             user_api_key_service::touch_last_used(&db_clone, &key_id).await;
         });
         credential
@@ -3884,7 +3884,7 @@ pub async fn resolve_agent_credential_override_identity(
     if credential.is_some() {
         let db_clone = db.clone();
         let key_id = api_key.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             user_api_key_service::touch_last_used(&db_clone, &key_id).await;
         });
     }

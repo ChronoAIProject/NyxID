@@ -274,11 +274,16 @@ pub fn spawn_refresh_worker(db: mongodb::Database, lago: Option<std::sync::Arc<d
     let Some(lago) = lago else {
         return;
     };
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = crate::services::shutdown::process()
+                .tick(&mut interval)
+                .await
+            else {
+                break;
+            };
             if super::exact_migration::ready(&db).await.unwrap_or(false)
                 && let Err(error) = service_refresh_requests(&db, lago.as_ref()).await
             {
@@ -308,6 +313,9 @@ pub(super) async fn service_refresh_requests(
         .try_collect()
         .await?;
     for request in rows {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         let id = request
             .get_str("_id")
             .map_err(|e| AppError::Internal(e.to_string()))?;

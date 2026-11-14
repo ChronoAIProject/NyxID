@@ -280,6 +280,9 @@ impl BillingService {
     /// Immutable codes make retries safe and retain historical provider charges.
     /// Admission still verifies the effective subscription, never just this marker.
     pub async fn retry_sandbox_rate_cards(&self) -> AppResult<u64> {
+        let Some(_work) = crate::services::shutdown::process().background() else {
+            return Ok(0);
+        };
         let Some(lago) = self.lago.as_deref().filter(|_| self.config.billing_enabled) else {
             return Ok(0);
         };

@@ -2078,13 +2078,17 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         }
     };
 
-    Sse::new(stream)
+    let mut response = Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(30))
                 .text("keepalive"),
         )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::services::shutdown::RecoverableSubscription);
+    response
 }
 
 // ---------------------------------------------------------------------------

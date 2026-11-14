@@ -1469,7 +1469,16 @@ rows without it keep the same lease/TTL behavior. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
 A 15-second cross-replica sweep reclaims only rows whose heartbeat is at least 75 seconds old,
-through the same fenced settlement path; a fresh long-running turn is never swept.
+through the same fenced settlement path, with stage `sweep`; a fresh long-running
+turn is never swept. Planned SIGTERM/ctrl-c drains keep heartbeats alive and wait
+for the detached workers. At the shutdown work deadline or second signal,
+remaining turns use the same fenced settlement with code `turn_lost` and stage
+`shutdown`, additionally matching this process's worker identity. A terminal
+reply clears `active_turn`, so old replicas' sweep and next-send reclamation
+cannot create a second reply. Stop still wins as `cancelled`/`stop`. A crash,
+early platform kill, or unavailable shutdown settlement retains stale-heartbeat
+recovery. Neither shutdown nor crash automatically replays execution. See
+[graceful drain](../DEPLOYMENT.md#rolling-deploys-and-graceful-drain).
 Delete stops and cancels before removing the row, and a late worker settlement against
 the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
 

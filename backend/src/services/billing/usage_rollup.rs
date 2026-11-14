@@ -1061,42 +1061,49 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
     if seconds == 0 {
         return None;
     }
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(seconds));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            let start = std::time::Instant::now();
-            let budget = match state(&db).await {
-                Ok(state) => tick_budget(
-                    state
-                        .filter(|s| s.daily_ready)
-                        .map(|s| s.rolled_up_through)
-                        .unwrap_or(DateTime::UNIX_EPOCH),
-                    Utc::now(),
-                ),
-                Err(_) => {
-                    tracing::warn!("Usage rollup state unavailable; retrying next tick");
-                    continue;
-                }
-            };
-            let mut folded = 0;
-            for _ in 0..MAX_BATCHES_PER_TICK {
-                match fold_once(&db, Utc::now()).await {
-                    Ok(0) => break,
-                    Ok(rows) => folded += rows,
+    Some(
+        crate::services::shutdown::process().spawn_worker(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(seconds));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let Some(_work) = crate::services::shutdown::process()
+                    .tick(&mut interval)
+                    .await
+                else {
+                    break;
+                };
+                let start = std::time::Instant::now();
+                let budget = match state(&db).await {
+                    Ok(state) => tick_budget(
+                        state
+                            .filter(|s| s.daily_ready)
+                            .map(|s| s.rolled_up_through)
+                            .unwrap_or(DateTime::UNIX_EPOCH),
+                        Utc::now(),
+                    ),
                     Err(_) => {
-                        tracing::warn!("Usage rollup batch retained for retry");
+                        tracing::warn!("Usage rollup state unavailable; retrying next tick");
+                        continue;
+                    }
+                };
+                let mut folded = 0;
+                for _ in 0..MAX_BATCHES_PER_TICK {
+                    match fold_once(&db, Utc::now()).await {
+                        Ok(0) => break,
+                        Ok(rows) => folded += rows,
+                        Err(_) => {
+                            tracing::warn!("Usage rollup batch retained for retry");
+                            break;
+                        }
+                    }
+                    if start.elapsed() >= budget {
                         break;
                     }
                 }
-                if start.elapsed() >= budget {
-                    break;
-                }
+                tracing::debug!(rows_folded = folded, "Usage rollup tick completed");
             }
-            tracing::debug!(rows_folded = folded, "Usage rollup tick completed");
-        }
-    }))
+        }),
+    )
 }
 
 #[cfg(test)]

@@ -317,7 +317,7 @@ impl NodeDispatch {
                 "Failed to initialize internal node stream".to_string(),
             ))
         })?;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let mut stream = response.bytes_stream();
             loop {
                 tokio::select! {
@@ -496,7 +496,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let (tx, rx) = mpsc::channel(256);
                 let sessions = self.remote_duplex.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -603,7 +603,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let (tx, rx) = mpsc::channel(256);
                 let sessions = self.remote_duplex.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -730,7 +730,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let (tx, rx) = mpsc::channel(512);
                 let sessions = self.remote_duplex.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -905,7 +905,7 @@ impl NodeDispatch {
         let (incoming_tx, incoming_rx) =
             mpsc::channel::<DuplexServerFrame>(if machine_desktop { 2 } else { 512 });
         let (mut sink, mut stream) = socket.split();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             loop {
                 tokio::select! {
                     _ = incoming_tx.closed() => break,
@@ -1451,16 +1451,18 @@ async fn internal_duplex(
     };
     upgrade
         .max_message_size(config.max_message_bytes)
-        .on_upgrade(move |socket| async move {
-            serve_internal_duplex(
-                dispatch,
-                node_id,
-                authenticated_body,
-                config.handshake_timeout,
-                socket,
-            )
-            .await;
-        })
+        .on_upgrade(crate::services::shutdown::process().upgrade_callback(
+            move |socket| async move {
+                serve_internal_duplex(
+                    dispatch,
+                    node_id,
+                    authenticated_body,
+                    config.handshake_timeout,
+                    socket,
+                )
+                .await;
+            },
+        ))
 }
 
 async fn serve_internal_duplex(
@@ -2238,8 +2240,8 @@ impl Drop for RemoteProxyCancellationGuard {
         let Some(request) = self.request.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = request.send().await;
             });
         }
@@ -2491,7 +2493,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let sessions = self.remote_duplex.clone();
                 let (tx, rx) = mpsc::channel(2);
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _=tx.closed()=>break,

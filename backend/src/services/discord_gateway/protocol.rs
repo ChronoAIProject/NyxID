@@ -95,12 +95,28 @@ fn close_failure(code: u16) -> Failure {
 /// One connection, with a bounded serial dispatch queue. Heartbeats/read/ACK
 /// continue while shared ingress awaits a callback. Resume advances only after
 /// ordered dispatch completes (including its fenced checkpoint write).
+#[cfg(test)]
 pub(super) async fn connection<F, Fut>(
     initial_url: &str,
     token: &str,
     bot_id: &str,
     resume: &mut Resume,
     dispatch: F,
+) -> Failure
+where
+    F: Fn(Resume, Value) -> Fut,
+    Fut: Future<Output = Result<(), Failure>> + Send,
+{
+    connection_with_drain(initial_url, token, bot_id, resume, dispatch, None).await
+}
+
+pub(super) async fn connection_with_drain<F, Fut>(
+    initial_url: &str,
+    token: &str,
+    bot_id: &str,
+    resume: &mut Resume,
+    dispatch: F,
+    shutdown: Option<&crate::services::shutdown::Runtime>,
 ) -> Failure
 where
     F: Fn(Resume, Value) -> Fut,
@@ -194,6 +210,12 @@ where
         }
         tokio::select! {
             biased;
+            () = async {
+                match shutdown {
+                    Some(shutdown) => shutdown.intake_stopped().await,
+                    None => std::future::pending().await,
+                }
+            }, if failure.is_none() => { failure = Some(Failure::Reconnect); }
             _ = tokio::time::sleep_until(auth_deadline), if !authenticated && failure.is_none() => {
                 failure = Some(Failure::Protocol);
             }

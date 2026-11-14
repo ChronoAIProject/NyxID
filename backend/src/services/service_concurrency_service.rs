@@ -232,7 +232,8 @@ fn claim<'a>(
         // A disconnect during commit must not discard a committed claim before
         // it gets a guard. The owned task finishes admission and drops its result
         // (releasing the lease) even if its awaiting request has disappeared.
-        tokio::spawn(async move { claim_inner(&db, &service, &person, limit).await })
+        crate::services::shutdown::process()
+            .spawn(async move { claim_inner(&db, &service, &person, limit).await })
             .await
             .map_err(|_| AppError::Internal("Concurrency claim task failed".into()))?
     })
@@ -331,10 +332,20 @@ struct LeaseInner {
     lease_id: String,
     stop: CancellationToken,
     lost: CancellationToken,
+    shutdown_release: Option<super::shutdown::ReleaseTicket>,
 }
 impl Lease {
     fn new(db: Database, filter: Document, lease_id: String) -> Self {
+        let shutdown_release =
+            super::shutdown::process().register_release(super::shutdown::Release {
+                safe_after_stop: true,
+                db: db.clone(),
+                collection: COLLECTION_NAME,
+                filter: filter.clone(),
+                update: doc! {"$pull":{"leases":{"id": &lease_id}}},
+            });
         let inner = LeaseInner {
+            shutdown_release: Some(shutdown_release),
             db,
             filter,
             lease_id,
@@ -348,7 +359,7 @@ impl Lease {
             inner.stop.clone(),
             inner.lost.clone(),
         );
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_worker(async move {
             loop {
                 tokio::select! { biased; () = stop.cancelled() => return, () = tokio::time::sleep(RENEW_INTERVAL) => {} }
                 tokio::select! { biased;
@@ -373,7 +384,7 @@ impl Lease {
     /// Couple the existing WS bridge cancellation to loss of service capacity.
     pub fn cancel_on_loss(&self, token: CancellationToken) {
         let (lost, stop) = (self.0.lost.clone(), self.0.stop.clone());
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_worker(async move {
             tokio::select! { biased; () = lost.cancelled() => token.cancel(), () = stop.cancelled() => {} }
         });
     }
@@ -383,7 +394,7 @@ impl Lease {
         let pump_lease = self.clone();
         // The pump observes loss/disconnect even when a slow client stops polling
         // its response. At most one frame is queued; trailers remain intact.
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             loop {
                 let frame = tokio::select! { biased;
                     () = sender.closed() => return,
@@ -426,8 +437,9 @@ impl Drop for LeaseInner {
     fn drop(&mut self) {
         self.stop.cancel();
         let (db, filter, lease_id) = (self.db.clone(), self.filter.clone(), self.lease_id.clone());
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
+        let release = self.shutdown_release.take();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 if db
                     .collection::<Document>(COLLECTION_NAME)
                     .update_one(filter, doc! {"$pull":{"leases":{"id":lease_id}}})
@@ -437,6 +449,8 @@ impl Drop for LeaseInner {
                     tracing::warn!(
                         "Service concurrency lease release failed; expiry will reclaim it"
                     );
+                } else if let Some(release) = release {
+                    release.completed();
                 }
             });
         }

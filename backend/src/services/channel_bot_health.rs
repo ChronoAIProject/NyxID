@@ -401,7 +401,7 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
     }
     let db = db.clone();
     let owner = bot.user_id.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let mut recipients = match crate::services::org_service::list_admin_user_ids(&db, &owner)
             .await
         {

@@ -134,6 +134,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     voice::recover(&state.db).await?;
     let rows = voice::queued(&state.db).await?;
     for request in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let result: AppResult<()> = Box::pin(async {
             if request.expires_at <= chrono::Utc::now() {
                 return Err(AppError::Conflict("Voice request expired".into()));
@@ -251,9 +254,15 @@ fn require_origin(state: &AppState, headers: &axum::http::HeaderMap) -> AppResul
 }
 
 pub(crate) fn spawn_dispatch(state: AppState) {
-    tokio::spawn(Box::pin(async move {
+    state.shutdown.clone().spawn_worker(Box::pin(async move {
         loop {
-            crate::services::voice::dispatch_wakeup().await;
+            tokio::select! {
+                () = state.shutdown.intake_stopped() => break,
+                () = crate::services::voice::dispatch_wakeup() => {},
+            }
+            let Some(_work) = state.shutdown.background() else {
+                break;
+            };
             if sweep(&state).await.is_err() {
                 tracing::warn!("Voice request dispatch deferred to reconciliation");
             }

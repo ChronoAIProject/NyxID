@@ -404,6 +404,81 @@ groups and restarts to install the unique index.
 
 ---
 
+## Rolling deploys and graceful drain
+
+SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
+returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
+Both public and internal replica listeners continue serving during the work wait,
+including ordinary requests and new turns that arrive while routing converges.
+There is no drain rejection on these request paths and no database lookup in
+`/ready`.
+
+The process stops taking new background queue claims, scheduled work and polls.
+Already claimed work finishes, with turn heartbeats, capacity renewal, node
+ownership renewal and security capability observations kept alive. The wait
+counts detached turns and delivery work as well as HTTP bodies and upgraded
+streams. Idle node management sockets are closed at handover; their pending
+operations keep the wait open. MCP notification subscriptions, assistant `/live`, and dedicated CMA agent/response
+event observers do not count as work. They end cleanly five seconds after
+drain starts, allowing readiness propagation before reconnecting. MCP clients
+resume the durable outbox with `Last-Event-ID`; assistant clients poll and refresh
+on `ready`/`resync` after reconnect. Dedicated CMA observers display Disconnected
+and retain the cursor for their existing Reconnect action; closing observation
+does not cancel the remote task. Generic proxy streams remain work because their
+upstream resume guarantees vary. An otherwise idle drain waits for those bodies
+to close. Turn/provider streams, downloads, managed setup results, native response
+replay delivery barriers and interactive sessions still wait for completion and
+can consume the full work-wait budget. Once work is idle, Axum finishes accepted connections while
+retaining the bound sockets. If an accepted request starts more work at that
+boundary, both listeners resume serving until that work finishes.
+
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` defaults to 600. It is the total process budget:
+the smaller of five seconds or 10% is reserved for cleanup, so the default work
+wait ends at 595 seconds. The process exits earlier when work finishes. A second
+SIGTERM or ctrl-c skips the remaining wait and begins the same bounded cleanup.
+`0` restores the old immediate-exit path, including its existing ten-second
+Discord cancellation allowance.
+
+At the end, runners settle remaining turns through the existing fenced path
+with stable code `turn_lost` and stage `shutdown`. Cleanup cancels remaining local
+execution, attempts settlement for this worker's remaining claims, closes node
+WebSockets with going-away code 1001, releases owned cluster leases and capacity
+slots without deleting polling checkpoints, and removes this generation's
+security observation after stopping its writer. Releases compare generations
+or exact claim tokens. One metadata-only `backend_shutdown_drain` chained audit
+and structured log describe the outcome, including the count of subscriptions
+ended by shutdown. Logs at drain start show the signal, budget and in-flight
+counts; another log records a second signal. Database failures and stuck cleanup
+have a shared deadline; they cannot extend the exit budget.
+
+Cleanup does not clear uncertain provider-send barriers, wallet locks or
+purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
+retain their mutation locks; Discord identify rate windows retain their expiry. These records
+keep their existing recovery rules because releasing them could repeat an
+external effect. `billing:reconcile` uses its own cooperative stop and exact-token
+release after the current financial unit completes. If the deadline aborts that
+pass, its lease retains the default 30-second TTL; bulk shutdown release excludes
+it. Credit-schedule progress leases retain their existing 300-second expiry
+because they have no exact ownership token. Completion tasks, including detached audits, compensation and
+ledger appends, remain tracked while execution is stopped.
+
+Operators must match these settings in their platform's rollout configuration:
+
+- Termination grace period at least `SHUTDOWN_DRAIN_TIMEOUT_SECS` plus scheduling
+  and signal-delivery margin; allow the legacy Discord allowance when using `0`.
+- Readiness probe on `/ready`; liveness probe on `/health`.
+- Replace one replica at a time with surge capacity, allowing the successor to
+  become ready before terminating another replica.
+- Keep the draining replica's internal address reachable until it exits, because
+  peers forward node operations to the process that owns the socket.
+
+These are configuration requirements, not a description of production rollout
+tooling. That tooling is outside this repository. If the platform kills the
+process earlier, or MongoDB cannot confirm settlement within cleanup, peers use
+the unchanged stale-heartbeat recovery: 75 seconds plus the 15-second sweep
+cadence. A worker loss never automatically replays execution. A fully drained
+turn has its complete reply and needs no recovery.
+
 ## Environment Configuration
 
 ### Required Variables
@@ -749,7 +824,7 @@ curl https://auth.example.com/health
 ```
 
 Use this for:
-- Load balancer health checks
+- Liveness monitoring (load balancer readiness uses `/ready`)
 - Container orchestration liveness probes
 - Uptime monitoring (Uptime Robot, Pingdom, etc.)
 
@@ -764,7 +839,7 @@ livenessProbe:
   periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /health
+    path: /ready
     port: 3001
   initialDelaySeconds: 5
   periodSeconds: 5

@@ -1817,6 +1817,7 @@ mod tests {
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             port: 0,
+            shutdown_drain_timeout_secs: 600,
             base_url: "http://localhost".to_string(),
             chrono_probe_url: None,
             invocation_diagnostics_enabled: false,

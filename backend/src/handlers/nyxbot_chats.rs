@@ -565,7 +565,7 @@ pub(super) fn spawn_title_lookup(state: &AppState, row: &NyxbotChannel, chat: &N
     let state = state.clone();
     let bot_id = row.channel_bot_id.clone();
     let id = chat.id.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let result: AppResult<()> = async {
             if let Some(title) = fetch_title(&state, &bot_id, &chat_id).await? {
                 store_title(&state, &id, &title).await?;

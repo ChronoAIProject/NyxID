@@ -457,7 +457,7 @@ pub async fn callback(
                 if let Some(ref iid) = reserved_invite_id {
                     let db = state.db.clone();
                     let iid = iid.clone();
-                    tokio::spawn(async move {
+                    crate::services::shutdown::process().spawn_cleanup(async move {
                         let _ = invite_code_service::release_reservation(&db, &iid).await;
                     });
                 }
@@ -800,7 +800,7 @@ pub async fn apple_callback(
                 if let Some(ref iid) = reserved_invite_id {
                     let db = state.db.clone();
                     let iid = iid.clone();
-                    tokio::spawn(async move {
+                    crate::services::shutdown::process().spawn_cleanup(async move {
                         let _ = invite_code_service::release_reservation(&db, &iid).await;
                     });
                 }
@@ -971,7 +971,7 @@ async fn finish_social_sign_in(
                         if let Some(ref iid) = reserved_invite_id {
                             let db = state.db.clone();
                             let iid = iid.clone();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn_cleanup(async move {
                                 let _ = invite_code_service::release_reservation(&db, &iid).await;
                             });
                         }
@@ -1029,7 +1029,7 @@ async fn finish_social_sign_in(
                 if let Some(ref iid) = reserved_invite_id {
                     let db = state.db.clone();
                     let iid = iid.clone();
-                    tokio::spawn(async move {
+                    crate::services::shutdown::process().spawn_cleanup(async move {
                         let _ = invite_code_service::release_reservation(&db, &iid).await;
                     });
                 }
