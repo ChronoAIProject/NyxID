@@ -7,7 +7,7 @@ import test from "node:test";
 import { extractAuthDeviceUserCodeFromQr } from "../features/auth/deviceUserCode";
 
 type ResolvedProfile = {
-  androidApiAppLinks: boolean;
+  androidHttpsAppLinks: boolean;
   apiBaseUrl: string;
   frontendUrl: string;
   legalBaseUrl: string;
@@ -41,7 +41,11 @@ const { buildNativeLinks } = require("../../scripts/lib/native-links.js") as {
     config: Pick<
       ResolvedProfile,
       "universalLinkHost" | "universalLinkPathPrefix"
-    > & { apiBaseUrls: string[]; scheme: string; firstPartyLinkUrls?: string[]; androidApiAppLinks?: boolean },
+    > & {
+      associatedUrls: string[];
+      scheme: string;
+      androidHttpsAppLinks?: boolean;
+    },
   ) => {
     associatedDomains: string[];
     androidIntentFilters: {
@@ -156,7 +160,7 @@ function productionEnv(
 function nativeLinks(resolved: ResolvedProfile) {
   return buildNativeLinks({
     ...resolved,
-    apiBaseUrls: [resolved.apiBaseUrl, resolved.newApiBaseUrl],
+    associatedUrls: [resolved.apiBaseUrl, resolved.newApiBaseUrl],
     scheme: "nyxid",
   });
 }
@@ -407,22 +411,53 @@ test("QR trust accepts both embedded frontends and rejects others", () => {
 });
 
 
-test("Android API App Links opt-in stays profile-local and defaults to today's filters", () => {
+test("Android HTTPS App Links opt-in stays profile-local and defaults to today's filters", () => {
   const original = nativeLinks(resolveProfile("prod", productionEnv()));
-  const devOnly = nativeLinks(resolveProfile("prod", productionEnv({ DEV_ANDROID_API_APP_LINKS: "true" })));
+  const devOnly = nativeLinks(
+    resolveProfile("prod", productionEnv({ DEV_ANDROID_HTTPS_APP_LINKS: "true" })),
+  );
   assert.deepEqual(devOnly, original);
   assert.equal(original.androidIntentFilters.length, 2);
-  const enabled = nativeLinks(resolveProfile("prod", productionEnv({ PROD_ANDROID_API_APP_LINKS: "true" })));
+  const enabled = nativeLinks(
+    resolveProfile("prod", productionEnv({ PROD_ANDROID_HTTPS_APP_LINKS: "true" })),
+  );
   assert.equal(enabled.androidIntentFilters.length, 4);
   assert.deepEqual(enabled.associatedDomains, original.associatedDomains);
-  assert.throws(() => resolveProfile("prod", productionEnv({ PROD_ANDROID_API_APP_LINKS: "yes" })), /true or false/);
+  assert.throws(
+    () =>
+      resolveProfile(
+        "prod",
+        productionEnv({ PROD_ANDROID_HTTPS_APP_LINKS: "yes" }),
+      ),
+    /true or false/,
+  );
 });
 
-test("one path manifest attaches identically to API-only or API-plus-frontend host inputs", () => {
+test("one path manifest attaches identically to either host set", () => {
   const paths = require("../../../shared/native-app-links.json").paths as string[];
-  for (const firstPartyLinkUrls of [["https://api.example"], ["https://api.example", "https://web.example"]]) {
-    const links = buildNativeLinks({ apiBaseUrls: [], firstPartyLinkUrls, androidApiAppLinks: true, universalLinkHost: "", universalLinkPathPrefix: "", scheme: "nyxid" });
-    assert.deepEqual(links.associatedDomains, firstPartyLinkUrls.map((url) => `applinks:${new URL(url).host}`));
-    for (const filter of links.androidIntentFilters.slice(1)) assert.deepEqual(filter.data.map((data) => data.pathPrefix ? data.pathPrefix + "*" : (data as { path?: string }).path), paths);
+  for (const associatedUrls of [
+    ["https://api.example"],
+    ["https://api.example", "https://web.example"],
+  ]) {
+    const links = buildNativeLinks({
+      associatedUrls,
+      androidHttpsAppLinks: true,
+      universalLinkHost: "",
+      universalLinkPathPrefix: "",
+      scheme: "nyxid",
+    });
+    assert.deepEqual(
+      links.associatedDomains,
+      associatedUrls.map((url) => `applinks:${new URL(url).host}`),
+    );
+    for (const filter of links.androidIntentFilters.slice(1))
+      assert.deepEqual(
+        filter.data.map((data) =>
+          data.pathPrefix
+            ? data.pathPrefix + "*"
+            : (data as { path?: string }).path,
+        ),
+        paths,
+      );
   }
 });

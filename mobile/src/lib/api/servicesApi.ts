@@ -5,7 +5,7 @@ import {
   serviceConnectionSchema,
 } from "../../features/services/serviceContracts";
 
-import { NYXID_APP_SCHEME } from "../env";
+import { serviceOAuthReturnUri } from "../../features/services/serviceOAuthModel";
 
 const keyPath = (id: string) => `/keys/${encodeURIComponent(id)}`;
 
@@ -88,7 +88,10 @@ export const servicesApi = {
     orgId?: string,
     scopeOverride?: readonly string[],
   ) {
-    const query = new URLSearchParams({ key_id: connectionId, app_return_uri: `${NYXID_APP_SCHEME}://services/oauth-return` });
+    const query = new URLSearchParams({
+      key_id: connectionId,
+      app_return_uri: serviceOAuthReturnUri(),
+    });
     if (orgId) query.set("target_org_id", orgId);
     // Like Web, defined (including empty) replaces the provider's defaults.
     if (scopeOverride !== undefined)

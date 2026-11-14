@@ -636,7 +636,10 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
     // Invalidate delivery locally when server unbind is unavailable. The next
     // login obtains a native token and force-registers even if it is unchanged.
     try {
-      if (Platform.OS !== "web" && typeof Notifications.unregisterForNotificationsAsync === "function")
+      if (
+        Platform.OS !== "web" &&
+        typeof Notifications.unregisterForNotificationsAsync === "function"
+      )
         await Notifications.unregisterForNotificationsAsync();
     } catch {
       if (__DEV__) console.warn("[push] native unregister unavailable");
@@ -647,7 +650,9 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
     await Promise.allSettled([
       Promise.resolve().then(() => Notifications.dismissAllNotificationsAsync()),
       Promise.resolve().then(() => Notifications.setBadgeCountAsync(0)),
-      Promise.resolve().then(() => Notifications.clearLastNotificationResponseAsync()),
+      Promise.resolve().then(() =>
+        Notifications.clearLastNotificationResponseAsync(),
+      ),
       clearLocalPushRegistrationState(),
     ]);
   }
@@ -703,7 +708,14 @@ async function syncTokenWithBackend(
 ): Promise<PushActivateResult> {
   const accountId = getAuthAccountId();
   const previousToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
-  if (!accountId || accountId !== getAuthAccountId()) return { permission: "granted", token, registered: false, mode: "none", reason: "register_failed" };
+  if (!accountId || accountId !== getAuthAccountId())
+    return {
+      permission: "granted",
+      token,
+      registered: false,
+      mode: "none",
+      reason: "register_failed",
+    };
   const platform = resolvePlatform();
   if (platform !== "ios" && platform !== "android") {
     return {
@@ -724,7 +736,8 @@ async function syncTokenWithBackend(
         provider,
         platform,
       });
-      if (accountId === getAuthAccountId()) await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+      if (accountId === getAuthAccountId())
+        await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
       return {
         permission: "granted",
         token,
@@ -741,7 +754,8 @@ async function syncTokenWithBackend(
         provider,
         platform,
       });
-      if (accountId === getAuthAccountId()) await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+      if (accountId === getAuthAccountId())
+        await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
       return {
         permission: "granted",
         token,

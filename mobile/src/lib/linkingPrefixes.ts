@@ -1,6 +1,5 @@
 type LinkEnvironment = {
   appScheme: string;
-  firstPartyUrls?: readonly string[];
   apiBaseUrls: readonly string[];
   frontendUrls: readonly string[];
   universalLinkHost: string;
@@ -9,7 +8,7 @@ type LinkEnvironment = {
 
 export function buildLinkingPrefixes(env: LinkEnvironment): string[] {
   const prefixes = new Set([`${env.appScheme}://`]);
-  const urls = [...(env.firstPartyUrls ?? [...env.apiBaseUrls, ...env.frontendUrls])];
+  const urls = [...env.apiBaseUrls, ...env.frontendUrls];
   if (env.universalLinkHost) {
     urls.push(`https://${env.universalLinkHost}`);
     if (env.allowHttp) urls.push(`http://${env.universalLinkHost}`);

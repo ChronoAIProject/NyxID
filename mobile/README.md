@@ -79,7 +79,7 @@ Each field except the Firebase file path and Android App Links opt-in falls back
 | `*_ANDROID_VERSION_CODE` | for release builds | Android `versionCode` — bump per release |
 | `*_UNIVERSAL_LINK_HOST` | optional | iOS `associatedDomains` + Android intent filter |
 | `*_UNIVERSAL_LINK_PATH_PREFIX` | optional | Android intent-filter path |
-| `*_ANDROID_API_APP_LINKS` | optional, default false | Profile-local API-host App Links opt-in. Enable only after every chosen host serves valid Asset Links; see the native integration runbook. |
+| `*_ANDROID_HTTPS_APP_LINKS` | optional, default false | Profile-local HTTPS App Links opt-in for the selected API-only or API-plus-frontend host set. Enable only after every selected host serves valid Asset Links; see the native integration runbook. |
 | `*_LEGAL_BASE_URL` | for Privacy / Terms screens | Origin serving `/legal/{privacy,terms}.md` — same files the web dashboard renders. Empty = legal screens show an error. |
 | `*_ALLOWED_EMAILS` | optional | Comma-separated allowlist; empty = allow all signed-in users |
 | `*_TELEMETRY_DSN` / `*_TELEMETRY_HOST` / `*_SHARE_ANALYTICS` | optional | PostHog |

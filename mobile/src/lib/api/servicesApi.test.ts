@@ -28,7 +28,8 @@ function loadServicesApi(requestJson: (path: string) => Promise<unknown>) {
       exports,
       URLSearchParams,
       require: (name: string) => {
-        if (name === "../env") return { NYXID_APP_SCHEME: "nyxid" };
+        if (name === "../../features/services/serviceOAuthModel")
+          return { serviceOAuthReturnUri: () => "nyxid://services/oauth-return" };
         if (name === "./http") return { requestJson };
         if (name === "../../features/services/serviceContracts")
           return { catalogEntrySchema, serviceConnectionSchema };

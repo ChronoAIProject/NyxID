@@ -10,6 +10,7 @@ import {
 import {
   isServiceOAuthReturn,
   parseServiceOAuthReturn,
+  serviceOAuthReturnUri,
 } from "../features/services/serviceOAuthModel";
 import { recordServiceOAuthReturn } from "../features/services/serviceOAuthStore";
 import * as Notifications from "expo-notifications";
@@ -46,8 +47,10 @@ export const notificationLinkConfig = {
 };
 
 function consumeServiceOAuthReturn(url: string): boolean {
-  if (!isServiceOAuthReturn(url, NYXID_APP_SCHEME)) return false;
-  const result = parseServiceOAuthReturn(url, NYXID_APP_SCHEME);
+  const returnUri = serviceOAuthReturnUri();
+  const scheme = returnUri.slice(0, returnUri.indexOf("://"));
+  if (!isServiceOAuthReturn(url, scheme)) return false;
+  const result = parseServiceOAuthReturn(url, scheme);
   if (result) recordServiceOAuthReturn(result);
   return true;
 }

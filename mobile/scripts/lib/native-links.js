@@ -1,11 +1,12 @@
 const { paths: claimedPaths } = require("../../../shared/native-app-links.json");
 
-// Every embedded API host is associated, since the admin flag can select either at launch.
-function buildNativeLinks({ apiBaseUrls, universalLinkHost, universalLinkPathPrefix, scheme, firstPartyLinkUrls = apiBaseUrls, androidApiAppLinks = false }) {
+// The selected host list is the only rollout input. The shared path manifest
+// and native route code stay identical for API-only and API-plus-frontend sets.
+function buildNativeLinks({ associatedUrls, universalLinkHost, universalLinkPathPrefix, scheme, androidHttpsAppLinks = false }) {
   const associatedDomains = [];
-  for (const apiBaseUrl of firstPartyLinkUrls) {
+  for (const associatedUrl of associatedUrls) {
     try {
-      const domain = `applinks:${new URL(apiBaseUrl).host}`;
+      const domain = `applinks:${new URL(associatedUrl).host}`;
       if (!associatedDomains.includes(domain)) associatedDomains.push(domain);
     } catch {
       // Invalid optional URLs do not register a native association.
@@ -18,16 +19,30 @@ function buildNativeLinks({ apiBaseUrls, universalLinkHost, universalLinkPathPre
     data: [{ scheme }],
     category: ["BROWSABLE", "DEFAULT"],
   }];
-  if (androidApiAppLinks) {
+  if (androidHttpsAppLinks) {
     const hosts = new Set();
-    for (const value of firstPartyLinkUrls) {
-      try { const url = new URL(value); if (url.protocol === "https:") hosts.add(url.host); } catch {}
+    for (const value of associatedUrls) {
+      try {
+        const url = new URL(value);
+        if (url.protocol === "https:") hosts.add(url.host);
+      } catch {
+        // Invalid optional URLs do not register a native association.
+      }
     }
-    for (const host of hosts) androidIntentFilters.push({
-      action: "VIEW", autoVerify: true,
-      data: claimedPaths.map((path) => ({ scheme: "https", host, ...(path.includes("*") ? { pathPrefix: path.slice(0, -1) } : { path }) })),
-      category: ["BROWSABLE", "DEFAULT"],
-    });
+    for (const host of hosts) {
+      androidIntentFilters.push({
+        action: "VIEW",
+        autoVerify: true,
+        data: claimedPaths.map((path) => ({
+          scheme: "https",
+          host,
+          ...(path.includes("*")
+            ? { pathPrefix: path.slice(0, -1) }
+            : { path }),
+        })),
+        category: ["BROWSABLE", "DEFAULT"],
+      });
+    }
   }
   if (universalLinkHost) {
     const data = { scheme: "https", host: universalLinkHost };

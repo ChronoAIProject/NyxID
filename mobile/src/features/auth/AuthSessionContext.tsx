@@ -12,7 +12,6 @@ import {
 } from "../../lib/auth/sessionStore";
 import {
   activatePushAfterLogin,
-  clearLocalPushRegistrationState,
   deactivatePushOnLogout,
 } from "../../lib/notifications/pushNotifications";
 import { clearPendingApprovalRefreshSignal } from "../../lib/notifications/approvalRefreshSignal";
@@ -54,7 +53,6 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     telemetryReset();
     try {
       await deactivatePushOnLogout();
-      await clearLocalPushRegistrationState();
       // A generic refresh hint may outlive a blurred Activity route. Never
       // carry that previous user's pending work into the next auth session.
       clearPendingApprovalRefreshSignal();

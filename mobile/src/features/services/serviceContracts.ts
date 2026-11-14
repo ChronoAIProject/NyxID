@@ -30,7 +30,7 @@ export const serviceConnectionSchema = z.object({
     source: z.string().nullish(), can_check: z.boolean().default(false),
   }).nullish(),
   service_type: z.string().optional(),
-  ssh_auth_mode: z.enum(["cert", "node_key", "proxy_only"]).nullish(),
+  ssh_auth_mode: z.string().nullish(),
   ssh_allowed_principals: z.array(z.string()).optional(),
   endpoint_url: z.string().nullish(),
   api_key_id: z.string().nullish(),

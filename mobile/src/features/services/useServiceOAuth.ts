@@ -5,7 +5,6 @@ import {
   getAuthAccountId,
   subscribeAuthAccount,
 } from "../../lib/auth/authAccount";
-import { NYXID_APP_SCHEME } from "../../lib/env";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { reconnectScopeOverride } from "./connectionPresentation";
 import {
@@ -16,6 +15,7 @@ import {
 import {
   evaluateServiceOAuth,
   parseServiceOAuthReturn,
+  serviceOAuthReturnUri,
   SERVICE_OAUTH_TTL_MS,
   type OAuthOutcome,
   type PendingServiceOAuth,
@@ -30,8 +30,6 @@ import {
   subscribeServiceOAuth,
 } from "./serviceOAuthStore";
 
-export const serviceOAuthReturnUri = () =>
-  `${NYXID_APP_SCHEME}://services/oauth-return`;
 export type ServiceOAuthBanner = {
   attempt: PendingServiceOAuth;
   outcome: OAuthOutcome;
@@ -208,7 +206,11 @@ export function useServiceOAuth(
       );
       if (!current()) return;
       if (result.type === "success") {
-        const hint = parseServiceOAuthReturn(result.url, NYXID_APP_SCHEME);
+        const returnUri = serviceOAuthReturnUri();
+        const hint = parseServiceOAuthReturn(
+          result.url,
+          returnUri.slice(0, returnUri.indexOf("://")),
+        );
         if (hint) recordServiceOAuthReturn(hint);
       }
     } catch (error) {

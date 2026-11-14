@@ -1,7 +1,10 @@
 import { z } from "zod";
+import { NYXID_APP_SCHEME } from "../../lib/env";
 
 // services/user_token_service.rs: authorization-code states expire in 10 minutes.
 export const SERVICE_OAUTH_TTL_MS = 10 * 60 * 1000;
+export const serviceOAuthReturnUri = () =>
+  `${NYXID_APP_SCHEME}://services/oauth-return`;
 export const pendingOAuthSchema = z
   .object({
     accountId: z.string().min(1),

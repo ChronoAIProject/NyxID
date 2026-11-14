@@ -548,11 +548,18 @@ export function ServicesScreen({
               <SettingsGroup
                 inset={false}
                 footer={
-                  connection.ssh_auth_mode !== "cert"
+                  connection.ssh_auth_mode === "node_key"
                     ? t(
-                        "The mobile terminal is available for active certificate-mode SSH services. Use the web terminal or nyxid ssh exec for other modes.",
+                        "Certificate-mode services are required for the mobile terminal. Run nyxid ssh exec <service> from a computer.",
                       )
-                    : undefined
+                    : connection.ssh_auth_mode === "proxy_only"
+                      ? t(
+                          "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer.",
+                        )
+                      : connection.ssh_auth_mode === "cert" &&
+                          (!connection.is_active || connection.status !== "active")
+                        ? t("Enable this connection to open the terminal.")
+                        : undefined
                 }
               >
                 {connection.ssh_auth_mode === "cert" &&
@@ -563,17 +570,12 @@ export function ServicesScreen({
                     tone="action"
                     onPress={() =>
                       navigation.navigate("SshTerminal", {
-                        serviceId: connection.id,
+                        serviceId: connection.catalog_service_id ?? connection.id,
+                        connectionId: connection.id,
                       })
                     }
                   />
-                ) : (
-                  <SettingsRow
-                    label={t("Open web terminal")}
-                    tone="action"
-                    onPress={() => void openWeb("overview")}
-                  />
-                )}
+                ) : null}
               </SettingsGroup>
             )}
             <SettingsGroup

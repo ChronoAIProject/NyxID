@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import { getStateFromPath } from "@react-navigation/core";
 import { navigationLinkingConfig } from "./navigationLinking";
 import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
-import { buildLinkingPrefixes } from "../lib/linkingPrefixes";
 const manifest = JSON.parse(
   readFileSync(
     new URL("../../../shared/native-app-links.json", import.meta.url),
@@ -28,24 +27,5 @@ test("every claimed AASA/App Link path resolves to a native route", () => {
       ),
       `Claimed native path ${claimed} (${path}) has no native route`,
     );
-  }
-});
-test("host-set selection changes only the origins attached to native linking prefixes", () => {
-  for (const firstPartyUrls of [
-    ["https://api.example"],
-    ["https://api.example", "https://web.example"],
-  ]) {
-    const prefixes = buildLinkingPrefixes({
-      appScheme: "nyxid",
-      apiBaseUrls: [],
-      frontendUrls: [],
-      firstPartyUrls,
-      universalLinkHost: "",
-      allowHttp: false,
-    });
-    assert.deepEqual(prefixes, [
-      "nyxid://",
-      ...firstPartyUrls.map((url) => `${url}/`),
-    ]);
   }
 });
