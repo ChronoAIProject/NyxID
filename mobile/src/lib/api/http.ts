@@ -395,8 +395,26 @@ export async function requestRawText(
   path: string,
   options: RequestOptions = {},
 ): Promise<{ text: string; headers: { get(name: string): string | null } }> {
-  const response = await requestAuthenticatedResponse(path, options);
-  return { text: await response.text(), headers: response.headers };
+  const { response, assertOwner } = await executeAuthenticatedRequest({
+    url: buildApiUrl(path),
+    options,
+    clientHeaders: clientHeaders(),
+    transport: (url, init) =>
+      assistantConnection.observe(
+        () => expoFetch(url, init).catch((cause: unknown) => {
+          throw networkApiError(cause);
+        }),
+        init.signal ?? undefined,
+      ),
+    loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight,
+    invalidate: invalidateSession,
+    toError: buildApiError,
+    getAuthEpoch,
+  });
+  const text = await response.text();
+  await assertOwner();
+  return { text, headers: response.headers };
 }
 
 export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {

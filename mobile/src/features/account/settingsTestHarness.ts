@@ -254,7 +254,30 @@ export function setupSettingsScreen(
     },
     "../../lib/analyticsConsentState": {},
     "../../lib/analyticsRelay": {},
-    "../../lib/api/http": {},
+    "../../lib/api/http": {
+      requestJson: async () => ({ enabled: true }),
+      requestRawText: async () => ({ text: "{}", headers: { get: () => null } }),
+    },
+    "../../lib/api/ApiError": {
+      ApiError: class ApiError extends Error {
+        statusCode = 0;
+        retryAfter?: number;
+      },
+    },
+    "expo-file-system": {
+      File: class File {
+        uri = "cache/export.json";
+        exists = false;
+        create() {}
+        write() {}
+        delete() {}
+      },
+      Paths: { cache: "cache" },
+    },
+    "expo-sharing": {
+      isAvailableAsync: async () => true,
+      shareAsync: async () => {},
+    },
     "../../lib/telemetry": { capture() {} },
     "../../hooks/useNetworkStatus": {
       useNetworkStatus: () => ({ isConnected: true }),

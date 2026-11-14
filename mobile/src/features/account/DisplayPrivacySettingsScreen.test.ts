@@ -62,6 +62,26 @@ test("Privacy holds both analytics switches with the retention note", () => {
   env.harness.unmount();
 });
 
+test("Privacy exposes a first-party export row and disables it while sharing", () => {
+  const env = setupSettingsScreen(
+    "./PrivacySettingsScreen.tsx",
+    "PrivacySettingsScreen",
+  );
+  const row = env.row("Export my data");
+  assert.equal(row.props.disabled, false);
+  assert.equal(row.props.accessibilityState.disabled, false);
+  assert.ok(
+    env.text(
+      "Creates a bounded JSON export. You can request one up to three times per hour.",
+    ),
+  );
+  env.pending();
+  const pendingRow = env.row("Export my data");
+  assert.equal(pendingRow.props.disabled, true);
+  assert.equal(pendingRow.props.accessibilityState.busy, true);
+  env.harness.unmount();
+});
+
 test("Privacy analytics keeps shared group insets and wrapping controls at narrow widths and large text", () => {
   const env = setupSettingsScreen(
     "./PrivacySettingsScreen.tsx",

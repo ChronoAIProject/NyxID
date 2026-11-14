@@ -12,7 +12,7 @@ const PAGE: i64 = 32;
 /// the durable domain shape and intentionally remains unchanged for old jobs.
 pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 2;
 
-fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
+pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
         (
@@ -442,7 +442,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ("assistant_action_receipts", doc! {"user_id": owner}),
         ("assistant_voice_windows", doc! {"user_id": owner}),
         ("assistant_wire_logs", doc! {"user_id": owner}),
-        ("auth_device_code_reservations", doc! {"approved_user_id": owner}),
+        (
+            "auth_device_code_reservations",
+            doc! {"approved_user_id": owner},
+        ),
         ("channel_adapter_accounts", doc! {"user_id": owner}),
         ("mcp_session_notifications", doc! {"user_id": owner}),
         ("openclaw_channel_mappings", doc! {"user_id": owner}),
@@ -455,21 +458,32 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         ("invocation_diagnostics", doc! {"actor_user_id": owner}),
         ("managed_executions", doc! {"actor_user_id": owner}),
-        ("platform_personal_setup_selections", doc! {"user_id": owner}),
+        (
+            "platform_personal_setup_selections",
+            doc! {"user_id": owner},
+        ),
         ("platform_guide_selections", doc! {"user_id": owner}),
         ("platform_native_replies", doc! {"user_id": owner}),
-        ("platform_onboarding_binding_requests", doc! {"user_id": owner}),
+        (
+            "platform_onboarding_binding_requests",
+            doc! {"user_id": owner},
+        ),
         ("platform_onboarding_bindings", doc! {"user_id": owner}),
-        ("platform_personal_decision_spacing", doc! {"user_id": owner}),
-        ("encrypted_record_migration_findings", doc! {"owner_uuid": owner}),
-        ("encrypted_record_migration_runs", doc! {"owner_uuid": owner}),
+        (
+            "platform_personal_decision_spacing",
+            doc! {"user_id": owner},
+        ),
+        (
+            "encrypted_record_migration_findings",
+            doc! {"owner_uuid": owner},
+        ),
+        (
+            "encrypted_record_migration_runs",
+            doc! {"owner_uuid": owner},
+        ),
         ("nyxbot_gateway_releases", doc! {"owner_user_id": owner}),
         ("assistant_group_agent_access", doc! {"user_id": owner}),
         ("assistant_group_transfers", doc! {"user_id": owner}),
-        (
-            "assistant_learning_publication_targets",
-            doc! {"owner_id": owner},
-        ),
         ("assistant_learning_migrations", doc! {"owner_id": owner}),
         ("ownership_transfers", doc! {"actor_user_id": owner}),
         ("catalog_skill_revisions", doc! {"actor_id": owner}),
@@ -485,43 +499,161 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
 /// Redact shared records after personal ownership has been removed. These
 /// updates preserve counters and ordering/integrity fields while removing the
 /// departing person's human-readable identity.
-async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
-    let mut changed = false;
-    let event_filter = doc! {"owner_id": owner};
-    let event_update = doc! {"$set": {
-        "owner_id": bson::Bson::Null,
-        "actor.name": "Deleted account",
-        "actor.person_id": bson::Bson::Null,
-        "actor.api_key_id": bson::Bson::Null,
-        "actor.app_id": bson::Bson::Null,
-    }};
-    changed |= db.collection::<Document>("service_change_events").update_many(event_filter, event_update.clone()).await?.modified_count > 0;
-    let actor_filter = doc! {"actor.person_id": owner};
-    let actor_update = doc! {"$set": {
-        "actor.name": "Deleted account",
-        "actor.person_id": bson::Bson::Null,
-        "actor.api_key_id": bson::Bson::Null,
-        "actor.app_id": bson::Bson::Null,
-    }};
-    changed |= db.collection::<Document>("service_change_events").update_many(actor_filter, actor_update.clone()).await?.modified_count > 0;
-    changed |= db.collection::<Document>("service_history_heads").update_many(doc! {"owner_id": owner}, event_update).await?.modified_count > 0;
+async fn redact_page(
+    db: &Database,
+    owner: &str,
+    collection: &str,
+    filter: Document,
+    update: Document,
+) -> AppResult<bool> {
+    if db
+        .collection::<Document>(collection)
+        .find_one(filter.clone())
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<bool> = async {
+        let barrier = db
+            .collection::<Document>(super::super::erasure_admission::COLLECTION)
+            .update_one(
+                doc! {"_id": owner, "erasure_accepted": true},
+                doc! {"$inc": {"cleanup_revision": 1_i64}},
+            )
+            .session(&mut tx)
+            .await?;
+        if barrier.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Personal cleanup admission is unavailable".into(),
+            ));
+        }
+        let mut cursor = db
+            .collection::<Document>(collection)
+            .find(filter.clone())
+            .projection(doc! {"_id": 1})
+            .sort(doc! {"_id": 1})
+            .limit(PAGE)
+            .session(&mut tx)
+            .await?;
+        let ids: Vec<bson::Bson> = cursor
+            .stream(&mut tx)
+            .try_collect::<Vec<Document>>()
+            .await?
+            .into_iter()
+            .filter_map(|mut row| row.remove("_id"))
+            .collect();
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        let mut bounded_filter = Document::new();
+        bounded_filter.insert("$and", vec![filter, doc! {"_id": {"$in": ids}}]);
+        Ok(db
+            .collection::<Document>(collection)
+            .update_many(bounded_filter, update)
+            .session(&mut tx)
+            .await?
+            .modified_count
+            > 0)
+    }
+    .await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
 
+async fn redact_invite_usages(db: &Database, owner: &str) -> AppResult<bool> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<bool> = async {
+        let barrier = db
+            .collection::<Document>(super::super::erasure_admission::COLLECTION)
+            .update_one(
+                doc! {"_id": owner, "erasure_accepted": true},
+                doc! {"$inc": {"cleanup_revision": 1_i64}},
+            )
+            .session(&mut tx)
+            .await?;
+        if barrier.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Personal cleanup admission is unavailable".into(),
+            ));
+        }
+        let mut cursor = db
+            .collection::<Document>("invite_codes")
+            .find(doc! {"usages.user_id": owner})
+            .projection(doc! {"_id": 1, "usages": 1})
+            .sort(doc! {"_id": 1})
+            .limit(PAGE)
+            .session(&mut tx)
+            .await?;
+        let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
+        let mut changed = false;
+        for row in rows {
+            let id = row
+                .get("_id")
+                .cloned()
+                .ok_or_else(|| AppError::Internal("Invite code identity missing".into()))?;
+            let usages = row.get_array("usages").cloned().unwrap_or_default();
+            let filtered: Vec<bson::Bson> = usages
+                .into_iter()
+                .filter(|usage| {
+                    usage
+                        .as_document()
+                        .and_then(|doc| doc.get_str("user_id").ok())
+                        != Some(owner)
+                })
+                .collect();
+            let result = db
+                .collection::<Document>("invite_codes")
+                .update_one(
+                    doc! {"_id": id, "usages.user_id": owner},
+                    doc! {"$set": {"usages": filtered}},
+                )
+                .session(&mut tx)
+                .await?;
+            changed |= result.modified_count > 0;
+        }
+        Ok(changed)
+    }
+    .await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
+
+async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
+    // Events owned by the deleted person's personal service are erased. Events
+    // owned by an organization remain, with the actor's human-readable and
+    // person-linked fields redacted.
+    if erase_page(db, owner, "service_change_events", doc! {"owner_id": owner}).await? {
+        return Ok(true);
+    }
+    if redact_page(
+        db,
+        owner,
+        "service_change_events",
+        doc! {"actor.person_id": owner, "owner_id": {"$ne": owner}},
+        doc! {"$set": {
+        "actor.name": "Deleted account",
+        "actor.person_id": bson::Bson::Null,
+        "actor.api_key_id": bson::Bson::Null,
+        "actor.app_id": bson::Bson::Null,
+        }},
+    )
+    .await?
+    {
+        return Ok(true);
+    }
     // Invite usage is embedded in an invite owned by another account. Keep
     // used_count/max_uses and the code itself, but remove the person's usage
     // identity (including the legacy email field).
-    let mut cursor = db.collection::<Document>("invite_codes").find(doc! {"usages.user_id": owner}).limit(PAGE).await?;
-    let mut rows = Vec::new();
-    while let Some(row) = cursor.try_next().await? { rows.push(row); }
-    for row in rows {
-        let id = row.get("_id").cloned().ok_or_else(|| AppError::Internal("Invite code identity missing".into()))?;
-        let usages = row.get_array("usages").cloned().unwrap_or_default();
-        let filtered: Vec<bson::Bson> = usages.into_iter().filter(|usage| {
-            usage.as_document().and_then(|doc| doc.get_str("user_id").ok()) != Some(owner)
-        }).collect();
-        db.collection::<Document>("invite_codes").update_one(doc! {"_id": id, "usages.user_id": owner}, doc! {"$set": {"usages": filtered}}).await?;
-        changed = true;
-    }
-    Ok(changed)
+    redact_invite_usages(db, owner).await
 }
 
 async fn erase_page(
@@ -664,6 +796,10 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
                     "pool_id",
                 ),
             ],
+        ),
+        (
+            m::user_service::COLLECTION_NAME,
+            &[(m::service_change_event::HEADS_COLLECTION_NAME, "_id")],
         ),
     ];
     for (parent, children) in specs {

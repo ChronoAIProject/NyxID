@@ -4,8 +4,8 @@ This runbook describes personal-account erasure acceptance, durable cleanup and
 provider revocation. Acceptance fences account authority; completion waits for
 the recorded local and remote obligations. Queuing vendor erasure does not
 establish completion, and a scan for `user_id` alone cannot establish ownership.
-The [coverage limits below](#coverage-limits-and-follow-up-tests) distinguish
-the implemented cleanup from the remaining completeness and recovery tests.
+The registry and inventory drift tests described below keep the cleanup map
+reviewable as collections change.
 
 ## Pre-job orphan sweep
 
@@ -172,20 +172,15 @@ or authority for blanket deletion.
 | Billing / grants / effects | Settle outstanding operations and preserve immutable financial/effect records. Apply existing grant/wallet/account lifecycle to personally owned balances. | Billing ledger, audit chain, retained settlement/checkpoint/operation and transfer evidence remain under their existing retention rules. Personal erasure does not scrub, TTL-delete or re-sign them. |
 | Telemetry | Central consent/account fence, durable dispatch settlement and current provider-generation drain precede vendor deletion/no-data attestation. Fan out historical destinations and keep unresolved configuration actionable. | Capture acceptance does not prove provider processing is drained. Completion requires supported authenticated deletion/status evidence or a current-generation operator attestation with the same transport/drain fences. |
 
-## Coverage limits and follow-up tests
+## Coverage and recovery checks
 
-The full collection registry and its completeness test remain follow-up work in
-[#1930](https://github.com/ChronoAIProject/NyxID/issues/1930). The registry must
-cover model constants, service-layer literal collections and embedded variants,
-with each collection's exact owner or join predicate, bounded index, retained
-evidence and prerequisites. The current adapters and bookkeeping registry do
-not establish that every collection has been classified.
-
-The full-collection interrupt/resume test also remains follow-up work in #1930.
-Focused tests cover acceptance, domain recovery and provider-effect completion;
-they do not prove interruption and recovery across every collection in one
-erasure. These gaps limit the completeness claim, even though the implemented
-job reports completion only after its recorded obligations settle.
+The personal-data registry covers the production collection constants and
+literal collection calls. Registry tests fail when a collection is missing,
+duplicated, or drifts from the local inventory, joined-child specifications,
+export sections, or retained policy disclosures. The worker reconciliation pass
+also revisits completed jobs created before the current local-inventory revision
+under the surviving admission barrier, so mixed-fleet completion does not leave
+newly covered personal rows behind.
 
 ## Model-reference discovery appendix
 

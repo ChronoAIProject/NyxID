@@ -1,4 +1,10 @@
-use axum::{Json, body::Body, extract::State, http::{HeaderMap, header}, response::Response};
+use axum::{
+    Json,
+    body::Body,
+    extract::State,
+    http::{HeaderMap, header},
+    response::Response,
+};
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
@@ -84,7 +90,11 @@ pub async fn save_security_preferences(
 pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> AppResult<Response> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     let account_id = auth_user.user_id.to_string();
-    if !state.account_export_limiter.check_shared(&account_id).await? {
+    if !state
+        .account_export_limiter
+        .check_shared(&account_id)
+        .await?
+    {
         return Err(AppError::RateLimitedWithRetry { retry_after: 3600 });
     }
     let _permit = state
@@ -115,11 +125,17 @@ pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> Ap
     )
     .await
     .map_err(|_| AppError::Internal("Account export audit append failed".into()))?;
-    let filename = format!("nyxid-account-export-{}.json", Utc::now().format("%Y-%m-%d"));
+    let filename = format!(
+        "nyxid-account-export-{}.json",
+        Utc::now().format("%Y-%m-%d")
+    );
     Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
         .header(header::CACHE_CONTROL, "no-store")
         .header("X-Content-Type-Options", "nosniff")
         .body(Body::from(bytes))

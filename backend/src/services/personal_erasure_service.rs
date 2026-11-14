@@ -284,7 +284,7 @@ async fn accept_claimed(
 mod channel;
 pub(crate) mod issuance;
 mod learning;
-mod local;
+pub(crate) mod local;
 mod machine;
 pub(crate) mod nodes;
 mod preparation;

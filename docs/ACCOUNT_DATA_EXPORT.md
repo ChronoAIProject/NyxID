@@ -11,15 +11,38 @@ the opaque `account_id`, limits, `truncated_sections`, human-readable
 `excluded` categories, and section objects containing `items`, `total_count`,
 and `truncated`. Sections currently cover account profile, services, security
 session metadata, assistant messages, channel messages, account activity and
-audit metadata, machine job metadata, and the billing wallet summary. Empty
-sections remain present so clients can rely on the registry-defined section set.
+audit metadata, machine job metadata, and the billing wallet summary, credit
+grants received, and bounded usage rollups. Empty sections remain present so
+clients can rely on the registry-defined section set.
+
+The registry-defined sections and their allowlisted fields are:
+
+| Section | Fields included |
+| --- | --- |
+| `account` | Account ID, email, display name, avatar URL, email-verification state, and account timestamps |
+| `services` | Service IDs, slugs, type, active/deleted state, and lifecycle timestamps; other owner-scoped service metadata uses the common safe metadata fields |
+| `security` | Session IDs, creation/expiry/last-used timestamps, and user-agent metadata |
+| `assistant` | Owner-visible assistant message role/content/timestamps, conversation IDs, tool/action metadata, and retained file metadata |
+| `channels` | Owner-visible channel message IDs, conversation IDs, direction, text, and timestamps |
+| `account_activity` | Action receipt metadata, audit event type/status/timestamps, invite activity, and other owner-scoped activity metadata |
+| `machines` | Machine job IDs, status, and lifecycle timestamps |
+| `billing` | Wallet balance/reservation/status summary, grants received, and usage meter service/metric/model/quantity/status/timestamps |
+
+Rows from additional registry entries are placed in the section named by that
+entry and use the common safe metadata allowlist (`_id`, owner IDs,
+service/conversation IDs, names/slugs, status/type/role/action, content
+type/filename/size, and lifecycle timestamps). The retained
+`downstream_services` section is restricted to opaque owner IDs and service
+operational metadata.
 
 Passwords, authentication/session hashes, API keys and provider credentials,
 tokens, signatures, ciphertext, wrapped keys, nonces, OAuth state/code values,
 push tokens, webhook secrets, and transient coordination, lease, deduplication,
 and erasure bookkeeping are excluded. Uploaded and generated files are
 represented by metadata only (name/type/size and lifecycle timestamps where
-available); raw payloads are never included.
+available); raw payloads are never included. While a file is retained, its
+filename, MIME type, byte size, creation time, and expiry are included in the
+assistant section.
 
 Each section is capped at 1,000 rows and queries have a three-second server
 limit. The complete JSON is capped at 32 MiB; the server removes oldest rows

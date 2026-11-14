@@ -6339,6 +6339,47 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-
 
 ---
 
+#### POST /api/v1/admin/personal-erasure/orphans
+
+Review and optionally remove personal rows left by account deletions that
+predate durable erasure jobs. The request body is optional and defaults to a
+dry-run. A dry-run returns candidate counts and orphan owner IDs by collection
+plus a SHA-256 digest of the exact sorted candidate set. Applying requires that
+digest; a changed set is rejected. Existing person, organization-user, and
+service-account owners are always treated as live. A successful apply records a
+metadata-only chained audit event and can be repeated safely with the same
+digest.
+
+**Auth:** Admin, first-party human
+
+**Request (dry-run):**
+
+```json
+{}
+```
+
+**Request (apply):**
+
+```json
+{
+  "apply": true,
+  "digest": "<sha256-from-dry-run>"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "dry_run": true,
+  "digest": "…",
+  "candidate_count": 0,
+  "collections": []
+}
+```
+
+---
+
 #### PATCH /api/v1/admin/users/{user_id}/verify-email
 
 Manually verify a user's email address. Clears any pending verification token.

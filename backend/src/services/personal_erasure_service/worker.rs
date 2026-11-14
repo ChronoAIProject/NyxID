@@ -23,9 +23,7 @@ async fn claim(db: &Database) -> AppResult<Option<PersonalErasureJob>> {
 /// Claim one already-completed job whose local pass predates the current
 /// inventory. The account tombstone remains in place, so new writers stay
 /// fenced while this repair runs.
-async fn claim_completed_reconciliation(
-    db: &Database,
-) -> AppResult<Option<PersonalErasureJob>> {
+async fn claim_completed_reconciliation(db: &Database) -> AppResult<Option<PersonalErasureJob>> {
     let durable = super::super::transaction_service::durable_database(db);
     let db = &durable;
     Ok(db
@@ -34,8 +32,8 @@ async fn claim_completed_reconciliation(
             doc! {
                 "inventory_version": INVENTORY_VERSION,
                 "status": "complete",
-                "local_inventory_revision": {"$lt": super::local::LOCAL_INVENTORY_REVISION},
                 "$expr": {"$and": [
+                    {"$lt": [{"$ifNull": ["$local_inventory_revision", 0]}, super::local::LOCAL_INVENTORY_REVISION]},
                     {"$lte": [{"$ifNull": ["$lease_expires_at", bson::DateTime::from_millis(0)]}, "$$NOW"]},
                     {"$lte": [{"$ifNull": ["$retry_at", bson::DateTime::from_millis(0)]}, "$$NOW"]}
                 ]}
@@ -495,7 +493,9 @@ pub(crate) fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()
                 tracing::warn!("Personal erasure pass remains pending; durable lease will retry");
             }
             if reconcile_completed_once(&state).await.is_err() {
-                tracing::warn!("Completed personal erasure inventory reconciliation remains pending");
+                tracing::warn!(
+                    "Completed personal erasure inventory reconciliation remains pending"
+                );
             }
         }
     })
