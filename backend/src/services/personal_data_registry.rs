@@ -68,20 +68,73 @@ pub struct Entry {
     pub why: &'static str,
 }
 
+/// The authoritative parent/child relationships used by the local erasure
+/// pass and by its behavioral fixtures. Keeping the child key here means a
+/// newly added joined collection cannot silently bypass the worker test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JoinedChildSpec {
+    pub parent: &'static str,
+    pub child: &'static str,
+    pub child_parent_field: &'static str,
+}
+
+pub static JOINED_CHILD_SPECS: &[JoinedChildSpec] = &[
+    JoinedChildSpec {
+        parent: "assistant_agents",
+        child: "assistant_agent_learning_rejections",
+        child_parent_field: "agent_id",
+    },
+    JoinedChildSpec {
+        parent: "channel_conversations",
+        child: "channel_event_logs",
+        child_parent_field: "conversation_id",
+    },
+    JoinedChildSpec {
+        parent: "channel_conversations",
+        child: "channel_send_claims",
+        child_parent_field: "conversation_id",
+    },
+    JoinedChildSpec {
+        parent: "platform_bot_installations",
+        child: "platform_delivery_tests",
+        child_parent_field: "installation_id",
+    },
+    JoinedChildSpec {
+        parent: "platform_setups",
+        child: "platform_setup_notices",
+        child_parent_field: "setup_id",
+    },
+    JoinedChildSpec {
+        parent: "platform_setups",
+        child: "platform_setup_steps",
+        child_parent_field: "setup_id",
+    },
+    JoinedChildSpec {
+        parent: "user_services",
+        child: "service_history_heads",
+        child_parent_field: "_id",
+    },
+    JoinedChildSpec {
+        parent: "service_pools",
+        child: "service_pool_health_observations",
+        child_parent_field: "pool_id",
+    },
+];
+
 pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "agent_key_login_requests",
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "agent_key_login_requests stores person-owned rows keyed by approved_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "agent_key_login_requests stores the person-owned agent key login requests record keyed by approved_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "agent_service_bindings",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "agent_service_bindings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "agent_service_bindings stores the person-owned agent service bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "anonymous_endpoint_usage",
@@ -95,77 +148,77 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "api_key_credentials stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "api_key_credentials stores the person-owned api key credentials record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "api_keys",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "api_keys stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "api_keys stores the person-owned api keys record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "approval_grants",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "approval_grants stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "approval_grants stores the person-owned approval grants record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "approval_requests",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "approval_requests stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "approval_requests stores the person-owned approval requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_acknowledgements",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_acknowledgements stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_acknowledgements stores the person-owned assistant acknowledgements record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_action_receipts",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_action_receipts stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_action_receipts stores the person-owned assistant action receipts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_consents",
         owner: OwnerSelector::Fields(&["actor_user_id", "owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_consents stores person-owned rows keyed by actor_user_id, owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_consents stores the person-owned assistant agent consents record keyed by actor_user_id, owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_credentials",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::SecretMaterial),
-        why: "assistant_agent_credentials stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_credentials stores the person-owned assistant agent credentials record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_learning",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_learning stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_learning stores the person-owned assistant agent learning record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_learning_members",
         owner: OwnerSelector::Fields(&["member_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_learning_members stores person-owned rows keyed by member_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_learning_members stores the person-owned assistant agent learning members record keyed by member_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_learning_proposals",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_learning_proposals stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_learning_proposals stores the person-owned assistant agent learning proposals record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_learning_rejections",
@@ -181,42 +234,42 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_learning_runs stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_learning_runs stores the person-owned assistant agent learning runs record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_learning_skill_roots",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_learning_skill_roots stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_learning_skill_roots stores the person-owned assistant agent learning skill roots record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_private_notes",
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_private_notes stores person-owned rows keyed by actor_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_private_notes stores the person-owned assistant agent private notes record keyed by actor_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_shares",
         owner: OwnerSelector::Fields(&["owner_id", "subject_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_shares stores person-owned rows keyed by owner_id, subject_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_shares stores the person-owned assistant agent shares record keyed by owner_id, subject_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agent_sharing",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agent_sharing stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agent_sharing stores the person-owned assistant agent sharing record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_agents",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_agents stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_agents stores the person-owned assistant agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_analytics_settings",
@@ -230,112 +283,112 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_artifact_deliveries stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_artifact_deliveries stores the person-owned assistant artifact deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_async_operations",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_async_operations stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_async_operations stores the person-owned assistant async operations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_async_quotas",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_async_quotas stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_async_quotas stores the person-owned assistant async quotas record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_attachment_expiry",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_attachment_expiry stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_attachment_expiry stores the person-owned assistant attachment expiry record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_attachments",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_attachments stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_attachments stores the person-owned assistant attachments record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_authored_draft_claims",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_authored_draft_claims stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_authored_draft_claims stores the person-owned assistant authored draft claims record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_checkpoints",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_checkpoints stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_checkpoints stores the person-owned assistant checkpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_cma_agents",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_cma_agents stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_cma_agents stores the person-owned assistant cma agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_cma_creations",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_cma_creations stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_cma_creations stores the person-owned assistant cma creations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_cma_sandboxes",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_cma_sandboxes stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_cma_sandboxes stores the person-owned assistant cma sandboxes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_cma_session_origins",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_cma_session_origins stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_cma_session_origins stores the person-owned assistant cma session origins record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_conversations",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_conversations stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_conversations stores the person-owned assistant conversations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_direct_handoffs",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_direct_handoffs stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_direct_handoffs stores the person-owned assistant direct handoffs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_agent_access",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_group_agent_access stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_agent_access stores the person-owned assistant group agent access record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_agent_proposals",
         owner: OwnerSelector::Fields(&["proposed_by"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_group_agent_proposals stores person-owned rows keyed by proposed_by; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_agent_proposals stores the person-owned assistant group agent proposals record keyed by proposed_by; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_execution_slots",
         owner: OwnerSelector::Fields(&["original_requester_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_group_execution_slots stores person-owned rows keyed by original_requester_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_execution_slots stores the person-owned assistant group execution slots record keyed by original_requester_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_invites",
@@ -346,35 +399,35 @@ pub static ENTRIES: &[Entry] = &[
         ]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_group_invites stores person-owned rows keyed by issuer_user_id, accepted_by_user_id, intended_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_invites stores the person-owned assistant group invites record keyed by issuer_user_id, accepted_by_user_id, intended_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_mention_notifications",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_group_mention_notifications stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_mention_notifications stores the person-owned assistant group mention notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_messages",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_group_messages stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_messages stores the person-owned assistant group messages record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_read_states",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_group_read_states stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_read_states stores the person-owned assistant group read states record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_requests",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_group_requests stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_group_requests stores the person-owned assistant group requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_group_transfers",
@@ -388,28 +441,28 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_groups stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_groups stores the person-owned assistant groups record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_invocation_turns",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_invocation_turns stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_invocation_turns stores the person-owned assistant invocation turns record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_invocations",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_invocations stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_invocations stores the person-owned assistant invocations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_learning_migrations",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_learning_migrations stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_learning_migrations stores the person-owned assistant learning migrations record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_learning_publication_targets",
@@ -423,14 +476,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_message_feedback stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_message_feedback stores the person-owned assistant message feedback record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_messages",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_messages stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_messages stores the person-owned assistant messages record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_migrations",
@@ -444,14 +497,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "assistant_notification_push_budgets stores person-owned rows keyed by _id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_notification_push_budgets stores the person-owned assistant notification push budgets record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_notification_push_sources",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "assistant_notification_push_sources stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_notification_push_sources stores the person-owned assistant notification push sources record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_notification_worker",
@@ -465,14 +518,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_notifications stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_notifications stores the person-owned assistant notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_onboarding",
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_onboarding stores person-owned rows keyed by _id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_onboarding stores the person-owned assistant onboarding record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_profile_routes",
@@ -486,35 +539,35 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_resources stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_resources stores the person-owned assistant resources record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_service_execution",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_service_execution stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_service_execution stores the person-owned assistant service execution record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_settings",
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_settings stores person-owned rows keyed by _id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_settings stores the person-owned assistant settings record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_skill_draft_attempts",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_skill_draft_attempts stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_skill_draft_attempts stores the person-owned assistant skill draft attempts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_tool_results",
         owner: OwnerSelector::Fields(&["user_id", "actor_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_tool_results stores person-owned rows keyed by user_id, actor_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_tool_results stores the person-owned assistant tool results record keyed by user_id, actor_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_upload_limits",
@@ -528,14 +581,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_voice_announcements stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_voice_announcements stores the person-owned assistant voice announcements record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_voice_requests",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "assistant_voice_requests stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_voice_requests stores the person-owned assistant voice requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_voice_sessions",
@@ -549,21 +602,21 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_voice_windows stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_voice_windows stores the person-owned assistant voice windows record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "assistant_wire_logs",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "assistant_wire_logs stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "assistant_wire_logs stores the person-owned assistant wire logs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "async_service_operation_artifacts",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "async_service_operation_artifacts stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "async_service_operation_artifacts stores the person-owned async service operation artifacts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "audit_log",
@@ -574,33 +627,31 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_code_reservations",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::FeatureRetention(
-            "AUTH_DEVICE_EXPIRES_IN_SECS + AUTH_DEVICE_TERMINAL_RETENTION_SECS / expires_at",
-        ),
+        owner: OwnerSelector::Fields(&["approved_user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::TransientCoordination),
-        why: "auth_device_code_reservations stores only a cross-protocol user-code HMAC and expires_at; it has no account identifier and is bounded to 24 hours plus the ten-minute code lifetime.",
+        why: "auth_device_code_reservations stores a cross-protocol user-code HMAC and, after approval, the approving person's account id; approved rows are erased with that account and pending rows expire after AUTH_DEVICE_EXPIRES_IN_SECS plus AUTH_DEVICE_TERMINAL_RETENTION_SECS.",
     },
     Entry {
         collection: "auth_device_codes",
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "auth_device_codes stores person-owned rows keyed by approved_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "auth_device_codes stores the person-owned auth device codes record keyed by approved_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "auth_device_codes_v2",
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "auth_device_codes_v2 stores person-owned rows keyed by approved_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "auth_device_codes_v2 stores the person-owned auth device codes v2 record keyed by approved_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "authorization_codes",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "authorization_codes stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "authorization_codes stores the person-owned authorization codes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "billing_account_balances",
@@ -712,7 +763,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "catalog_delegation_grants stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "catalog_delegation_grants stores the person-owned catalog delegation grants record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "catalog_icons",
@@ -747,63 +798,63 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_activity_notifications stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_activity_notifications stores the person-owned channel activity notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_adapter_accounts",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "channel_adapter_accounts stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_adapter_accounts stores the person-owned channel adapter accounts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_adapter_allocations",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_adapter_allocations stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_adapter_allocations stores the person-owned channel adapter allocations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_adapter_bindings",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_adapter_bindings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_adapter_bindings stores the person-owned channel adapter bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_adapter_events",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_adapter_events stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_adapter_events stores the person-owned channel adapter events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_adapter_resource_claims",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_adapter_resource_claims stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_adapter_resource_claims stores the person-owned channel adapter resource claims record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_adapter_sessions",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_adapter_sessions stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_adapter_sessions stores the person-owned channel adapter sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_bots",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_bots stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_bots stores the person-owned channel bots record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_connect_links",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_connect_links stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_connect_links stores the person-owned channel connect links record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_conversations",
@@ -817,35 +868,35 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_delivery_receipts stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_delivery_receipts stores the person-owned channel delivery receipts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_email_batches",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_email_batches stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_email_batches stores the person-owned channel email batches record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_email_receipts",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_email_receipts stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_email_receipts stores the person-owned channel email receipts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_email_sends",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_email_sends stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_email_sends stores the person-owned channel email sends record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_email_subscriptions",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_email_subscriptions stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_email_subscriptions stores the person-owned channel email subscriptions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_event_logs",
@@ -861,14 +912,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_messages stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_messages stores the person-owned channel messages record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_reply_deliveries",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_reply_deliveries stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_reply_deliveries stores the person-owned channel reply deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_send_claims",
@@ -884,7 +935,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_text_deliveries stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_text_deliveries stores the person-owned channel text deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "channel_webhook_rejections",
@@ -898,21 +949,21 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
-        why: "channel_whatsapp_native stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "channel_whatsapp_native stores the person-owned channel whatsapp native record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "cli_pairings",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "cli_pairings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "cli_pairings stores the person-owned cli pairings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "connect_links",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "connect_links stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "connect_links stores the person-owned connect links record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "consent_revocation_fences",
@@ -926,7 +977,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "consents stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "consents stores the person-owned consents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "coordination_leases",
@@ -996,14 +1047,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["approved_by_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "device_codes stores person-owned rows keyed by approved_by_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "device_codes stores the person-owned device codes record keyed by approved_by_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "device_onboard_credentials",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "device_onboard_credentials stores person-owned rows keyed by owner_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "device_onboard_credentials stores the person-owned device onboard credentials record keyed by owner_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "device_pubkey_lockouts",
@@ -1038,14 +1089,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_uuid"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "encrypted_record_migration_findings stores person-owned rows keyed by owner_uuid; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "encrypted_record_migration_findings stores the person-owned encrypted record migration findings record keyed by owner_uuid; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "encrypted_record_migration_runs",
         owner: OwnerSelector::Fields(&["owner_uuid"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "encrypted_record_migration_runs stores person-owned rows keyed by owner_uuid; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "encrypted_record_migration_runs stores the person-owned encrypted record migration runs record keyed by owner_uuid; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "event_dedup_records",
@@ -1073,7 +1124,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "execution_permission_deliveries stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "execution_permission_deliveries stores the person-owned execution permission deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "feature_flag_definitions",
@@ -1094,14 +1145,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["target_key"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "feature_flag_overrides stores person-owned rows keyed by target_key; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "feature_flag_overrides stores the person-owned feature flag overrides record keyed by target_key; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "generated_artifact_content_series",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "generated_artifact_content_series stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "generated_artifact_content_series stores the person-owned generated artifact content series record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "groups",
@@ -1122,35 +1173,35 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "invocation_diagnostics stores person-owned rows keyed by actor_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "invocation_diagnostics stores the person-owned invocation diagnostics record keyed by actor_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "lark_base_write_photos",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "lark_base_write_photos stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "lark_base_write_photos stores the person-owned lark base write photos record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "lark_base_writes",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "lark_base_writes stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "lark_base_writes stores the person-owned lark base writes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "login_approvals",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "login_approvals stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "login_approvals stores the person-owned login approvals record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "login_codes",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "login_codes stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "login_codes stores the person-owned login codes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "machine_authority_leases",
@@ -1332,49 +1383,49 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "mcp_session_notifications stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "mcp_session_notifications stores the person-owned mcp session notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "mcp_session_slots",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "mcp_session_slots stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "mcp_session_slots stores the person-owned mcp session slots record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "mcp_sessions",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::SecretMaterial),
-        why: "mcp_sessions stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "mcp_sessions stores the person-owned mcp sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "mfa_challenges",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "mfa_challenges stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "mfa_challenges stores the person-owned mfa challenges record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "mfa_factors",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "mfa_factors stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "mfa_factors stores the person-owned mfa factors record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "node_pending_credentials",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("nodes"),
-        export: Export::Section("services"),
-        why: "node_pending_credentials stores encrypted pending credential payloads; raw secret material is excluded from export.",
+        export: Export::Excluded(ExclusionReason::SecretMaterial),
+        why: "node_pending_credentials stores pending credential injection metadata and encrypted payloads; the entire transient row is excluded because its crypto bundle is secret material.",
     },
     Entry {
         collection: "node_registration_tokens",
         owner: OwnerSelector::Fields(&["user_id", "issuer_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "node_registration_tokens stores person-owned rows keyed by user_id, issuer_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "node_registration_tokens stores the person-owned node registration tokens record keyed by user_id, issuer_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "node_service_bindings",
@@ -1395,7 +1446,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "notification_channels stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "notification_channels stores the person-owned notification channels record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_channels",
@@ -1409,14 +1460,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_event_bindings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_event_bindings stores the person-owned nyxbot event bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_events",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_events stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_events stores the person-owned nyxbot events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_gateway_releases",
@@ -1430,42 +1481,42 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_gateway_responses stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_gateway_responses stores the person-owned nyxbot gateway responses record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_image_deliveries",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_image_deliveries stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_image_deliveries stores the person-owned nyxbot image deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_image_deliveries_v2",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_image_deliveries_v2 stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_image_deliveries_v2 stores the person-owned nyxbot image deliveries v2 record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_threads",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_threads stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_threads stores the person-owned nyxbot threads record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "nyxbot_watches",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
-        why: "nyxbot_watches stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "nyxbot_watches stores the person-owned nyxbot watches record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "oauth_broker_bindings",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "oauth_broker_bindings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "oauth_broker_bindings stores the person-owned oauth broker bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "oauth_clients",
@@ -1479,35 +1530,35 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "oauth_consent_requests stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "oauth_consent_requests stores the person-owned oauth consent requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "oauth_delegation_authorities",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "oauth_delegation_authorities stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "oauth_delegation_authorities stores the person-owned oauth delegation authorities record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "oauth_states",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "oauth_states stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "oauth_states stores the person-owned oauth states record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "openclaw_channel_mappings",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "openclaw_channel_mappings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "openclaw_channel_mappings stores the person-owned openclaw channel mappings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "oracle_login_profiles",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("oracle_pool_cleanup"),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
-        why: "oracle_login_profiles stores an enrolled pool login profile with encrypted session material; pool cleanup removes it when its owner is erased and expiry removes stale profiles.",
+        why: "oracle_login_profiles stores an enrolled browser login profile, encrypted session material, and pool bindings; Oracle pool cleanup removes one profile per bounded cleanup chunk after the owner's pool is retired.",
     },
     Entry {
         collection: "oracle_login_snapshots",
@@ -1528,7 +1579,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("oracle lifecycle"),
         export: Export::Section("assistant"),
-        why: "oracle_sessions stores a person-owned Oracle conversation and lifecycle timestamps; the Oracle lifecycle closes and removes it with its pool.",
+        why: "oracle_sessions stores a person's Oracle conversation routing and lifecycle metadata; pool cleanup closes active sessions and removes closed session rows after settlement.",
     },
     Entry {
         collection: "oracle_tasks",
@@ -1542,7 +1593,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["created_by_user_id"]),
         erasure: Erasure::Domain("oracle lifecycle"),
         export: Export::Section("account_activity"),
-        why: "oracle_worker_commands stores manager commands and delivery state for an enrolled installation; Oracle lifecycle cleanup expires them.",
+        why: "oracle_worker_commands stores a person's manager commands and delivery state for an enrolled browser; pool deletion expires overdue work and the seven-day command TTL removes terminal rows.",
     },
     Entry {
         collection: "oracle_workers",
@@ -1581,10 +1632,10 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "org_channel_messages",
-        owner: OwnerSelector::Fields(&["author_user_id"]),
+        owner: OwnerSelector::Fields(&["author_user_id", "actor_id"]),
         erasure: Erasure::Domain("org_channel lifecycle"),
         export: Export::Section("channels"),
-        why: "org_channel_messages stores organization-channel transcript messages authored by a person; lifecycle erasure deletes them.",
+        why: "org_channel_messages stores organization-channel transcript text and actor attribution; lifecycle erasure deletes rows authored or initiated by the departing person.",
     },
     Entry {
         collection: "org_channel_sender_links",
@@ -1598,14 +1649,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["created_by"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "org_invites stores person-owned rows keyed by created_by; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "org_invites stores the person-owned org invites record keyed by created_by; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "org_memberships",
         owner: OwnerSelector::Fields(&["member_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "org_memberships stores person-owned rows keyed by member_user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "org_memberships stores the person-owned org memberships record keyed by member_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "org_role_scopes",
@@ -1626,7 +1677,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "permission_key_policies stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "permission_key_policies stores the person-owned permission key policies record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "personal_erasure_effects",
@@ -1654,7 +1705,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id", "user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
-        why: "personal_erasure_preparations stores person-owned rows keyed by _id, user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "personal_erasure_preparations stores the person-owned personal erasure preparations record keyed by _id, user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "personal_erasure_revocation_receipts",
@@ -1693,10 +1744,10 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_bot_runtime_controls",
-        owner: OwnerSelector::Fields(&["public_policy.sponsor_owner_user_id"]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        why: "platform_bot_runtime_controls stores personal and public runtime control state for a platform owner.",
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        why: "platform_bot_runtime_controls stores shared platform runtime policy and control revisions; the platform lifecycle owns this coordination state.",
     },
     Entry {
         collection: "platform_credentials",
@@ -1754,7 +1805,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "platform_guide_selections stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "platform_guide_selections stores the person-owned platform guide selections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "platform_help_assignments",
@@ -1838,7 +1889,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "platform_native_replies stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "platform_native_replies stores the person-owned platform native replies record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "platform_native_reply_handles",
@@ -1852,14 +1903,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "platform_onboarding_binding_requests stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "platform_onboarding_binding_requests stores the person-owned platform onboarding binding requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "platform_onboarding_bindings",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "platform_onboarding_bindings stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "platform_onboarding_bindings stores the person-owned platform onboarding bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "platform_onboarding_decision_spacing",
@@ -1880,7 +1931,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "platform_personal_decision_spacing stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "platform_personal_decision_spacing stores the person-owned platform personal decision spacing record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "platform_personal_link_challenges",
@@ -1901,7 +1952,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "platform_personal_setup_selections stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "platform_personal_setup_selections stores the person-owned platform personal setup selections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "platform_personal_stop_effects",
@@ -2059,7 +2110,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "refresh_tokens stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "refresh_tokens stores the person-owned refresh tokens record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "reply_token_uses",
@@ -2122,7 +2173,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "saved_logins stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "saved_logins stores the person-owned saved logins record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "schema_migrations",
@@ -2164,7 +2215,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id", "owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "service_account_key_read_grants stores person-owned rows keyed by _id, owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "service_account_key_read_grants stores the person-owned service account key read grants record keyed by _id, owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "service_account_tokens",
@@ -2185,7 +2236,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "service_approval_configs stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "service_approval_configs stores the person-owned service approval configs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "service_change_events",
@@ -2231,21 +2282,21 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "service_pool_member_health stores person-owned rows keyed by owner_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "service_pool_member_health stores the person-owned service pool member health record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "service_pools",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "service_pools stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "service_pools stores the person-owned service pools record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "service_preferences",
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "service_preferences stores person-owned rows keyed by _id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "service_preferences stores the person-owned service preferences record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "service_provider_requirements",
@@ -2259,7 +2310,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
-        why: "sessions stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "sessions stores the person-owned sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "startup_diagnostics",
@@ -2273,21 +2324,21 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "telegram_bot_claims stores person-owned claim state; completed redeemed-and-delivered claims are erased and pending claims expire at purge_after/expires_at.",
+        why: "telegram_bot_claims stores one-time Telegram setup claims and their owner linkage; every redeemed claim is erased with the owner, while pending or undelivered claims expire through the purge_after TTL.",
     },
     Entry {
         collection: "telegram_bot_requests",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "telegram_bot_requests stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "telegram_bot_requests stores the person-owned telegram bot requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "telegram_managed_bot_events",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        why: "telegram_managed_bot_events stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "telegram_managed_bot_events stores the person-owned telegram managed bot events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "telemetry_capture_accounts",
@@ -2329,14 +2380,14 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "trigger_deliveries stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "trigger_deliveries stores the person-owned trigger deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "trigger_owner_limits",
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "trigger_owner_limits stores person-owned rows keyed by _id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "trigger_owner_limits stores the person-owned trigger owner limits record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "trigger_run_budgets",
@@ -2350,21 +2401,21 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "trigger_runs stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "trigger_runs stores the person-owned trigger runs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "trigger_work",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "trigger_work stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "trigger_work stores the person-owned trigger work record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "triggers",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
-        why: "triggers stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "triggers stores the person-owned triggers record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "usage_allowance_periods",
@@ -2413,49 +2464,49 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("billing"),
-        why: "usage_workspaces stores person-owned rows keyed by _id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "usage_workspaces stores the person-owned usage workspaces record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "user_api_keys",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "user_api_keys stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "user_api_keys stores the person-owned user api keys record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "user_endpoints",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "user_endpoints stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "user_endpoints stores the person-owned user endpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "user_provider_credentials",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "user_provider_credentials stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "user_provider_credentials stores the person-owned user provider credentials record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "user_provider_tokens",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "user_provider_tokens stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "user_provider_tokens stores the person-owned user provider tokens record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "user_service_connections",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "user_service_connections stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "user_service_connections stores the person-owned user service connections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "user_services",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
-        why: "user_services stores person-owned rows keyed by user_id; bounded local cleanup removes those rows after the erasure admission fence.",
+        why: "user_services stores the person-owned user services record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
         collection: "users",
@@ -3109,6 +3160,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn claim_and_reservation_inventory_only_erases_settled_owner_rows() {
+        let owner = "00000000-0000-0000-0000-000000000001";
+        let inventory = crate::services::personal_erasure_service::local::inventory(owner);
+        let claims = inventory
+            .iter()
+            .find(|(collection, _)| *collection == "telegram_bot_claims")
+            .map(|(_, filter)| filter)
+            .expect("telegram claims inventory");
+        assert_eq!(claims.get_str("owner_user_id"), Ok(owner));
+        assert_eq!(claims.get_str("status"), Ok("redeemed"));
+        assert_eq!(claims.get_bool("delivered"), Ok(true));
+        let reservations = inventory
+            .iter()
+            .find(|(collection, _)| *collection == "auth_device_code_reservations")
+            .map(|(_, filter)| filter)
+            .expect("auth-device reservation inventory");
+        assert_eq!(reservations.get_str("approved_user_id"), Ok(owner));
+    }
+
     #[tokio::test]
     async fn ensure_indexes_creates_every_personal_owner_predicate_index() {
         let db =
@@ -3181,6 +3252,22 @@ mod tests {
     }
 
     #[test]
+    fn joined_child_specs_are_the_registry_joined_child_set() {
+        let expected: BTreeSet<_> = JOINED_CHILD_SPECS
+            .iter()
+            .map(|spec| (spec.child, spec.parent))
+            .collect();
+        let actual: BTreeSet<_> = ENTRIES
+            .iter()
+            .filter_map(|entry| match entry.erasure {
+                Erasure::JoinedChild { parent } => Some((entry.collection, parent)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn corrected_owner_selectors_match_model_field_names() {
         for (collection, expected) in [
             ("assistant_agent_learning_members", &["member_user_id"][..]),
@@ -3189,15 +3276,12 @@ mod tests {
             ("assistant_agent_learning_skill_roots", &["owner_id"][..]),
             ("assistant_group_agent_access", &["owner_id"][..]),
             ("org_memberships", &["member_user_id"][..]),
+            ("org_channel_messages", &["author_user_id", "actor_id"][..]),
             ("billing_wallet", &["owner_id"][..]),
             ("credit_grants", &["recipient_user_id"][..]),
             ("usage_meter", &["billing_owner_id"][..]),
             ("platform_setups", &["owner_user_id"][..]),
             ("platform_bot_installations", &["owner_user_id"][..]),
-            (
-                "platform_bot_runtime_controls",
-                &["public_policy.sponsor_owner_user_id"][..],
-            ),
             (
                 "platform_personal_stop_effects",
                 &["active_turn.origin.user_id"][..],
@@ -3239,7 +3323,6 @@ mod tests {
                 entry.collection,
                 "platform_setups"
                     | "platform_bot_installations"
-                    | "platform_bot_runtime_controls"
                     | "platform_personal_stop_effects"
                     | "platform_personal_bindings"
                     | "platform_personal_link_challenges"

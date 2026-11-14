@@ -452,17 +452,32 @@ async fn cleanup_chunk(db: &Database, pool_id: &str) -> AppResult<bool> {
                         let sessions = db
                             .collection::<Document>(crate::models::oracle_session::COLLECTION_NAME);
                         if let Some(row) = sessions
-                            .find_one(doc! {"pool_id": &*pool_id, "closed_at": null})
+                            .find_one(doc! {"pool_id": &*pool_id})
                             .projection(doc! {"_id": 1})
                             .session(&mut *session)
                             .await?
                         {
-                            sessions.update_one(
-                                doc! {"_id": row.get("_id").unwrap()},
-                                doc! {"$set": {"closed_at": deleted_at, "updated_at": deleted_at}},
-                            )
-                            .session(&mut *session)
-                            .await?;
+                            let id = row.get("_id").unwrap();
+                            let open = sessions
+                                .find_one(doc! {"_id": id, "closed_at": null})
+                                .projection(doc! {"_id": 1})
+                                .session(&mut *session)
+                                .await?
+                                .is_some();
+                            if open {
+                                sessions
+                                    .update_one(
+                                        doc! {"_id": id},
+                                        doc! {"$set": {"closed_at": deleted_at, "updated_at": deleted_at}},
+                                    )
+                                    .session(&mut *session)
+                                    .await?;
+                            } else {
+                                sessions
+                                    .delete_one(doc! {"_id": id})
+                                    .session(&mut *session)
+                                    .await?;
+                            }
                             changed = true;
                         }
                         if !changed {

@@ -210,9 +210,10 @@ async fn aggregate_joined_children(
         let Ok(parent_id) = row.get_str("_id") else {
             continue;
         };
-        if !candidate_owner_id(parent_id) {
-            continue;
-        }
+        // Joined parents are not account IDs in every domain (channel
+        // conversations use `conv_*` IDs), so structural orphan checks must
+        // accept the parent's opaque string identity. Person-owner scans
+        // remain UUID-gated in `aggregate_groups`.
         let row_count = row
             .get_i64("row_count")
             .or_else(|_| row.get_i32("row_count").map(i64::from))
@@ -365,28 +366,10 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
 }
 
 fn joined_child_spec(collection: &str, parent: &str) -> Option<(&'static str, &'static str)> {
-    match (collection, parent) {
-        ("assistant_agent_learning_rejections", "assistant_agents") => {
-            Some(("agent_id", "assistant_agents"))
-        }
-        ("channel_event_logs", "channel_conversations") => {
-            Some(("conversation_id", "channel_conversations"))
-        }
-        ("channel_send_claims", "channel_conversations") => {
-            // Claims use `<conversation_id>:<claim_id>` ids rather than a
-            // dedicated parent field; aggregate_joined_children parses that
-            // stable prefix before checking the parent.
-            Some(("_id", "channel_conversations"))
-        }
-        ("service_history_heads", "user_services") => Some(("_id", "user_services")),
-        ("service_pool_health_observations", "service_pools") => Some(("pool_id", "service_pools")),
-        ("platform_delivery_tests", "platform_bot_installations") => {
-            Some(("installation_id", "platform_bot_installations"))
-        }
-        ("platform_setup_notices", "platform_setups") => Some(("setup_id", "platform_setups")),
-        ("platform_setup_steps", "platform_setups") => Some(("setup_id", "platform_setups")),
-        _ => None,
-    }
+    personal_data_registry::JOINED_CHILD_SPECS
+        .iter()
+        .find(|spec| spec.child == collection && spec.parent == parent)
+        .map(|spec| (spec.child_parent_field, spec.parent))
 }
 
 fn row_id_hash(row_ids: &[Bson]) -> AppResult<String> {

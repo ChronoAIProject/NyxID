@@ -285,36 +285,10 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
     // Joined children have no personal owner field. Seed every registry join
     // with a target parent and child so the worker's authoritative-parent
     // cleanup is exercised automatically when a new join is added.
-    let joined_cases = [
-        (
-            "assistant_agent_learning_rejections",
-            "assistant_agents",
-            "agent_id",
-        ),
-        (
-            "channel_event_logs",
-            "channel_conversations",
-            "conversation_id",
-        ),
-        (
-            "channel_send_claims",
-            "channel_conversations",
-            "conversation_id",
-        ),
-        ("service_history_heads", "user_services", "_id"),
-        (
-            "service_pool_health_observations",
-            "service_pools",
-            "pool_id",
-        ),
-        (
-            "platform_delivery_tests",
-            "platform_bot_installations",
-            "installation_id",
-        ),
-        ("platform_setup_notices", "platform_setups", "setup_id"),
-        ("platform_setup_steps", "platform_setups", "setup_id"),
-    ];
+    let joined_cases: Vec<_> = crate::services::personal_data_registry::JOINED_CHILD_SPECS
+        .iter()
+        .map(|spec| (spec.child, spec.parent, spec.child_parent_field))
+        .collect();
     let registry_joined: std::collections::BTreeSet<_> =
         crate::services::personal_data_registry::entries()
             .iter()

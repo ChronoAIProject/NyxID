@@ -127,6 +127,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"approved_user_id":owner},
         ),
         (
+            m::auth_device_code::RESERVATION_COLLECTION_NAME,
+            doc! {"approved_user_id":owner},
+        ),
+        (
             m::agent_key_login_request::COLLECTION_NAME,
             doc! {"approved_user_id":owner},
         ),
@@ -448,7 +452,7 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ("telegram_bot_requests", doc! {"user_id": owner}),
         (
             "telegram_bot_claims",
-            doc! {"owner_user_id": owner, "status":"redeemed", "delivered":true},
+            doc! {"owner_user_id": owner, "status":"redeemed", "delivered": true},
         ),
         ("telegram_managed_bot_events", doc! {"user_id": owner}),
         (
