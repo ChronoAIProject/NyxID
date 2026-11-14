@@ -1,4 +1,11 @@
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
 import { formatDateTime } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
@@ -6,6 +13,7 @@ import { Link, useParams } from "@tanstack/react-router";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { PageHeader } from "@/components/shared/page-header";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -68,9 +76,17 @@ const windowLabels: Record<string, string> = {
 function label(value: string, labels: Record<string, string>) {
   return t(labels[value] ?? value);
 }
+function reportedKinds(counts: Record<string, number>) {
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .map(([kind, count]) => `${label(kind, kindLabels)}: ${count}`)
+    .join(", ");
+}
 function LoadState({ error, loading }: { error: unknown; loading: boolean }) {
   return error ? (
-    <p role="alert">{t("Could not load crash reports.")}</p>
+    <div role="alert">
+      <ErrorBanner message={t("Could not load crash reports.")} />
+    </div>
   ) : loading ? (
     <p>{t("Loading…")}</p>
   ) : null;
@@ -91,6 +107,24 @@ export function AdminCrashReportsPage() {
   });
   const summary = useCrashSummary(reportWindow, filters.platform ?? "");
   const reports = useCrashReports(filters);
+  const selectVersion = (version: {
+    platform: string;
+    app_version: string;
+    app_build: string;
+  }) => {
+    form.reset({
+      platform: version.platform,
+      app_version: version.app_version,
+      app_build: version.app_build,
+      kind: "",
+      fingerprint: "",
+    });
+    setFilters({
+      platform: version.platform,
+      app_version: version.app_version,
+      app_build: version.app_build,
+    });
+  };
   return (
     <div className="space-y-6">
       <PageHeader
@@ -218,8 +252,51 @@ export function AdminCrashReportsPage() {
             <CardHeader>
               <CardTitle>{t("Reported events by version")}</CardTitle>
             </CardHeader>
-            <CardContent className="overflow-x-auto">
-              <Table className="w-full text-left type-table-cell">
+            <CardContent>
+              <div
+                role="list"
+                aria-label={t("Reported events by version")}
+                className="flex flex-col gap-3 md:hidden"
+              >
+                {summary.data.versions.map((v, i) => (
+                  <div
+                    role="listitem"
+                    key={i}
+                    className="rounded-xl border border-border/50 bg-card p-4"
+                  >
+                    <Button
+                      variant="link"
+                      className="h-auto p-0 type-row-title"
+                      onClick={() => selectVersion(v)}
+                    >
+                      {label(v.platform, platformLabels)} · {v.app_version} (
+                      {v.app_build})
+                    </Button>
+                    <dl className="mt-2 space-y-1 type-secondary">
+                      {[
+                        [t("Environment"), v.environment],
+                        [t("Artifact"), v.artifact_id ?? "—"],
+                        [t("Reported events"), v.total],
+                        [t("Reported events by kind"), reportedKinds(v.counts)],
+                        [t("Last seen"), formatDateTime(v.last_seen)],
+                      ].map(([key, value]) => (
+                        <div
+                          key={key}
+                          className="flex flex-wrap justify-between gap-x-3"
+                        >
+                          <dt className="text-muted-foreground">{key}</dt>
+                          <dd className="break-all">{value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </div>
+                ))}
+              </div>
+              <Table
+                aria-label={t("Reported events by version")}
+                containerClassName="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden"
+                className="w-full text-left type-table-cell"
+              >
                 <TableHeader>
                   <TableRow>
                     {[
@@ -232,50 +309,29 @@ export function AdminCrashReportsPage() {
                       "Reported events by kind",
                       "Last seen",
                     ].map((h) => (
-                      <TableHead className="p-2 type-table-header" key={h}>
-                        {t(h)}
-                      </TableHead>
+                      <TableHead key={h}>{t(h)}</TableHead>
                     ))}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {summary.data.versions.map((v, i) => (
-                    <TableRow key={i} className="border-t border-border">
-                      <TableCell className="p-2">
-                        {label(v.platform, platformLabels)}
-                      </TableCell>
+                    <TableRow key={i}>
+                      <TableCell>{label(v.platform, platformLabels)}</TableCell>
                       <TableCell>{v.environment}</TableCell>
                       <TableCell>
-                        <Button
-                          variant="link"
-                          onClick={() => {
-                            form.reset({
-                              platform: v.platform,
-                              app_version: v.app_version,
-                              app_build: v.app_build,
-                              kind: "",
-                              fingerprint: "",
-                            });
-                            setFilters({
-                              platform: v.platform,
-                              app_version: v.app_version,
-                              app_build: v.app_build,
-                            });
-                          }}
-                        >
+                        <Button variant="link" onClick={() => selectVersion(v)}>
                           {v.app_version}
                         </Button>
                       </TableCell>
                       <TableCell className="font-mono">{v.app_build}</TableCell>
-                      <TableCell className="font-mono">{v.artifact_id ?? "—"}</TableCell>
-                      <TableCell>{v.total}</TableCell>
-                      <TableCell>
-                        {Object.entries(v.counts)
-                          .filter(([, n]) => n > 0)
-                          .map(([k, n]) => `${label(k, kindLabels)}: ${n}`)
-                          .join(", ")}
+                      <TableCell className="font-mono">
+                        {v.artifact_id ?? "—"}
                       </TableCell>
-                      <TableCell className="font-mono">{formatDateTime(v.last_seen)}</TableCell>
+                      <TableCell>{v.total}</TableCell>
+                      <TableCell>{reportedKinds(v.counts)}</TableCell>
+                      <TableCell className="font-mono">
+                        {formatDateTime(v.last_seen)}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -288,12 +344,53 @@ export function AdminCrashReportsPage() {
         <CardHeader>
           <CardTitle>{t("Individual reports")}</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3 overflow-x-auto">
+        <CardContent className="space-y-3">
           <LoadState error={reports.error} loading={reports.isLoading} />
           {reports.data?.reports.length === 0 && (
             <p>{t("No reports in this selection.")}</p>
           )}
-          <Table className="w-full text-left type-table-cell">
+          <div
+            role="list"
+            aria-label={t("Individual reports")}
+            className="flex flex-col gap-3 md:hidden"
+          >
+            {reports.data?.reports.map((r) => (
+              <div
+                role="listitem"
+                key={r.id}
+                className="rounded-xl border border-border/50 bg-card p-4"
+              >
+                <Link
+                  to="/admin/crash-reports/$id"
+                  params={{ id: r.id }}
+                  className="type-row-title underline"
+                >
+                  {formatDateTime(r.captured_at)}
+                </Link>
+                <dl className="mt-2 space-y-1 type-secondary">
+                  {[
+                    [t("Platform"), label(r.platform, platformLabels)],
+                    [t("Version"), `${r.app_version} (${r.app_build})`],
+                    [t("Kind"), label(r.kind, kindLabels)],
+                    [t("Export status"), label(r.export.status, exportLabels)],
+                  ].map(([key, value]) => (
+                    <div
+                      key={key}
+                      className="flex flex-wrap justify-between gap-x-3"
+                    >
+                      <dt className="text-muted-foreground">{key}</dt>
+                      <dd>{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))}
+          </div>
+          <Table
+            aria-label={t("Individual reports")}
+            containerClassName="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden"
+            className="w-full text-left type-table-cell"
+          >
             <TableHeader>
               <TableRow>
                 {[
@@ -303,16 +400,14 @@ export function AdminCrashReportsPage() {
                   "Kind",
                   "Export status",
                 ].map((h) => (
-                  <TableHead className="p-2 type-table-header" key={h}>
-                    {t(h)}
-                  </TableHead>
+                  <TableHead key={h}>{t(h)}</TableHead>
                 ))}
               </TableRow>
             </TableHeader>
             <TableBody>
               {reports.data?.reports.map((r) => (
-                <TableRow key={r.id} className="border-t border-border">
-                  <TableCell className="p-2 font-mono">
+                <TableRow key={r.id}>
+                  <TableCell className="font-mono">
                     <Link
                       to="/admin/crash-reports/$id"
                       params={{ id: r.id }}
@@ -401,7 +496,8 @@ export function CrashReportView({ report: r }: { report: CrashReportDetail }) {
         <ol className="font-mono">
           {r.native_images.map((image, i) => (
             <li key={i}>
-              {i}: {image.name} · {image.uuid} · {`0x${image.size.toString(16)}`}
+              {i}: {image.name} · {image.uuid} ·{" "}
+              {`0x${image.size.toString(16)}`}
             </li>
           ))}
         </ol>
