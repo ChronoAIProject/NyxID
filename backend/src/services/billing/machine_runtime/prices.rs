@@ -80,7 +80,7 @@ impl BillingService {
             let id = row
                 .get_str("_id")
                 .map_err(|_| unavailable("invalid runtime rate identity"))?;
-            let ok = self.sync_machine_runtime_rate(id).await.is_ok();
+            let ok = self.sync_machine_runtime_rate(id).await.unwrap_or(false);
             let attempts = row
                 .get_i64("sync_attempts")
                 .unwrap_or(0)
@@ -139,14 +139,20 @@ impl BillingService {
         Ok(row)
     }
 
-    pub async fn sync_machine_runtime_rate(&self, rate_version: &str) -> AppResult<()> {
+    pub async fn sync_machine_runtime_rate(&self, rate_version: &str) -> AppResult<bool> {
         let rate = self.runtime_rate(rate_version).await?;
         let lago = self
             .lago
             .as_deref()
             .ok_or_else(|| unavailable("billing provider is not configured"))?;
-        let result = async {
-            super::super::taxes::sync_charge(
+        super::super::plan_sync::run(
+            &self.db,
+            &rate.plan_code,
+            None,
+            super::super::plan_sync::CacheWrite::None,
+            async {
+                let result = async {
+                    super::super::taxes::sync_charge(
                 &self.db,
                 lago,
                 &rate.plan_code,
@@ -160,19 +166,37 @@ impl BillingService {
                 },
             )
             .await?;
-            verify_provider(lago, &rate).await
-        }
-        .await;
-        let status = if result.is_ok() { "synced" } else { "failed" };
-        let mut fields = doc! {"sync_status":status};
-        if result.is_ok() {
-            fields.insert("verified_at", bson::DateTime::from_chrono(Utc::now()));
-        }
-        self.db
-            .collection::<Document>(RATE_COLLECTION)
-            .update_one(doc! {"_id":&rate.id}, doc! {"$set":fields})
-            .await?;
-        result
+                    verify_provider(lago, &rate).await
+                }
+                .await;
+                if super::super::plan_sync::lost() {
+                    return Ok(false);
+                }
+                let pending = matches!(result, Err(AppError::Conflict(_)));
+                let status = if result.is_ok() {
+                    "synced"
+                } else if pending {
+                    "pending"
+                } else {
+                    "failed"
+                };
+                let mut fields = doc! {"sync_status":status};
+                if result.is_ok() {
+                    fields.insert("verified_at", bson::DateTime::from_chrono(Utc::now()));
+                }
+                self.db
+                    .collection::<Document>(RATE_COLLECTION)
+                    .update_one(doc! {"_id":&rate.id}, doc! {"$set":fields})
+                    .await?;
+                if pending {
+                    Ok(false)
+                } else {
+                    result.map(|_| true)
+                }
+            },
+        )
+        .await
+        .map(|result| result.unwrap_or(false))
     }
 
     /// Stop issuing new quotes. Keep the immutable charge and exact record for

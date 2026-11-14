@@ -317,6 +317,40 @@ reconcile interval handle all charges. Price/metric/code fences prevent stale ad
 sync completions from activating obsolete prices; stale writes after removal restore
 cleanup intent. Clients cannot control metric codes, sync state, or cleanup markers.
 
+All NyxID plan writers share a renewable `billing:plan:<code>` lease from before
+reading Lago through the cache write and publication. An admin save that finds
+it busy returns its saved pending price; reconciliation retries it. A writer
+verifies the complete target charge after PUT before publishing synced state.
+Plan synchronization retains a dirty generation and charge/removal intents.
+The audit maintains synced source prices, retained published immutable tariffs,
+and removal markers. Pending and failed prices remain with their normal
+publication retry; an attempted intent alone does not publish a price or cache
+row. Catalog reads select billing-bearing services and recorded intent owners.
+Unrelated Lago charges and existing charge IDs are preserved; plan updates
+never send tax assignments back to Lago.
+
+Clean matching audits perform only reads, including no tax invalidation. Charge
+comparison uses numeric amount and economic flags, tolerating absent defaults
+and presentation metadata. Per-code failures do not block other repairs. Each
+failure retains one Integrity diagnostic and a retry delay starting at five
+minutes, doubling to a one-day cap. An explicit price write resets that delay;
+a verified recovery clears the diagnostic. Already-completed dirty generations
+with only deferred failures do not repeat tax invalidation or cache writes.
+
+A provider PUT can still arrive after its client or lease expires: Lago does not
+accept a NyxID fencing token. Every attempt marks the plan dirty before tax
+invalidation, including explicit resyncs of already-synced service and machine
+prices. Recovery repeats tax invalidation and cache publication even when no
+price is pending, and clears dirty only after those steps and full-set readback
+complete for the same generation. A late overwrite lasts until
+the next successful eligible plan check (normally the existing reconciliation
+interval plus pass and provider latency; a repeatedly failing code also waits
+for its backoff). Registered plans are checked even when clean,
+so an old replica's uncoordinated writes during rollout can also be detected.
+The lease covers only upgraded writers; rollback leaves additive recovery
+metadata unused and restores the old concurrency behavior. No migration or new
+setting is required; keep billing reconciliation enabled.
+
 Older admin payloads omitting lanes or nested `components` preserve them. A null lane
 clears the entire lane; `components: null` or `[]` clears only additional components.
 Lane-only edits preserve omitted legacy fallback and resale fields. Legacy-only edits

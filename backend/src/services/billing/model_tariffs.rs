@@ -596,6 +596,23 @@ pub async fn sync(
     if t.status != TariffStatus::Pending {
         return Ok(false);
     }
+    super::plan_sync::run(
+        db,
+        plan,
+        None,
+        super::plan_sync::CacheWrite::Rate,
+        sync_locked(db, lago, plan, t),
+    )
+    .await
+    .map(|result| result.unwrap_or(false))
+}
+
+async fn sync_locked(
+    db: &Database,
+    lago: &dyn LagoApi,
+    plan: &str,
+    t: &ModelTariff,
+) -> AppResult<bool> {
     let Some(service) = db
         .collection::<DownstreamService>(SERVICES)
         .find_one(doc! {"_id":&t.service_id})

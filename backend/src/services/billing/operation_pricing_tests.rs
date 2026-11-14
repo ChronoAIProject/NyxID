@@ -485,6 +485,8 @@ async fn operation_charges_sync_reprice_retry_cleanup_and_retire_with_their_lane
     assert_eq!(pending_cleanup[&code("lookup")], (Some(2 * PICO), false));
 
     // The durable marker retries until the charge is removed, then retires the rate.
+    // Advance the fixture to the next pass after the uncertain plan lease expires.
+    crate::services::billing::plan_writers_tests::expire_plan_lease(&db, "standard").await;
     lago.fail_removals.store(false, Ordering::SeqCst);
     pricing::retry_pending_service_prices(&db, &lago, "standard")
         .await
@@ -674,7 +676,8 @@ async fn spawn_plan_mock(mock: PlanMock) -> String {
                     str::to_owned,
                 );
                 json!({"lago_id": id, "billable_metric_code": code,
-                    "charge_model": "standard", "properties": charge["properties"]})
+                    "charge_model": "standard", "properties": charge["properties"],
+                    "invoiceable": charge["invoiceable"], "pay_in_advance": charge["pay_in_advance"], "prorated": charge["prorated"]})
             })
             .collect();
         *mock.charges.lock().unwrap() = stored.clone();

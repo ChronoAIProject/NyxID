@@ -1743,6 +1743,12 @@ async fn runtime_price_retry_is_leased_bounded_and_retains_historical_versions()
         "backoff remains authoritative"
     );
     f.db.collection::<Document>(RATE_COLLECTION).update_one(doc!{"_id":&pending.id},doc!{"$set":{"sync_retry_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+    // Advance the fixture to the next pass after the uncertain plan lease expires.
+    crate::services::billing::plan_writers_tests::expire_plan_lease(
+        &f.db,
+        &f.billing.config.lago_plan_code,
+    )
+    .await;
     let (a, b) = tokio::join!(
         f.billing.retry_machine_runtime_rates(1),
         f.billing.retry_machine_runtime_rates(1)

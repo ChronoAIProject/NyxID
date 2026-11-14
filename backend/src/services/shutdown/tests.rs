@@ -214,7 +214,7 @@ async fn shutdown_second_signal_skips_wait_for_registered_work() {
     let db = connect_transaction_test_database("shutdown_second_signal").await;
     let state = test_app_state(db);
     let _work = state.shutdown.work();
-    let drain = drain::Drain::begin(&state.shutdown, Duration::from_secs(600), "SIGTERM").unwrap();
+    let drain = drain::Drain::begin(&state, Duration::from_secs(600), "SIGTERM").unwrap();
     let outcome = tokio::time::timeout(
         Duration::from_millis(200),
         drain.wait(&state, drain.deadline, async { "SIGINT" }),
@@ -230,12 +230,19 @@ async fn shutdown_zero_keeps_readiness_and_background_claims_unchanged() {
     let db = connect_transaction_test_database("shutdown_zero").await;
     let state = test_app_state(db);
     let _work = state.shutdown.work();
-    assert!(drain::Drain::begin(&state.shutdown, Duration::ZERO, "SIGTERM").is_none());
+    assert!(drain::Drain::begin(&state, Duration::ZERO, "SIGTERM").is_none());
     assert!(!state.shutdown.is_draining());
     assert!(state.shutdown.background().is_some());
     assert_eq!(
-        crate::handlers::health::ready(axum::extract::State(state)).await,
+        crate::handlers::health::ready(axum::extract::State(state.clone())).await,
         StatusCode::OK
+    );
+    assert_eq!(state.shutdown.tracked_units(), 1);
+    assert_eq!(
+        state.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type": {"$in": ["backend_shutdown_drain_started", "backend_shutdown_drain"]}})
+            .await.unwrap(),
+        0
     );
 }
 
@@ -515,7 +522,7 @@ async fn shutdown_node_handover_waits_for_late_socket_publication_and_teardown_b
 async fn shutdown_idle_audit_is_one_chained_row_and_audit_failure_cannot_block_exit() {
     let db = connect_transaction_test_database("shutdown_audit").await;
     let state = test_app_state(db.clone());
-    let drain = drain::Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let drain = drain::Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     for _ in 0..2 {
         drain
             .audit(
@@ -550,7 +557,7 @@ async fn shutdown_idle_audit_is_one_chained_row_and_audit_failure_cannot_block_e
     db.run_command(doc! {"collMod": crate::models::audit_log::COLLECTION_NAME,
         "validator": {"event_type": {"$ne":"backend_shutdown_drain"}}, "validationLevel":"strict", "validationAction":"error"}).await.unwrap();
     let other = test_app_state(db);
-    let failed = drain::Drain::begin(&other.shutdown, Duration::from_secs(10), "SIGINT").unwrap();
+    let failed = drain::Drain::begin(&other, Duration::from_secs(10), "SIGINT").unwrap();
     tokio::time::timeout(
         Duration::from_secs(1),
         failed.audit(
@@ -562,6 +569,48 @@ async fn shutdown_idle_audit_is_one_chained_row_and_audit_failure_cannot_block_e
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_start_audit_timeout_is_nonblocking_survives_stop_and_keeps_idle_outcome() {
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    // An open loopback socket with no MongoDB handshake keeps selection pending.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = mongodb::Client::with_uri_str(format!(
+        "mongodb://{}/?directConnection=true&serverSelectionTimeoutMS=60000",
+        listener.local_addr().unwrap()
+    ))
+    .await
+    .unwrap();
+    for budget_secs in [30, 1] {
+        let state = test_app_state(client.database("shutdown_start_audit_timeout"));
+        let before = std::time::Instant::now();
+        let drain =
+            drain::Drain::begin(&state, Duration::from_secs(budget_secs), "SIGTERM").unwrap();
+        assert!(before.elapsed() < Duration::from_millis(250));
+        assert!(drain.counts.is_empty());
+        assert_eq!(state.shutdown.counts().detached, 1);
+        // Match finish_shutdown's join deadline for an immediate second signal.
+        let join_deadline = tokio::time::Instant::now() + drain.cleanup_reserve() * 2 / 3;
+        state.shutdown.stop();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), state.shutdown.tasks_stopped())
+                .await
+                .is_err(),
+            "the pending audit must survive stop"
+        );
+        tokio::time::timeout_at(join_deadline, state.shutdown.tasks_stopped())
+            .await
+            .expect("the audit must finish within bounded cleanup, even with a short budget");
+        assert_eq!(
+            drain
+                .wait(&state, drain.work_deadline(), std::future::pending())
+                .await,
+            drain::End::Idle
+        );
+        assert_eq!(state.shutdown.tracked_units(), 0);
+        assert_eq!(state.shutdown.outcomes(), (0, vec![]));
+    }
 }
 
 #[tokio::test]

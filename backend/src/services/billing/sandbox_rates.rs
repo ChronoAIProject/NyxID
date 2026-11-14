@@ -342,6 +342,7 @@ impl BillingService {
             if !super::reconcile::continue_reconcile() {
                 break;
             }
+            let completed = super::plan_sync::run(&self.db, &card.plan_code, None, super::plan_sync::CacheWrite::Rate, async {
             let result: AppResult<bool> = async {
                 for price in &card.prices {
                     if !super::reconcile::continue_reconcile() {
@@ -384,9 +385,9 @@ impl BillingService {
                 Ok(true)
             }
             .await;
-            if matches!(result, Ok(false)) {
+            if matches!(result, Ok(false)) || super::plan_sync::lost() {
                 // Partial cards stay pending; do not publish a partial sync.
-                break;
+                return Ok(false);
             }
             if let Err(error) = &result {
                 tracing::warn!(
@@ -401,10 +402,12 @@ impl BillingService {
                 .collection::<Document>(COLLECTION_NAME)
                 .update_one(
                     doc! {"_id":&card.id},
-                    doc! {"$set":{"sync_status":if result.is_ok() {"synced"} else {"failed"}}},
+                    doc! {"$set":{"sync_status":if result.is_ok() {"synced"} else if matches!(result,Err(AppError::Conflict(_))) {"pending"} else {"failed"}}},
                 )
                 .await?;
-            if result.is_ok() {
+            Ok(result.is_ok())
+            }).await?;
+            if completed == Some(true) {
                 synced += 1;
             }
         }

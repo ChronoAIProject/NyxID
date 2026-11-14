@@ -446,10 +446,12 @@ pub async fn sync_charge(
     plan: &str,
     input: &super::lago_client::ServicePriceSync,
 ) -> AppResult<()> {
+    let attempt = super::plan_sync::begin(db, plan, &input.metric_code, Some(input)).await?;
     invalidate_plan(db, plan).await?;
     let result = lago.sync_standard_charge(plan, input).await;
     invalidate_plan(db, plan).await?;
-    result
+    result?;
+    super::plan_sync::completed(db, plan, &attempt).await
 }
 pub async fn remove_charge(
     db: &Database,
@@ -457,10 +459,12 @@ pub async fn remove_charge(
     plan: &str,
     code: &str,
 ) -> AppResult<()> {
+    let attempt = super::plan_sync::begin(db, plan, code, None).await?;
     invalidate_plan(db, plan).await?;
     let result = lago.remove_standard_charge(plan, code).await;
     invalidate_plan(db, plan).await?;
-    result
+    result?;
+    super::plan_sync::completed(db, plan, &attempt).await
 }
 pub async fn invalidate_plan(db: &Database, plan: &str) -> AppResult<()> {
     ordering::invalidate_plan(db, plan).await
