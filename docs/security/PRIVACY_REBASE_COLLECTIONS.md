@@ -169,3 +169,14 @@ erasure index calls. Upgrade snapshots now explicitly include the delivery
 queue's indexes and assert both main-owned prefixes exist before branch startup.
 The branch still adds only the accepted 17 indexes and never drops, renames, or
 rebuilds existing indexes.
+
+The rebased telemetry durability fixture also overrode an explicit
+`directConnection=true`, which made the driver follow an advertised member
+outside the dedicated test endpoint. Its command-monitoring helper now honors
+explicit topology options. The test still requires an exactly `Primary` durable
+database handle, majority reads/writes, and snapshot/majority transaction
+evidence; it asserts the exact wire mode for that topology (the driver's Single
+topology encodes `Primary` as `primaryPreferred`). The parse-only
+`replica_command_monitoring_preserves_explicit_topologies` regression covers
+explicit direct/discovery and default discovery without opening a client.
+No replica configuration or container lifecycle change is needed.

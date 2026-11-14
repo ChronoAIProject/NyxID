@@ -287,13 +287,16 @@ pub(crate) async fn connect_test_database_with_command_handler(
     Some(db)
 }
 
-/// Concern assertions need replica discovery: the driver's Single topology
-/// legitimately sends primaryPreferred even for an explicitly Primary handle.
+/// Prefer replica discovery for concern assertions, but honor an explicit
+/// direct connection: advertised members may be outside the test endpoint.
+/// The driver's Single topology legitimately sends primaryPreferred even for
+/// an explicitly Primary handle; tests also assert the handle's selection.
+/// Return its exact expected wire mode so command assertions remain strict.
 /// Retain the ordinary fixture guard until this discovered client is dropped.
 pub(crate) async fn connect_replica_test_database_with_command_handler(
     prefix: &str,
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
-) -> mongodb::Database {
+) -> (mongodb::Database, &'static str) {
     let fixture = connect_test_database(prefix)
         .await
         .expect("Mongo8 fixture required");
@@ -301,7 +304,12 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
         .get()
         .expect("fixture pins its selected URI");
     let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
-    options.direct_connection = Some(false);
+    replica_command_connection(&mut options);
+    let primary_wire_mode = if options.direct_connection == Some(true) {
+        "primaryPreferred"
+    } else {
+        "primary"
+    };
     options.server_selection_timeout = Some(Duration::from_secs(30));
     options.connect_timeout = Some(Duration::from_secs(20));
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
@@ -312,7 +320,13 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
         let _ = keepalive.name();
     }));
     let client = mongodb::Client::with_options(options).unwrap();
-    client.database(fixture.name())
+    (client.database(fixture.name()), primary_wire_mode)
+}
+
+fn replica_command_connection(options: &mut mongodb::options::ClientOptions) {
+    if options.direct_connection.is_none() {
+        options.direct_connection = Some(false);
+    }
 }
 
 /// Connect to a fresh database and prove that it supports multi-document
@@ -4228,6 +4242,28 @@ mod tests {
             let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
             local_test_connection(&mut options);
             assert_eq!(options.direct_connection, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn replica_command_monitoring_preserves_explicit_topologies() {
+        for (uri, expected) in [
+            (
+                "mongodb://127.0.0.1:27105/?replicaSet=rs0&directConnection=true",
+                true,
+            ),
+            (
+                "mongodb://127.0.0.1:27105/?replicaSet=rs0&directConnection=false",
+                false,
+            ),
+            ("mongodb://127.0.0.1:27105/?replicaSet=rs0", false),
+        ] {
+            // Parse only; this test never opens a client or discovers members.
+            let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
+            replica_command_connection(&mut options);
+            assert_eq!(options.direct_connection, Some(expected));
+            assert_eq!(options.hosts.len(), 1);
+            assert_eq!(options.hosts[0].to_string(), "127.0.0.1:27105");
         }
     }
 }

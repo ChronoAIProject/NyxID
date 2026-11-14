@@ -1479,15 +1479,16 @@ mod durability_tests {
         use std::sync::{Arc, Mutex};
         let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
         let observed = commands.clone();
-        let db = crate::test_utils::connect_replica_test_database_with_command_handler(
-            "telemetry_erasure_durable",
-            EventHandler::callback(move |event| {
-                if let CommandEvent::Started(event) = event {
-                    observed.lock().unwrap().push(event.command);
-                }
-            }),
-        )
-        .await;
+        let (db, primary_wire_mode) =
+            crate::test_utils::connect_replica_test_database_with_command_handler(
+                "telemetry_erasure_durable",
+                EventHandler::callback(move |event| {
+                    if let CommandEvent::Started(event) = event {
+                        observed.lock().unwrap().push(event.command);
+                    }
+                }),
+            )
+            .await;
         let weak = db.client().database_with_options(
             db.name(),
             DatabaseOptions::builder()
@@ -1508,6 +1509,10 @@ mod durability_tests {
         // Startup initializes these collections and indexes before admission.
         // Keep cold catalog creation outside the production 250 ms bound.
         let ready_db = super::super::transaction_service::durable_database(&weak);
+        assert!(matches!(
+            ready_db.selection_criteria(),
+            Some(SelectionCriteria::ReadPreference(ReadPreference::Primary))
+        ));
         for (collection, keys) in [
             (
                 super::super::analytics_dispatch_service::COLLECTION,
@@ -1578,11 +1583,14 @@ mod durability_tests {
                     .unwrap(),
                 "majority"
             );
+            // A Single-topology client encodes Primary as primaryPreferred.
+            // The handle assertion above still requires exactly Primary,
+            // and neither wire mode may retain weak's secondary preference.
             assert!(
                 command
                     .get_document("$readPreference")
                     .ok()
-                    .is_none_or(|p| p.get_str("mode").ok() == Some("primary"))
+                    .is_none_or(|p| p.get_str("mode").ok() == Some(primary_wire_mode))
             );
         }
         assert!(
