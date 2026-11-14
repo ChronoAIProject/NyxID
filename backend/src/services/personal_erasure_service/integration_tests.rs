@@ -810,6 +810,22 @@ async fn completed_erasure_redacts_every_persisted_attribution_and_global_identi
         .unwrap();
     accept(&db, &owner, &owner, None).await.unwrap();
     let cases = attribution::seed(&db, &owner, &org, 35).await;
+    // Delivery intent is drained by node, then swept by exact personal owner
+    // in main's final_metadata path. An org actor is attribution, not ownership.
+    let desired = crate::models::node_credential_desired::COLLECTION_NAME;
+    let org_intent = doc! {
+        "_id": "org-delivery-intent", "owner_id": &org, "actor_user_id": &owner,
+        "node_id": "org-node", "service_id": "catalog-service", "service_slug": "catalog-slug",
+        "generation": 1_i64, "pending": true, "retry_at": bson::DateTime::now(),
+    };
+    db.collection::<Document>(desired)
+        .insert_many([
+            doc! {"_id": "personal-delivery-intent", "owner_id": &owner, "actor_user_id": &owner,
+            "node_id": "removed-node", "generation": 1_i64},
+            org_intent.clone(),
+        ])
+        .await
+        .unwrap();
     // Recipient labels and embedded invite usages are removed by their existing
     // grant/invite paths. They participate in the same global identity scan.
     db.collection::<Document>("assistant_agent_shares")
@@ -876,6 +892,20 @@ async fn completed_erasure_redacts_every_persisted_attribution_and_global_identi
     }
     let completed = status(&db, &owner).await.unwrap().unwrap();
     assert_eq!(completed.status, ErasureStatus::Complete, "{completed:?}");
+    assert!(
+        db.collection::<Document>(desired)
+            .find_one(doc! {"_id": "personal-delivery-intent"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<Document>(desired)
+            .find_one(doc! {"_id": "org-delivery-intent"})
+            .await
+            .unwrap(),
+        Some(org_intent)
+    );
     attribution::assert_cases(&db, &cases, true).await;
     attribution::assert_no_identity_outside_audit(&db).await;
     assert_eq!(

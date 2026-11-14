@@ -27,10 +27,10 @@ new index. `channel_send_claims` is also covered by its composite `_id` prefix.
 
 `db::create_connection` awaits the base `db::ensure_indexes` call
 (`backend/src/db.rs:86-92`), and `main` awaits
-`ensure_startup_indexes` (`backend/src/main.rs:814-818`). That awaits
+`ensure_startup_indexes` (`backend/src/main.rs:986-988`). That awaits
 `ensure_indexes` → `ensure_owner_index_gaps` → `create_index(...).await`
 (`backend/src/services/personal_erasure_service.rs:107-132`), before either
-listener binds (`backend/src/main.rs:1715-1723`). Therefore every row below is an
+listener binds (`backend/src/main.rs:1943-1948`). Therefore every row below is an
 awaited startup build: on a large existing collection MongoDB may hold startup
 until the one-time index build completes. This follows the existing startup
 precedent for large collections, where `ensure_indexes` awaits feature-owned
@@ -56,6 +56,12 @@ from `db::ensure_indexes` plus origin/main's security-readiness and personal
 erasure index calls. The upgrade tests run that fixture first, run the branch
 sequence twice, and then replay the fixture to prove mixed-fleet compatibility.
 Paths in the tables below are relative to `backend/src`.
+
+The round-10 rebase adds six registry classifications with no new WS5 indexes.
+See [the collection audit](PRIVACY_REBASE_COLLECTIONS.md) for persisted-field
+quotes, every writer, retention, expected volume, and the test-only evidence.
+The upgrade fixture now uses base `cdcd410c20b0cd45b37b352394b367f348d41c25`
+and includes main's node-delivery indexes.
 
 | Collection | Key | New index name | Why this gap is kept | Startup/build behavior |
 | --- | --- | --- | --- | --- |

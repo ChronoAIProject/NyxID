@@ -1011,6 +1011,13 @@ async fn retain_settled_evidence(db: &Database, job: &PersonalErasureJob) -> App
     Ok(false)
 }
 
+/// Children drained before their erased node; also pinned to the data registry.
+pub(crate) const NODE_DRAIN_COLLECTIONS: &[&str] = &[
+    crate::models::node_pending_credential::COLLECTION_NAME,
+    crate::models::node_service_binding::COLLECTION_NAME,
+    crate::models::node_credential_desired::COLLECTION_NAME,
+];
+
 /// One bounded page. The next pass starts from the first unresolved collection,
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
@@ -1166,11 +1173,7 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         } else {
             state.node_dispatch.drain_inactive(&node_model).await?;
         }
-        for collection in [
-            crate::models::node_pending_credential::COLLECTION_NAME,
-            crate::models::node_service_binding::COLLECTION_NAME,
-            crate::models::node_credential_desired::COLLECTION_NAME,
-        ] {
+        for &collection in NODE_DRAIN_COLLECTIONS {
             if erase_page(&db, &job.user_id, collection, doc! {"node_id":id}).await? {
                 return Ok(false);
             }

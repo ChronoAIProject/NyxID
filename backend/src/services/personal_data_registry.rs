@@ -758,6 +758,13 @@ pub static ENTRIES: &[Entry] = &[
         why: "billing_cutover_operations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
+        collection: "billing_hold_observations",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        why: "billing_hold_observations links wallet, grant, and allowance-period ids to retained financial and billing records; reconciliation removes resolved observations, and personal erasure must preserve outstanding hold-verification evidence.",
+    },
+    Entry {
         collection: "billing_lago_carry",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
@@ -786,6 +793,24 @@ pub static ENTRIES: &[Entry] = &[
         why: "billing_migrations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
+        collection: "billing_plan_charges",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal(
+            "platform plan and metric pricing intents without person identifiers",
+        ),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        why: "billing_plan_charges stores one desired or removed platform price per plan/metric, optional catalog service id, and repair backoff; it has no person, wallet, grant, period, or actor id.",
+    },
+    Entry {
+        collection: "billing_plan_sync",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal(
+            "platform plan synchronization generations without person identifiers",
+        ),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        why: "billing_plan_sync is keyed by platform plan code and records synchronization generations, dirty/uncertain flags, and an opaque provider-attempt UUID, with no person or financial-owner id.",
+    },
+    Entry {
         collection: "billing_pool_recovery",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
@@ -807,11 +832,25 @@ pub static ENTRIES: &[Entry] = &[
         why: "billing_rate_diagnostics is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
+        collection: "billing_rate_epoch",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("singleton platform rate-cache ordering generation"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        why: "billing_rate_epoch stores only the rate-cache singleton id and its generation counter to order platform price publication; neither field identifies a person or financial owner.",
+    },
+    Entry {
         collection: "billing_tax_profiles",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_tax_profiles is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+    },
+    Entry {
+        collection: "billing_tax_plan_epoch",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("singleton platform tax-plan ordering generation"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        why: "billing_tax_plan_epoch stores the all-plans singleton id, generation, and random publication guard token; it contains no tax profile, person, financial-owner, or actor id.",
     },
     Entry {
         collection: "billing_topup_sessions",
@@ -1488,6 +1527,15 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
         why: "mfa_factors stores the person-owned mfa factors record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+    },
+    Entry {
+        collection: "node_credential_desired",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::Domain(
+            "local::pass node drain + personal_erasure_registry::final_metadata",
+        ),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        why: "node_credential_desired is metadata-only delivery intent: main's local::pass drains it by node_id and final_metadata deletes owner_id; org-owned rows retain only opaque actor_user_id, and the transient queue is excluded from export.",
     },
     Entry {
         collection: "node_pending_credentials",
@@ -3478,6 +3526,39 @@ mod tests {
     }
 
     #[test]
+    fn node_delivery_intent_pins_existing_node_drain_and_final_metadata_cleanup() {
+        let collection = crate::models::node_credential_desired::COLLECTION_NAME;
+        let entry = find(collection).expect("registered delivery intent");
+        assert_eq!(entry.owner, OwnerSelector::Fields(&["owner_id"]));
+        assert_eq!(
+            entry.erasure,
+            Erasure::Domain("local::pass node drain + personal_erasure_registry::final_metadata")
+        );
+        assert_eq!(
+            entry.export,
+            Export::Excluded(ExclusionReason::TransientCoordination)
+        );
+        assert!(
+            crate::services::personal_erasure_service::local::NODE_DRAIN_COLLECTIONS
+                .contains(&collection)
+        );
+        let final_metadata = crate::services::personal_erasure_registry::final_metadata("person");
+        assert_eq!(
+            final_metadata
+                .iter()
+                .find(|(name, _)| *name == collection)
+                .map(|(_, filter)| filter),
+            Some(&bson::doc! {"owner_id": "person"})
+        );
+        assert!(
+            !crate::services::personal_erasure_service::local::inventory("person")
+                .iter()
+                .any(|(name, _)| *name == collection),
+            "no competing local-inventory deletion"
+        );
+    }
+
+    #[test]
     fn local_inventory_owner_selectors_match_registry_predicates_and_indexes() {
         let owner = "00000000-0000-0000-0000-000000000001";
         let filters =
@@ -3550,6 +3631,9 @@ mod tests {
             .map(|(collection, _)| collection)
             .collect::<BTreeSet<_>>();
         collections.extend(JOINED_CHILD_SPECS.iter().map(|spec| spec.child));
+        // New base's delivery queue is erased by its existing domain rather
+        // than the inventory. Include its main-owned indexes in upgrade snapshots.
+        collections.insert(crate::models::node_credential_desired::COLLECTION_NAME);
         collections
     }
 
@@ -3974,6 +4058,14 @@ mod tests {
             .await
             .unwrap();
         let origin = index_snapshot(&db).await;
+        assert!(snapshot_has_prefix(
+            &origin["node_credential_desired"],
+            "node_id"
+        ));
+        assert!(snapshot_has_prefix(
+            &origin["node_credential_desired"],
+            "pending"
+        ));
 
         // The checked-in classification is complete relative to the
         // origin/main fixture: every uncovered registry/join predicate is
