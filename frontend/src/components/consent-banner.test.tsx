@@ -6,14 +6,15 @@ import { ConsentBanner } from "./consent-banner";
 import { useConsentStore } from "@/stores/consent-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-const mocks = vi.hoisted(() => ({read:vi.fn(),save:vi.fn()}));
+const mocks = vi.hoisted(() => ({read:vi.fn(),save:vi.fn(),telemetry:true}));
 vi.mock("@/lib/analytics-consent",()=>({readAnalyticsConsent:mocks.read,saveAnalyticsConsent:mocks.save}));
-vi.mock("@/hooks/use-public-config",()=>({usePublicConfig:()=>({data:{telemetry_share_analytics:true}})}));
+vi.mock("@/hooks/use-public-config",()=>({usePublicConfig:()=>({data:{telemetry_share_analytics:mocks.telemetry}})}));
 const original = "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Change this in Settings → Privacy.";
 const initialAuth=useAuthStore.getState(),initialConsent=useConsentStore.getState();
 let client:QueryClient;
 beforeEach(()=>{
   localStorage.clear();
+  mocks.telemetry=true;
   useAuthStore.setState({user:{id:"owner"} as User});
   useConsentStore.setState({accountId:"owner",asked:false,enabled:false,policy:1});
   mocks.read.mockReset().mockResolvedValue({account_id:"owner",enabled:true,policy_version:"1",current_policy_version:"1",diagnostics_offered:false});
@@ -68,4 +69,26 @@ it("a fresh banner cache is reused and window focus does not refetch",async()=>{
   first.unmount();show();
   await act(async()=>{window.dispatchEvent(new Event("focus"));await Promise.resolve();});
   expect(mocks.read).toHaveBeenCalledOnce();
+});
+
+it("unconfigured telemetry makes no preference request and shows no banner", async () => {
+  mocks.telemetry = false;
+  show();
+  await act(async () => { await Promise.resolve(); });
+  expect(mocks.read).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+it("banner preference cache lasts the session across stale time focus and remount", async () => {
+  const clock = vi.spyOn(Date, "now");
+  const now = Date.now();
+  const first = show();
+  await waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
+  first.unmount();
+  clock.mockReturnValue(now + 24 * 60 * 60 * 1000);
+  const second = show();
+  await act(async () => { window.dispatchEvent(new Event("focus")); await Promise.resolve(); });
+  second.unmount();
+  show();
+  expect(mocks.read).toHaveBeenCalledOnce();
+  clock.mockRestore();
 });

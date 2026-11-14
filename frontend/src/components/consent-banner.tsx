@@ -5,7 +5,7 @@ import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { useAuthStore } from '../stores/auth-store';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { readAnalyticsConsent, saveAnalyticsConsent } from '../lib/analytics-consent';
 import { Button } from './ui/button';
 import { useConsentStore } from '../stores/consent-store';
@@ -19,7 +19,19 @@ export function ConsentBanner() {
   const [dismissed, setDismissed] = useState<string | null>(null);
   const accountId = useAuthStore((s) => s.user?.id);
   const [saving, setSaving] = useState(false);
-  const permission = useQuery({ queryKey: ["analytics-consent", accountId], queryFn: () => readAnalyticsConsent(accountId!), enabled: !!accountId && (!asked || deviceEnabled), staleTime: 60_000, refetchOnWindowFocus: false });
+  const queryClient = useQueryClient();
+  const candidate = !!accountId && (!asked || deviceEnabled);
+  const { data: cfg } = usePublicConfig({ enabled: candidate });
+  const telemetryActive = !!(cfg?.telemetry_dsn || cfg?.telemetry_share_analytics);
+  const permission = useQuery({
+    queryKey: ["analytics-consent", accountId],
+    queryFn: () => readAnalyticsConsent(accountId!),
+    enabled: candidate && telemetryActive,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  });
   const offered = permission.data?.diagnostics_offered === true;
   const current = offered && permission.data?.current_policy_version === "2" ? 2 : 1;
   const update = asked && deviceEnabled && permission.data?.enabled && current === 2 && (permission.data.policy_version !== "2" || devicePolicy !== 2);
@@ -33,13 +45,13 @@ export function ConsentBanner() {
   async function choose(enabled: boolean) {
     if (!accountId) return;
     setSaving(true);
-    try { await saveAnalyticsConsent(accountId, enabled, current); await permission.refetch(); }
+    try {
+      const saved = await saveAnalyticsConsent(accountId, enabled, current);
+      queryClient.setQueryData(["analytics-consent", accountId], saved);
+    }
     catch { toast.error(translateErrorMessage('Could not save account analytics permission. This browser remains off.')); }
     finally { setSaving(false); }
   }
-  // The existing first-time banner still follows public telemetry configuration.
-  const { data: cfg } = usePublicConfig({ enabled: !asked });
-
   if (!accountId || (asked && (!update || previouslyDismissed || dismissed === accountId))) return null;
 
   // Default-off contract: when the backend's /public/config reports
@@ -47,7 +59,6 @@ export function ConsentBanner() {
   // nothing to capture — rendering the banner would be user-visible
   // drift from a pre-telemetry deploy. Short-circuit here. The banner
   // still renders normally on any deploy where telemetry could fire.
-  const telemetryActive = !!(cfg?.telemetry_dsn || cfg?.telemetry_share_analytics);
   if (!telemetryActive && current !== 2) return null;
 
   return (

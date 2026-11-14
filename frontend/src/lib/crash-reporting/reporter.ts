@@ -42,12 +42,14 @@ export async function refreshCrashPermission(): Promise<void> {
       generation === epoch &&
       useConsentStore.getState().revision === device.revision &&
       useAuthStore.getState().user?.id === actor
-    )
+    ) {
       available =
         permission.diagnostics_status === "available" &&
         permission.enabled &&
         permission.policy_version === "2" &&
         permission.diagnostics_available === true;
+      if (available) stopped = false;
+    }
   } catch {
     /* Fail closed; capture is optional. */
   }

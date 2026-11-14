@@ -301,19 +301,20 @@ it("observes resource errors and unhandled rejections without cancelling browser
   script.remove();
   remove();
 });
-it("stops the session after 13400 or 13401", async () => {
+it.each([13400, 13401])("a %s stop survives an unavailable refresh and clears on an available refresh", async (code) => {
   const r = await boot();
-  s.api.mockRejectedValueOnce(
-    new (await import("../api-error")).ApiError(403, {
-      error: "crash_report_consent_required",
-      error_code: 13401,
-      message: sentinel,
-    }),
-  );
-  await r.reportCrash(failure());
+  const { ApiError } = await import("../api-error");
+  s.api.mockRejectedValueOnce(new ApiError(code === 13400 ? 404 : 403, {
+    error: "crash_reporting_unavailable", error_code: code, message: sentinel,
+  }));
+  await r.reportCrash(failure(1));
+  s.read.mockResolvedValueOnce({ ...s.permission, diagnostics_status: "not_offered", diagnostics_available: false });
   await r.refreshCrashPermission();
   await r.reportCrash(failure(2));
   expect(s.api).toHaveBeenCalledOnce();
+  await r.refreshCrashPermission();
+  await r.reportCrash(failure(3));
+  expect(s.api).toHaveBeenCalledTimes(2);
 });
 it("React caught-error reporting preserves the rendered fallback", async () => {
   await boot();
