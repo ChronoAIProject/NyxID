@@ -2034,6 +2034,36 @@ mod export_http_tests {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()["format"],
             "nyxid.account-export"
         );
+        let audit = fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {
+                "event_type": "user.data_exported",
+                "user_id": &fixture.owner,
+            })
+            .await
+            .unwrap()
+            .expect("export audit event");
+        let metadata = audit
+            .get_document("event_data")
+            .expect("metadata-only event data");
+        assert_eq!(metadata.get_str("format").unwrap(), "nyxid.account-export");
+        let version = metadata
+            .get("version")
+            .and_then(|value| value.as_i32().or_else(|| value.as_i64().map(|v| v as i32)))
+            .expect("integer export version");
+        assert_eq!(version, 1);
+        assert!(metadata.get_array("sections").is_ok());
+        assert!(metadata.get_array("truncated_sections").is_ok());
+        assert!(metadata.get("byte_size").is_some());
+        assert!(!metadata.contains_key("content"));
+        assert!(
+            !serde_json::to_vec(&metadata)
+                .unwrap()
+                .windows("EXPORT_SECRET_SENTINEL".len())
+                .any(|window| window == b"EXPORT_SECRET_SENTINEL")
+        );
 
         let raw_key = format!("nyxid_{}", Uuid::new_v4().simple());
         let key_id = Uuid::new_v4().to_string();
