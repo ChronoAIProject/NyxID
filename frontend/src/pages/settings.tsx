@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
-import { api, apiClient, ApiError } from "@/lib/api-client";
+import { api, apiBlobClient, apiClient, ApiError } from "@/lib/api-client";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
 import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
@@ -1075,6 +1075,7 @@ function PrivacyTab() {
   const setConsent = useConsentStore((s) => s.setConsent);
   const accountId = useAuthStore((s) => s.user?.id);
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const permission = useQuery({
     queryKey: ["analytics-consent", accountId],
     queryFn: () => readAnalyticsConsent(accountId!),
@@ -1096,10 +1097,53 @@ function PrivacyTab() {
     }
   }
 
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const { blob, filename } = await apiBlobClient("/users/me/export", { method: "POST" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename ?? `nyxid-account-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast.success(translateUi("Your data export is ready."));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.status === 429) {
+          const retry = error.retryAfter ? ` ${translateUi("Try again in {{seconds}} seconds.", { seconds: error.retryAfter })}` : "";
+          toast.error(`${translateUi("Your data export is temporarily rate limited.")}${retry}`);
+        } else if (error.status === 404 || error.status === 405) {
+          toast.error(translateUi("Data export is not available on this server yet."));
+        } else {
+          toast.error(translateUi("We couldn't create your data export. Please try again."));
+        }
+      } else {
+        toast.error(translateUi("We couldn't create your data export. Please try again."));
+      }
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
-    <GroupedList
-      title={translateUi("Usage analytics")}
-      footer={
+    <div className="space-y-6">
+      <GroupedList
+        title={translateUi("Your data")}
+        footer={translateUi("Download a JSON copy of your account profile, services, activity, assistant and channel content, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.")}
+      >
+        <GroupedRow
+          title={translateUi("Download your data")}
+          description={translateUi("Creates a bounded JSON export. You can request one up to three times per hour.")}
+          accessory={<Button variant="outline" size="sm" isLoading={exporting} onClick={() => void handleExport()}>{translateUi("Download")}</Button>}
+        />
+      </GroupedList>
+      <GroupedList
+        title={translateUi("Usage analytics")}
+        footer={
         <>
           <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.")}</p>
           {persistenceError && (
@@ -1121,7 +1165,7 @@ function PrivacyTab() {
           </p>
         </>
       }
-    >
+      >
       <GroupedRow
         title={translateUi("Allow account usage analytics")}
         description={
@@ -1179,6 +1223,7 @@ function PrivacyTab() {
           />
         }
       />
-    </GroupedList>
+      </GroupedList>
+    </div>
   );
 }
