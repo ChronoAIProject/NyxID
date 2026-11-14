@@ -167,6 +167,7 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         ])
         .await
         .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
 
     let mut target_rows = Vec::new();
     let mut bystander_rows = Vec::new();
@@ -268,7 +269,6 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         .await
         .unwrap();
 
-    accept(&db, &owner, &owner, None).await.unwrap();
     for (collection, _, row) in &org_rows {
         db.collection::<Document>(collection)
             .insert_one(row.clone())
