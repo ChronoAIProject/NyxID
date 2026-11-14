@@ -1807,7 +1807,8 @@ mod tests {
         assert!(!url.contains("URL_QUERY"));
         assert!(!url.contains("URL_FRAGMENT"));
         assert!(!url.contains("PATH_TOKEN"));
-        let endpoint = sanitize_url("https://user:pass@api.example.test:8443/v1?token=secret#fragment");
+        let endpoint =
+            sanitize_url("https://user:pass@api.example.test:8443/v1?token=secret#fragment");
         assert_eq!(endpoint, "https://api.example.test:8443");
     }
 
