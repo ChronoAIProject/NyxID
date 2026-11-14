@@ -96,11 +96,107 @@ pub async fn detail(db: &Database, id: &str) -> AppResult<ClientErrorReport> {
         .await?
         .ok_or_else(|| AppError::NotFound("Crash report not found".into()))
 }
+#[derive(Clone, Debug)]
+pub struct VersionData {
+    pub platform: String,
+    pub environment: String,
+    pub app_version: String,
+    pub app_build: String,
+    pub artifact_ids: Vec<String>,
+    pub counts: std::collections::BTreeMap<String, i64>,
+    pub total: i64,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rollout {
+    Off,
+    Killed,
+    Global,
+    Cohort,
+}
 pub struct SummaryData {
-    pub versions: Vec<Document>,
-    pub counters: Vec<Document>,
-    pub exports: Vec<Document>,
-    pub flag_enabled: bool,
+    pub versions: Vec<VersionData>,
+    pub unverified_releases: Vec<VersionData>,
+    pub counters: std::collections::BTreeMap<String, i64>,
+    pub exports: std::collections::BTreeMap<String, i64>,
+    pub rollout: Rollout,
+}
+fn number(d: &Document, key: &str) -> i64 {
+    d.get_i64(key)
+        .unwrap_or_else(|_| i64::from(d.get_i32(key).unwrap_or(0)))
+}
+fn parse_versions(rows: Vec<Document>) -> AppResult<Vec<VersionData>> {
+    rows.into_iter()
+        .map(|d| {
+            let invalid = || AppError::Internal("Invalid crash summary projection".into());
+            let id = d.get_document("_id").map_err(|_| invalid())?;
+            Ok(VersionData {
+                platform: id.get_str("platform").map_err(|_| invalid())?.into(),
+                environment: id.get_str("environment").map_err(|_| invalid())?.into(),
+                app_version: id.get_str("app_version").map_err(|_| invalid())?.into(),
+                app_build: id.get_str("app_build").map_err(|_| invalid())?.into(),
+                artifact_ids: d
+                    .get_array("artifact_ids")
+                    .map_err(|_| invalid())?
+                    .iter()
+                    .filter_map(bson::Bson::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                counts: [
+                    "native_crash",
+                    "js_fatal",
+                    "js_error",
+                    "unhandled_rejection",
+                    "render_error",
+                    "recoverable_error",
+                    "resource_error",
+                ]
+                .into_iter()
+                .map(|k| (k.into(), number(&d, k)))
+                .collect(),
+                total: number(&d, "total"),
+                first_seen: d
+                    .get_datetime("first_seen")
+                    .map_err(|_| invalid())?
+                    .to_chrono(),
+                last_seen: d
+                    .get_datetime("last_seen")
+                    .map_err(|_| invalid())?
+                    .to_chrono(),
+            })
+        })
+        .collect()
+}
+fn parse_counts(rows: Vec<Document>) -> std::collections::BTreeMap<String, i64> {
+    rows.into_iter()
+        .map(|d| {
+            (
+                d.get_str("_id").unwrap_or("unknown").to_owned(),
+                number(&d, "count"),
+            )
+        })
+        .collect()
+}
+pub async fn rollout(db: &Database) -> AppResult<Rollout> {
+    let rows: Vec<crate::models::feature_flag_override::FeatureFlagOverride> = db
+        .collection(crate::models::feature_flag_override::COLLECTION_NAME)
+        .find(doc! {"flag_key": FLAG,"definition_id":null})
+        .await?
+        .try_collect()
+        .await?;
+    let global = rows.iter().find(|r| {
+        r.org_user_id.is_none()
+            && r.target_kind == crate::models::feature_flag_override::FlagTargetKind::Global
+            && r.target_key.is_none()
+    });
+    Ok(match global {
+        Some(r) if !r.enabled => Rollout::Killed,
+        Some(_) => Rollout::Global,
+        None if rows.iter().any(|r| r.enabled) => Rollout::Cohort,
+        _ => Rollout::Off,
+    })
 }
 pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryData> {
     let hours = match query.window.as_deref().unwrap_or("24h") {
@@ -138,29 +234,31 @@ pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryDa
             doc! {"$sum": {"$cond": [{"$eq": ["$report.kind", kind]}, 1, 0]}},
         );
     }
-    let versions = db
+    let mut version_pipeline = vec![
+        doc! {"$match": &filter},
+        super::releases::verification_lookup(),
+        doc! {"$match": {"registered_release.0": {"$exists": true}}},
+        doc! {"$group": group},
+        doc! {"$sort": {"last_seen": -1}},
+        doc! {"$limit": 200},
+        doc! {"$set": {"artifact_ids": {"$slice": [{"$sortArray": {"input": {"$filter": {"input": "$artifact_ids", "as": "artifact", "cond": {"$ne": ["$$artifact", null]}}}, "sortBy": 1}}, 10]}}},
+    ];
+    let versions: Vec<Document> = db
         .collection::<Document>(COLLECTION_NAME)
-        .aggregate(vec![
-            doc! {"$match": &filter},
-            doc! {"$group": group},
-            doc! {"$sort": {"last_seen": -1}},
-            doc! {"$limit": 200},
-            doc! {"$set": {"artifact_ids": {"$slice": [
-                {"$sortArray": {
-                    "input": {"$filter": {
-                        "input": "$artifact_ids", "as": "artifact",
-                        "cond": {"$ne": ["$$artifact", null]}
-                    }},
-                    "sortBy": 1
-                }},
-                10
-            ]}}},
-        ])
+        .aggregate(version_pipeline.clone())
         .max_time(Duration::from_secs(5))
         .await?
         .try_collect()
         .await?;
-    let exports = db
+    version_pipeline[2] = doc! {"$match": {"registered_release.0": {"$exists": false}}};
+    let unverified: Vec<Document> = db
+        .collection::<Document>(COLLECTION_NAME)
+        .aggregate(version_pipeline)
+        .max_time(Duration::from_secs(5))
+        .await?
+        .try_collect()
+        .await?;
+    let exports: Vec<Document> = db
         .collection::<Document>(COLLECTION_NAME)
         .aggregate(vec![
             doc! {"$match": filter},
@@ -175,7 +273,7 @@ pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryDa
     if let Some(platform) = query.platform {
         counter_filter.insert("platform", platform.as_str());
     }
-    let counters = db
+    let counters: Vec<Document> = db
         .collection::<Document>(COUNTERS)
         .aggregate(vec![
             doc! {"$match": counter_filter},
@@ -185,16 +283,11 @@ pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryDa
         .await?
         .try_collect()
         .await?;
-    let flag_enabled = !global_killed(db).await?
-        && db
-            .collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME)
-            .find_one(doc! {"flag_key": FLAG, "enabled": true})
-            .await?
-            .is_some();
     Ok(SummaryData {
-        versions,
-        counters,
-        exports,
-        flag_enabled,
+        versions: parse_versions(versions)?,
+        unverified_releases: parse_versions(unverified)?,
+        counters: parse_counts(counters),
+        exports: parse_counts(exports),
+        rollout: rollout(db).await?,
     })
 }

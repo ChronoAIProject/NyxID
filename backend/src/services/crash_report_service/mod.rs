@@ -1,5 +1,6 @@
 //! First-party, policy-2 diagnostic admission and owner-linked local storage.
 pub mod admin;
+pub mod releases;
 pub mod validation;
 use crate::{
     errors::{AppError, AppResult},
@@ -16,55 +17,107 @@ use std::time::Duration;
 
 pub const FLAG: &str = super::feature_flag_service::CRASH_REPORTS_FLAG_KEY;
 
-pub async fn global_killed(db: &Database) -> AppResult<bool> {
-    Ok(db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME).find_one(doc! {
-        "flag_key": FLAG, "definition_id": null, "org_user_id": null, "target_kind": "global", "target_key": null, "enabled": false
-    }).await?.is_some())
+/// Only definitive denials may destroy a client's pending reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsStatus {
+    Available,
+    ConsentRequired,
+    NotOffered,
+    Unknown,
 }
-async fn offered_with_readiness(db: &Database, actor: &str, serving: bool) -> bool {
-    if !serving {
-        return false;
+impl DiagnosticsStatus {
+    pub fn offered(self) -> bool {
+        matches!(self, Self::Available | Self::ConsentRequired)
     }
-    // Resolve the flag directly: personal_flag_enabled also performs diagnostic
-    // readiness reads, which this caller has already completed.
-    if !super::feature_flag_service::resolve_personal_features(db, actor)
-        .await
-        .is_ok_and(|flags| flags.iter().any(|flag| flag == FLAG))
+    pub fn admission(self) -> AppResult<()> {
+        match self {
+            Self::Available | Self::ConsentRequired => Ok(()),
+            Self::NotOffered => Err(AppError::CrashReportingUnavailable),
+            Self::Unknown => Err(AppError::SecurityReadinessUnavailable),
+        }
+    }
+}
+// Absence only: a positive rollout is always resolved live. This process serves
+// one application database; isolated test databases have unique names.
+static NEGATIVE_SCOPES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+fn cache_key(db: &Database) -> String {
+    db.name().to_owned()
+}
+pub fn invalidate_rollout_cache(db: &Database) {
+    NEGATIVE_SCOPES
+        .lock()
+        .expect("rollout cache")
+        .remove(&cache_key(db));
+}
+async fn has_enabled_scope(db: &Database) -> AppResult<bool> {
+    let key = cache_key(db);
+    if NEGATIVE_SCOPES
+        .lock()
+        .expect("rollout cache")
+        .get(&key)
+        .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
     {
-        return false;
+        return Ok(false);
     }
-    matches!(global_killed(db).await, Ok(false))
+    let enabled = db
+        .collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .find_one(doc! {"flag_key": FLAG, "definition_id": null, "enabled": true})
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some();
+    if !enabled {
+        let mut cache = NEGATIVE_SCOPES.lock().expect("rollout cache");
+        cache.retain(|_, at| at.elapsed() < Duration::from_secs(5));
+        if cache.len() < 1024 {
+            cache.insert(key, std::time::Instant::now());
+        }
+    }
+    Ok(enabled)
 }
-pub async fn available(db: &Database, actor: &str) -> bool {
-    let serving = super::security_readiness_service::require_serving(db, FLAG)
-        .await
-        .is_ok();
-    offered_with_readiness(db, actor, serving).await
+async fn offered_status(db: &Database, actor: &str) -> AppResult<DiagnosticsStatus> {
+    if !has_enabled_scope(db).await? {
+        return Ok(DiagnosticsStatus::NotOffered);
+    }
+    let (enabled, killed) = super::feature_flag_service::resolve_crash_reporting(db, actor).await?;
+    if killed || !enabled {
+        return Ok(DiagnosticsStatus::NotOffered);
+    }
+    super::security_readiness_service::require_serving(db, FLAG).await?;
+    Ok(DiagnosticsStatus::ConsentRequired)
 }
 async fn bounded_policy_status(
-    check: impl std::future::Future<Output = (bool, bool)>,
-) -> (&'static str, bool, bool) {
-    let (offered, available) = tokio::time::timeout(Duration::from_millis(250), check)
+    check: impl std::future::Future<Output = AppResult<DiagnosticsStatus>>,
+) -> DiagnosticsStatus {
+    tokio::time::timeout(Duration::from_millis(250), check)
         .await
-        .unwrap_or((false, false));
-    (if offered { "2" } else { "1" }, offered, available)
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(DiagnosticsStatus::Unknown)
+}
+pub async fn eligibility(db: &Database, actor: &str) -> DiagnosticsStatus {
+    bounded_policy_status(offered_status(db, actor)).await
+}
+#[cfg(test)]
+pub async fn available(db: &Database, actor: &str) -> bool {
+    eligibility(db, actor).await.offered()
 }
 pub async fn policy_status(
     db: &Database,
     actor: &str,
     value: &crate::models::user::AnalyticsConsent,
-) -> (&'static str, bool, bool) {
-    bounded_policy_status(async {
-        let serving = super::security_readiness_service::require_serving(db, FLAG)
-            .await
-            .is_ok();
-        let offered = offered_with_readiness(db, actor, serving).await;
-        let available = offered
-            && value.enabled
-            && value.policy_version.as_deref() == Some(consent::POLICY_VERSION_DIAGNOSTICS);
-        (offered, available)
-    })
-    .await
+) -> DiagnosticsStatus {
+    let status = eligibility(db, actor).await;
+    if status.offered()
+        && value.enabled
+        && value.policy_version.as_deref() == Some(consent::POLICY_VERSION_DIAGNOSTICS)
+    {
+        DiagnosticsStatus::Available
+    } else {
+        status
+    }
 }
 pub async fn rate_limits(db: &Database, actor: &str, ip: Option<&str>) -> AppResult<()> {
     let limits = [
@@ -145,7 +198,7 @@ pub async fn insert(
         received_at: now,
         expires_at: now + chrono::Duration::days(i64::from(config.retention_days)),
         export: Export {
-            status: if destination.is_some() {
+            status: if destination.is_some() && !config.interval.is_zero() {
                 ExportStatus::Pending
             } else {
                 ExportStatus::Disabled
@@ -169,6 +222,19 @@ pub async fn insert(
     }
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    releases::ensure_indexes(db).await?;
+    db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"flag_key":1,"enabled":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("crash_enabled_scope".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     let specs = [
         (
             doc! {"user_id": 1, "event_id": 1},
@@ -237,3 +303,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 }
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod review_tests;

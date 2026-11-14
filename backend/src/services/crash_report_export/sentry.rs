@@ -70,6 +70,7 @@ pub fn envelope(safe: &SanitizedReport<'_>) -> Vec<u8> {
         "event_id": event_id, "timestamp": r.captured_at, "level": safe.severity,
         "platform": if native {"cocoa"} else {"javascript"}, "release": release, "dist": r.app_build,
         "environment": safe.environment,
+        "sdk": {"name": "nyxid.crash-export", "version": env!("CARGO_PKG_VERSION"), "settings": {"infer_ip": "never"}},
         "exception": {"values": [{"type": r.native_signal.map(|s| s.as_str()).unwrap_or(r.exception_class.as_str()),
             "mechanism": {"type": r.kind.as_str(), "handled": matches!(r.kind, Kind::RenderError | Kind::RecoverableError | Kind::ResourceError)},
             "stacktrace": {"frames": frames}}]},

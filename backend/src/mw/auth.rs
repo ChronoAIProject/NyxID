@@ -664,9 +664,6 @@ fn is_delegated_native_path(path: &str) -> bool {
 /// never reach. Matching is segment-based so adjacent names such as
 /// `/nodesXYZ` and `/administer` remain ordinary default-allowed GET paths.
 fn delegated_read_denied_path(path: &str) -> bool {
-    if path.starts_with("/api/v1/admin/crash-reports") {
-        return true;
-    }
     if path == "/api/v1/llm/gateway/v1/assistant-model-context" {
         return true;
     }
@@ -5391,8 +5388,16 @@ mod crash_management_boundary_tests {
             "/api/v1/admin/crash-reports",
             "/api/v1/admin/crash-reports/summary",
             "/api/v1/admin/crash-reports/123",
+            "/api/v1/admin/crash-reports/releases",
         ] {
             assert!(super::delegated_read_denied_path(path));
         }
+        assert!(!super::delegated_read_denied_path(
+            "/api/v1/administer/crash-reportsX"
+        ));
+        // The existing entire admin segment also denies adjacent admin resources.
+        assert!(super::delegated_read_denied_path(
+            "/api/v1/admin/crash-reportsX"
+        ));
     }
 }

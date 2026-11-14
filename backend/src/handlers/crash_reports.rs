@@ -47,10 +47,8 @@ pub async fn ingest(
 ) -> AppResult<Response> {
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
-    if !service::available(&state.db, &actor).await {
-        service::count(&state.db, None, "unavailable").await;
-        return Err(AppError::CrashReportingUnavailable);
-    }
+    // No counter write on an unthrottled, default-off admission path.
+    service::eligibility(&state.db, &actor).await.admission()?;
     let ip = crate::mw::rate_limit::resolve_client_ip_for_rate_limit(
         &headers,
         peer.ok().map(|p| p.0),
@@ -95,6 +93,8 @@ pub async fn ingest(
         service::count(&state.db, Some(platform), "consent_denied").await;
         return Err(AppError::CrashReportConsentRequired);
     }
+    service::validation::validate(&request.report, chrono::Utc::now())?;
+    service::releases::auto_register_web(&state.db, &state.config, &request.report).await;
     match service::insert(
         &state.db,
         &state.crash_reports,
@@ -296,11 +296,14 @@ struct HealthResponse {
     destination_ids: Vec<String>,
     retention_days: u32,
     flag_enabled: bool,
+    rollout: service::admin::Rollout,
+    export_enabled: bool,
 }
 #[derive(Serialize)]
 struct SummaryResponse {
     health: HealthResponse,
     versions: Vec<VersionResponse>,
+    unverified_releases: Vec<VersionResponse>,
 }
 pub async fn summary(
     State(state): State<AppState>,
@@ -309,78 +312,67 @@ pub async fn summary(
 ) -> AppResult<Response> {
     require_admin(&state, &auth).await?;
     let data = service::admin::summary(&state.db, &query).await?;
-    let counts = |rows: Vec<bson::Document>| {
-        rows.into_iter()
-            .map(|d| {
-                (
-                    d.get_str("_id").unwrap_or("unknown").to_owned(),
-                    number(&d, "count"),
-                )
-            })
-            .collect()
-    };
-    let versions = data
-        .versions
-        .into_iter()
-        .map(|d| {
-            let id = d.get_document("_id").cloned().unwrap_or_default();
-            let artifact_ids: Vec<String> = d
-                .get_array("artifact_ids")
-                .into_iter()
-                .flatten()
-                .filter_map(bson::Bson::as_str)
-                .map(str::to_owned)
-                .collect();
-            VersionResponse {
-                platform: string(&id, "platform"),
-                environment: string(&id, "environment"),
-                app_version: string(&id, "app_version"),
-                app_build: string(&id, "app_build"),
-                artifact_id: artifact_ids
-                    .first()
-                    .filter(|_| artifact_ids.len() == 1)
-                    .cloned(),
-                artifact_ids,
-                total: number(&d, "total"),
-                first_seen: time(&d, "first_seen"),
-                last_seen: time(&d, "last_seen"),
-                counts: [
-                    "native_crash",
-                    "js_fatal",
-                    "js_error",
-                    "unhandled_rejection",
-                    "render_error",
-                    "recoverable_error",
-                    "resource_error",
-                ]
-                .into_iter()
-                .map(|k| (k.to_owned(), number(&d, k)))
-                .collect(),
-            }
-        })
-        .collect();
     Ok(no_store(SummaryResponse {
         health: HealthResponse {
-            outcomes: counts(data.counters),
-            export_statuses: counts(data.exports),
+            outcomes: data.counters,
+            export_statuses: data.exports,
             destination_ids: state.crash_reports.destination_ids(),
             retention_days: state.crash_reports.retention_days,
-            flag_enabled: data.flag_enabled,
+            flag_enabled: matches!(
+                data.rollout,
+                service::admin::Rollout::Global | service::admin::Rollout::Cohort
+            ),
+            rollout: data.rollout,
+            export_enabled: !state.crash_reports.interval.is_zero()
+                && !state.crash_reports.destination_ids().is_empty(),
         },
-        versions,
+        versions: data.versions.into_iter().map(Into::into).collect(),
+        unverified_releases: data
+            .unverified_releases
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     }))
 }
-fn number(d: &bson::Document, key: &str) -> i64 {
-    d.get_i64(key)
-        .unwrap_or_else(|_| i64::from(d.get_i32(key).unwrap_or(0)))
-}
-fn string(d: &bson::Document, key: &str) -> String {
-    d.get_str(key).unwrap_or_default().to_owned()
-}
-fn time(d: &bson::Document, key: &str) -> String {
-    d.get_datetime(key)
-        .map(|d| d.to_chrono().to_rfc3339())
-        .unwrap_or_default()
+impl From<service::admin::VersionData> for VersionResponse {
+    fn from(v: service::admin::VersionData) -> Self {
+        Self {
+            platform: v.platform,
+            environment: v.environment,
+            app_version: v.app_version,
+            app_build: v.app_build,
+            artifact_id: v
+                .artifact_ids
+                .first()
+                .filter(|_| v.artifact_ids.len() == 1)
+                .cloned(),
+            artifact_ids: v.artifact_ids,
+            counts: v.counts,
+            total: v.total,
+            first_seen: v.first_seen.to_rfc3339(),
+            last_seen: v.last_seen.to_rfc3339(),
+        }
+    }
 }
 #[cfg(test)]
 mod tests;
+
+/// Release registration is an explicit admin write, never an operator/delegated action.
+pub async fn register_release(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<service::releases::RegisterRelease>,
+) -> AppResult<Response> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    body.validate()?;
+    crate::services::audit_service::log_actor_event(state.db.clone(), &crate::services::audit_service::AuditActor::from_auth_user(&auth), "crash_reports.release_registered", Some(serde_json::json!({"platform": body.platform.as_str(), "app_version": body.app_version, "app_build": body.app_build, "artifact_id": body.artifact_id}))).await?;
+    service::releases::register(
+        &state.db,
+        &body,
+        crate::models::client_release_registry::ReleaseSource::Admin,
+        Some(&auth.user_id.to_string()),
+    )
+    .await?;
+    Ok(no_store(serde_json::json!({"status":"registered"})))
+}

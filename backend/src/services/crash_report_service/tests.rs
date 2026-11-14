@@ -16,10 +16,10 @@ pub(crate) async fn account(name: &str) -> (Database, String, String) {
         .insert_one(test_user(&id, UserType::Person))
         .await
         .unwrap();
-    let revision = consent::set_acknowledging(&db, &id, true, consent::PolicyVersion::Diagnostics)
-        .await
-        .unwrap()
-        .revision;
+    // Seed an existing policy-2 account independently of rollout. Production
+    // acknowledgements are tested through the offered-only service/HTTP path.
+    let revision = uuid::Uuid::new_v4().to_string();
+    db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id":&id},doc! {"$set":{"profile_config.analytics":{"enabled":true,"policy_version":"2","revision":&revision,"changed_at":bson::DateTime::now()}}}).await.unwrap();
     (db, id, revision)
 }
 #[test]
@@ -146,6 +146,16 @@ async fn consent_matrix_storage_duplicate_ttl_and_expired_reads() {
             .is_some_and(|o| o.name.as_deref() == Some("crash_ttl")
                 && o.expire_after == Some(Duration::ZERO)))
     );
+    super::super::security_readiness_service::ready_test_replica(&db).await;
+    super::super::feature_flag_service::set_platform_override(
+        &db,
+        FLAG,
+        &super::super::feature_flag_service::FlagTarget::User(id.clone()),
+        true,
+        &id,
+    )
+    .await
+    .unwrap();
     for policy in [
         consent::PolicyVersion::V1,
         consent::PolicyVersion::Diagnostics,
@@ -243,6 +253,7 @@ async fn admin_aggregation_pagination_and_window_filters_are_correct() {
         let mut r = report();
         r.kind = kind;
         artifacts.push(r.artifact_id.clone().unwrap());
+        register_report_release(&db, &r).await;
         insert(&db, &CrashConfig::default(), "test", &id, &rev, r)
             .await
             .unwrap();
@@ -260,16 +271,10 @@ async fn admin_aggregation_pagination_and_window_filters_are_correct() {
     artifacts.dedup();
     assert_eq!(summary.versions.len(), 1);
     let version = &summary.versions[0];
-    assert_eq!(version.get_i32("total").unwrap(), 3);
-    assert_eq!(version.get_i32("js_error").unwrap(), 2);
-    assert_eq!(version.get_i32("render_error").unwrap(), 1);
-    assert_eq!(
-        version.get_array("artifact_ids").unwrap(),
-        &artifacts
-            .into_iter()
-            .map(bson::Bson::String)
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(version.total, 3);
+    assert_eq!(version.counts["js_error"], 2);
+    assert_eq!(version.counts["render_error"], 1);
+    assert_eq!(version.artifact_ids, artifacts);
     let query = admin::ReportQuery {
         limit: Some(2),
         ..Default::default()
@@ -310,6 +315,7 @@ async fn admin_aggregation_combines_native_and_js_for_the_same_version_build() {
             r.artifact_id = Some(artifact.clone());
             r.js_frames[0].asset = "main.jsbundle".into();
         }
+        register_report_release(&db, &r).await;
         insert(&db, &CrashConfig::default(), "test", &id, &rev, r)
             .await
             .unwrap();
@@ -322,20 +328,20 @@ async fn admin_aggregation_combines_native_and_js_for_the_same_version_build() {
     assert_eq!(summary.versions.len(), 1);
     let version = &summary.versions[0];
     assert_eq!(
-        version.get_document("_id").unwrap(),
-        &doc! {
-            "platform": "ios", "environment": "test", "app_version": "1.0.4", "app_build": "45"
-        }
+        (
+            &*version.platform,
+            &*version.environment,
+            &*version.app_version,
+            &*version.app_build
+        ),
+        ("ios", "test", "1.0.4", "45")
     );
-    assert_eq!(version.get_i32("total").unwrap(), 3);
+    assert_eq!(version.total, 3);
     for kind in ["native_crash", "js_fatal", "unhandled_rejection"] {
-        assert_eq!(version.get_i32(kind).unwrap(), 1);
+        assert_eq!(version.counts[kind], 1);
     }
-    assert_eq!(version.get_i32("js_error").unwrap(), 0);
-    assert_eq!(
-        version.get_array("artifact_ids").unwrap(),
-        &vec![bson::Bson::String(artifact)]
-    );
+    assert_eq!(version.counts["js_error"], 0);
+    assert_eq!(version.artifact_ids, vec![artifact]);
     let (reports, _) = admin::list(
         &db,
         &admin::ReportQuery {
@@ -356,13 +362,8 @@ async fn admin_aggregation_combines_native_and_js_for_the_same_version_build() {
         .unwrap();
     let summary = admin::summary(&db, &query).await.unwrap();
     assert_eq!(summary.versions.len(), 1);
-    assert_eq!(summary.versions[0].get_i32("total").unwrap(), 3);
-    assert!(
-        summary.versions[0]
-            .get_array("artifact_ids")
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(summary.versions[0].total, 3);
+    assert!(summary.versions[0].artifact_ids.is_empty());
 }
 
 #[tokio::test]
@@ -374,6 +375,7 @@ async fn admin_version_artifact_ids_are_distinct_sorted_and_bounded() {
     for artifact in artifacts.iter().rev().chain(artifacts.iter().take(2)) {
         let mut r = report();
         r.artifact_id = Some(artifact.clone());
+        register_report_release(&db, &r).await;
         insert(&db, &CrashConfig::default(), "test", &id, &rev, r)
             .await
             .unwrap();
@@ -388,15 +390,10 @@ async fn admin_version_artifact_ids_are_distinct_sorted_and_bounded() {
     .await
     .unwrap();
     assert_eq!(summary.versions.len(), 1);
-    assert_eq!(summary.versions[0].get_i32("total").unwrap(), 14);
+    assert_eq!(summary.versions[0].total, 14);
     assert_eq!(
-        summary.versions[0].get_array("artifact_ids").unwrap(),
-        &artifacts
-            .iter()
-            .take(10)
-            .cloned()
-            .map(bson::Bson::String)
-            .collect::<Vec<_>>()
+        summary.versions[0].artifact_ids,
+        artifacts.iter().take(10).cloned().collect::<Vec<_>>()
     );
 }
 use futures::TryStreamExt;
@@ -446,7 +443,86 @@ async fn policy_status_timeout_fails_closed_without_failing_consent() {
     let start = std::time::Instant::now();
     assert_eq!(
         bounded_policy_status(std::future::pending()).await,
-        ("1", false, false)
+        DiagnosticsStatus::Unknown
     );
     assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+pub(crate) async fn register_report_release(db: &Database, r: &CrashReportV1) {
+    releases::register(
+        db,
+        &releases::RegisterRelease {
+            platform: r.platform,
+            app_version: r.app_version.clone(),
+            app_build: r.app_build.clone(),
+            artifact_id: r.artifact_id.clone(),
+        },
+        crate::models::client_release_registry::ReleaseSource::Admin,
+        None,
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn transient_policy_failures_are_unknown_and_only_definitive_denial_is_13400() {
+    assert_eq!(
+        bounded_policy_status(async { Err(AppError::SecurityReadinessUnavailable) }).await,
+        DiagnosticsStatus::Unknown
+    );
+    assert!(matches!(
+        DiagnosticsStatus::Unknown.admission(),
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert!(matches!(
+        DiagnosticsStatus::NotOffered.admission(),
+        Err(AppError::CrashReportingUnavailable)
+    ));
+    let (db, id, _) = account("crash_eligibility").await;
+    assert_eq!(eligibility(&db, &id).await, DiagnosticsStatus::NotOffered);
+    super::super::security_readiness_service::ready_test_replica(&db).await;
+    super::super::feature_flag_service::set_platform_override(
+        &db,
+        FLAG,
+        &super::super::feature_flag_service::FlagTarget::User(id.clone()),
+        true,
+        &id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        eligibility(&db, &id).await,
+        DiagnosticsStatus::ConsentRequired
+    );
+    // A malformed matching override simulates resolution/decoding failure, not denial.
+    db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .update_one(
+            doc! {"flag_key":FLAG},
+            doc! {"$set":{"target_kind":"broken"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(eligibility(&db, &id).await, DiagnosticsStatus::Unknown);
+}
+#[tokio::test]
+async fn release_verification_is_live_and_needs_no_report_backfill() {
+    let (db, id, rev) = account("crash_registry_aggregation").await;
+    let mut r = report();
+    r.platform = Platform::Ios;
+    r.runtime = None;
+    r.js_frames.clear();
+    r.artifact_id = None;
+    insert(&db, &CrashConfig::default(), "test", &id, &rev, r.clone())
+        .await
+        .unwrap();
+    let q = admin::SummaryQuery {
+        window: None,
+        platform: None,
+    };
+    let before = admin::summary(&db, &q).await.unwrap();
+    assert!(before.versions.is_empty());
+    assert_eq!(before.unverified_releases[0].total, 1);
+    register_report_release(&db, &r).await;
+    let after = admin::summary(&db, &q).await.unwrap();
+    assert_eq!(after.versions[0].total, 1);
+    assert!(after.unverified_releases.is_empty());
 }

@@ -73,6 +73,15 @@ pub async fn set_acknowledging(
     enabled: bool,
     acknowledged: PolicyVersion,
 ) -> AppResult<AnalyticsConsent> {
+    if matches!(acknowledged, PolicyVersion::Diagnostics)
+        && !super::crash_report_service::eligibility(db, user_id)
+            .await
+            .offered()
+    {
+        return Err(AppError::ValidationError(
+            "Diagnostics permission is not currently offered".into(),
+        ));
+    }
     // A random revision invalidates previously admitted work even on same-ms
     // withdraw/regrant or wall-clock rollback. Majority acknowledgement prevents
     // an acknowledged withdrawal being rolled back on ordinary primary failover.

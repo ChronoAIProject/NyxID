@@ -225,6 +225,7 @@ async fn admin_operator_projection_and_nonhuman_denial() {
     assert!(require_admin(&state, &auth).await.is_err());
     let report = report();
     let artifact = report.artifact_id.clone().unwrap();
+    service::tests::register_report_release(&db, &report).await;
     let (_, report_id) = service::insert(&db, &state.crash_reports, "test", &id, &rev, report)
         .await
         .unwrap();
@@ -444,4 +445,73 @@ async fn crash_status_lookup_failures_do_not_fail_consent_get_or_put() {
     assert!(!response.enabled);
     assert!(!response.diagnostics_offered);
     assert_eq!(response.policy_version.as_deref(), Some("1"));
+}
+
+#[tokio::test]
+async fn release_registration_is_admin_only_first_party_validated_and_metadata_audited() {
+    use crate::services::role_service;
+    use mongodb::bson::doc;
+    let (db, id, _) = account("crash_register_admin").await;
+    role_service::seed_system_roles(&db).await.unwrap();
+    let roles = role_service::get_platform_role_ids(&db).await.unwrap();
+    let state = test_app_state(db.clone());
+    let auth = test_auth_user(&id);
+    let request = || service::releases::RegisterRelease {
+        platform: Platform::Ios,
+        app_version: "1.0.4".into(),
+        app_build: "45".into(),
+        artifact_id: None,
+    };
+    for (role, allowed) in [
+        (None, false),
+        (Some(roles.operator), false),
+        (Some(roles.admin), true),
+    ] {
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"role_ids":role.clone().into_iter().collect::<Vec<_>>()}},
+            )
+            .await
+            .unwrap();
+        let result = register_release(State(state.clone()), auth.clone(), Json(request())).await;
+        assert_eq!(result.is_ok(), allowed);
+    }
+    // The final loop role was admin, and the authoritative registry proves it succeeded.
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::client_release_registry::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    let audit = db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"event_type":"crash_reports.release_registered"})
+        .await
+        .unwrap()
+        .unwrap();
+    let text = serde_json::to_string(&audit).unwrap();
+    assert!(!text.contains("consent_revision"));
+    assert!(text.contains("1.0.4"));
+    for method in [
+        crate::mw::auth::AuthMethod::ApiKey,
+        crate::mw::auth::AuthMethod::Delegated,
+        crate::mw::auth::AuthMethod::ServiceAccount,
+    ] {
+        let mut other = auth.clone();
+        other.auth_method = method;
+        assert!(
+            register_release(State(state.clone()), other, Json(request()))
+                .await
+                .is_err()
+        );
+    }
+    let mut bad = request();
+    bad.app_version = "SECRET_SENTINEL/person@example.test".into();
+    assert!(matches!(
+        register_release(State(state), auth, Json(bad)).await,
+        Err(AppError::ValidationError(_))
+    ));
+    assert!(serde_json::from_value::<service::releases::RegisterRelease>(serde_json::json!({"platform":"ios","app_version":"1","app_build":"1","message":"SECRET_SENTINEL"})).is_err());
 }

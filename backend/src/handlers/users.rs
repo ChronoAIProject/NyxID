@@ -1868,6 +1868,7 @@ pub struct AnalyticsConsentResponse {
     pub current_policy_version: String,
     pub diagnostics_offered: bool,
     pub diagnostics_available: bool,
+    pub diagnostics_status: crate::services::crash_report_service::DiagnosticsStatus,
     pub account_id: String,
     pub policy_version: Option<String>,
     pub revision: String,
@@ -1880,8 +1881,7 @@ async fn analytics_consent_response(
     account_id: &str,
     value: crate::models::user::AnalyticsConsent,
 ) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
-    let (current, offered, diagnostics) =
-        crate::services::crash_report_service::policy_status(db, account_id, &value).await;
+    let status = crate::services::crash_report_service::policy_status(db, account_id, &value).await;
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -1890,9 +1890,11 @@ async fn analytics_consent_response(
     (
         headers,
         Json(AnalyticsConsentResponse {
-            current_policy_version: current.into(),
-            diagnostics_offered: offered,
-            diagnostics_available: diagnostics,
+            current_policy_version: if status.offered() { "2" } else { "1" }.into(),
+            diagnostics_offered: status.offered(),
+            diagnostics_available: status
+                == crate::services::crash_report_service::DiagnosticsStatus::Available,
+            diagnostics_status: status,
             account_id: account_id.to_owned(),
             policy_version: value.policy_version,
             revision: value.revision,

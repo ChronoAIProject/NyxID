@@ -1090,6 +1090,41 @@ pub async fn resolve_personal_features(
     ))
 }
 
+/// Resolve just the built-in diagnostics flag, sharing its override snapshot
+/// with the global kill switch. No definition inventory or per-org fan-out.
+pub(crate) async fn resolve_crash_reporting(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<(bool, bool)> {
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+    let mut scopes = vec![bson::Bson::Null];
+    scopes.extend(
+        memberships
+            .iter()
+            .map(|m| bson::Bson::String(m.org_user_id.clone())),
+    );
+    let rows: Vec<FeatureFlagOverride> = db.collection(COLLECTION_NAME)
+        .find(doc! {"flag_key": CRASH_REPORTS_FLAG_KEY, "definition_id": null, "org_user_id": {"$in": scopes}}).await?.try_collect().await?;
+    let (org, platform): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.org_user_id.is_some());
+    let killed = platform
+        .iter()
+        .any(|r| r.target_kind == FlagTargetKind::Global && r.target_key.is_none() && !r.enabled);
+    let roles: Vec<_> = memberships
+        .into_iter()
+        .map(|m| (m.org_user_id, m.role))
+        .collect();
+    let enabled = resolve_personal_definitions(
+        [(CRASH_REPORTS_FLAG_KEY, false, None)],
+        &platform,
+        &org,
+        &roles,
+        user_id,
+    )
+    .iter()
+    .any(|k| k == CRASH_REPORTS_FLAG_KEY);
+    Ok((enabled, killed))
+}
+
 /// Signup has no user or organization yet, so only the global override applies.
 pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &INVITATION_CODE_FLAG).await
@@ -1505,6 +1540,9 @@ async fn upsert_override_row(
             AppError::Internal("feature flag override upsert did not return the row".to_string())
         })?;
 
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db);
+    }
     Ok(row)
 }
 
@@ -1588,6 +1626,9 @@ pub async fn set_platform_override(
                 "platform feature flag override upsert did not return the row".to_string(),
             )
         })?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db);
+    }
     Ok(row)
 }
 
@@ -1613,6 +1654,9 @@ pub async fn clear_platform_override(
             "target_key": target_key,
         })
         .await?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db);
+    }
     Ok(row)
 }
 
@@ -1667,6 +1711,9 @@ pub async fn clear_platform_org_override(
             "target_key": bson::Bson::Null,
         })
         .await?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db);
+    }
     Ok(row)
 }
 

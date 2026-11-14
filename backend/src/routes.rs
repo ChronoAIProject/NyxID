@@ -1200,6 +1200,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::crash_reports::summary),
         )
         .route("/crash-reports", get(handlers::crash_reports::list))
+        .route(
+            "/crash-reports/releases",
+            post(handlers::crash_reports::register_release),
+        )
         .route("/crash-reports/{id}", get(handlers::crash_reports::detail))
         .route(
             "/security-readiness",

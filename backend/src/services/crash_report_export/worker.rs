@@ -26,6 +26,9 @@ pub fn spawn(db: Database, config: Arc<CrashConfig>) {
     });
 }
 pub async fn tick(db: &Database, config: &CrashConfig) -> AppResult<()> {
+    if config.interval.is_zero() {
+        return Ok(());
+    }
     db.collection::<Document>(COLLECTION_NAME).update_many(doc! {
         "export.status": "dispatching", "$expr": {"$and": [{"$lte": ["$export.lease_until", "$$NOW"]}, {"$gt": ["$expires_at", "$$NOW"]}]}
     }, doc! {"$set": {"export.status": "unknown", "export.last_error_code": "dispatch_lease_expired", "export.lease_id": null, "export.lease_until": null}}).await?;
@@ -74,11 +77,40 @@ async fn dispatch(
     let destination = config
         .destination(row.report.platform)
         .filter(|d| Some(d.destination_id()) == row.export.destination_id.as_deref());
+    let eligibility = if row.export.deadline > chrono::Utc::now() && destination.is_some() {
+        crash_report_service::eligibility(db, &row.user_id).await
+    } else {
+        crash_report_service::DiagnosticsStatus::Unknown
+    };
+    if row.export.deadline > chrono::Utc::now() {
+        if destination.is_none() {
+            return settle(
+                db,
+                &row.id,
+                lease,
+                ExportStatus::Pending,
+                Some("destination_unavailable"),
+                Some(10),
+            )
+            .await;
+        }
+        if eligibility == crash_report_service::DiagnosticsStatus::Unknown {
+            return settle(
+                db,
+                &row.id,
+                lease,
+                ExportStatus::Pending,
+                Some("eligibility_unknown"),
+                Some(10),
+            )
+            .await;
+        }
+    }
     let code = if row.export.deadline <= chrono::Utc::now() {
         Some("deadline")
     } else if destination.is_none() {
         Some("destination_unavailable")
-    } else if !crash_report_service::available(db, &row.user_id).await {
+    } else if !eligibility.offered() {
         Some("reporting_unavailable")
     } else if !analytics_consent_service::permits_diagnostics(
         db,
@@ -208,6 +240,42 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+    }
+    #[tokio::test]
+    async fn mixed_destination_replicas_release_pending_rows_and_matching_replica_exports() {
+        let (db, _, _, id, config, exporter) = setup("crash_mixed_dsn", 0).await;
+        tick(&db, &CrashConfig::default()).await.unwrap();
+        let pending = row(&db, &id).await;
+        assert_eq!(pending.export.status, ExportStatus::Pending);
+        assert!(pending.export.lease_id.is_none());
+        assert_eq!(pending.export.attempts, 0);
+        assert!(pending.export.next_attempt_at.unwrap() > chrono::Utc::now());
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"export.next_attempt_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        tick(&db, &config).await.unwrap();
+        assert_eq!(row(&db, &id).await.export.status, ExportStatus::Exported);
+        assert_eq!(exporter.calls.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn zero_export_interval_disables_new_rows_and_never_works_pending_rows() {
+        let (db, actor, rev, id, mut config, exporter) = setup("crash_zero_interval", 0).await;
+        config.interval = Duration::ZERO;
+        let (_, disabled) =
+            crash_report_service::insert(&db, &config, "test", &actor, &rev, report())
+                .await
+                .unwrap();
+        assert_eq!(
+            row(&db, &disabled).await.export.status,
+            ExportStatus::Disabled
+        );
+        tick(&db, &config).await.unwrap();
+        assert_eq!(row(&db, &id).await.export.status, ExportStatus::Pending);
+        assert_eq!(exporter.calls.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn worker_settles_retry_connect_unknown_and_failed_without_resending() {

@@ -303,3 +303,27 @@ fn sentry_uses_symbolicated_grouping_platform_releases_and_standard_contexts() {
         }
     }
 }
+
+#[test]
+fn every_javascript_and_cocoa_event_explicitly_disables_vendor_ip_inference() {
+    for native in [false, true] {
+        let mut r = report();
+        if native {
+            r.platform = Platform::Ios;
+            r.kind = Kind::NativeCrash;
+            r.native_signal = Some(crate::models::client_error_report::NativeSignal::Segv);
+            r.js_frames.clear();
+            r.runtime = None;
+        }
+        let bytes = envelope(&SanitizedReport {
+            report: &r,
+            environment: "test",
+            severity: "error",
+        });
+        let event: Value =
+            serde_json::from_slice(bytes.split(|b| *b == b'\n').nth(2).unwrap()).unwrap();
+        assert_eq!(event["sdk"]["settings"]["infer_ip"], "never");
+        assert_eq!(event["sdk"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(event.get("user").is_none());
+    }
+}

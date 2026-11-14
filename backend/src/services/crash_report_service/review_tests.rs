@@ -1,0 +1,152 @@
+use super::*;
+use crate::{
+    models::user::{User, UserType},
+    services::{
+        feature_flag_service::{self as flags, FlagTarget},
+        security_readiness_service as readiness,
+    },
+    test_utils::*,
+};
+use mongodb::event::{EventHandler, command::CommandEvent};
+use std::sync::{Arc, Mutex};
+
+#[tokio::test]
+async fn consent_get_warm_default_off_adds_zero_commands_and_enabled_rollout_is_bounded() {
+    let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+    let seen = commands.clone();
+    let db = connect_test_database_with_command_handler(
+        "crash_hot_path",
+        EventHandler::callback(move |e| {
+            if let CommandEvent::Started(e) = e {
+                seen.lock().unwrap().push(e.command);
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&id, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let get = || {
+        crate::handlers::users::get_analytics_consent(
+            axum::extract::State(state.clone()),
+            test_auth_user(&id),
+        )
+    };
+    get().await.unwrap(); // Warm absence only.
+    commands.lock().unwrap().clear();
+    let (_, axum::Json(off)) = get().await.unwrap();
+    assert_eq!(off.diagnostics_status, DiagnosticsStatus::NotOffered);
+    let reads: Vec<_> = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|d| {
+            d.contains_key("find") || d.contains_key("aggregate") || d.contains_key("getMore")
+        })
+        .cloned()
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(
+        reads[0].get_str("find").unwrap(),
+        crate::models::user::COLLECTION_NAME
+    );
+    readiness::ready_test_replica(&db).await;
+    flags::set_platform_override(&db, FLAG, &FlagTarget::User(id.clone()), true, &id)
+        .await
+        .unwrap();
+    commands.lock().unwrap().clear();
+    let (_, axum::Json(on)) = get().await.unwrap();
+    assert_eq!(on.diagnostics_status, DiagnosticsStatus::ConsentRequired);
+    let reads: Vec<_> = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|d| {
+            d.contains_key("find") || d.contains_key("aggregate") || d.contains_key("getMore")
+        })
+        .cloned()
+        .collect();
+    assert!(reads.len() <= 8, "bounded enabled path: {reads:?}");
+    assert_eq!(
+        reads
+            .iter()
+            .filter(
+                |d| d.get_str("find") == Ok(crate::models::feature_flag_override::COLLECTION_NAME)
+            )
+            .count(),
+        2
+    );
+    assert!(
+        !reads
+            .iter()
+            .any(|d| d.get_str("find")
+                == Ok(crate::models::feature_flag_definition::COLLECTION_NAME))
+    );
+    println!("consent GET enabled read count: {}", reads.len());
+}
+
+#[tokio::test]
+async fn unserving_readiness_is_unknown_and_ingestion_returns_503_without_destroying_pending() {
+    let (db, id, rev) = tests::account("crash_unserving").await;
+    readiness::ready_test_replica(&db).await;
+    flags::set_platform_override(&db, FLAG, &FlagTarget::User(id.clone()), true, &id)
+        .await
+        .unwrap();
+    let extra = readiness::overlapping_test_replica(&db).await;
+    readiness::remove_test_replica_capability(&db, &extra, FLAG).await;
+    assert_eq!(eligibility(&db, &id).await, DiagnosticsStatus::Unknown);
+    let state = test_app_state(db.clone());
+    let error = crate::handlers::crash_reports::ingest(
+        axum::extract::State(state),
+        test_auth_user(&id),
+        Ok(axum::extract::ConnectInfo(
+            "127.0.0.1:1234".parse().unwrap(),
+        )),
+        axum::http::HeaderMap::new(),
+        Ok(axum::body::Bytes::new()),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(matches!(error, AppError::SecurityReadinessUnavailable));
+    assert!(consent::permits_diagnostics(&db, &id, &rev).await);
+    flags::set_platform_override(&db, FLAG, &FlagTarget::Global, false, &id)
+        .await
+        .unwrap();
+    assert_eq!(eligibility(&db, &id).await, DiagnosticsStatus::NotOffered);
+    assert_eq!(admin::rollout(&db).await.unwrap(), admin::Rollout::Killed);
+}
+
+#[tokio::test]
+async fn policy_two_put_requires_an_offer_and_legacy_put_stays_policy_one() {
+    use crate::handlers::users::{AnalyticsConsentRequest, set_analytics_consent};
+    let (db, id, _) = tests::account("crash_policy_offer").await;
+    let state = test_app_state(db.clone());
+    let put = |version: Option<&str>| {
+        set_analytics_consent(
+            axum::extract::State(state.clone()),
+            test_auth_user(&id),
+            axum::Json(AnalyticsConsentRequest {
+                account_id: id.clone(),
+                enabled: true,
+                policy_version: version.map(str::to_owned),
+            }),
+        )
+    };
+    assert!(matches!(
+        put(Some("2")).await,
+        Err(AppError::ValidationError(_))
+    ));
+    let (_, axum::Json(old)) = put(None).await.unwrap();
+    assert_eq!(old.policy_version.as_deref(), Some("1"));
+    readiness::ready_test_replica(&db).await;
+    flags::set_platform_override(&db, FLAG, &FlagTarget::User(id.clone()), true, &id)
+        .await
+        .unwrap();
+    let (_, axum::Json(new)) = put(Some("2")).await.unwrap();
+    assert_eq!(new.diagnostics_status, DiagnosticsStatus::Available);
+}

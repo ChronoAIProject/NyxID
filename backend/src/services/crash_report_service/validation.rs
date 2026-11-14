@@ -1,11 +1,21 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-fn matches(pattern: &str, value: &str) -> bool {
-    regex::Regex::new(pattern)
-        .expect("static pattern")
-        .is_match(value)
-}
+static VERSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[0-9A-Za-z.+-]{1,32}$").expect("static pattern")
+});
+static BUILD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[0-9A-Za-z.+-]{1,64}$").expect("static pattern")
+});
+static OS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[0-9]{1,3}(\.[0-9]{1,3})?$").expect("static pattern")
+});
+static ASSET: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^assets/[A-Za-z0-9_.-]{1,96}\.js$").expect("static pattern")
+});
+static IMAGE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[A-Za-z0-9_.+-]{1,64}$").expect("static pattern")
+});
 fn uuid(value: &str, v4: bool) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| {
         id.hyphenated().to_string() == value.to_ascii_lowercase()
@@ -21,9 +31,9 @@ pub fn validate(report: &CrashReportV1, now: DateTime<Utc>) -> AppResult<()> {
         || !uuid(&report.event_id, true)
         || captured > now + chrono::Duration::minutes(5)
         || captured < now - chrono::Duration::hours(24)
-        || !matches(r"^[0-9A-Za-z.+-]{1,32}$", &report.app_version)
-        || !matches(r"^[0-9A-Za-z.+-]{1,64}$", &report.app_build)
-        || !matches(r"^[0-9]{1,3}(\.[0-9]{1,3})?$", &report.os_version)
+        || !VERSION.is_match(&report.app_version)
+        || !BUILD.is_match(&report.app_build)
+        || !OS.is_match(&report.os_version)
         || report.artifact_id.as_ref().is_some_and(|v| !uuid(v, false))
         || (report.platform == Platform::Web && report.artifact_id.is_none())
         || report.js_frames.len() > 64
@@ -48,7 +58,7 @@ pub fn validate(report: &CrashReportV1, now: DateTime<Utc>) -> AppResult<()> {
     }
     for frame in &report.js_frames {
         let valid_asset = if report.platform == Platform::Web {
-            matches(r"^assets/[A-Za-z0-9_.-]{1,96}\.js$", &frame.asset)
+            ASSET.is_match(&frame.asset)
                 || matches!(frame.asset.as_str(), "<external>" | "<inline>")
         } else {
             matches!(
@@ -61,9 +71,7 @@ pub fn validate(report: &CrashReportV1, now: DateTime<Utc>) -> AppResult<()> {
         }
     }
     for image in &report.native_images {
-        if !uuid(&image.uuid, false)
-            || !matches(r"^[A-Za-z0-9_.+-]{1,64}$", &image.name)
-            || image.size > i64::MAX as u64
+        if !uuid(&image.uuid, false) || !IMAGE.is_match(&image.name) || image.size > i64::MAX as u64
         {
             return Err(bad());
         }
@@ -122,4 +130,8 @@ pub fn fingerprint(report: &CrashReportV1) -> String {
         ))
         .expect("closed record"),
     ))
+}
+
+pub fn valid_release(version: &str, build: &str, artifact: Option<&str>) -> bool {
+    VERSION.is_match(version) && BUILD.is_match(build) && artifact.is_none_or(|id| uuid(id, false))
 }
