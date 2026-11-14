@@ -108,6 +108,23 @@ fn seed_from_inventory_filter(filter: &Document, owner: &str, id: &str) -> Docum
     row
 }
 
+fn filter_has_owner_id(filter: &Document, owner: &str) -> bool {
+    filter.iter().any(|(key, value)| {
+        if key == "_id" && value.as_str() == Some(owner) {
+            return true;
+        }
+        match value {
+            bson::Bson::Document(document) => filter_has_owner_id(document, owner),
+            bson::Bson::Array(values) => values.iter().any(|value| {
+                value
+                    .as_document()
+                    .is_some_and(|document| filter_has_owner_id(document, owner))
+            }),
+            _ => false,
+        }
+    })
+}
+
 fn assert_owner_row_is_absent_or_redacted(
     row: Option<Document>,
     entry: &crate::services::personal_data_registry::Entry,
@@ -163,14 +180,14 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         // `_id` owner selectors intentionally use the account id. Keep the
         // generated ids for every other collection so repeated inventory
         // predicates cannot collide.
-        let target = if filter.get_str("_id").ok() == Some(owner.as_str()) {
+        let target = if filter_has_owner_id(&filter, &owner) {
             let mut row = target;
             row.insert("_id", owner.clone());
             row
         } else {
             target
         };
-        let bystander = if filter.get_str("_id").ok() == Some(owner.as_str()) {
+        let bystander = if filter_has_owner_id(&filter, &owner) {
             let mut row = bystander;
             row.insert("_id", other.clone());
             row
