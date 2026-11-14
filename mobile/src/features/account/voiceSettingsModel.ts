@@ -2,7 +2,10 @@ import type {
   VoiceOption,
   VoicePreferences,
 } from "../assistant/voice/voiceContracts";
-import { chooseVoiceOption } from "../assistant/voice/voiceSelection";
+import {
+  chooseVoiceOption,
+  resolveVoicePreferences,
+} from "../assistant/voice/voiceSelection";
 
 export type VoiceSettingsView = {
   option: VoiceOption;
@@ -26,7 +29,8 @@ export function voiceSettingsView(
   const option = chooseVoiceOption(options, saved);
   if (!option?.available) return null;
   const holdOnly = option.voice.protocol === "xai_realtime";
-  const voice = saved?.voice ?? option.voice.voices[0]?.id ?? null;
+  const preferences = resolveVoicePreferences(option, saved);
+  const voice = preferences.voice;
   const missingVoice =
     voice && !option.voice.voices.some((row) => row.id === voice)
       ? voice
@@ -35,17 +39,6 @@ export function voiceSettingsView(
     option,
     holdOnly,
     missingVoice,
-    preferences: {
-      service_id: option.service_id,
-      connection_id: option.connection_id,
-      key_source: option.key_source,
-      model: option.model,
-      voice,
-      input_mode: holdOnly
-        ? "push_to_talk"
-        : (saved?.input_mode ?? "push_to_talk"),
-      language: saved?.language ?? null,
-      notify_on_completion: saved?.notify_on_completion ?? false,
-    },
+    preferences,
   };
 }

@@ -354,7 +354,7 @@ pub(super) async fn execute_with_runtime(
     // Check before any decoder reservation/base64 work. Plan and dispatch
     // retain their checks to fence readiness changes after this entrance.
     if execution::images::contains_images(&value) {
-        crate::services::security_readiness_service::require(
+        crate::services::security_readiness_service::require_serving(
             &state.db,
             execution::images::READINESS,
         )
@@ -439,7 +439,7 @@ pub(super) async fn execute_with_runtime(
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     let worker_cancel = cancel.clone();
     let response_id = request_id.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_cleanup(async move {
         let context = execution::Context {
             db: &state.db,
             keys: &state.encryption_keys,

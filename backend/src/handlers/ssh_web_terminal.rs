@@ -170,7 +170,7 @@ pub async fn ssh_web_terminal(
 
     // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             Box::pin(async move {
                 let work = Box::pin(async {
                     handle_web_terminal(
@@ -200,7 +200,7 @@ pub async fn ssh_web_terminal(
                     let _ = work.await;
                 }
             })
-        })
+        }))
         .into_response())
 }
 

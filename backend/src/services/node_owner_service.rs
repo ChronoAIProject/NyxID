@@ -303,6 +303,7 @@ pub async fn release(db: &mongodb::Database, fence: &NodeOwnerFence) -> AppResul
             },
         )
         .await?;
+    super::shutdown::process().record_release("node_owners", result.matched_count);
     Ok(result.matched_count == 1)
 }
 

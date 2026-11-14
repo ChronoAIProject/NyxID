@@ -116,6 +116,7 @@ pub struct HealthFacts<'a> {
     pub webhook_registered: bool,
     pub failure_reason: Option<&'a str>,
     pub outbound_reason: Option<&'a str>,
+    pub thread_reason: Option<&'a str>,
     pub inbound_outcome: Option<&'a str>,
     pub subscription_registered: Option<bool>,
     pub backoff_active: bool,
@@ -141,6 +142,11 @@ impl<'a> HealthFacts<'a> {
                 .last_outbound_error
                 .as_ref()
                 .and_then(|error| error.reason.as_deref()),
+            thread_reason: bot
+                .diagnostics
+                .last_outbound_error
+                .as_ref()
+                .and_then(|error| error.thread_reason.as_deref()),
             subscription_registered: bot
                 .diagnostics
                 .subscription_state
@@ -264,6 +270,17 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     if facts.failure_reason == Some(codes::NATIVE_RELAY_CONFLICT) {
         return for_code(codes::NATIVE_RELAY_CONFLICT, facts, false).expect("mapped code");
     }
+    match facts.thread_reason {
+        Some("thread_target_rejected") => return advice("none",
+            "NyxID could not validate the thread or permission to reply, so this reply was not sent. There is no reply to retry here. If the next message has the same problem, report it to NyxID support.".into()),
+        Some("thread_reply_failed") => return advice("none",
+            "The last thread reply failed or its delivery could not be confirmed. Part of it may have arrived. No action is needed here; if a later reply has the same problem, report it to NyxID support.".into()),
+        Some("thread_delayed_reply_failed") => return advice("none",
+            "A delayed thread update failed or its delivery could not be confirmed. No action is needed here; if a later update has the same problem, report it to NyxID support.".into()),
+        Some("thread_reply_reference_expired") => return advice("none",
+            "A delayed thread update could not be sent because its gateway reply reference expired after 29 minutes. No owner action is needed; a new message starts a new reply window.".into()),
+        _ => {},
+    }
     if facts.gateway {
         return advice(
             "gateway",
@@ -384,7 +401,7 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
     }
     let db = db.clone();
     let owner = bot.user_id.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let mut recipients = match crate::services::org_service::list_admin_user_ids(&db, &owner)
             .await
         {
@@ -531,8 +548,8 @@ pub async fn setup_evidence(
         "last_authenticated_inbound_at": d.last_inbound_at.map(|t| t.to_rfc3339()),
         "last_authenticated_inbound_source": d.last_inbound_source,
         "last_outbound_attempt_at": d.last_outbound_at.map(|t| t.to_rfc3339()),
-        "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
-        "last_outbound_notice": d.last_outbound_notice.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
+        "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "thread_reason": e.thread_reason, "at": e.at.to_rfc3339()})),
+        "last_outbound_notice": d.last_outbound_notice.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "thread_reason": e.thread_reason, "at": e.at.to_rfc3339()})),
         "failure_reason": d.failure_reason,
         "last_inbound_outcome": d.last_inbound_outcome.as_ref().map(|o| json!({"code":o.code,"at":o.at.to_rfc3339()})),
         "inbound_outcomes": d.inbound_outcomes.iter().map(|(code,c)| (code.clone(),json!({"count":c.count,"at":c.at.to_rfc3339()}))).collect::<serde_json::Map<_,_>>(),

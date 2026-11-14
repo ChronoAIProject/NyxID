@@ -60,6 +60,33 @@ automation”; other calls retain metadata-only labels. Existing activity detail
 and permission/machine receipts remain available. Permission receipts authorize
 an effect; they alone do not prove completion.
 
+An assistant turn's own closed stateless catalog model call is its thinking,
+not a service action. A live conversation key using POST, without method override
+or pool, and passing the existing closed request contract skips actor-personal
+RequireApproval (explicit config/rule/default or global mode). Deny and org policy
+remain authoritative. Connection consent, guest/shared access, operation scopes,
+billing and rate limits are unchanged. Other callers and payloads keep approval
+policy. The exemption adds no database reads and records
+`approval_exempt: "assistant_model_transport"` only if a requirement was skipped.
+
+A denied model call settles once as `model_policy_denied`; unsatisfied org model
+approval settles as `model_org_approval_required`. A non-stateless model call
+requiring approval on a Crew/event/channel/background surface that cannot present
+it settles as `model_approval_required`. All use stage `model_approval` with a
+metadata-only `failure_reason`. Ordinary interactive non-stateless approval keeps
+its existing connected card/wait. Execution-permission failures cannot repeatedly
+create proposals for the same turn. Stop wins. The existing model-refusal record
+and stop poll implement this fence; no stored struct or enum format changes.
+
+Saved replies and Crew/channel notices carry fixed policy-specific guidance and
+an AssistantPage Approval settings link. Old clients can display the saved text.
+`service_request` records a closed denied/approval outcome and
+`model_egress_admitted`, so a cancelled approval wait is distinguishable from a
+provider stall. Known response status and genuine send-error diagnostics are
+metadata only. No header/body deadline or engine transport retry policy changes.
+Old replicas continue to gate personal model approvals during rollout; rollback
+restores that gate. No new environment setting is needed.
+
 A first-byte failure is not proof of no execution. NyxAgent sends lifecycle events
 before tools and keepalives every 15 seconds, but buffering or transport delays can
 hide them. Dropping its stream signals cancellation; completed remote effects are
@@ -1442,7 +1469,16 @@ rows without it keep the same lease/TTL behavior. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
 A 15-second cross-replica sweep reclaims only rows whose heartbeat is at least 75 seconds old,
-through the same fenced settlement path; a fresh long-running turn is never swept.
+through the same fenced settlement path, with stage `sweep`; a fresh long-running
+turn is never swept. Planned SIGTERM/ctrl-c drains keep heartbeats alive and wait
+for the detached workers. At the shutdown work deadline or second signal,
+remaining turns use the same fenced settlement with code `turn_lost` and stage
+`shutdown`, additionally matching this process's worker identity. A terminal
+reply clears `active_turn`, so old replicas' sweep and next-send reclamation
+cannot create a second reply. Stop still wins as `cancelled`/`stop`. A crash,
+early platform kill, or unavailable shutdown settlement retains stale-heartbeat
+recovery. Neither shutdown nor crash automatically replays execution. See
+[graceful drain](../DEPLOYMENT.md#rolling-deploys-and-graceful-drain).
 Delete stops and cancels before removing the row, and a late worker settlement against
 the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
 
@@ -2494,7 +2530,7 @@ Personal credential catalogs, including OAuth/device-code/API-key providers with
 
 Specialists never mint links, even in routed mode. Their refusal includes only same-catalog connection facts already within the key's effective grants (including active auto/platform rows only when authentication grants them) and asks the owner to have NyxBot perform setup, followed by a separate specialist grant; direct specialist work never transfers automatically to NyxBot. An org-owned specialist thread keeps the acting member as its key owner, while the owner-bound grant resolver limits its connection IDs to the agent organization's own rows; personal or other-organization rows are excluded. Guests receive no inventory. Organization cards retain exact operation approval and current connection facts; their `connect_own` is setup guidance, not a minted link or approval. When the owner requests personal setup, use the connect tool immediately with its existing-connection narration. Unsupported hosted card offers share the connect tool's reason codes; `no_separate_account` instead explains the one-step setup contract. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Hosted preview carries the declared credential fields so a failed catalog/pricing lookup cannot hide them (clients retain catalog fallback for older servers). Web and mobile hosted credential forms render declared token-exchange fields separately (for example, App ID and App Secret), then submit one JSON credential. Lark/Feishu startup corrects only exact prior system-seed instructions, preserving admin text and explicit clears.
 
-`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Use compatible readers/UI; observed support from every live writer/completer gates automatic activation without roster/drain declarations. Old readers that ignore the stored lock remain incompatible. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 ### Shared-agent transport continuations
 

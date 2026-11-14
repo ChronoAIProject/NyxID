@@ -225,7 +225,8 @@ pub async fn reserve_with_artifacts(
         && super::generated_artifacts::eligible(chat)
         && super::generated_artifacts::sandbox_contract(service, endpoint)
     {
-        super::security_readiness_service::require(db, "assistant:generated-artifacts").await?;
+        super::security_readiness_service::require_serving(db, "assistant:generated-artifacts")
+            .await?;
         super::generated_artifacts::trusted_sandbox_catalog(db, service, endpoint).await?
     } else {
         None
@@ -475,6 +476,20 @@ pub async fn claim(db: &Database) -> AppResult<Option<AsyncServiceOperation>> {
     let now = Utc::now();
     Ok(db.collection::<AsyncServiceOperation>(WATCHES).find_one_and_update(doc!{"state":{"$in":["submitting","waiting","cancelling","ready"]},"poll_at":{"$lte":bson::DateTime::from_chrono(now)},"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]},doc!{"$set":{"lease_id":Uuid::new_v4().to_string(),"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(60))}}).sort(doc!{"poll_at":1}).return_document(ReturnDocument::After).await?)
 }
+pub fn retain_shutdown_release(
+    db: &Database,
+    w: &AsyncServiceOperation,
+    runtime: &super::shutdown::Runtime,
+) -> super::shutdown::ReleaseTicket {
+    runtime.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+        db: db.clone(),
+        collection: WATCHES,
+        filter: doc! {"_id": &w.id, "lease_id": &w.lease_id},
+        update: doc! {"$set": {"lease_until": null, "poll_at": bson::DateTime::from_millis(0)}},
+    })
+}
+
 fn lease_filter(w: &AsyncServiceOperation) -> bson::Document {
     doc! {"_id":&w.id,"state":&w.state,"lease_id":&w.lease_id}
 }

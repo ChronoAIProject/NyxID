@@ -280,6 +280,9 @@ impl BillingService {
     /// Immutable codes make retries safe and retain historical provider charges.
     /// Admission still verifies the effective subscription, never just this marker.
     pub async fn retry_sandbox_rate_cards(&self) -> AppResult<u64> {
+        let Some(_work) = crate::services::shutdown::process().background() else {
+            return Ok(0);
+        };
         let Some(lago) = self.lago.as_deref().filter(|_| self.config.billing_enabled) else {
             return Ok(0);
         };
@@ -336,8 +339,14 @@ impl BillingService {
             .await?;
         let mut synced = 0;
         for card in cards {
-            let result: AppResult<()> = async {
+            if !super::reconcile::continue_reconcile() {
+                break;
+            }
+            let result: AppResult<bool> = async {
                 for price in &card.prices {
+                    if !super::reconcile::continue_reconcile() {
+                        return Ok(false);
+                    }
                     super::taxes::sync_charge(
                         &self.db,
                         lago,
@@ -372,9 +381,13 @@ impl BillingService {
                         .upsert(true)
                         .await?;
                 }
-                Ok(())
+                Ok(true)
             }
             .await;
+            if matches!(result, Ok(false)) {
+                // Partial cards stay pending; do not publish a partial sync.
+                break;
+            }
             if let Err(error) = &result {
                 tracing::warn!(
                     rate_card_id = %card.id,

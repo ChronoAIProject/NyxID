@@ -893,6 +893,31 @@ pub fn build_callback_payload(
     }
 }
 
+/// One-use relay dispatch barrier. A failed or uncertain platform effect never
+/// removes this row; the token cannot authorize a second send.
+pub(crate) async fn consume_reply_token_use(
+    db: &mongodb::Database,
+    usage: &crate::models::reply_token_use::ReplyTokenUse,
+) -> AppResult<()> {
+    match db
+        .collection::<crate::models::reply_token_use::ReplyTokenUse>(
+            crate::models::reply_token_use::COLLECTION_NAME,
+        )
+        .insert_one(usage)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(error.kind.as_ref(),
+            mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write))
+                if write.code == 11000) =>
+        {
+            Err(AppError::Unauthorized("Reply token already used".into()))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1792,6 +1817,7 @@ mod tests {
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             port: 0,
+            shutdown_drain_timeout_secs: 600,
             base_url: "http://localhost".to_string(),
             chrono_probe_url: None,
             invocation_diagnostics_enabled: false,

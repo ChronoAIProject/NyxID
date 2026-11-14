@@ -95,6 +95,69 @@ With `experimental:direct-chat-engine` enabled, a draft or `direct-*` route uses
 the in-memory Direct seam. Explicit `nyxid-chat-*` and `chatc-*` routes still use
 the canonical actor/history page. Direct conversations are not persisted.
 
+## 会话置顶 / Conversation pins
+
+浏览器侧栏的会话菜单提供「置顶会话」和「取消置顶」。同一列表支持多个置顶项，
+以中性图钉区分，保留标题、草稿、选中态及现有未读展示。NyxAgent 的置顶项排在
+所属 agent 的普通会话列表最前；channel chats 只在所属机器人分组内置顶，
+不移动机器人分组，也不改变其计数、展开状态或 parent chat 上下文。先按机器人分组，
+再将组内置顶主题排在所有普通主题之前；两部分分别保留 parent chat 标签。
+之后应用 Show more 上限；rail 保留 recent 顺序中的各 scope 原始槽位，只在同一
+普通会话或机器人 scope 的槽位间重排，再取前 8 项；没有置顶时原顺序完全不变。
+展开列表与折叠 rail 均先进行 O(n) 稳定分组，再应用已有展示上限；置顶和普通项
+各自保留原来的顺序，取消后回到正常位置。共享 transport 的列表顺序保持不变，
+进入 agent 时仍默认选择最新会话。置顶操作不导航、不执行已读操作。
+
+The browser conversation menu offers **Pin chat** and **Unpin chat**. Multiple
+pins lead their existing list with a neutral pin glyph, retaining titles,
+drafts, selection and existing unread presentation. NyxAgent pins lead their
+own agent's ordinary thread list. Channel chats pin only inside their own bot
+group; bot order, counts, expansion and parent chat context stay intact. Split
+groups before sorting within each list, then apply Show more limits. Within a
+bot, all pinned topics precede ordinary topics; each partition groups topics
+under their parent chat labels. Rail previews retain each scope’s original
+recent-list slots, reorder only within
+ordinary-chat or same-bot slots, then take eight rows. With no pins the original
+recent order is unchanged.
+Expanded lists and rail popovers use an O(n) stable partition before their
+existing display limits. Each partition retains its original order; unpinning
+restores normal placement. Transport ordering and the latest-thread default
+are unchanged. Pinning neither navigates nor marks a conversation read.
+
+只有置顶和取消置顶操作在菜单关闭后恢复行焦点；若取消置顶使该行移出 Show more
+预览，则焦点返回该机器人标题。重命名表单打开后，标题输入框保留焦点。
+
+Pin and unpin actions restore focus to the row after the menu closes. If an
+unpinned row leaves the Show more preview, focus returns to its bot header.
+Opening Rename keeps focus in the title input. Inline Rename actions keep the
+mobile drawer open so Save can submit before the form unmounts.
+
+置顶是本浏览器偏好，采用单一 `nyxid.assistant_pins` localStorage 记录，仅保存
+version、ownerUserId 和会话 ID，不保存标题、正文或访问权限。经确认的登录身份
+决定读取归属，刷新或重新进入 Chat 保留；登出、401 或切换账号会清除内存和持久化
+记录。存储结构使用 Zod 校验；失败以本地 load/save/clear 阶段标记记录（没有 HTTP
+请求或 Trace ID），侧栏展示本地化错误，写入失败不呈现为保存成功。删除成功后由
+实际 transport/API 删除路径清理对应 ID；失败或运行中拒绝删除保留置顶。不能用
+单个 agent 的局部加载列表修剪全账户 ID。记录只影响当前授权列表中已有的行。
+
+Pins are a browser-local preference in one `nyxid.assistant_pins` localStorage
+record containing only a version, owner ID and conversation IDs. Confirmed
+identity scopes restoration; reload and Chat re-entry retain pins. Sign-out,
+401 and account changes clear memory and storage. Zod validates stored data.
+Local load/save/clear error phases replace HTTP trace correlation for this
+storage-only operation; localized sidebar errors report failures, and failed
+writes never appear saved. Actual successful transport/API deletion removes
+the ID; failed or protected no-op deletion retains it. A partially loaded
+agent list must never prune account-wide IDs. Pins only decorate rows already
+present in the authorized list.
+
+本期不包含跨浏览器/跨设备同步、群聊置顶或服务器 API；Direct 会话本身仍只在内存
+中存在。清理浏览器数据会移除置顶。回滚前端提交即可停用功能；无服务端迁移。
+
+This does not add cross-browser/device sync, crew pins or a server API. Direct
+conversations themselves remain memory-only. Clearing browser data removes
+pins. Reverting the frontend change disables the feature without a migration.
+
 ## Thread states
 
 The thread distinguishes execution state from transcript content. An active turn can have no printable output yet, printable streaming output, or structured activity without text.

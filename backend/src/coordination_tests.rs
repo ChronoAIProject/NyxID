@@ -659,3 +659,68 @@ async fn expired_event_claim_cannot_be_committed() {
             .expect("commit expired claim")
     );
 }
+
+#[tokio::test]
+async fn rate_window_precheck_is_read_only_and_tracks_window_rollover() {
+    let db = crate::test_utils::connect_transaction_test_database("rate_precheck").await;
+    let rows = db.collection::<mongodb::bson::Document>(RATE_WINDOW_COLLECTION_NAME);
+    let at = mongodb::bson::DateTime::from_millis(1_800_000_000_000);
+    coordination_service::TEST_RATE_WINDOW_NOW
+        .scope(std::cell::Cell::new(at), async {
+            let window = Duration::from_secs(3600);
+            assert!(
+                !RateWindowStore::is_exhausted(&db, "check", "owner", 1, window)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                RateWindowStore::is_exhausted(&db, "check", "zero", 0, window)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(rows.count_documents(doc! {}).await.unwrap(), 0);
+            assert!(
+                RateWindowStore::admit(&db, "check", "owner", 1, window)
+                    .await
+                    .unwrap()
+                    .allowed
+            );
+            let full = rows.find_one(doc! {}).await.unwrap().unwrap();
+            for _ in 0..2 {
+                assert!(
+                    RateWindowStore::is_exhausted(&db, "check", "owner", 1, window)
+                        .await
+                        .unwrap()
+                );
+            }
+            assert_eq!(rows.find_one(doc! {}).await.unwrap().unwrap(), full);
+            coordination_service::TEST_RATE_WINDOW_NOW.with(|clock| {
+                clock.set(mongodb::bson::DateTime::from_millis(
+                    at.timestamp_millis() + 3_600_000,
+                ))
+            });
+            assert!(
+                !RateWindowStore::is_exhausted(&db, "check", "owner", 1, window)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(rows.find_one(doc! {}).await.unwrap().unwrap(), full);
+            assert!(
+                RateWindowStore::admit(&db, "check", "owner", 1, window)
+                    .await
+                    .unwrap()
+                    .allowed
+            );
+            assert_eq!(
+                rows.find_one(doc! {})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_i64("count")
+                    .unwrap(),
+                1
+            );
+        })
+        .await;
+    db.drop().await.unwrap();
+}

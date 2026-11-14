@@ -74,17 +74,10 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// Unlike require(), unknown/future capabilities must fail closed. Local code
-/// support and the whole observed fleet must agree before any activation.
+/// Publication and runtime use require durable activation and live support.
 pub async fn require_execution_ready(db: &Database) -> AppResult<()> {
     for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
-        if !security_readiness_service::CAPABILITIES.contains(&capability)
-            || !security_readiness_service::report(db, capability)
-                .await?
-                .ready
-        {
-            return Err(AppError::SecurityReadinessUnavailable);
-        }
+        security_readiness_service::require_serving(db, capability).await?;
     }
     Ok(())
 }
@@ -965,13 +958,13 @@ pub async fn retail_explanations(
     };
     // Discovery must never fail because readiness is unconfigured or unknown;
     // image limits are simply omitted. Execution enforces readiness itself.
-    let image_ready = match security_readiness_service::report(
+    let image_ready = match security_readiness_service::serving_report(
         db,
         super::platform_model_execution::images::READINESS,
     )
     .await
     {
-        Ok(report) => report.ready,
+        Ok(report) => report.serving_ready,
         Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
         Err(error) => return Err(error),
     };
@@ -979,8 +972,8 @@ pub async fn retail_explanations(
         .iter()
         .any(|t| certification::family_contract(&t.contract))
     {
-        match security_readiness_service::report(db, certification::READINESS).await {
-            Ok(report) => report.ready,
+        match security_readiness_service::serving_report(db, certification::READINESS).await {
+            Ok(report) => report.serving_ready,
             Err(AppError::SecurityReadinessUnavailable) => false,
             Err(error) => return Err(error),
         }

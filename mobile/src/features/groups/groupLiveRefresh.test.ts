@@ -148,3 +148,10 @@ test("seen metadata is bounded to 256 FIFO threads and repeating a thread does n
   assert.equal(seen.size, 256);
   assert.equal(seen.has("4:thread-1"), false);
 });
+
+test("a notification frame leaves crew transcripts and drawer metadata alone", () => {
+  assert.deepEqual(
+    groupLiveRefresh(4, { type: "notification", id: "n-1" }, new Map()),
+    { now: [], lists: [] },
+  );
+});

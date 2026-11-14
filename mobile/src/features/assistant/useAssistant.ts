@@ -1,5 +1,13 @@
-import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
-import { historyErrorMessage, HISTORY_UNSUPPORTED, HISTORY_UNAVAILABLE } from "./assistantHistoryCompat";
+import {
+  retryAgentRead,
+  agentReadRetryDelay,
+} from "../../lib/api/agentReadRetry";
+import {
+  historyErrorMessage,
+  HISTORY_UNSUPPORTED,
+  HISTORY_UNAVAILABLE,
+} from "./assistantHistoryCompat";
+import { withAssistantHistoryDeadline } from "./assistantHistoryRequest";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -88,6 +96,16 @@ export function useAssistant(
   const mounted = useRef(true);
   const epoch = useRef(0);
   const historySequence = useRef(0);
+  const historyRequest = useRef<
+    | {
+        id: string;
+        beforeSeq?: number;
+        sequence: number;
+        controller: AbortController;
+        promise: Promise<AssistantHistory | undefined>;
+      }
+    | undefined
+  >(undefined);
   const reopenSequence = useRef(0);
   const recoverSequence = useRef(0);
   const indexSequence = useRef(0);
@@ -96,7 +114,8 @@ export function useAssistant(
   const sendOperation = useRef<object | undefined>(undefined);
   const decisionLock = useRef(false);
   const approvalKeys = useRef(new Map<string, string>());
-  const accountEpoch = useRef(getAuthEpoch());
+  const authEpoch = getAuthEpoch();
+  const accountEpoch = useRef(authEpoch);
   const lastDecision = useRef(0);
   const consumedRetries = useRef(new Set<string>());
   const previousAgent = useRef(routeAgentId);
@@ -127,6 +146,15 @@ export function useAssistant(
     latestHistory.current = value;
     setHistory(value);
   }, []);
+  const cancelHistory = useCallback(() => {
+    historySequence.current += 1;
+    historyRequest.current?.controller.abort();
+    historyRequest.current = undefined;
+  }, []);
+
+  useEffect(() => {
+    if (authEpoch !== accountEpoch.current) cancelHistory();
+  }, [authEpoch, cancelHistory]);
 
   const refreshIndex = useCallback(
     async (cursor?: string) => {
@@ -169,30 +197,75 @@ export function useAssistant(
   }, [agentId]);
 
   const refreshHistory = useCallback(
-    async (id: string, beforeSeq?: number) => {
-      const sequence = ++historySequence.current;
-      const page = await assistantApi.history(
-        id,
-        beforeSeq,
-        undefined,
-        acknowledgementForConversation(historyTarget.current, id),
-      );
+    (id: string, beforeSeq?: number, replace = false) => {
       if (
         !mounted.current ||
+        !activeRef.current ||
         id !== selected.current ||
-        sequence !== historySequence.current
+        accountEpoch.current !== getAuthEpoch()
       )
-        return undefined;
-      const merged = mergeAssistantHistory(
-        latestHistory.current,
-        page,
-        !!beforeSeq,
-      );
-      updateHistory(merged);
-      setRecoveryRequired(false);
-      return merged;
+        return Promise.resolve(undefined);
+      const pending = historyRequest.current;
+      // Foreground recovery and selection can request the same initial page in
+      // one commit. Share it; explicit Retry/reopen must replace a stuck read.
+      if (
+        !replace &&
+        pending?.id === id &&
+        pending.beforeSeq === beforeSeq &&
+        pending.sequence === historySequence.current
+      )
+        return pending.promise;
+
+      cancelHistory();
+      const sequence = historySequence.current;
+      const localEpoch = epoch.current;
+      const controller = new AbortController();
+      const current = () =>
+        mounted.current &&
+        activeRef.current &&
+        selected.current === id &&
+        epoch.current === localEpoch &&
+        accountEpoch.current === getAuthEpoch() &&
+        sequence === historySequence.current;
+      const promise = withAssistantHistoryDeadline(controller, () =>
+        assistantApi.history(
+          id,
+          beforeSeq,
+          controller.signal,
+          acknowledgementForConversation(historyTarget.current, id),
+        ),
+      )
+        .then((page) => {
+          if (!current()) return undefined;
+          const merged = mergeAssistantHistory(
+            latestHistory.current,
+            page,
+            !!beforeSeq,
+          );
+          updateHistory(merged);
+          setRecoveryRequired(false);
+          return merged;
+        })
+        .catch((cause: unknown) => {
+          if (!current()) return undefined;
+          // A live invalidation may replace the initial load and own its only
+          // remaining read. Its subscriber intentionally ignores refresh errors,
+          // so keep the empty conversation's recovery action reachable here.
+          if (latestHistory.current?.conversation.id !== id)
+            setError(errorMessage(cause));
+          throw cause;
+        })
+        .finally(() => {
+          if (!current()) return;
+          historyRequest.current = undefined;
+          // Every successful or failed current read can settle an interrupted
+          // initial load, including manual recovery and live invalidations.
+          setLoading(false);
+        });
+      historyRequest.current = { id, beforeSeq, sequence, controller, promise };
+      return promise;
     },
-    [updateHistory],
+    [cancelHistory, updateHistory],
   );
 
   const openConversation = useCallback(
@@ -209,29 +282,19 @@ export function useAssistant(
         const localEpoch = epoch.current;
         setError(undefined);
         setLoading(true);
-        void refreshHistory(id)
-          .catch((cause) => {
-            if (
-              mounted.current &&
-              selected.current === id &&
-              epoch.current === localEpoch &&
-              reopenSequence.current === operation
-            )
-              setError(errorMessage(cause));
-          })
-          .finally(() => {
-            if (
-              mounted.current &&
-              selected.current === id &&
-              epoch.current === localEpoch &&
-              reopenSequence.current === operation
-            )
-              setLoading(false);
-          });
+        void refreshHistory(id, undefined, true).catch((cause) => {
+          if (
+            mounted.current &&
+            selected.current === id &&
+            epoch.current === localEpoch &&
+            reopenSequence.current === operation
+          )
+            setError(errorMessage(cause));
+        });
         return;
       }
       epoch.current += 1;
-      historySequence.current += 1;
+      cancelHistory();
       streamController.current?.abort();
       selected.current = id;
       setConversationId(id);
@@ -246,7 +309,7 @@ export function useAssistant(
       setLoading(!!id);
       setLoadingOlder(false);
     },
-    [refreshHistory, updateHistory],
+    [cancelHistory, refreshHistory, updateHistory],
   );
 
   useEffect(() => {
@@ -264,23 +327,31 @@ export function useAssistant(
   }, [initialId, routeAgentId, initialAcknowledgementId, openConversation]);
 
   const recover = useCallback(async () => {
+    if (!activeRef.current || accountEpoch.current !== getAuthEpoch()) return;
     const recovery = ++recoverSequence.current;
     setError(undefined);
     const id = selected.current;
     const localEpoch = epoch.current;
     const operation = reopenSequence.current;
+    const current = () =>
+      mounted.current &&
+      activeRef.current &&
+      accountEpoch.current === getAuthEpoch() &&
+      selected.current === id &&
+      epoch.current === localEpoch &&
+      reopenSequence.current === operation &&
+      recoverSequence.current === recovery;
     try {
-      if (id) await refreshHistory(id);
-      await refreshIndex();
+      if (id) {
+        setLoading(
+          (blocking) =>
+            blocking || latestHistory.current?.conversation.id !== id,
+        );
+        await refreshHistory(id, undefined, true);
+      }
+      if (current()) await refreshIndex();
     } catch (cause) {
-      if (
-        mounted.current &&
-        selected.current === id &&
-        epoch.current === localEpoch &&
-        reopenSequence.current === operation &&
-        recoverSequence.current === recovery
-      )
-        setError(errorMessage(cause));
+      if (current()) setError(errorMessage(cause));
     }
   }, [refreshHistory, refreshIndex]);
 
@@ -297,19 +368,21 @@ export function useAssistant(
     return () => {
       mounted.current = false;
       epoch.current += 1;
+      cancelHistory();
       streamController.current?.abort();
       subscription.remove();
       unsubscribe();
     };
-  }, []);
+  }, [cancelHistory]);
 
   useEffect(() => {
     if (!active) {
+      cancelHistory();
       streamController.current?.abort();
       return;
     }
     void recover();
-  }, [active, recover]);
+  }, [active, recover, cancelHistory]);
 
   useEffect(() => {
     // Refocusing can rerun this with the previous chat in the same commit that
@@ -327,27 +400,16 @@ export function useAssistant(
       (blocking) =>
         blocking || latestHistory.current?.conversation.id !== conversationId,
     );
-    void refreshHistory(conversationId)
-      .catch((cause) => {
-        if (
-          current &&
-          mounted.current &&
-          selected.current === conversationId &&
-          epoch.current === localEpoch &&
-          reopenSequence.current === operation
-        )
-          setError(errorMessage(cause));
-      })
-      .finally(() => {
-        if (
-          current &&
-          mounted.current &&
-          selected.current === conversationId &&
-          epoch.current === localEpoch &&
-          reopenSequence.current === operation
-        )
-          setLoading(false);
-      });
+    void refreshHistory(conversationId).catch((cause) => {
+      if (
+        current &&
+        mounted.current &&
+        selected.current === conversationId &&
+        epoch.current === localEpoch &&
+        reopenSequence.current === operation
+      )
+        setError(errorMessage(cause));
+    });
     return () => {
       current = false;
     };
@@ -386,11 +448,17 @@ export function useAssistant(
     return () => clearInterval(interval);
   }, [active, conversationId, needsPolling, loadingOlder, refreshHistory]);
 
+  // A server invalidation can describe a change newer than an in-flight GET.
+  // Only ordinary initial reads/polls may share that earlier snapshot.
+  const refreshLiveHistory = useCallback(
+    (id: string) => refreshHistory(id, undefined, true),
+    [refreshHistory],
+  );
   useAssistantLiveRefresh(
     active,
     conversationId,
     loadingOlder || needsPolling,
-    refreshHistory,
+    refreshLiveHistory,
   );
 
   const send = useCallback(
@@ -515,7 +583,7 @@ export function useAssistant(
         try {
           if (mounted.current && epoch.current === localEpoch) {
             if (id && selected.current === id)
-              await refreshHistory(id).catch(() => undefined);
+              await refreshHistory(id, undefined, true).catch(() => undefined);
             if (mounted.current && epoch.current === localEpoch)
               await refreshIndex().catch(() => undefined);
           }
@@ -577,14 +645,13 @@ export function useAssistant(
     try {
       const row = await assistantApi.decide(id, acknowledgementId, choice);
       if (!mounted.current || selected.current !== id) return;
-      historySequence.current += 1;
       if (choice === "allow" && needsClientContinuation(row)) {
         continuations.current.set(id, [
           ...(continuations.current.get(id) ?? []),
           row,
         ]);
       }
-      await refreshHistory(id);
+      await refreshHistory(id, undefined, true);
       await refreshIndex();
     } catch (cause) {
       if (mounted.current && selected.current === id)
@@ -644,7 +711,7 @@ export function useAssistant(
         approvalKeys.current.get(key)!,
       );
       if (!current()) return;
-      await refreshHistory(id);
+      await refreshHistory(id, undefined, true);
       if (current()) await refreshIndex();
     } catch (cause) {
       if (current()) setError(errorMessage(cause));
@@ -725,7 +792,8 @@ export function useAssistant(
     setMutating(true);
     try {
       await assistantApi.stop(id);
-      if (mounted.current && selected.current === id) await refreshHistory(id);
+      if (mounted.current && selected.current === id)
+        await refreshHistory(id, undefined, true);
     } catch (cause) {
       if (mounted.current && selected.current === id)
         setError(errorMessage(cause));
@@ -782,7 +850,10 @@ export function useAssistant(
     loadingIndex,
     deciding,
     mutating,
-    error: error ?? interruptionError ?? (history?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
+    error:
+      error ??
+      interruptionError ??
+      (history?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
     online,
     recoveryRequired,
     interrupted:
@@ -809,7 +880,12 @@ export function useAssistant(
 }
 
 function errorMessage(cause: unknown): string {
-  if (cause && typeof cause === "object" && "name" in cause && cause.name === "ZodError")
+  if (
+    cause &&
+    typeof cause === "object" &&
+    "name" in cause &&
+    cause.name === "ZodError"
+  )
     return HISTORY_UNAVAILABLE;
   if (cause instanceof ApiError && cause.errorKey === "turn_active")
     return "The assistant is already working on this chat. Refresh its history.";

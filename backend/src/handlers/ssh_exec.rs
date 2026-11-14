@@ -695,7 +695,7 @@ pub(crate) fn truncate_output(bytes: &[u8]) -> String {
 }
 
 fn record_node_ssh_metric_success(db: mongodb::Database, node_id: String, duration_ms: u64) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) =
             node_metrics_service::record_success(db, node_id.clone(), duration_ms).await
         {
@@ -709,7 +709,7 @@ fn record_node_ssh_metric_success(db: mongodb::Database, node_id: String, durati
 }
 
 fn record_node_ssh_metric_error(db: mongodb::Database, node_id: String, error_message: String) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) =
             node_metrics_service::record_error(db, node_id.clone(), error_message).await
         {

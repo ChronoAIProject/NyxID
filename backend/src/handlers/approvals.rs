@@ -2086,7 +2086,7 @@ pub async fn decide_execution_request(
         let conversation = p.conversation_id.clone();
         let wake_state = state.clone();
         let wake_owner = owner.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             super::assistant_team::wake(&wake_state, &wake_owner, &conversation).await;
         });
     }

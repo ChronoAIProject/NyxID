@@ -39,6 +39,8 @@ use crate::{
 };
 use protocol::{Failure, Resume};
 
+pub(crate) const SOCKET_LEASE_PREFIX: &str = "discord-gateway:";
+
 const MAX_SESSIONS: usize = 32;
 const DISCOVERY_BATCH: i64 = 100;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -212,7 +214,7 @@ async fn enabled(db: &mongodb::Database, bot: &ChannelBot) -> AppResult<bool> {
     {
         return Ok(false);
     }
-    super::security_readiness_service::require(
+    super::security_readiness_service::require_serving(
         db,
         super::feature_flag_service::DISCORD_GATEWAY_FLAG_KEY,
     )
@@ -234,7 +236,10 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
     ));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! { _ = shutdown.cancelled() => break, _ = tick.tick() => {} }
+        tokio::select! { _ = shutdown.cancelled() => break, () = state.shutdown.intake_stopped() => break, _ = tick.tick() => {} }
+        let Some(_pass) = state.shutdown.background() else {
+            break;
+        };
         tasks.retain(|_, task| !task.is_finished());
         let scan = async {
             state.db.collection::<ChannelBot>(COLLECTION_NAME)
@@ -253,14 +258,18 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
         }
         for bot in bots {
             after = bot.id.clone();
-            if shutdown.is_cancelled() {
+            if shutdown.is_cancelled() || state.shutdown.is_draining() {
                 break;
             }
             if tasks.contains_key(&bot.id) || !enabled(&state.db, &bot).await.unwrap_or(false) {
                 continue;
             }
             let Ok(Some(lease)) = cluster_lease_runtime()
-                .acquire(&state.db, &format!("discord-gateway:{}", bot.id))
+                .acquire_background(
+                    &state.db,
+                    &format!("{SOCKET_LEASE_PREFIX}{}", bot.id),
+                    &state.shutdown,
+                )
                 .await
             else {
                 continue;
@@ -281,7 +290,7 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
             let cancel = shutdown.child_token();
             tasks.insert(
                 bot.id.clone(),
-                tokio::spawn(async move {
+                state.shutdown.spawn(async move {
                     run_owned(&task_state, Fence { lease, bot }, cancel).await;
                 }),
             );
@@ -331,6 +340,7 @@ async fn run_owned(state: &AppState, fence: Fence, shutdown: CancellationToken) 
     let ready = tokio::select! {
         biased;
         _ = shutdown.cancelled() => false,
+        () = state.shutdown.intake_stopped() => false,
         result = tokio::time::timeout_at(deadline, async {
             if !enabled(&state.db, &fence.bot).await? || !fence.current(&state.db).await? {
                 return Ok(false);
@@ -472,6 +482,9 @@ async fn session(state: &AppState, fence: &Fence) {
     let mut attempts = 0_u32;
     let channels = Channels::default();
     loop {
+        if state.shutdown.is_draining() {
+            return;
+        }
         let _ = status(&state.db, fence, "connecting", None).await;
         let connected_at = std::time::Instant::now();
         let gateway = if resume.session_id.is_empty() {
@@ -516,7 +529,7 @@ async fn session(state: &AppState, fence: &Fence) {
                         }
                     }
                     let adapter = super::channel_adapters::discord::DiscordAdapter::default();
-                    protocol::connection(url, &token, &fence.bot.platform_bot_id, &mut resume, |cursor, event| {
+                    protocol::connection_with_drain(url, &token, &fence.bot.platform_bot_id, &mut resume, |cursor, event| {
                         let adapter = &adapter;
                         let token = &token;
                         let channels = &channels;
@@ -543,13 +556,16 @@ async fn session(state: &AppState, fence: &Fence) {
                             }
                             checkpoint(&state.db, fence, &cursor).await
                         }
-                    }).await
+                    }, Some(&state.shutdown)).await
                 } else {
                     Failure::Protocol
                 }
             }
             Err(failure) => failure,
         };
+        if state.shutdown.is_draining() {
+            return;
+        }
         if matches!(failure, Failure::InvalidSession(false)) {
             let _ = checkpoint(&state.db, fence, &resume).await;
         }
@@ -569,6 +585,9 @@ async fn session(state: &AppState, fence: &Fence) {
         )
         .await;
         tracing::warn!(bot_id = %fence.bot.id, reason = failure.code(), "Discord Gateway reconnect scheduled");
-        tokio::time::sleep(protocol::retry_delay(attempts, failure)).await;
+        tokio::select! {
+            () = state.shutdown.intake_stopped() => return,
+            () = tokio::time::sleep(protocol::retry_delay(attempts, failure)) => {},
+        }
     }
 }

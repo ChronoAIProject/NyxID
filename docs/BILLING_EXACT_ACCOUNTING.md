@@ -156,7 +156,7 @@ u64 big-endian length-prefixed UTF-8 account, sequence and canonical balance.
 Rolling HMAC verification separately checks historical postings for edits or
 deletion.
 
-A billing-enabled runner leases the reconciliation job across replicas and checks
+A billing-enabled account-integrity runner leases its reconciliation job across replicas and checks
 up to 1,000 wallets and 1,000 grants in one bounded snapshot. It runs at the
 chain-verification cadence, holds the lease for the active pass, and releases it
 when the pass reaches both lexical cursors. Deployments with billing disabled or
@@ -167,6 +167,19 @@ incomplete journaling defer accounts; a deferred cycle never certifies a full
 pass. Mismatches retain the cursor and report account, stored balance and journal
 balance at error level. The one-second deferred-refresh worker uses a per-request
 lease before calling Lago, so replicas cannot duplicate a provider fetch.
+
+The separate periodic billing maintenance pass (settlement recovery, grant and
+purchase expiry, Lago price/usage/balance refresh) uses the renewable
+`billing:reconcile` cluster lease. It skips contending ticks and, on renewal loss,
+finishes the current write protocol before stopping at a row/component/chunk
+boundary. Financial row claims, locks and dedupe are unchanged; request-time
+writers do not acquire this supervisor lease. See
+[BILLING_OPERATIONS.md](BILLING_OPERATIONS.md#reconcile-ownership-and-verification-status)
+for timing, drain and mixed-version limits. Automatic and manual chain verification discard losing `Ok` scans, always log a local
+`Broken` at error level and retry its publication up to three times (on conflict,
+keeping the stored break at an earlier or equal sequence, or returning an error on
+exhaustion), so a late break after repair may restore an alarm that the next scan
+clears by rechecking its break cursor.
 
 For N accounts in either collection, a pass runs its
 `ceil(N/1000) + 1` bounded transactions back-to-back, then idles until the next
@@ -222,6 +235,15 @@ closed. A refresh blocked by a money lock creates a durable request and returns
 provider snapshot, commits it and deletes only the request token it serviced.
 If a newer deferral changed that token, the worker releases only its own lease
 so the newer request can run on the next tick; a successor's lease is preserved.
+
+Wallet `snapshot_generation` orders provider balance reads against local publication
+and invalidation. It advances on publication, a balance webhook before its provider
+read, and the first wallet-backed usage acknowledgement. A rejected read changes
+no balance or ledger entry: webhook/reconcile callers request a fresh read, the
+deferred worker retains its existing request, and expiry retries from its stored
+operation/receipt without creating a refresh request. Old binaries ignore the
+field; their balance writes and acknowledgements are not fenced. Ordering is
+complete only once every replica runs this release; rollback needs no data change.
 
 Purchased credits expire independently after 365 days. The Lago void boundary
 floors at five decimal places. Residue remains spendable in the provider purchase
@@ -526,5 +548,6 @@ Usage retains org `billing_owner_id` and additive `org_channel_guest` metadata
 org's billing usage and bot settings show spend; settings also show reserved
 credits and named guest access from Grants or the frozen legacy restriction. Financial rows follow accounting
 retention and are never discarded while unsettled. Every executing replica must
-support the typed lane before exposure is enabled; use the existing security
-readiness roster and drain controls, not a new environment variable.
+support the typed lane before exposure is enabled; its observed-support
+readiness converges automatically without roster/drain declarations. Independent
+billing migration and rollback requirements above remain unchanged.

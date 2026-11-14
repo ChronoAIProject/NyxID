@@ -148,7 +148,7 @@ export function AssistantActivityDisclosure({
             const decision = activityDecisionPresentation(activity.decision);
             const confirmation = Boolean(decision && decision.status === "waiting") || gated.has(activity.id);
             const status = activityPresentationStatus(decision ? decision.status === "done" ? "completed" : decision.status === "error" ? "error" : "running" : activity.status, activity.failure?.kind);
-            const description = status === "skipped" ? toolFailureCopy(activity.failure) : status === "unknown" ? "Activity details unavailable in this app version." : decision?.label ?? (confirmation
+            const description = status === "skipped" ? toolFailureCopy(activity.failure, activity.label) : status === "unknown" ? "Activity details unavailable in this app version." : decision?.label ?? (confirmation
               ? "Asked for your confirmation"
               : describeToolActivity(
                   activity.label,
@@ -203,7 +203,7 @@ export function AssistantActivityDisclosure({
                     <Label
                       style={[styles.description, { color: colors.danger }]}
                     >
-                      {toolFailureCopy(activity.failure)} The assistant can
+                      {toolFailureCopy(activity.failure, activity.label)} The assistant can
                       continue after a failed step.
                     </Label>
                   ) : null}

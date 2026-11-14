@@ -47,6 +47,9 @@ pub async fn expire_purchased_credits(
         .await?;
     let mut expired_transactions = 0;
     for wallet in wallets {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         // Rotate the bounded batch even when Lago is unavailable or this
         // wallet has no purchases, preventing the oldest 100 wallets from
         // starving every other billing owner.
@@ -56,6 +59,9 @@ pub async fn expire_purchased_credits(
                 doc! { "$set": { "topup_expiry_checked_at": bson::DateTime::from_chrono(now), } },
             )
             .await?;
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if let Some(operation) = wallet.active_topup_expiry.clone() {
             match acquire_expiry_operation(db, &wallet, operation, now).await? {
                 Some(operation) => {
@@ -115,7 +121,13 @@ pub async fn expire_purchased_credits(
         // Populate the paid/expiry timestamps well before credits become due,
         // so history surfaces remain truthful without waiting for the expiry
         // mutation itself.
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let sessions = backfill_session_expiry(db, &wallet.owner_id, &purchases, now).await?;
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let expired = prepare_expired_purchases(db, &wallet.owner_id, purchases, now).await?;
         let amount = expired
             .iter()
@@ -256,7 +268,7 @@ async fn acquire_expiry_operation(
     Ok(Some(operation))
 }
 
-async fn complete_expiry_operation(
+pub(super) async fn complete_expiry_operation(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
     wallet: &BillingWallet,
@@ -310,8 +322,13 @@ async fn complete_expiry_operation(
         // include the current period's un-invoiced usage. Subtract the same
         // current_usage amount as refresh_wallet_balances before publishing
         // the post-void local balance, or expiry could re-expose spent credit.
-        let balance = super::webhook::provider_effective_balance(lago, wallet).await?;
-        if super::webhook::apply_balance(db, &wallet.id, balance, Some(&operation))
+        let snapshot = db
+            .collection::<BillingWallet>(BILLING_WALLETS)
+            .find_one(doc! { "_id": &wallet.id })
+            .await?
+            .ok_or_else(|| crate::errors::AppError::Internal("expiry wallet disappeared".into()))?;
+        let balance = super::webhook::provider_effective_balance(lago, &snapshot).await?;
+        if super::webhook::apply_balance(db, &snapshot, balance, Some(&operation))
             .await?
             .is_none()
         {
@@ -476,6 +493,9 @@ async fn backfill_session_expiry(
         .try_collect()
         .await?;
     for session in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let Some(purchase) = purchases.iter().find(|purchase| {
             session.lago_wallet_transaction_id.as_deref() == Some(purchase.transaction_id.as_str())
         }) else {
@@ -930,6 +950,7 @@ mod tests {
         let paid_at = now - Duration::days(PURCHASED_CREDIT_LIFETIME_DAYS + 1);
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: "wallet-1".to_string(),
                 owner_id: "owner-1".to_string(),
                 lago_customer_id: "customer-1".to_string(),
@@ -1057,6 +1078,7 @@ mod tests {
         };
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: "wallet-recover".to_string(),
                 owner_id: "owner-recover".to_string(),
                 lago_customer_id: "customer-recover".to_string(),
@@ -1128,6 +1150,7 @@ mod tests {
         let paid_at = now - Duration::days(PURCHASED_CREDIT_LIFETIME_DAYS + 1);
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: "wallet-race".to_string(),
                 owner_id: "owner-race".to_string(),
                 lago_customer_id: "customer-race".to_string(),

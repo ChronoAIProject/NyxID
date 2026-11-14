@@ -23,7 +23,7 @@ pub async fn bind_in_session(
         .find_one_and_update(
             doc! {"_id":event,"$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],"status":{"$in":["running","resuming","queued"]},
             "turn_id":bson::Bson::Null,"media.interrupted":{"$ne":true},"delivery.version":1},
-            doc! {"$set":{"conversation_id":conversation,"turn_id":turn},"$unset":{"guest_setup_payload":""}},
+            doc! {"$set":{"conversation_id":conversation,"resolved_conversation_id":conversation,"turn_id":turn},"$unset":{"guest_setup_payload":""}},
         )
         .session(&mut *session)
         .await?
@@ -473,7 +473,7 @@ pub(crate) async fn enqueue_in_session(
                 "_id": &source, "$or":[{"user_id":&owner},{"delivery.origin.org_execution.actor_id":&owner}], "status": {"$in": ["running", "resuming"]},
                 "turn_id": bson::Bson::Null, "media.interrupted": {"$ne": true}, "delivery.version": 1,
             },
-            doc! {"$set": {"status": "queued", "conversation_id": &conversation,
+            doc! {"$set": {"status": "queued", "conversation_id": &conversation,"resolved_conversation_id":&conversation,
             "turn_id": bson::Bson::Null, "delivery.state": if replay {"replay"} else {"pending"}}},
         )
         .session(&mut *session)

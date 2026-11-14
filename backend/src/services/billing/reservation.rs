@@ -825,6 +825,9 @@ pub async fn abandon_stale_unforwarded(
 
     let mut released_count = 0;
     for row in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if release_one_unforwarded_row(db, &row, UsageStatus::Abandoned, None).await? {
             released_count += 1;
         }
@@ -862,6 +865,9 @@ pub(crate) async fn recover_retryable_settlements_at(
 
     let mut stats = SettlementRecoveryStats::default();
     for row in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
             if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
                 stats.dead_lettered += 1;
@@ -1305,6 +1311,7 @@ mod tests {
     fn wallet(owner_id: &str, balance_credits: i64) -> BillingWallet {
         let now = Utc::now();
         BillingWallet {
+            snapshot_generation: 0,
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.to_string(),
             lago_customer_id: owner_id.to_string(),

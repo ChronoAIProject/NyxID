@@ -263,6 +263,9 @@ pub mod social_token_exchange_service;
 pub mod sse_parser;
 pub(crate) mod ssh_ca_record_service;
 pub mod ssh_service;
+mod startup_seed_service;
+#[cfg(test)]
+mod startup_seed_tests;
 pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
@@ -315,6 +318,7 @@ pub mod assistant_instruction_context;
 pub mod assistant_job_service_use;
 pub mod assistant_live;
 pub mod assistant_native_execution;
+pub mod assistant_notification_service;
 pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
@@ -590,3 +594,6 @@ pub mod platform_model_credentials;
 
 pub mod assistant_tool_result_service;
 pub(crate) mod catalog_endpoint_service;
+pub(crate) mod channel_supplemental_delivery;
+
+pub mod shutdown;

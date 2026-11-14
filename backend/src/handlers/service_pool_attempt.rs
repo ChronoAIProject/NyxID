@@ -430,7 +430,7 @@ impl Completion {
             // ticket's durable sequence/revision fences still order this write.
             let db = self.db.clone();
             let ticket = self.context.ticket.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     service_pool_health_service::record_success(&db, &ticket),
@@ -509,7 +509,7 @@ impl Drop for Completion {
             observability: self.observability.clone(),
         };
         self.completed = true;
-        crate::turn_trace::spawn(async move {
+        crate::turn_trace::spawn_cleanup(async move {
             if let Err(error) =
                 Box::pin(completion.finish(completion.context.cancellation_cause())).await
             {
@@ -667,7 +667,7 @@ pub(super) async fn response_body(
     let heartbeat_cancel = cancellation.clone();
     let lease_lost = completion.context.lease_lost.clone();
     let settling = completion.context.settling.clone();
-    completion.heartbeat = Some(tokio::spawn(async move {
+    completion.heartbeat = Some(crate::services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tokio::select! {

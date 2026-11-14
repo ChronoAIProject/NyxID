@@ -11,7 +11,7 @@ use crate::services::{approval_service, audit_service, telegram_service};
 
 const TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval remains required and notifications will be attempted here. Pending requests can also be reviewed on the web.";
 const TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is off — enable it in NyxID notification settings when you want requests delivered here.";
-const TELEGRAM_POLLER_LEASE_NAME: &str = "telegram-poller";
+pub(crate) const TELEGRAM_POLLER_LEASE_NAME: &str = "telegram-poller";
 
 /// Run the Telegram long polling loop (development mode fallback).
 ///
@@ -34,7 +34,13 @@ pub async fn run_polling_loop(state: AppState) {
     );
 
     loop {
-        match runtime.acquire(&state.db, TELEGRAM_POLLER_LEASE_NAME).await {
+        let Some(_work) = state.shutdown.background() else {
+            return;
+        };
+        match runtime
+            .acquire_background(&state.db, TELEGRAM_POLLER_LEASE_NAME, &state.shutdown)
+            .await
+        {
             Ok(Some(lease)) => {
                 let result = runtime
                     .run_while_renewed(
@@ -61,7 +67,11 @@ pub async fn run_polling_loop(state: AppState) {
                 tracing::warn!(error = %error, "Failed to acquire Telegram polling lease");
             }
         }
-        tokio::time::sleep(runtime.contender_wait()).await;
+        drop(_work);
+        tokio::select! {
+            () = state.shutdown.intake_stopped() => return,
+            () = tokio::time::sleep(runtime.contender_wait()) => {},
+        }
     }
 }
 
@@ -86,14 +96,12 @@ async fn run_as_polling_leader(
     let poll_timeout_secs = u32::try_from(runtime.ttl.as_secs()).unwrap_or(u32::MAX);
 
     loop {
-        match telegram_service::get_updates(
-            &state.http_client,
-            bot_token,
-            offset,
-            poll_timeout_secs,
-        )
-        .await
-        {
+        let updates = tokio::select! {
+            biased;
+            () = state.shutdown.intake_stopped() => return Ok(()),
+            result = telegram_service::get_updates(&state.http_client, bot_token, offset, poll_timeout_secs) => result,
+        };
+        match updates {
             Ok(updates) => {
                 for update in updates {
                     let next_offset = update.update_id.saturating_add(1);

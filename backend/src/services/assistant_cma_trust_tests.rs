@@ -525,15 +525,31 @@ async fn trust_automatic_recovery_refuses_expired_or_changed_deployment_before_r
                 .await
                 .unwrap();
         }
-        let error = proxy_create(&f, "new-key", &confirmed_body(), true)
-            .await
-            .unwrap_err();
+        let core_error = recover_creation_core(
+            &f.db,
+            &f.keys,
+            &f.gateway(),
+            &f.owner,
+            &row.sandbox_ref_id,
+            row.sandbox_generation,
+            CreationRecoveryAccess::Admission,
+        )
+        .await
+        .unwrap_err();
         let expected = if expired {
             "cma_creation_replay_expired"
         } else {
             "cma_configuration_required"
         };
-        assert!(matches!(error, AppError::Conflict(ref message) if message.starts_with(expected)));
+        assert!(
+            matches!(core_error, AppError::Conflict(ref message) if message.starts_with(expected))
+        );
+        let error = proxy_create(&f, "new-key", &confirmed_body(), true)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref message)
+            if message.starts_with("cma_sandbox_account_slot_occupied:")
+            && message.contains("not confirmed absent")));
         assert_eq!(f.post_count().await, 1);
         assert_eq!(f.saved(&row.id).await.submission_state, "unknown");
         assert!(f.saved(&row.id).await.request_ciphertext.is_some());
@@ -764,6 +780,125 @@ async fn trust_exact_original_unknown_retry_adds_no_automatic_recovery_send() {
             row.submission_generation
         );
         assert_eq!(cma.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn trust_stranded_proxy_without_management_feature_recovers_both_formats() {
+    for contextual in [false, true] {
+        let mut f = Fixture::with_management(false).await;
+        f.keys.set_contextual_record_writes(contextual);
+        assert!(matches!(
+            crate::services::assistant_cma_agent_service::require_enabled(&f.db, &f.owner).await,
+            Err(AppError::NotFound(_))
+        ));
+        let cma = mock_cma(&f).await;
+        let row = unknown_refusal(&f, contextual).await;
+        assert_eq!(
+            proxy_create(&f, "confirmed-key", &confirmed_body(), contextual)
+                .await
+                .unwrap()
+                .0,
+            201
+        );
+        assert_absent(&f, &row).await;
+        assert_eq!(f.post_count().await, 3);
+        assert_eq!(cma.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn trust_management_entry_and_replay_still_require_feature() {
+    let f = Fixture::with_management(false).await;
+    mock_cma(&f).await;
+    let row = unknown_refusal(&f, true).await;
+    let state = crate::test_utils::test_app_state(f.db.clone());
+    let auth = crate::test_utils::test_auth_user(&f.owner);
+    let error = crate::handlers::assistant_cma_sandboxes::list(
+        axum::extract::State(state.clone()),
+        auth.clone(),
+        axum::extract::Query(crate::handlers::assistant_cma_sandboxes::PageQuery { cursor: None }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, AppError::NotFound(ref message) if message.contains("access is not enabled"))
+    );
+    let error = crate::handlers::assistant_cma_sandboxes::commands(
+        axum::extract::State(state),
+        auth,
+        axum::extract::Path(row.sandbox_ref_id.clone()),
+        axum::http::HeaderMap::new(),
+        axum::Json(crate::handlers::assistant_cma_sandboxes::CommandRequest {
+            generation: row.sandbox_generation,
+            command: crate::handlers::assistant_cma_sandboxes::Command::RecoverCreation,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, AppError::NotFound(ref message) if message.contains("access is not enabled"))
+    );
+    let error = recover_creation(
+        &f.db,
+        &f.keys,
+        &f.gateway(),
+        &f.owner,
+        &row.sandbox_ref_id,
+        row.sandbox_generation,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+    let error = f
+        .gateway()
+        .replay_creation(
+            &f.keys,
+            &row,
+            UNCONFIRMED,
+            CreationRecoveryAccess::Management,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+    assert_eq!(f.post_count().await, 1);
+    assert_eq!(f.saved(&row.id).await.submission_state, "unknown");
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn trust_unavailable_proxy_recovery_without_management_returns_slot_conflict() {
+    for contextual in [false, true] {
+        let mut f = Fixture::with_management(false).await;
+        f.keys.set_contextual_record_writes(contextual);
+        mock_cma(&f).await;
+        let row = unknown_refusal(&f, contextual).await;
+        f.server.reset().await;
+        Mock::given(method("POST"))
+            .and(path(SANDBOX_ROUTE))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(serde_json::json!({"code":"unavailable"})),
+            )
+            .mount(&f.server)
+            .await;
+        let error = proxy_create(&f, "confirmed-key", &confirmed_body(), contextual)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(ref message)
+            if message.starts_with("cma_sandbox_account_slot_occupied:")
+            && message.contains("not confirmed absent")));
+        assert_eq!(
+            f.post_count().await,
+            1,
+            "only the original retained request is replayed"
+        );
+        let posts = f.server.received_requests().await.unwrap();
+        assert_eq!(posts[0].body, UNCONFIRMED);
+        assert_eq!(posts[0].headers["idempotency-key"], "original-key");
+        assert_eq!(f.saved(&row.id).await.submission_state, "unknown");
+        f.assert_single_intent().await;
         f.db.drop().await.unwrap();
     }
 }

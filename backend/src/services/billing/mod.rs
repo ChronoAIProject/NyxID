@@ -763,7 +763,7 @@ impl BillingService {
         let db = self.db.clone();
         #[cfg(test)]
         let gate = self.settlement_gate.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             #[cfg(test)]
             if let Some(gate) = gate
                 && gate.wait().await.is_err()
@@ -2418,6 +2418,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),

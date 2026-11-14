@@ -36,6 +36,7 @@ const MACHINES: &str = crate::models::node::COLLECTION_NAME;
 const MACHINE_DESKTOPS: &str = crate::models::machine_desktop::COLLECTION_NAME;
 const MACHINE_SETUPS: &str = crate::models::machine_setup::COLLECTION_NAME;
 const CHANNEL_CONNECT_LINKS: &str = crate::models::channel_connect_link::COLLECTION_NAME;
+const NOTIFICATIONS: &str = crate::models::assistant_notification::COLLECTION_NAME;
 const CAPACITY: usize = 1024;
 /// Per-owner buffer for browser streams.
 const OWNER_CAPACITY: usize = 64;
@@ -94,6 +95,12 @@ pub enum LiveEvent {
         user_id: String,
         active: bool,
     },
+    /// A NyxBot notification row was created or its read/resolved state
+    /// changed; identifiers only.
+    Notification {
+        id: String,
+        user_id: String,
+    },
     /// Metadata-only machine capability/setup change.
     Machine {
         id: String,
@@ -135,7 +142,8 @@ impl LiveEvent {
             | Self::MachineUpdate { user_id, .. }
             | Self::MachineSetup { user_id, .. }
             | Self::MachineDesktop { user_id, .. }
-            | Self::TriggerCreated { user_id, .. } => Some(user_id),
+            | Self::TriggerCreated { user_id, .. }
+            | Self::Notification { user_id, .. } => Some(user_id),
             Self::Resync => None,
         }
     }
@@ -342,7 +350,7 @@ impl AssistantLive {
         let mut workers = tokio::task::JoinSet::new();
         let live = self.clone();
         let worker_db = db.clone();
-        workers.spawn(async move {
+        crate::services::shutdown::process().spawn_worker_joined(&mut workers, async move {
             org_group_worker(pending, |id| {
                 live.publish_resolved(
                     &worker_db,
@@ -469,6 +477,14 @@ fn pipeline() -> Vec<Document> {
                 // Update watches still need the authenticated reconnect event.
                 {"ns.coll": MACHINES, "updateDescription.updatedFields.connected_at": {"$exists": true}},
                 {"ns.coll": crate::models::trigger::COLLECTION_NAME, "operationType": "insert", "fullDocument.setup_watch_id": {"$type":"string"}},
+                // Push bookkeeping writes only `push.*` and stays invisible.
+                {"ns.coll": NOTIFICATIONS, "$or": [
+                    {"operationType": "insert"},
+                    {"updateDescription.updatedFields.updated_at": {"$exists": true}},
+                    {"updateDescription.updatedFields.count": {"$exists": true}},
+                    {"updateDescription.updatedFields.unread": {"$exists": true}},
+                    {"updateDescription.updatedFields.resolved_at": {"$exists": true}},
+                ]},
                 // Links and bots matter only when created or when their
                 // status or activation changes, not on every bookkeeping write.
                 {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_CONNECT_LINKS, CHANNEL_BOTS, MACHINE_SETUPS, MACHINES, MACHINE_DESKTOPS]}, "$or": [
@@ -496,6 +512,10 @@ fn pipeline() -> Vec<Document> {
         }},
     ]
 }
+
+#[cfg(test)]
+#[path = "assistant_notification_live_tests.rs"]
+mod notification_tests;
 
 fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
     if !matches!(
@@ -595,6 +615,7 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             user_id,
             active: full.get_bool("is_active").unwrap_or(false),
         },
+        NOTIFICATIONS => LiveEvent::Notification { id: key, user_id },
         _ => return None,
     })
 }

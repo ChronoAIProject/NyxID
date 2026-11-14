@@ -960,3 +960,164 @@ async fn discord_definitive_create_refusal_restores_relay_after_bounded_drain() 
 
 #[path = "nyxbot_gateway_retry_tests.rs"]
 mod retry_tests;
+
+async fn unread_activity_survives_transport_move(back_to_relay: bool, fallback: bool) {
+    use crate::{
+        models::assistant_notification::{AssistantNotification, COLLECTION_NAME as NOTIFICATIONS},
+        models::assistant_settings::{NotificationPreferences, NotificationPushPreferences},
+        services::{
+            assistant_notification_service as feed, assistant_settings_service as settings,
+        },
+    };
+    let (mut state, _, agent) = setup("notification_transport_retention").await;
+    let _agent = tokio_util::task::AbortOnDropHandle::new(agent);
+    feed::ensure_indexes(&state.db).await.unwrap();
+    set_platform_override(
+        &state.db,
+        feed::FLAG_KEY,
+        &FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    feed::reset_flag_cache(&state.db);
+    settings::update(
+        &state.db,
+        OWNER,
+        settings::Update {
+            notifications: Some(NotificationPreferences {
+                push: NotificationPushPreferences {
+                    chat_update: true,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let initial = linked(&state, None, "lark").await;
+    state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &initial.id},
+            doc! {"$set": {"notification_epoch": 7_i64, "binding_id": "bnd_relay"}},
+        )
+        .await
+        .unwrap();
+    let initial = load_channel(&state, OWNER, &initial.id).await.unwrap();
+    let conversation = Uuid::new_v4().to_string();
+    let message = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .insert_one(doc! {
+            "_id": &conversation, "user_id": OWNER, "title": "Deployment status",
+        })
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .insert_one(
+            doc! {"_id": &message, "user_id": OWNER, "conversation_id": &conversation,
+            "role": "assistant", "text": "The deployment completed", "seq": 1_i64},
+        )
+        .await
+        .unwrap();
+    let id = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {
+            "type": "channel_chat", "id": &conversation, "conversation_id": &conversation,
+            "channel_id": &initial.id, "channel_epoch": 7_i64,
+            "channel_binding_id": "bnd_relay", "message_id": &message,
+        },
+    )
+    .await;
+    state.db.collection::<bson::Document>(NOTIFICATIONS).update_one(doc! {"_id": &id},
+        doc! {"$set": {"kind": "chat_update", "push": {"state": "pending", "kind": "chat_update", "attempts": 0}}})
+        .await.unwrap();
+    async fn visible(state: &AppState, id: &str) {
+        use crate::services::assistant_notification_service as feed;
+        let listed = feed::list(state, OWNER, &feed::ListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].id, id);
+        assert!(!listed.items[0].read);
+        assert_eq!(listed.items[0].preview, "The deployment completed");
+        assert_eq!(
+            feed::summary(&state.db, OWNER).await.unwrap().unread_count,
+            1
+        );
+    }
+    visible(&state, &id).await;
+    let (_, gateway) = mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
+    let _gateway = tokio_util::task::AbortOnDropHandle::new(gateway);
+    set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
+    move_to_gateway(&state, &initial).await.unwrap();
+    let on = load_channel(&state, OWNER, &initial.id).await.unwrap();
+    assert_eq!(on.transport, "gateway");
+    assert_ne!(on.binding_id, initial.binding_id);
+    assert_eq!(on.notification_epoch, 7);
+    visible(&state, &id).await;
+    if back_to_relay {
+        if fallback {
+            state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .update_one(doc! {"_id": &on.id}, doc! {"$set": {"status": "pending"}})
+                .await
+                .unwrap();
+            let pending = load_channel(&state, OWNER, &on.id).await.unwrap();
+            let fresh = key(&state, "fallback route").await;
+            releases::fallback(&state, &pending, &fresh.id)
+                .await
+                .unwrap();
+        } else {
+            set_flag(&state, FlagTarget::User(OWNER.into()), false).await;
+            due(&state, &on.id).await;
+            switch_to_gateway(&state).await.unwrap();
+        }
+        let off = load_channel(&state, OWNER, &on.id).await.unwrap();
+        assert_eq!(off.transport, "direct");
+        assert!(off.binding_id.is_none());
+        assert_eq!(off.notification_epoch, 7);
+        visible(&state, &id).await;
+    }
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured = sent.clone();
+    feed::sweep_with(&state, move |_, _, body, data| {
+        assert_eq!(body, "The deployment completed");
+        assert_eq!(data["type"], "chat_update");
+        captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(crate::services::notification_service::automation::Outcome::Accepted) }
+    })
+    .await
+    .unwrap();
+    assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let saved = state
+        .db
+        .collection::<AssistantNotification>(NOTIFICATIONS)
+        .find_one(doc! {"_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.unread);
+    assert_eq!(saved.push.unwrap().state, "sent");
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notification_unread_chat_rows_survive_gateway_and_relay_swaps() {
+    unread_activity_survives_transport_move(false, false).await;
+    unread_activity_survives_transport_move(true, false).await;
+}
+
+#[tokio::test]
+async fn notification_unread_chat_rows_survive_gateway_fallback() {
+    unread_activity_survives_transport_move(true, true).await;
+}

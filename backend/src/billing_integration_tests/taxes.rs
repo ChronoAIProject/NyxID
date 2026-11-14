@@ -94,7 +94,7 @@ async fn gross_hold_debit_tax_postings_chain_and_refresh_rounding() {
         .update_one(doc! {"_id":&row.id}, doc! {"$set":{"lago_acked":true}})
         .await
         .unwrap();
-    crate::services::billing::webhook::refresh_wallet_balance(&db, &owner, "98.9".parse().unwrap())
+    crate::services::billing::webhook::refresh_test_balance(&db, &owner, "98.9".parse().unwrap())
         .await
         .unwrap();
     assert_eq!(

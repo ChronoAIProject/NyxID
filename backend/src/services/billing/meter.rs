@@ -763,6 +763,9 @@ pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> Ap
         .try_collect()
         .await?;
     for coordinator in components {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         let rows = materialize_component_intent(db, &coordinator).await?;
         settle_persisted(db, rows).await?;
     }
@@ -779,6 +782,9 @@ pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> Ap
 
     let mut recovered = 0;
     for coordinator in coordinators {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if materialize_pending_resale_intent(db, &coordinator)
             .await?
             .is_some()
@@ -2636,6 +2642,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),

@@ -1880,7 +1880,7 @@ pub async fn delete(
         let credential = credentials_by_id.remove(&row.id);
         let state = state.clone();
         let auth = auth.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let result: AppResult<()> = async {
                 if let Some(credential) = credential
                     && credential.api_key_id == row.credential_api_key_id
@@ -2470,13 +2470,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
             .unwrap_or_default();
             tokio::time::sleep(remaining).await;
             loop {
-                if notice::claim(&state.db, &row, Utc::now())
-                    .await
-                    .unwrap_or(false)
-                {
-                    // The ordinary progress path revalidates the channel, owner
-                    // and guest route without claiming the eventual answer.
-                    super::nyxbot::deliver_to(&state, &row, &origin, notice::TEXT, None).await;
+                if send_checking_notice(&state, &row, &origin).await {
                     break;
                 }
                 tokio::time::sleep(notice::POLL_INTERVAL).await;
@@ -2490,9 +2484,10 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
     ) -> Option<tokio::task::JoinHandle<()>> {
         let state = self.state.clone();
         let row = row.clone();
-        Some(tokio::spawn(
-            async move { capacity_notice(&state, &row).await },
-        ))
+        Some(
+            crate::services::shutdown::process()
+                .spawn(async move { capacity_notice(&state, &row).await }),
+        )
     }
 
     async fn request(
@@ -2664,7 +2659,7 @@ pub(crate) async fn start_turn_with_voice(
             .await?
             .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
     let (sender, receiver) = broadcast::channel(256);
-    tokio::spawn(
+    state.shutdown.spawn(
         run_turn(
             state.clone(),
             auth,
@@ -2792,6 +2787,9 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 Ok(LiveEvent::ChannelBot { user_id: owner, .. }) if owner == user_id => {
                     ("channels", json!({"type": "channels"}))
                 }
+                Ok(LiveEvent::Notification { id, user_id: owner }) if owner == user_id => {
+                    ("notification", json!({"type": "notification", "id": id}))
+                }
                 Ok(LiveEvent::Resync) | Err(broadcast::error::RecvError::Lagged(_)) => {
                     ("resync", json!({"type": "resync"}))
                 }
@@ -2801,7 +2799,11 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
             yield Ok(Event::default().event(name).data(data.to_string()));
         }
     };
-    Ok(sse_response(stream))
+    let mut response = sse_response(stream);
+    response
+        .extensions_mut()
+        .insert(crate::services::shutdown::RecoverableSubscription);
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2914,6 +2916,30 @@ async fn execute_turn(
     .await
 }
 
+pub(crate) async fn send_checking_notice(
+    state: &AppState,
+    row: &AssistantConversation,
+    origin: &crate::models::assistant_conversation::ChannelOrigin,
+) -> bool {
+    use crate::services::assistant_checking_notice as notice;
+    if !notice::claim(&state.db, row, Utc::now())
+        .await
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    super::nyxbot::deliver_to_for(
+        state,
+        row,
+        origin,
+        notice::TEXT,
+        None,
+        super::nyxbot::supplemental::Purpose::CheckingNotice,
+    )
+    .await;
+    true
+}
+
 pub(crate) async fn capacity_notice(state: &AppState, row: &AssistantConversation) {
     use engine::PrimaryDestination;
     let turn = row.active_turn.as_ref().expect("claimed turn");
@@ -2936,12 +2962,28 @@ pub(crate) async fn capacity_notice(state: &AppState, row: &AssistantConversatio
     let text = crate::services::assistant_turn_observability::CAPACITY_ACKNOWLEDGEMENT;
     match destination {
         PrimaryDestination::ChannelEvent { origin } => {
-            super::nyxbot::deliver_to(state, row, &origin, text, None).await
+            super::nyxbot::deliver_to_for(
+                state,
+                row,
+                &origin,
+                text,
+                None,
+                super::nyxbot::supplemental::Purpose::CapacityNotice,
+            )
+            .await
         }
         PrimaryDestination::ChatUpdate { origins } => {
             // One notice per turn, to the primary chat only.
             if let Some(origin) = origins.first() {
-                super::nyxbot::deliver_to(state, row, origin, text, None).await;
+                super::nyxbot::deliver_to_for(
+                    state,
+                    row,
+                    origin,
+                    text,
+                    None,
+                    super::nyxbot::supplemental::Purpose::CapacityNotice,
+                )
+                .await;
             }
         }
         _ => {}

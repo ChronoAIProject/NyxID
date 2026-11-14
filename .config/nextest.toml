@@ -84,3 +84,16 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(=routes::remote_machine_flag_tests::flag_absent_and_explicit_off_block_all_mounted_admission_before_effects_for_users_and_admins)"
 threads-required = "num-cpus"
+
+# The shutdown runner contract is a one-second ordinary-settlement allowance.
+# Isolate the real MongoDB scenario from unrelated fixture creation/drop work,
+# preserving that production allowance and the test's one-second assertion.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_new_turn_after_signal_outlives_wait_and_settles_within_runner_grace)"
+threads-required = "num-cpus"
+
+# The real-process drain asserts completion within the subscription grace plus
+# five seconds. Reserve the runner's slots; keep the bound.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_actual_server_idle_node_and_subscriptions_exit_idle_after_grace)"
+threads-required = "num-cpus"

@@ -218,6 +218,16 @@ pub struct RelayReplyClaims {
     pub platform: String,
 }
 
+impl RelayReplyClaims {
+    /// Recheck a verified capability after preparation without decoding it again.
+    pub(crate) fn require_unexpired(&self) -> Result<(), AppError> {
+        if self.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= Utc::now().timestamp() {
+            return Err(AppError::TokenExpired);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RelayCallbackClaims {
     pub iss: String,
@@ -1354,9 +1364,7 @@ pub fn validate_relay_reply_token(
     let claims = token_data.claims;
     let now = Utc::now().timestamp();
 
-    if claims.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= now {
-        return Err(AppError::TokenExpired);
-    }
+    claims.require_unexpired()?;
     if claims.iat > now + RELAY_REPLY_CLOCK_SKEW_SECS {
         return Err(AppError::Unauthorized(
             "Invalid relay reply token".to_string(),
@@ -1515,6 +1523,7 @@ mod tests {
 
         let config = AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: 600,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),

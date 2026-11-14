@@ -121,6 +121,18 @@ This behavior is reflected in:
 
 ## Catalog Endpoint Discovery
 
+Remote spec sync binds its endpoint transaction to the service's captured
+`openapi_spec_url` and `updated_at`. If the parent changes during a fetch, the
+same call reloads it and retries at most twice, using the existing 60-second
+fetch cache. It stops if the URL is gone, the service is inactive or otherwise
+ineligible, or a legacy service now has endpoint rows. Three consecutive parent
+changes leave no stale writes and log a warning; a later create/update trigger
+or process startup can try again. Legacy zero-row discovery also checks rows
+inside the commit transaction, preserving concurrent curation. Embedded startup
+overlays use ordinary additive reconciliation: they are compiled into the binary
+and are not invalidated by unrelated parent timestamps. Hosted overlays and Tool
+sync remain additive by name; unrelated administrator operations are retained.
+
 `GET /api/v1/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints` under `/api/v1` accept general and scoped agent API keys via `X-API-Key` or Bearer without proxy scope. Scheduled-invocation keys, service accounts, and relay tokens are rejected; delegated access retains the exact `account:read` GET exception. Catalog metadata uses template values and live platform grants, without instance connection flags or overrides. Private instance-backed access and mounted-spec fallback obey the effective key allowlist and Member/Admin org scopes. Discovery performs no auto-provisioning or pending-OAuth reconciliation. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; credential-free auto-connected templates remain suppressed for all callers. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability.
 
 The catalog API exposes parsed OpenAPI endpoint metadata for any service that has an `openapi_spec_url`:
@@ -402,6 +414,57 @@ selected user/tenant credential and recheck the live turn, key, operation scopes
 connection, credential generation and published contracts at every send. Errors
 identify the outbound service slug and connection label so the owner can fix
 that principal's scopes and Base access. Provider error prose is not exposed.
+
+Managed child requests use the trusted catalog dependency paths. User OAuth
+catalogs (`api-lark`, `api-feishu`) have `/open-apis` in their base URL; bot
+catalogs (`api-lark-bot`, `api-feishu-bot`) normally have it in provider operation
+paths. Two legacy logical contracts (fields-list and media-upload) retain their
+prefix-less stored paths for scope/approval compatibility. A typed, compiled
+SYSTEM-catalog routing capability adds `/open-apis` only at HTTP dispatch, after
+checking both logical and wire destination policies. Instance/remote specs and
+the generic proxy cannot obtain it. Connection suffixes such as
+`api-lark-bot-3` do not select routing rules.
+Tenant token exchange uses the same connection credential and cached-token
+injection as an ordinary tool call. A PDF bound to an earlier owner message in
+the same conversation remains eligible during a later live turn and uploads as
+`bitable_file`; images upload as `bitable_image`. Original bytes, size and SHA
+are checked, and source-message completeness is still enforced.
+
+Both attachment tools record one `mcp_tool_call` result for success or failure.
+Activity `failure.reason` and result audit `reason_code` use closed codes;
+`provider_code` contains only an observed numeric Lark code and
+`response_status` only an observed HTTP status. Their `service_request` records
+carry the same composite outcome: `not_sent`, `provider_refused`, `succeeded`,
+or `uncertain`. For a composite, `not_sent` means the record-create was not sent;
+a field read or a staging upload may already have happened. `uncertain` never
+authorizes a resend. A successful ledger replay has no new provider status.
+Other service events retain their existing fields and meanings.
+
+Common reasons are `eligibility:<reason>` (the existing attachment eligibility
+codes), `field_read_transport`, `field_read_provider_error`,
+`field_read_invalid_response`, `field_missing`, `field_not_attachment`,
+`field_value_invalid`, `attachment_unreadable`, `attachment_incomplete_set`,
+`attachment_integrity`, `attachment_size`, `credential_preparation`,
+`upload_transport`, `upload_provider_error`, `upload_invalid_response`,
+`authority_changed`, `create_provider_error`, `create_uncertain`,
+`ledger:<state>`, `ledger_changed`, `timeout`, `database_unavailable`,
+`invalid_arguments`, `admission_refused`, and `internal`. Diagnostics never copy
+field names/values, filenames, file tokens, attachment bytes or provider prose.
+The model still receives the actionable tool error text.
+
+The bot repair leaves compiled/stored contracts, publication and operation
+generations unchanged. Existing specialist/key/guest scopes, exact approvals,
+shared consent and execution permissions need no migration or owner re-save.
+Old replicas retain the routing defect until upgraded, but there are no changed
+stored paths for their startup sync to revert. Complete the worker upgrade to
+get the repair everywhere. Existing ledger rows and the write-once barrier are
+unchanged; dispatching or uncertain creates are never resent.
+
+Typed ordinary `bitable_fields_list` calls also reject a 2xx non-JSON or missing
+numeric `code` response as `field_read_invalid_response`; a nonzero Lark code
+is `field_read_provider_error`. Their activity and result/service audits carry
+these metadata-only reasons. An HTTP 200 alone does not establish API success.
+Generic proxy response semantics remain unchanged.
 
 The attachment map and each array must be nonempty, with at most ten distinct
 attachment IDs and 50 MiB total (20 MiB per file). Every declared photo from a

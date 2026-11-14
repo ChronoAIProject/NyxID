@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import {
   ChatProgressTimeoutError,
   ChatStartTimeoutError,
@@ -1342,6 +1343,8 @@ describe("useAssistantChat", () => {
   });
 
   it("refuses deletion while that conversation is streaming", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", ACTOR_ID);
     const stream = controlledSse();
     const deletes: string[] = [];
     installSwitchingMock(stream);
@@ -1370,6 +1373,8 @@ describe("useAssistantChat", () => {
 
     await act(async () => result.current.deleteConversation(ACTOR_ID));
     expect(deletes).toEqual([]);
+    expect(useAssistantPinsStore.getState().ids).toContain(ACTOR_ID);
+    useAssistantPinsStore.getState().bindAccount(null);
 
     await act(async () => {
       stream.push({

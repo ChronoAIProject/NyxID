@@ -12,6 +12,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for notice in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let owner = notice
             .get_str("user_id")
             .map_err(|_| AppError::Internal("Invalid setup notice".into()))?;
@@ -73,6 +76,9 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
             .await?;
         let nyxbot_id = nyxbot.as_ref().and_then(|r| r.get_str("_id").ok());
         for chat in chats {
+            let Some(_claim) = state.shutdown.background() else {
+                return Ok(());
+            };
             let channel = match load_channel(state, owner, &chat.channel_id).await {
                 Ok(channel) => channel,
                 Err(AppError::NotFound(_)) => continue,

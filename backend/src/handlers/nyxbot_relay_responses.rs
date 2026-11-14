@@ -49,9 +49,12 @@ pub(super) async fn prepare(
             "Invalid recovery command identity".into(),
         ));
     }
-    if crate::services::security_readiness_service::require(&state.db, recovery::RELAY_READINESS)
-        .await
-        .is_err()
+    if crate::services::security_readiness_service::require_serving(
+        &state.db,
+        recovery::RELAY_READINESS,
+    )
+    .await
+    .is_err()
     {
         return Ok(None);
     }
@@ -286,7 +289,7 @@ impl Drop for Observer {
         let state = self.state.clone();
         let row = self.row.clone();
         let id = self.response.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             if let Ok(Some(stored)) = recovery::load(&state.db, &row, &id).await {
                 // Also fence admission which has not created delivery metadata yet.
                 let _ = state
@@ -300,7 +303,9 @@ impl Drop for Observer {
                 let _ =
                     crate::services::channel_turn_delivery::detach(&state.db, &stored.event_key)
                         .await;
-                late_delivery::process(&state, &stored.event_key).await;
+                if !state.shutdown.is_stopped() {
+                    late_delivery::process(&state, &stored.event_key).await;
+                }
             }
         });
     }

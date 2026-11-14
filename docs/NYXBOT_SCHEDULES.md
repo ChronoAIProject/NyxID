@@ -191,6 +191,23 @@ sends, but can still terminate a new notification lease as interrupted; upgrade
 and drain all scheduler workers to obtain the new retry/status guarantees.
 There is no automatic replay or backfill of terminal historical failures.
 
+### Notifications feed and scheduled digests
+
+The default-off `assistant:notifications` flag adds a separate per-person
+[Notifications feed](chat/12-notifications.md). A terminal run contributes one
+result or actionable problem row, using the saved run and delivery states;
+auto-pause notices retain their existing identities. Feed push preferences
+start off for every kind. A run already delivering to `notification` suppresses
+the feed's push so the owner receives one result push. The feed sends only
+through FCM/APNs; Telegram and channel bots remain automation `chat`
+destinations.
+
+An owner can schedule NyxBot to prepare a morning digest using the read-only
+`nyxid__list_notifications` tool. NyxBot trigger turns may call it with a time
+window, kinds, unread-only selector and at most 50 results. Tool reads do not
+mark entries seen. Upgrade all API replicas and scheduler workers before
+enabling the flag; old servers reject the additive notification settings.
+
 ### S4. Exactly-once runs, safe across replicas
 
 - **The worker.** A leased, fenced scheduler worker per replica claims due
@@ -665,9 +682,9 @@ claim.
 ## Coordinator completion v2
 
 `AUTOMATION_CONTINUATION_V2_ENABLED=false` preserves legacy completion. With it
-on, first assistant admission enrolls only after the full declared/drained fleet
-advertises `automation:coordinator-completion-v2`. Missing readiness falls back to
-legacy admission. Started runs and confirmation waits admitted by legacy code
+on, first assistant admission uses `automation:coordinator-completion-v2` serving
+readiness. After activation is recorded, advisory roster/drain conditions retain
+v2 enrollment. Hard serving-readiness loss falls back to legacy admission. Started runs and confirmation waits admitted by legacy code
 finish using legacy behavior. No trigger protocol stamp or data migration exists.
 
 The coordinator is the thread selected by the delivery: NyxBot's home for a home
@@ -720,17 +737,15 @@ run. Use Cancel on a waiting run in Automations history, or the first-party huma
 `POST /api/v1/triggers/{id}/runs/{run_id}/cancel` route. Cancel is owner-scoped,
 idempotent after termination, and fences descendants and queued results.
 
-Deploy upgraded binaries with the option off first. Drain old/unregistered
-writers, configure the complete identical `SECURITY_ROLLOUT_REPLICAS` roster,
-unique `INSTANCE_NAME`s and `SECURITY_ROLLOUT_DRAINED=true`, then enable the option
-on every replica. `GET /api/v1/admin/automation-continuations/readiness` is a
+Deploy compatible binaries and enable the option on participating replicas.
+Capability activation converges after observed support settles for 90 seconds;
+no readiness roster, unique instance names or drain assertion is required. `GET /api/v1/admin/automation-continuations/readiness` is a
 metadata-only admin/operator diagnostic for admission readiness and indexed drain
 blockers. Disabling prevents new enrollment while existing v2 runs and their
 children continue draining. Before downgrading, disable everywhere, drain or
 cancel enrolled runs, and require no nonterminal runs, bound queued events,
 active children, pending receipts, group followers, cards or async watches in the
-diagnostic. The roster is an operator assertion; it cannot discover hidden old
-writers. A disabled option alone does not make a downgrade safe.
+diagnostic. Observation cannot discover writers predating the observation protocol. A disabled option alone does not make a downgrade safe.
 
 Completion records the coordinator's settled result; verifying external business
 outcomes such as published post IDs remains the coordinator agent's job and is

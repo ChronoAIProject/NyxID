@@ -38,13 +38,13 @@ pub(crate) async fn enabled(db: &Database, admin: &str) -> AppResult<()> {
     if !super::feature_flag_service::personal_flag_enabled(db, admin, FLAG).await? {
         return Err(denied());
     }
-    super::security_readiness_service::require(db, FLAG).await
+    super::security_readiness_service::require_serving(db, FLAG).await
 }
 
 /// Readiness is checked only on organization guest paths, never ordinary billing.
 pub(crate) async fn guest_grants_ready(db: &Database) -> AppResult<bool> {
-    match super::security_readiness_service::report(db, GUEST_GRANTS_READINESS).await {
-        Ok(report) => Ok(report.ready),
+    match super::security_readiness_service::serving_report(db, GUEST_GRANTS_READINESS).await {
+        Ok(report) => Ok(report.serving_ready),
         Err(AppError::SecurityReadinessUnavailable) => Ok(false),
         Err(error) => Err(error),
     }
@@ -594,18 +594,7 @@ pub(crate) async fn conversation_access(
             .await?;
             access.check_conversation(row)?;
             if origin.thread.is_some() {
-                let mut conversation = row.id.clone();
-                if row.guest_model_setup {
-                    let e = origin.org_execution.as_ref().ok_or_else(denied)?;
-                    let lane = db.collection::<Document>(crate::models::org_channel::LANES).find_one(doc!{
-                    "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":&row.user_id,
-                    "agent_id":&e.agent_id,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,
-                    "sender_hash":&e.sender_hash}).await?.ok_or_else(denied)?;
-                    conversation = lane
-                        .get_str("conversation_id")
-                        .map_err(|_| denied())?
-                        .into();
-                }
+                let conversation = follow_conversation(db, row, origin, None).await?;
                 Box::pin(super::channel_thread_follow_service::validate_delivery(
                     db,
                     &row.user_id,
@@ -618,6 +607,45 @@ pub(crate) async fn conversation_access(
         }
         None => Ok(None),
     }
+}
+
+/// Hidden setup owns its own credential and settlement. Only its follow check
+/// uses the originating guest's admitted lane, bound to the exact sender/policy.
+pub(crate) async fn follow_conversation(
+    db: &Database,
+    row: &AssistantConversation,
+    origin: &ChannelOrigin,
+    session: Option<&mut ClientSession>,
+) -> AppResult<String> {
+    let Some(e) = origin
+        .org_execution
+        .as_ref()
+        .filter(|_| row.guest_model_setup && origin.thread.is_some())
+    else {
+        return Ok(row.id.clone());
+    };
+    if !e.guest
+        || row.guest_turn
+        || e.actor_id != row.user_id
+        || row.agent_id.as_deref() != Some(&e.agent_id)
+    {
+        return Err(denied());
+    }
+    let lanes = db.collection::<Document>(crate::models::org_channel::LANES);
+    let lookup = lanes.find_one(doc! {
+        "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":&row.user_id,
+        "agent_id":&e.agent_id,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,
+        "sender_hash":&e.sender_hash
+    });
+    let lane = match session {
+        Some(session) => lookup.session(session).await?,
+        None => lookup.await?,
+    }
+    .ok_or_else(denied)?;
+    Ok(lane
+        .get_str("conversation_id")
+        .map_err(|_| denied())?
+        .to_owned())
 }
 
 pub(crate) async fn guest_rate(

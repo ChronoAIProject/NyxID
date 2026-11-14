@@ -101,7 +101,7 @@ They never create org-owned auto-connected rows, even when the person is an acti
 Member/Admin with `can_proxy()`. Restricted services provision a personal row only
 when the person is in `allowed_owner_ids`, and an org row only when that org is in
 `allowed_owner_ids` and is reached through an active `can_proxy()` membership.
-Human and delegated key listing, Agent Key login delivery (login options), and
+Human grant inventory, human and delegated key listing, Agent Key login delivery (login options), and
 device-code approval/onboarding for the acting person's own account invoke this
 shared provisioning. The 0.19.0 guarantee remains: org-targeted device
 approval/onboarding resolves existing org services and never provisions rows for

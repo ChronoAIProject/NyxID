@@ -24,6 +24,7 @@ mod mw;
 mod redaction;
 mod routes;
 mod services;
+mod shutdown_servers;
 mod ssh_cli;
 mod telemetry;
 mod telemetry_erasure_cli;
@@ -88,6 +89,7 @@ const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    pub shutdown: services::shutdown::Runtime,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
@@ -279,7 +281,7 @@ impl AppState {
 }
 
 fn spawn_broker_policy_refresh_task(state: AppState) {
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(
                 BROKER_POLICY_REFRESH_INTERVAL_SECS,
@@ -390,19 +392,35 @@ fn main() {
         services::attachment_extraction::worker();
         return;
     }
-    server_main();
+    server_main(Cli::parse());
 }
 
-#[tokio::main]
-async fn server_main() {
+fn server_main(cli: Cli) {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Cannot start backend runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(server_run(cli));
+    if services::shutdown::process().is_draining() {
+        // Blocking parsers/password hashes cannot be aborted once running. They
+        // must not extend an explicitly bounded process shutdown.
+        runtime.shutdown_timeout(std::time::Duration::ZERO);
+    }
+}
+
+async fn server_run(cli: Cli) {
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
     // auto-select in that state. The CLI uses the same pattern; see
     // cli/src/main.rs for the canonical version.
     install_rustls_crypto_provider();
-
-    let cli = Cli::parse();
 
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();
@@ -665,7 +683,7 @@ async fn server_main() {
     // unreachable URL never blocks startup.
     {
         let db = db.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             if let Err(error) =
                 services::catalog_spec_sync::sync_spec_backed_service_endpoints(&db).await
             {
@@ -812,35 +830,28 @@ async fn server_main() {
     services::security_readiness_service::ensure_indexes(&db)
         .await
         .expect("security replica indexes failed");
-    services::security_readiness_service::initialize(
-        services::security_readiness_service::Runtime {
-            identity: (*replica_identity).clone(),
-            config: config.security_rollout.clone(),
-            platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
-        },
+    let readiness_runtime = services::security_readiness_service::Runtime::new(
+        (*replica_identity).clone(),
+        config.security_rollout.clone(),
+        services::proxy_service::actor_addressed_policy_required(),
     );
+    services::security_readiness_service::initialize(readiness_runtime.clone());
     services::security_readiness_service::observe_with_automation(
         &db,
-        &replica_identity,
-        &config.security_rollout,
-        services::proxy_service::actor_addressed_policy_required(),
+        &readiness_runtime,
         config.automation_continuation_v2_enabled,
     )
     .await
     .expect("security replica observation failed");
     let readiness_db = db.clone();
-    let readiness_identity = replica_identity.clone();
-    let readiness_config = config.security_rollout.clone();
     let automation_enabled = config.automation_continuation_v2_enabled;
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
             if let Err(error) = services::security_readiness_service::observe_with_automation(
                 &readiness_db,
-                &readiness_identity,
-                &readiness_config,
-                services::proxy_service::actor_addressed_policy_required(),
+                &readiness_runtime,
                 automation_enabled,
             )
             .await
@@ -983,6 +994,7 @@ async fn server_main() {
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     let state = AppState {
+        shutdown: services::shutdown::process(),
         #[cfg(test)]
         local_machine_platform: None,
         db: db.clone(),
@@ -1182,11 +1194,13 @@ async fn server_main() {
     spawn_broker_policy_refresh_task(state.clone());
 
     let lifecycle_cleanup_db = state.db.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) =
                 services::oracle_pool_service::cleanup_deleted_pools(&lifecycle_cleanup_db).await
             {
@@ -1195,11 +1209,13 @@ async fn server_main() {
         }
     });
     let login_cleanup_db = state.db.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) =
                 services::oracle_login_profile_service::purge_expired(&login_cleanup_db).await
             {
@@ -1242,28 +1258,30 @@ async fn server_main() {
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();
-        tokio::spawn(async move { live.run(db).await });
+        services::shutdown::process().spawn_worker(async move { live.run(db).await });
     }
 
     {
         let cache = state.execution_enrollment.clone();
         let db = state.db.clone();
-        tokio::spawn(async move { cache.run(db).await });
-        tokio::spawn(services::execution_permission_enrollment::jobs::run(
-            state.db.clone(),
-        ));
+        services::shutdown::process().spawn_worker(async move { cache.run(db).await });
+        services::shutdown::process().spawn_worker(
+            services::execution_permission_enrollment::jobs::run(state.db.clone()),
+        );
     }
 
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
     if config.agent_key_login_sweep_interval_secs > 0 {
         let sweep_db = state.db.clone();
         let sweep_interval = config.agent_key_login_sweep_interval_secs;
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(sweep_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
                     tracing::error!(
                         error_code = error.error_code(),
@@ -1288,12 +1306,14 @@ async fn server_main() {
         let connect_link_expiry_db = state.db.clone();
         let connect_link_expiry_dispatcher = state.developer_webhook_dispatcher.clone();
         let connect_link_expiry_interval = config.connect_link_expiry_sweep_interval_secs;
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(connect_link_expiry_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(error) = services::connect_link_service::expire_pending_app_links(
                     &connect_link_expiry_db,
                     &connect_link_expiry_dispatcher,
@@ -1310,11 +1330,13 @@ async fn server_main() {
     if config.connect_link_expiry_sweep_interval_secs > 0 {
         let bot_link_state = state.clone();
         let interval_secs = config.connect_link_expiry_sweep_interval_secs;
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(error) = services::channel_connect_link_service::sweep(
                     &bot_link_state.db,
                     &bot_link_state.encryption_keys,
@@ -1330,11 +1352,13 @@ async fn server_main() {
 
     // Budget holds must recover independently of external Telegram notice latency.
     let platform_budget_db = state.db.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) =
                 services::platform_inference_service::sweep_abandoned(&platform_budget_db).await
             {
@@ -1347,11 +1371,16 @@ async fn server_main() {
     });
 
     let platform_cleanup_state = state.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
+            if services::shutdown::process().is_draining() {
+                break;
+            }
             if let Err(error) =
                 handlers::platform_bots::sweep_cleanup(&platform_cleanup_state).await
             {
@@ -1359,6 +1388,9 @@ async fn server_main() {
                     error_code = error.error_code(),
                     "Platform conversion cleanup sweep failed"
                 );
+            }
+            if services::shutdown::process().is_draining() {
+                break;
             }
             if let Err(error) =
                 services::platform_provisioning_service::sweep(&platform_cleanup_state).await
@@ -1368,6 +1400,9 @@ async fn server_main() {
                     "Platform setup provisioning sweep failed"
                 );
             }
+            if services::shutdown::process().is_draining() {
+                break;
+            }
             if let Err(error) =
                 services::platform_setup_notice_service::sweep(&platform_cleanup_state).await
             {
@@ -1376,6 +1411,9 @@ async fn server_main() {
                     "Platform setup status notice sweep failed"
                 );
             }
+            if services::shutdown::process().is_draining() {
+                break;
+            }
             if let Err(error) =
                 services::platform_native_receipt_service::sweep(&platform_cleanup_state).await
             {
@@ -1383,6 +1421,9 @@ async fn server_main() {
                     error_code = error.error_code(),
                     "Native platform recovery sweep failed"
                 );
+            }
+            if services::shutdown::process().is_draining() {
+                break;
             }
             if let Err(error) =
                 services::platform_setup_service::expire(&platform_cleanup_state.db).await
@@ -1399,10 +1440,12 @@ async fn server_main() {
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.
     let mcp_sessions_for_reaper = mcp_sessions.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) = mcp_sessions_for_reaper
                 .reap_expired(std::time::Duration::from_secs(
                     models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
@@ -1422,7 +1465,7 @@ async fn server_main() {
     let apns_for_expiry = state.apns_auth.clone();
     let telemetry_for_expiry = state.telemetry.clone();
     let expiry_interval_secs = config.approval_expiry_interval_secs;
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
         // Prevent rapid-fire catch-up sweeps when a tick is delayed (e.g. under
@@ -1431,7 +1474,9 @@ async fn server_main() {
         // update_many() in expire_pending_requests.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(e) = services::approval_service::expire_pending_requests(
                 &db_for_expiry,
                 &config_for_expiry,
@@ -1460,7 +1505,7 @@ async fn server_main() {
         let refresh_interval = config.oauth_refresh_sweep_interval_secs;
         let refresh_window =
             chrono::Duration::seconds(config.oauth_refresh_sweep_window_secs.max(0));
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
             // Delay catch-up bursts under DB backpressure: a stacked sweep
@@ -1471,7 +1516,9 @@ async fn server_main() {
             // index creation / seeding for the connection pool.
             interval.tick().await;
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(e) = services::user_token_service::refresh_expiring_oauth_keys(
                     &refresh_db,
                     &refresh_keys,
@@ -1487,10 +1534,9 @@ async fn server_main() {
     }
 
     let discord_shutdown = tokio_util::sync::CancellationToken::new();
-    let discord_worker = tokio::spawn(services::discord_gateway::run(
-        state.clone(),
-        discord_shutdown.clone(),
-    ));
+    let discord_worker = services::shutdown::process().spawn_worker(
+        services::discord_gateway::run(state.clone(), discord_shutdown.clone()),
+    );
 
     {
         let poll_state = state.clone();
@@ -1499,12 +1545,14 @@ async fn server_main() {
         } else {
             60
         };
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if services::channel_billing_service::sweep(&poll_state)
                     .await
                     .is_err()
@@ -1526,11 +1574,13 @@ async fn server_main() {
 
     {
         let creation_state = state.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 let service = services::telegram_new_service::TelegramNewService {
                     manager_id: None,
                     db: &creation_state.db,
@@ -1570,13 +1620,15 @@ async fn server_main() {
         let wh_token = bot_token.clone();
         let wh_url = webhook_url.clone();
         let wh_secret = webhook_secret.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             // Check every 5 minutes
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             // Skip the first tick (we just registered above)
             interval.tick().await;
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if !services::telegram_service::is_webhook_healthy(&wh_http, &wh_token, &wh_url)
                     .await
                 {
@@ -1595,7 +1647,7 @@ async fn server_main() {
     } else if config.telegram_bot_token.is_some() {
         // Development fallback: poll getUpdates when no webhook URL is configured
         let polling_state = state.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             services::telegram_poller::run_polling_loop(polling_state).await;
         });
     }
@@ -1611,7 +1663,7 @@ async fn server_main() {
     let owner_lease_db = heartbeat_db.clone();
     let owner_lease_ws = heartbeat_ws.clone();
     let owner_lease_identity = heartbeat_identity.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(node_owner_lease_renew_secs));
         loop {
@@ -1625,7 +1677,7 @@ async fn server_main() {
             .await;
         }
     });
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
         loop {
@@ -1676,6 +1728,7 @@ async fn server_main() {
     // silently exempt those routes.
     let internal_node_dispatch = state.node_dispatch.clone();
     let public_backend_url = state.config.base_url.clone();
+    let shutdown_state = state.clone();
     let app = public_oauth
         .merge(private_api)
         .with_state(state)
@@ -1709,7 +1762,11 @@ async fn server_main() {
     // Wrap last so early middleware errors (including rate limits) receive
     // the same deployment-controlled policy as handler responses.
     let app = mw::security_headers::with_response_headers_for_origin(app, &public_backend_url)
-        .expect("BASE_URL must be a valid public HTTP(S) URL without credentials");
+        .expect("BASE_URL must be a valid public HTTP(S) URL without credentials")
+        .layer(axum_mw::from_fn_with_state(
+            shutdown_state.shutdown.clone(),
+            mw::shutdown::track,
+        ));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
@@ -1726,7 +1783,11 @@ async fn server_main() {
         internal_node_dispatch,
         internal_body_limit,
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
-    );
+    )
+    .layer(axum_mw::from_fn_with_state(
+        shutdown_state.shutdown.clone(),
+        mw::shutdown::track,
+    ));
 
     tracing::info!("Listening on {addr}");
     tracing::info!(
@@ -1735,30 +1796,165 @@ async fn server_main() {
         "Internal replica listener started"
     );
 
-    let public_server = axum::serve(
-        downstream_disconnect::DisconnectAwareListener::new(listener),
-        downstream_disconnect::DisconnectAwareMakeService::new(app),
+    let mut signals = match services::shutdown::signals::Signals::new() {
+        Ok(signals) => signals,
+        Err(error) => {
+            tracing::error!(%error, "Cannot install shutdown signal handlers");
+            return;
+        }
+    };
+    let mut servers = shutdown_servers::Servers::new(
+        shutdown_state.shutdown.clone(),
+        listener,
+        internal_listener,
+        app,
+        internal_app,
     );
-    let internal_server = axum::serve(internal_listener, internal_app);
-    tokio::select! {
-        result = public_server => result.expect("Public server error"),
-        result = internal_server => result.expect("Internal replica server error"),
-        _ = shutdown_signal() => {},
+    let signal = tokio::select! {
+        () = servers.failed() => None,
+        signal = signals.next() => Some(signal),
+    };
+    if let Some(signal) = signal
+        && let Some(drain) = services::shutdown::drain::Drain::begin(
+            &shutdown_state.shutdown,
+            std::time::Duration::from_secs(config.shutdown_drain_timeout_secs),
+            signal,
+        )
+    {
+        use services::shutdown::drain::End;
+        // Keep the configured timeout a hard exit budget. Short budgets reserve
+        // ten percent; ordinary budgets reserve at most five seconds.
+        let reserve = drain.cleanup_reserve();
+        let work_deadline = drain.work_deadline();
+        let end = loop {
+            let end = tokio::select! {
+                () = servers.failed() => End::ListenerFailure,
+                end = drain.wait(&shutdown_state, work_deadline, signals.next()) => end,
+            };
+            if end != End::Idle {
+                break end;
+            }
+            let idle = tokio::select! {
+                biased;
+                signal = signals.next() => break drain.second_signal(signal),
+                () = tokio::time::sleep_until(work_deadline) => break End::Deadline,
+                idle = servers.finish_idle() => idle,
+            };
+            if idle {
+                break End::Idle;
+            }
+            servers.resume();
+        };
+        servers.quiesce();
+        let cleanup_deadline = drain.deadline.min(tokio::time::Instant::now() + reserve);
+        finish_shutdown(
+            &shutdown_state,
+            &drain,
+            end,
+            &discord_shutdown,
+            cleanup_deadline,
+        )
+        .await;
+        return;
     }
+    // Zero preserves the old signal path: no drain state, settlement or release
+    // pass, and the same bounded Discord cancellation before runtime teardown.
+    drop(servers);
     discord_shutdown.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discord_worker).await;
 }
 
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("install SIGTERM handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+async fn finish_shutdown(
+    state: &AppState,
+    drain: &services::shutdown::drain::Drain,
+    end: services::shutdown::drain::End,
+    discord_shutdown: &tokio_util::sync::CancellationToken,
+    deadline: tokio::time::Instant,
+) {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let settle_deadline = tokio::time::Instant::now() + remaining * 2 / 3;
+    let release_deadline = deadline - remaining / 10;
+    state.shutdown.interrupt();
+    // Let the runners use their ordinary settlement and delivery path first.
+    let _ = tokio::time::timeout(remaining / 5, state.shutdown.idle()).await;
+    state.shutdown.stop();
+    discord_shutdown.cancel();
+    let stopped = tokio::time::timeout_at(settle_deadline, state.shutdown.execution_stopped())
+        .await
+        .is_ok();
+    if stopped {
+        if let Ok(Ok(rows)) = tokio::time::timeout_at(
+            settle_deadline,
+            services::shutdown::drain::settle_remaining(state),
+        )
+        .await
+        {
+            // The transaction already persisted terminal state. Existing hooks
+            // publish channel/group/trigger delivery, under the same bound.
+            let deliveries = async {
+                use futures::StreamExt;
+                futures::stream::iter(rows)
+                    .for_each_concurrent(16, |(row, error)| {
+                        handlers::assistant_team::after_turn_boxed(
+                            state.clone(),
+                            row,
+                            String::new(),
+                            Some(error),
+                        )
+                    })
+                    .await;
+            };
+            let _ = tokio::time::timeout_at(settle_deadline, deliveries).await;
+        }
+    } else {
+        tracing::warn!("Shutdown tasks did not stop before cleanup deadline");
     }
-    #[cfg(not(unix))]
-    let _ = tokio::signal::ctrl_c().await;
+    if stopped
+        && !matches!(
+            tokio::time::timeout_at(settle_deadline, services::shutdown::release::nodes(state))
+                .await,
+            Ok(Ok(_))
+        )
+    {
+        tracing::warn!("Shutdown node ownership release unavailable");
+    }
+    let nodes_stopped =
+        tokio::time::timeout_at(settle_deadline, state.shutdown.node_sockets_closed())
+            .await
+            .is_ok();
+    // Never free capacity under an executor which has not stopped.
+    let cleanup_stopped = stopped
+        && nodes_stopped
+        && tokio::time::timeout_at(settle_deadline, state.shutdown.tasks_stopped())
+            .await
+            .is_ok();
+    if cleanup_stopped {
+        let _ =
+            tokio::time::timeout_at(release_deadline, state.shutdown.close_completion_workers())
+                .await;
+    }
+    let mut releases = if cleanup_stopped {
+        services::shutdown::drain::release_owned(state, release_deadline).await
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    // The node release path counts the winning write, including a socket
+    // teardown racing this coordinator's exact-fence release.
+    releases.insert("node_owners", 0);
+    // The observation writer is joined even if an unrelated completion task
+    // could not finish. Retiring it cannot transfer an external-effect claim.
+    if stopped {
+        let observation = tokio::time::timeout_at(
+            release_deadline,
+            services::shutdown::release::observation(&state.db, &state.replica_identity),
+        )
+        .await;
+        releases.insert(
+            "security_observation",
+            observation.ok().and_then(Result::ok).unwrap_or_default(),
+        );
+    }
+    drain.audit(state, end, releases, deadline).await;
 }
 
 /// Preserve each legacy domain, including its historical source-byte convention.

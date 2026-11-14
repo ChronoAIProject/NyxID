@@ -402,7 +402,7 @@ Backward compatibility means existing accepted work keeps its explicitly shared 
 | Mixed server fleet | Read-only visibility additions are safe; do not enable new restriction/context writes until every auth, API, MCP, worker, gateway and WS replica supports enforcement. |
 | Disabled creation flag after rollout | Existing assignments/contexts/revocations still enforced. Disabling a flag never widens authority or switches a context back to shared. |
 
-Proposed feature flags: `assistant:machine-capabilities` for new assignment configuration and `assistant:machine-contexts` for separated-context setup. Both start off. A separate presentation flag can stage cards/activity without changing authority. Enforcement depends on stored policy, not feature flag evaluation. Node-local enablement and successful isolation probes are required in addition to server flags. Record per-replica supported schema/protocol in readiness diagnostics; require deployment readiness/draining of old replicas before enabling writes, following the B1/B3 rollout pattern.
+Proposed feature flags: `assistant:machine-capabilities` for new assignment configuration and `assistant:machine-contexts` for separated-context setup. Both start off. A separate presentation flag can stage cards/activity without changing authority. Enforcement depends on stored policy, not feature flag evaluation. Node-local enablement and successful isolation probes are required in addition to server flags. Record per-replica supported schema/protocol in readiness diagnostics; enable writes only with durable activation and observed support on every live generation; roster/drain declarations are advisory. Node-local isolation requirements remain independent.
 
 ### 5.2 Ordered migration
 

@@ -770,7 +770,11 @@ async fn channel_guest_media_relay_adapters_and_gateway_relay_retain_only_curren
                 input.attachments.len(),
                 2,
                 "{name}/{transport}: {:?}",
-                input.media_bound
+                input.media_bound.as_ref().map(|bound| bound
+                    .failed
+                    .iter()
+                    .map(|failure| (failure.index, &failure.status))
+                    .collect::<Vec<_>>())
             );
             assert_eq!(input.attachments[0].content_type, "image/png");
             assert_eq!(

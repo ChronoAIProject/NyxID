@@ -103,7 +103,7 @@ pub(crate) async fn list(
         page.limit.unwrap_or(25),
     )
     .await?;
-    hide_reservations(state, owner, &mut rows).await?;
+    hide_reservations(state, owner, &mut rows, std::slice::from_ref(&row)).await?;
     let ready = capabilities(
         state,
         &row,
@@ -136,8 +136,14 @@ pub(crate) async fn stop(
         .await?;
         crate::handlers::machine_cancel::conversation(state, owner, conversation_id).await?;
     }
-    hide_reservations(state, owner, std::slice::from_mut(&mut child)).await?;
     let row = follow::access(&state.db, owner, channel).await?;
+    hide_reservations(
+        state,
+        owner,
+        std::slice::from_mut(&mut child),
+        std::slice::from_ref(&row),
+    )
+    .await?;
     audit(
         state,
         owner,
@@ -209,7 +215,7 @@ pub(crate) async fn list_tool(state: &AppState, owner: &str, args: &Value) -> Ap
         args["limit"].as_u64().unwrap_or(25).try_into().unwrap_or(0),
     )
     .await?;
-    hide_reservations(state, owner, &mut rows).await?;
+    hide_reservations(state, owner, &mut rows, &channels).await?;
     let on = thread_follow::enabled(state, owner).await?;
     Ok(
         json!({"threads":rows.iter().map(|r|response(r,channels.iter().find(|c|c.id==r.channel_id)
@@ -221,9 +227,21 @@ async fn hide_reservations(
     state: &AppState,
     owner: &str,
     rows: &mut [NyxbotThread],
+    channels: &[NyxbotChannel],
 ) -> AppResult<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
     let known = follow::materialized_conversations(&state.db, owner, rows).await?;
+    let org_lanes = follow::actor_conversations(&state.db, owner, rows, channels).await?;
     for row in rows {
+        if channels
+            .iter()
+            .any(|c| c.id == row.channel_id && c.org_specialist.is_some())
+        {
+            row.conversation_id = org_lanes.get(&row.id).cloned();
+            continue;
+        }
         if row
             .conversation_id
             .as_ref()

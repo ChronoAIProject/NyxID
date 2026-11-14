@@ -1,4 +1,5 @@
 import retryHistory from "./__fixtures__/retry-duplicate-history.json";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { fireEvent } from "@testing-library/react";
 import { HISTORY_UNAVAILABLE } from "@/schemas/assistant-history-compat";
 import { createElement } from "react";
@@ -827,6 +828,8 @@ describe("NyxAgent server-backed transport", () => {
   });
 
   it("renames and deletes through HTTP and evicts deleted transcript state", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", id);
     globalThis.__nyxidAssistantHttpMock = ({ init }) => {
       if (init.method === "DELETE") return new Response(null, { status: 204 });
       if (init.method === "PATCH")
@@ -838,8 +841,18 @@ describe("NyxAgent server-backed transport", () => {
     await transport.rename(id, "Renamed");
     expect(transport.session(id).title).toBe("Renamed");
     await transport.delete(id);
+    expect(useAssistantPinsStore.getState().ids).not.toContain(id);
     expect(transport.getHistory(id)).toBeUndefined();
     expect(transport.getConversations()).toEqual([]);
+  });
+
+  it("retains the conversation pin when its DELETE fails", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", id);
+    globalThis.__nyxidAssistantHttpMock = () => new Response(null, { status: 503 });
+    await expect(new NyxAgentTransport().delete(id)).rejects.toThrow();
+    expect(useAssistantPinsStore.getState().ids).toContain(id);
+    useAssistantPinsStore.getState().bindAccount(null);
   });
 
   it("rejects malformed SSE and never automatically retries a submitted message", async () => {
@@ -2113,6 +2126,9 @@ it("persists decision continuation provenance through the request, optimistic tu
 
 it.each([
   ["wallet_suspended", "Contact support"],
+  ["model_approval_required", "Review Approval settings"],
+  ["model_policy_denied", "Deny rules"],
+  ["model_org_approval_required", "organization requires approval"],
   ["plan_entitlement_required", "Check your plan"],
   ["model_interrupted", "Some actions may already have completed"],
   ["model_unavailable", "Choose another model"],
@@ -2847,4 +2863,21 @@ it.each(["history", "index"] as const)("2345 on 2365 preserves HTTP errors and s
   response = valid;
   await expect(load()).resolves.toBeDefined();
   expect(requests).toEqual(Array(7).fill("GET"));
+});
+
+
+it("keeps model approval guidance and settings link in the saved failed reply", async () => {
+  const page = history();
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "model_approval_required",
+    text: "Your approval settings require approval for the model service. Review Approval settings before retrying. https://example.test/approvals/settings",
+    turn_metadata: { attempts: 1, failure_reason: { source: "nyxid", stage: "model_approval", code: "model_approval_required", http_status: 403, nyxid_error_code: 12502 } } };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  const message = reloaded.session(id).messages[1];
+  expect(message?.error).toContain("Review Approval settings");
+  expect(message?.content).toContain("https://example.test/approvals/settings");
+  render(createElement(ChatMessageList, { session: reloaded.session(id), bottomInset: 0 }));
+  expect(screen.getAllByText(storedError("model_approval_required"))[0]).toBeVisible();
+  expect(screen.getByRole("link", { name: "https://example.test/approvals/settings" })).toHaveAttribute("href", "https://example.test/approvals/settings");
 });

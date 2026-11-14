@@ -14,6 +14,11 @@ import { fixture } from "./workspaceNavigationTestHarness";
 import * as authEpoch from "../lib/auth/authEpoch";
 import * as authAccount from "../lib/auth/authAccount";
 
+import { createNotificationPushController } from "../lib/notifications/notificationPushController";
+
+const C = `nyxa-${"a".repeat(32)}`;
+const G = `nyxg-${"b".repeat(32)}`;
+
 type Hook = ReturnType<
   typeof import("./useNotificationNavigation").useNotificationNavigation
 >;
@@ -117,16 +122,32 @@ function setup(initialAccount: string | null = null) {
   const hook = h.load(
     fileURLToPath(new URL("./useNotificationNavigation.ts", import.meta.url)),
   ).useNotificationNavigation as any;
+  const reads: { ids: string[]; dispatches: number; account: string | null }[] = [];
+  const invalidations: unknown[] = [];
+  let failRead = false;
+  const controller = createNotificationPushController({
+    api: { markRead: async (scope) => {
+      assert.ok("ids" in scope);
+      reads.push({ ids: [...scope.ids], dispatches: actions.length, account: authAccount.getAuthAccountId() });
+      if (failRead) throw new Error("offline");
+    } },
+    queryClient: { invalidateQueries: async (filters) => { invalidations.push(filters); } },
+    isForeground: () => true,
+    isOnline: () => true,
+  });
   const navigation = {
     isReady: () => ready,
     getRootState: () => state,
     dispatch: (action: any) => actions.push(action),
   };
-  h.mount(() => hook(navigation, guards));
+  h.mount(() => hook(navigation, guards, controller.navigated));
   return {
     h,
     guards,
     actions,
+    reads,
+    invalidations,
+    failRead: () => { failRead = true; },
     telemetry,
     cached,
     linking,
@@ -206,7 +227,7 @@ test("warm tap and foreground Open share guards; newest destination replaces an 
   const guard = Symbol();
   f.guards.current.add(guard);
   f.tap(response({ type: "approval_request", request_id: "approval" }));
-  f.h.value().open("https://nyx.example/assistant?c=nyxg-crew");
+  f.h.value().open(`https://nyx.example/assistant?c=${G}`);
   assert.equal(f.actions.length, 0);
   f.guards.current.delete(guard);
   f.h.value().flush();
@@ -224,8 +245,8 @@ test("warm tap and foreground Open share guards; newest destination replaces an 
 });
 
 for (const url of [
-  "nyxid://assistant?c=newer-direct-thread",
-  "https://nyx.example/assistant?c=newer-direct-thread",
+  `nyxid://assistant?c=${C}`,
+  `https://nyx.example/assistant?c=${C}`,
 ]) {
   test(`a direct link supersedes a guarded notification: ${url}`, async () => {
     const f = setup();
@@ -324,14 +345,14 @@ test("a foreground Open fences a late cached cold response while navigation is g
   await f.signIn();
   const guard = Symbol();
   f.guards.current.add(guard);
-  f.h.value().open("https://nyx.example/assistant?c=foreground-thread");
+  f.h.value().open(`https://nyx.example/assistant?c=${C}`);
   f.cached.resolve(response({ conversation_id: "stale-cold-thread" }));
   await f.h.settle();
   assert.equal(f.actions.length, 0);
   f.guards.current.delete(guard);
   f.h.value().flush();
   assert.equal(f.actions.length, 1);
-  assert.match(JSON.stringify(f.actions[0]), /foreground-thread/);
+  assert.ok(JSON.stringify(f.actions[0]).includes(C));
   assert.doesNotMatch(JSON.stringify(f.actions[0]), /stale-cold-thread/);
   f.h.unmount();
 });
@@ -378,14 +399,14 @@ for (const delayed of [false, true]) {
       await f.signIn();
       const guard = Symbol();
       f.guards.current.add(guard);
-      if (!delayed) f.tap(response({ conversation_id: "private-a-thread" }));
+      if (!delayed) f.tap(response({ conversation_id: "private-a-thread", type: "chat_update", notification_id: "private-row" }));
       if (transition !== "account-switch") await f.signOut();
       if (transition !== "sign-out")
         await f.signIn(
           transition === "account-switch" ? "account-b" : "account-a",
         );
       if (delayed) {
-        f.cached.resolve(response({ conversation_id: "private-a-thread" }));
+        f.cached.resolve(response({ conversation_id: "private-a-thread", type: "chat_update", notification_id: "private-row" }));
         await f.h.settle();
         assert.equal(f.telemetry.length, 0);
         assert.equal(
@@ -397,6 +418,7 @@ for (const delayed of [false, true]) {
       f.guards.current.delete(guard);
       f.h.value().flush();
       assert.equal(f.actions.length, 0);
+      assert.equal(f.reads.length, 0);
       f.h.unmount();
     });
   }
@@ -490,4 +512,99 @@ for (const cold of [false, true]) {
       f.h.unmount();
     });
   }
+}
+
+for (const cold of [false, true]) {
+  test(`NyxBot ${cold ? "cold" : "warm"} tap waits for auth and guards, then dispatches before marking read once`, async () => {
+    const f = setup();
+    const guard = Symbol();
+    f.guards.current.add(guard);
+    const push = response({ type: "needs_decision", notification_id: "row-1", deeplink: `https://nyx.example/assistant?c=${C}&card=decision-1` });
+    if (cold) { f.cached.resolve(push); await f.h.settle(); }
+    else f.tap(push);
+    assert.equal(f.reads.length, 0);
+    await f.signIn();
+    assert.equal(f.actions.length, 0);
+    assert.equal(f.reads.length, 0);
+    f.guards.current.delete(guard);
+    f.h.value().flush();
+    assert.equal(f.actions.length, 1);
+    assert.ok(JSON.stringify(f.actions[0]).includes(C));
+    assert.match(JSON.stringify(f.actions[0]), /decision-1/);
+    assert.deepEqual(f.reads, [{ ids: ["row-1"], dispatches: 1, account: "account-a" }]);
+    await f.h.settle();
+    assert.equal(f.invalidations.length, 1);
+    f.tap(push);
+    f.h.value().flush();
+    assert.equal(f.reads.length, 1);
+    f.h.unmount();
+  });
+}
+test("NyxBot taps share latest-intent ownership with approval, toast and direct links", async () => {
+  const f = setup();
+  await f.signIn();
+  const guard = Symbol();
+  f.guards.current.add(guard);
+  f.tap(response({ type: "chat_update", notification_id: "old", deeplink: `nyxid://assistant?c=${C}` }));
+  f.tap(response({ request_id: "new-approval", type: "approval_request" }, "approval"));
+  f.guards.current.delete(guard); f.h.value().flush();
+  assert.match(JSON.stringify(f.actions[0]), /new-approval/);
+  assert.equal(f.reads.length, 0);
+  f.guards.current.add(guard);
+  f.tap(response({ type: "chat_update", notification_id: "old-2", deeplink: `nyxid://assistant?c=${C}` }, "old-2"));
+  f.h.value().open(`https://nyx.example/assistant?c=${G}`, "toast-row");
+  f.guards.current.delete(guard); f.h.value().flush();
+  assert.match(JSON.stringify(f.actions[1]), /GroupChat/);
+  assert.deepEqual(f.reads.map(x => x.ids), [["toast-row"]]);
+  f.guards.current.add(guard);
+  f.h.value().open(`nyxid://assistant?c=${C}`, "superseded-by-direct");
+  const unsubscribe = f.linking.appLinking.subscribe(() => {});
+  f.directLink(`nyxid://assistant?c=${C}`);
+  f.guards.current.delete(guard); f.h.value().flush();
+  assert.equal(f.actions.length, 2);
+  assert.equal(f.reads.length, 1);
+  unsubscribe(); f.h.unmount();
+});
+test("supported NyxBot destinations use canonical agent, crew, automation and card stacks even if read fails", async () => {
+  const f = setup(); await f.signIn(); f.failRead();
+  for (const [index, [query, expected]] of [
+    [`assistant?agent=agent-two&details=channels`, "AgentDetail"],
+    [`assistant?c=${G}`, "GroupChat"],
+    ["assistant/automations?agent=agent-two", "Automations"],
+    [`assistant?c=${C}&card=card-7`, "card-7"],
+  ].entries()) {
+    f.h.value().open(`https://nyx.example/${query}`, `row-${index}`);
+    assert.ok(JSON.stringify(f.actions[index]).includes(expected!));
+    assert.equal(f.reads[index]!.dispatches, index + 1);
+    await f.h.settle();
+    assert.equal(f.invalidations.length, index + 1);
+  }
+  f.h.unmount();
+});
+test("foreign/malformed links and fallback Activity never mark a NyxBot row read", async () => {
+  const f = setup(); await f.signIn();
+  for (const url of ["https://evil.example/assistant", "not a url", `nyxid://assistant?c=${C}#fragment`, "nyxid://unsupported-route"]) {
+    f.h.value().open(url, "unopened-row");
+  }
+  assert.equal(f.actions.length, 1);
+  assert.match(JSON.stringify(f.actions[0]), /Activity/);
+  assert.equal(f.reads.length, 0);
+  f.tap(response({ type: "chat_update", notification_id: "foreign-row", deeplink: "https://evil.example/assistant" }));
+  assert.equal(f.actions.length, 2);
+  assert.match(JSON.stringify(f.actions[1]), /Activity/);
+  assert.equal(f.reads.length, 0, "an extracted Activity fallback is not the row's destination");
+  f.h.unmount();
+});
+for (const trigger of [
+  { type: "push", payload: { type: "chat_update", notification_id: "apns-row", deeplink: `nyxid://assistant?c=${C}` } },
+  { type: "push", remoteMessage: { data: { type: "chat_update", notification_id: "fcm-row", deeplink: `nyxid://assistant?c=${C}` } } },
+]) {
+  test("wrapped native push keeps its notification ID through the shared router", async () => {
+    const f = setup(); await f.signIn(); f.tap(response({}, "wrapped", trigger));
+    assert.equal(f.actions.length, 1);
+    assert.equal(f.reads.length, 1);
+    assert.equal(f.reads[0]!.dispatches, 1);
+    assert.ok(["apns-row", "fcm-row"].includes(f.reads[0]!.ids[0]!));
+    f.h.unmount();
+  });
 }

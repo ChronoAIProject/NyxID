@@ -566,7 +566,7 @@ impl DirectChatPermit {
         let slot_manager = queued.slot_manager.clone();
         let user_id = queued.user_id.clone();
         let limit = queued.max_in_flight;
-        Some(tokio::spawn(async move {
+        Some(crate::services::shutdown::process().spawn(async move {
             if !oldest.await? {
                 return Ok(None);
             }
@@ -1482,7 +1482,7 @@ fn extract_client_ip(request: &Request<Body>, trusted_proxies: &[TrustedProxyRan
 }
 
 /// Paths exempt from the general budgets (protected by their own controls).
-const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health"];
+const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health", "/ready"];
 const ASSISTANT_ACTIONS_EXEMPT_PATH: &str = "/api/v1/assistant/actions";
 
 fn is_rate_limit_exempt(path: &str) -> bool {
@@ -2107,6 +2107,7 @@ mod tests {
     #[test]
     fn assistant_actions_has_exact_path_rate_limit_exemption() {
         assert!(is_rate_limit_exempt("/health"));
+        assert!(is_rate_limit_exempt("/ready"));
         assert!(is_rate_limit_exempt("/.well-known/openid-configuration"));
         assert!(is_rate_limit_exempt("/mcp"));
         assert!(is_rate_limit_exempt("/api/v1/assistant/actions"));

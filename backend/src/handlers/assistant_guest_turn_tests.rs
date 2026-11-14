@@ -117,6 +117,17 @@ async fn readiness_2092_real_codex_first_guest_all_profiles() {
     }
 }
 
+#[tokio::test]
+async fn model_approval_guest_personal_requirements_exempt_for_nyxbot_and_specialist() {
+    for nyxbot in [true, false] {
+        Box::pin(guest_pipeline(
+            nyxbot,
+            &["owner", "approval", "global_all", "manual_default"],
+        ))
+        .await;
+    }
+}
+
 async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     let f = if nyxbot {
         Box::pin(orchestrator_fixture("guest_1995_nyxbot")).await
@@ -579,6 +590,26 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .await
             .unwrap();
         }
+        if matches!(scenario, "global_all" | "manual_default") {
+            f.state
+                .db
+                .collection::<bson::Document>("service_approval_configs")
+                .delete_many(doc! {"user_id":&f.owner,"service_id":&model.id})
+                .await
+                .unwrap();
+            let channel =
+                crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+                    .await
+                    .unwrap();
+            f.state.db.collection::<bson::Document>("notification_channels").update_one(doc! {"_id":channel.id},
+                doc! {"$set":{"approval_required": if scenario == "global_all" {bson::Bson::Boolean(true)} else {bson::Bson::Null}}}).await.unwrap();
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .update_one(doc! {"_id":&connection}, doc! {"$set":{"source":"manual"}})
+                .await
+                .unwrap();
+        }
         if matches!(
             scenario,
             "catalog"
@@ -629,6 +660,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 .await
                 .unwrap();
         }
+        let turn_started_at = bson::DateTime::now();
         let input: engine::TurnRequest =
             serde_json::from_value(if scenario == "guest_new_thread" {
                 json!({"agent_id":&f.chat.agent_id,"text":"Where is the shop?"})
@@ -746,7 +778,6 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             );
         }
         let expected = match scenario {
-            "approval" => Some((403, "api_key_scope_forbidden", 9000)),
             "stateful" | "missing_input" => Some((403, "guest_model_route_required", 9000)),
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
@@ -820,6 +851,55 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                     .unwrap()
                     .failure_reason
                     .is_none()
+            );
+        }
+        if matches!(scenario, "approval" | "global_all" | "manual_default") {
+            assert_eq!(
+                reply
+                    .turn_metadata
+                    .as_ref()
+                    .unwrap()
+                    .timing
+                    .as_ref()
+                    .unwrap()
+                    .model_calls,
+                1
+            );
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let event = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(event) = f.state.db.collection::<crate::models::audit_log::AuditLog>("audit_log")
+                        .find_one(doc! {"event_type":"service_request","api_key_id":&row.credential_api_key_id,
+                            "event_data.user_service_id":&connection,"created_at":{"$gte":turn_started_at}})
+                        .await.unwrap()
+                    {
+                        break event.event_data.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(event["outcome"], "response_received");
+            assert_eq!(event["model_egress_admitted"], true);
+            assert_eq!(
+                event.get("approval_exempt").and_then(Value::as_str),
+                (scenario != "manual_default").then_some("assistant_model_transport")
+            );
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("audit_log")
+                    .count_documents(doc! {"event_type":"execution_permission_requested"})
+                    .await
+                    .unwrap(),
+                0
             );
         }
         drop(lease);

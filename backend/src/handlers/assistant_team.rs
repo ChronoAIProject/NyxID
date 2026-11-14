@@ -38,7 +38,6 @@ use crate::{
         assistant_settings_service as settings,
         assistant_team_service::{self as team, TeamRefusal},
         assistant_team_tools,
-        coordination_service::RateWindowStore,
     },
 };
 
@@ -211,6 +210,9 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 /// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
+    let Some(_claim) = state.shutdown.background() else {
+        return;
+    };
     let result: AppResult<()> = async {
         let (row, org_access) = match Box::pin(engine::get_authorized(&state.db, owner, id)).await {
             Ok(authorized) => authorized,
@@ -222,6 +224,21 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
+        let automation =
+            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
+                .await?;
+        if !automation
+            && crate::services::coordination_service::RateWindowStore::is_exhausted(
+                &state.db,
+                "assistant_event_turns",
+                owner,
+                team::EVENT_TURNS_PER_HOUR,
+                Duration::from_secs(3600),
+            )
+            .await?
+        {
+            return Ok(());
+        }
         if Box::pin(crate::services::channel_thread_follow_service::prune_queue(
             &state.db, owner, id,
         ))
@@ -241,9 +258,6 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         }) {
             return Ok(());
         }
-        let automation =
-            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
-                .await?;
         if !automation && !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
             return Ok(());
         }
@@ -255,9 +269,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         {
             return team::drop_events(&state.db, owner, id).await;
         }
-        // Take a pool slot before spending the hourly budget, so a full pool
-        // never uses it up. NyxBot's event turns share the pool with working
-        // specialists.
+        // NyxBot's event turns share the pool with working specialists.
+        // The engine spends the hourly budget in the turn admission transaction.
         let limit = team_pool_limit(state, owner).await + 1;
         let pool = if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
             Pool::Channel { owner }
@@ -267,19 +280,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         let Some(permit) = acquire(state, pool).await? else {
             return Ok(());
         };
-        if !automation
-            && !RateWindowStore::admit(
-                &state.db,
-                "assistant_event_turns",
-                owner,
-                team::EVENT_TURNS_PER_HOUR,
-                Duration::from_secs(3600),
-            )
-            .await?
-            .allowed
-        {
-            return Ok(());
-        }
+        #[cfg(test)]
+        tests::wait_for_wake_barrier(&state.db).await;
         let mut start = event_turn(id);
         start.org_access = org_access;
         let mut group_seen = None;
@@ -582,12 +584,13 @@ pub(crate) async fn after_turn(
     if error.is_some() {
         // They were told an answer would come: say it did not.
         for origin in &also {
-            super::nyxbot::deliver_to(
+            super::nyxbot::deliver_to_for(
                 state,
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
                 None,
+                super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
             )
             .await;
         }
@@ -620,7 +623,15 @@ pub(crate) async fn after_turn(
         | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
+        super::nyxbot::deliver_to_for(
+            state,
+            row,
+            origin,
+            text,
+            Some(&plan),
+            super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
+        )
+        .await;
     }
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }
@@ -1585,6 +1596,12 @@ fn dispatch<'a>(
     delegation_approved: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "list_notifications" => Box::pin(async move {
+            Ok((
+                super::assistant_notifications::list_for_tool(state, &chat.user_id, args).await?,
+                false,
+            ))
+        }),
         "task_status" => Box::pin(async move {
             Ok((
                 crate::services::assistant_task_status::read(&state.db, chat, args).await?,
@@ -3364,6 +3381,149 @@ pub struct CreateAgentRequest {
     account_read: bool,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantServicesQuery {
+    org: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GrantServiceResponse {
+    id: String,
+    slug: String,
+    label: String,
+    executable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+}
+
+/// Metadata-only grant inventory, deliberately separate from key management
+/// and executable MCP discovery. Saving resolves this same live inventory.
+pub async fn grant_services(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<GrantServicesQuery>,
+) -> AppResult<Json<Value>> {
+    use crate::services::mcp_service::McpToolSource;
+    use bson::doc;
+    use futures::TryStreamExt;
+
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let owner = match query.org.as_deref() {
+        Some(org) => {
+            crate::services::org_agent_service::resolve_org(&state.db, &actor, org).await?
+        }
+        None => actor.clone(),
+    };
+    let access =
+        crate::services::org_agent_service::resolve_key_access(&state.db, &actor, Some(&owner))
+            .await?;
+    let scope = match access.as_deref() {
+        Some(access) => crate::services::mcp_service::ServiceScope::Organization { access },
+        None => crate::services::mcp_service::ServiceScope::Unrestricted,
+    };
+    // Preserve the old human /keys inventory's personal/restricted-org provisioning.
+    // Grant writers themselves remain read-only until the normal grant transaction.
+    crate::services::unified_key_service::auto_provision_no_auth_services(&state.db, &actor)
+        .await?;
+    let services =
+        team::grant_catalog(&state.db, &state.node_ws_manager, &actor, scope, &[]).await?;
+    // Presentation metadata only: one ID-bounded batch, only on this human GET.
+    // The canonical inventory already supplies the catalog identity; no lookup
+    // or new reads in grant writers / MCP / execution are needed.
+    let mut connection_ids = Vec::new();
+    let mut catalog_ids = std::collections::BTreeSet::new();
+    for service in &services {
+        match &service.source {
+            McpToolSource::UserManaged {
+                user_service_id,
+                catalog_service_id,
+                ..
+            } => {
+                connection_ids.push(user_service_id.clone());
+                catalog_ids.extend(catalog_service_id.iter().cloned());
+            }
+            McpToolSource::Platform {
+                downstream_service_id,
+            } => {
+                catalog_ids.insert(downstream_service_id.clone());
+            }
+            McpToolSource::Internal => {}
+        }
+    }
+    let mut connection_icons = BTreeMap::new();
+    let mut catalog_icons = BTreeMap::new();
+    if !services.is_empty() {
+        let metadata: Vec<bson::Document> = state.db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .aggregate(vec![
+                doc! {"$match": {"_id": {"$in": connection_ids}}},
+                doc! {"$project": {"_id": 1, "icon_url": 1, "kind": {"$literal": "connection"}}},
+                doc! {"$unionWith": {"coll": crate::models::downstream_service::COLLECTION_NAME,
+                    "pipeline": [
+                        {"$match": {"_id": {"$in": catalog_ids.into_iter().collect::<Vec<_>>()}}},
+                        {"$project": {"_id": 1, "slug": 1, "icon_url": 1, "kind": {"$literal": "catalog"}}}
+                    ]}},
+            ])
+            .await?
+            .try_collect()
+            .await?;
+        for row in metadata {
+            let Ok(id) = row.get_str("_id") else { continue };
+            let icon = row
+                .get_str("icon_url")
+                .ok()
+                .filter(|icon| !icon.is_empty())
+                .map(str::to_owned);
+            if row.get_str("kind") == Ok("connection") {
+                connection_icons.insert(id.to_owned(), icon);
+            } else {
+                catalog_icons.insert(
+                    id.to_owned(),
+                    (row.get_str("slug").ok().map(str::to_owned), icon),
+                );
+            }
+        }
+    }
+    let services: Vec<_> = services
+        .into_iter()
+        .map(|service| {
+            let (connection_id, catalog_id) = match &service.source {
+                McpToolSource::UserManaged {
+                    user_service_id,
+                    catalog_service_id,
+                    ..
+                } => (
+                    Some(user_service_id.as_str()),
+                    catalog_service_id.as_deref(),
+                ),
+                McpToolSource::Platform {
+                    downstream_service_id,
+                } => (None, Some(downstream_service_id.as_str())),
+                McpToolSource::Internal => (None, None),
+            };
+            let catalog = catalog_id.and_then(|id| catalog_icons.get(id));
+            let icon_url = connection_id
+                .and_then(|id| connection_icons.get(id))
+                .and_then(Clone::clone)
+                .or_else(|| catalog.and_then(|(_, icon)| icon.clone()));
+            GrantServiceResponse {
+                catalog_slug: catalog.and_then(|(slug, _)| slug.clone()),
+                icon_url,
+                id: service.service_id,
+                slug: service.service_slug,
+                label: service.service_name,
+                executable: service.executable,
+            }
+        })
+        .collect();
+    Ok(Json(json!({"services":services})))
+}
+
 /// The owner creates a specialist directly.
 pub async fn create_agent(
     State(state): State<AppState>,
@@ -3754,6 +3914,7 @@ pub struct SettingsResponse {
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
     specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
+    notifications: crate::models::assistant_settings::NotificationPreferences,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -3778,6 +3939,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
             specialist_access_requests: row.specialist_access_requests,
+            notifications: row.notifications,
         }
     }
 }
@@ -3812,6 +3974,8 @@ pub struct SettingsRequest {
     max_group_handoffs_per_hour: Option<i32>,
     #[serde(default)]
     specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
+    #[serde(default)]
+    notifications: Option<crate::models::assistant_settings::NotificationPreferences>,
 }
 
 pub async fn update_settings(
@@ -3843,6 +4007,7 @@ pub async fn update_settings(
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
             specialist_access_requests: body.specialist_access_requests,
+            notifications: body.notifications,
         },
     )
     .await?;
@@ -3955,22 +4120,31 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
     super::nyxbot::execution_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::nyxbot::guest_setup_queue::sweep(&state)
                 .await
                 .is_err()
             {
                 tracing::warn!("Guest model queue deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::assistant_guest_model_setup::sweep(&state)
                 .await
@@ -3978,11 +4152,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::warn!("Guest model recovery deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::nyxbot::guest_model_notices::sweep(&state)
                 .await
                 .is_err()
             {
                 tracing::warn!("Guest model setup notices deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::lark_base_writes::sweep(&state.db)
                 .await
@@ -3990,11 +4170,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Lark Base write maintenance deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::assistant_channel_media::queue::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel media finalization deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await
@@ -4002,11 +4188,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Channel media sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::channel_thread_follow_service::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel thread sweep deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::assistant_invocation_service::reconcile_cancellations(&state)
                 .await
@@ -4014,8 +4206,14 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Invocation cancellation sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
                 Ok(rows) => {
@@ -4031,6 +4229,9 @@ pub fn spawn_sweeps(state: AppState) {
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::execution_permission_dispatch::proposals::sweep(&state)
                 .await
                 .is_err()
@@ -4038,32 +4239,57 @@ pub fn spawn_sweeps(state: AppState) {
                 tracing::debug!("Execution permission recovery deferred");
             }
             // Things the owner finished outside the chat queue events first.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::process_watches(&state).await {
                 tracing::debug!(%error, "NyxBot watch sweep deferred");
             }
             // Linked chat apps whose messages stopped reaching their agent.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::check_deliveries(&state).await {
                 tracing::debug!(%error, "NyxBot delivery sweep deferred");
             }
             // Reconcile personal and org bot transports against their linking person's flags.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::switch_to_gateway(&state).await {
                 tracing::debug!(%error, "NyxBot gateway switch-over deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if deliver_pending_skill_notifications(&state).await.is_err() {
                 tracing::debug!("Skill attachment outbox sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
                     wake(&state, &row.user_id, &row.id).await;
                 }
             }
             super::collaboration_group::sweep(&state).await;
             // Group members addressed while busy (or while the pool was full).
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Ok(rows) =
                 crate::services::assistant_group_service::with_pending(&state.db).await
             {
                 for group in rows {
-                    super::assistant_group::advance(&state, &group.user_id, &group.id).await;
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
+                    super::assistant_group::advance_background(&state, &group.user_id, &group.id)
+                        .await;
                 }
             }
         }
@@ -4144,6 +4370,10 @@ pub(crate) async fn operation_owner_card(
     .await?;
     Ok((acks::refusal(&card), true))
 }
+
+#[cfg(test)]
+#[path = "assistant_grant_services_tests.rs"]
+mod grant_services_tests;
 
 #[cfg(test)]
 #[path = "assistant_team_tests.rs"]

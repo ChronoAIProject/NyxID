@@ -69,6 +69,8 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
   };
   const native = {
     setAudioSessionActiveIOS: () => {},
+    permissionStatus: { granted: false },
+    getPermissionsAsync: async () => native.permissionStatus,
     requestPermissionsAsync: () => {
       events.push("permission");
       return permission.promise;
@@ -144,6 +146,9 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/accessibility/workspaceAccessibility": {
       useWorkspaceAccessibility: () => ({ sheetOpen: false }),
+    },
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({ t: (phrase: string) => phrase }),
     },
     "../../lib/api/agentsApi": { agentsApi: {} },
     "./useAssistantLiveRefresh": { useAssistantLiveRefresh: () => {} },
@@ -226,6 +231,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
   return {
     h,
     events,
+    native,
     inserted,
     permission,
     feedback: () => {
@@ -318,6 +324,8 @@ test("saved and new chat microphone taps retain pending permission and start aft
         .feedback()
         .some((node) => node.props.accessibilityLabel === "Discard dictation"),
     );
+    await x.h.settle();
+    assert.deepEqual(x.events, ["permission"]);
     x.app("inactive");
     x.permission.resolve({ granted: true });
     await x.h.settle();
@@ -346,6 +354,8 @@ test("saved and new chat permission denial remains actionable during a foregroun
   for (const saved of [true, false]) {
     const x = await setup(saved);
     x.h.value().button.props.onPress();
+    await x.h.settle();
+    assert.deepEqual(x.events, ["permission"]);
     x.app("inactive");
     x.permission.resolve({ granted: false });
     await x.h.settle();
@@ -372,10 +382,10 @@ test("saved and new chat permission denial remains actionable during a foregroun
 test("already granted microphone permission starts saved and new chat dictation on the first tap", async () => {
   for (const saved of [true, false]) {
     const x = await setup(saved);
-    x.permission.resolve({ granted: true });
+    x.native.permissionStatus = { granted: true };
     x.h.value().button.props.onPress();
     await x.h.settle();
-    assert.deepEqual(x.events, ["permission", "start"]);
+    assert.deepEqual(x.events, ["start"]);
     x.emit("start");
     assert.equal(x.h.value().dictation.phase, "listening");
     assert.deepEqual(x.inserted, []);
@@ -425,6 +435,8 @@ test("background, navigation, account and scope changes still cancel a saved cha
   for (const action of ["background", "blur", "account", "scope"]) {
     const x = await setup(true);
     x.h.value().button.props.onPress();
+    await x.h.settle();
+    assert.deepEqual(x.events, ["permission"]);
     if (action === "background") x.app("background");
     if (action === "blur") x.blur();
     if (action === "account") x.account();
@@ -456,6 +468,8 @@ test("a failed explicit reopen refresh releases loading and reports the failure"
 test("a foreground history response with an active turn cancels pending permission", async () => {
   const x = await setup(true);
   x.h.value().button.props.onPress();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["permission"]);
   x.app("inactive");
   x.refresh();
   x.app("active");

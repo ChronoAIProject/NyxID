@@ -7,3 +7,5 @@ pub mod security_headers;
 pub mod telemetry;
 
 pub mod cookie_domain;
+
+pub mod shutdown;

@@ -1054,9 +1054,33 @@ async fn v2_direct_continuation_keeps_assignment_identity_and_latest_source_turn
     );
     let mut request = start(&child.id, "Continue");
     request.origin = TurnOrigin::Event;
+    for _ in 0..team::EVENT_TURNS_PER_HOUR {
+        assert!(
+            crate::services::coordination_service::RateWindowStore::admit(
+                &state.db,
+                "assistant_event_turns",
+                OWNER,
+                team::EVENT_TURNS_PER_HOUR,
+                std::time::Duration::from_secs(3600),
+            )
+            .await
+            .unwrap()
+            .allowed
+        );
+    }
     let resumed = engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
         .await
         .unwrap();
+    let budget = state
+        .db
+        .collection::<crate::models::coordination::RateWindowRecord>(
+            crate::models::coordination::RATE_WINDOW_COLLECTION_NAME,
+        )
+        .find_one(doc! {"namespace":"assistant_event_turns"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(budget.count, team::EVENT_TURNS_PER_HOUR as i64);
     let latest = resumed.active_turn.as_ref().unwrap();
     let edge = latest.delegated_images.assignment.as_ref().unwrap();
     assert_eq!(edge.id, assignment.id);
@@ -2479,4 +2503,60 @@ async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group
             .any(|e| e.kind == "group_settled" && e.text.contains("Shared group result"))
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn non_resumable_automation_events_start_nothing_and_spend_no_budget() {
+    Box::pin(async {
+        for reason in ["finished", "deadline", "continuation_limit"] {
+            let (state, _, run, root, server) = root("non_resumable_event", false).await;
+            let row = if reason == "continuation_limit" { root } else { child(&state, &root).await };
+            let work = row.active_turn.as_ref().unwrap().automation_work.clone().unwrap();
+            save_reply(&state, &row, "Waiting", None).await;
+            let mut event = team::event("permission_decided", "Continue".into(), None);
+            event.automation_work = Some(work.clone());
+            if reason == "continuation_limit" {
+                use crate::models::async_service_operation::{AsyncServiceOperation, COLLECTION_NAME as WATCHES};
+                event.kind = crate::services::async_service_operation::EVENT_KIND.into();
+                let now = schedules::date(Utc::now());
+                let watch: AsyncServiceOperation = mongodb::bson::from_document(doc! {
+                    "_id": &event.id, "user_id": OWNER, "conversation_id": &row.id,
+                    "agent_id": &row.agent_id, "turn_id": &run.turn_id,
+                    "api_key_id": &row.credential_api_key_id, "service_id":"test-service",
+                    "submit_endpoint_id":"submit", "state":"queued", "attempts":0,
+                    "lease_until":null, "created_at":now, "deadline":now, "poll_at":now,
+                    "expires_at":schedules::date(Utc::now()+Duration::hours(1)),
+                    "contract": {"status_operation":"status", "result_operation":"result", "id_field":"id",
+                        "id_parameter":"id", "status_field":"status", "success_states":["completed"], "failure_states":["failed"]},
+                    "delivery": {"origin":"trigger", "automation_work":mongodb::bson::to_bson(&work).unwrap()},
+                }).unwrap();
+                state.db.collection::<AsyncServiceOperation>(WATCHES).insert_one(watch).await.unwrap();
+            }
+            engine::push_events(&state.db, OWNER, &row.id, vec![event.clone()]).await.unwrap();
+            let before = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+            assert!(v2::event_can_resume(&state.db, &before).await.unwrap(), "{reason}: live fixture resumes");
+            let mutation = match reason {
+                "finished" => doc! {"outcome":"completed"},
+                "deadline" => doc! {"coordinator.deadline": schedules::date(Utc::now()-Duration::seconds(1))},
+                _ => doc! {"coordinator.continuations":i64::from(v2::CONTINUATION_LIMIT)},
+            };
+            state.db.collection::<Document>(RUNS).update_one(doc! {"_id": &run.id}, doc! {"$set":mutation}).await.unwrap();
+            assert!(!v2::event_can_resume(&state.db, &before).await.unwrap());
+            let mut request = start(&row.id, "Continue");
+            request.origin = TurnOrigin::Event;
+            let result = engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys).await;
+            assert!(matches!(result, Err(AppError::AssistantTurnRequired)), "{reason}: invalid automation must reject admission");
+            crate::handlers::assistant_team::wake(&state, OWNER, &row.id).await;
+            let after = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+            assert!(after.active_turn.is_none());
+            assert_eq!(after.pending_events.len(), 1);
+            assert_eq!(after.pending_events[0].id, event.id);
+            assert_eq!(after.message_count, before.message_count);
+            assert_eq!(after.event_streak, before.event_streak);
+            assert_eq!(state.db.collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+                .count_documents(doc! {"namespace":"assistant_event_turns"}).await.unwrap(), 0);
+            server.abort();
+            state.db.drop().await.unwrap();
+        }
+    }).await;
 }

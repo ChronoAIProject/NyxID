@@ -730,7 +730,49 @@ pub(crate) async fn send(
     text: &str,
     images: Option<super::images::ImageTurn<'_>>,
 ) -> AppResult<()> {
-    let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
+    send_impl(state, owner, origin, conversation, text, images, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_supplemental(
+    state: &AppState,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+    images: Option<super::images::ImageTurn<'_>>,
+    decision: &mut super::supplemental::Decision,
+) -> AppResult<()> {
+    Box::pin(send_impl(
+        state,
+        owner,
+        origin,
+        conversation,
+        text,
+        images,
+        Some(decision),
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_impl(
+    state: &AppState,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+    images: Option<super::images::ImageTurn<'_>>,
+    mut decision: Option<&mut super::supplemental::Decision>,
+) -> AppResult<()> {
+    let channel = if origin.org_execution.is_some() {
+        // Execution belongs to the admitted actor; channel management belongs
+        // to the transport admin returned by the live delivery validator.
+        let child = follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        follow::access(&state.db, &child.user_id, &origin.nyxbot_channel_id).await?
+    } else {
+        follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?
+    };
     if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
         return Err(follow::not_found());
     }
@@ -772,12 +814,39 @@ pub(crate) async fn send(
     // committed transport, not that identity alone, selects the reply path.
     if channel.transport == "gateway" && channel.gateway_source.is_some() {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        if let Some(decision) = decision {
+            return Box::pin(super::supplemental::native(
+                state,
+                &channel,
+                origin,
+                conversation,
+                &text,
+                decision,
+            ))
+            .await;
+        }
         return super::native_responses::send_update(state, &channel, origin, conversation, &text)
             .await;
     }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        if let Some(decision) = decision {
+            return Box::pin(super::supplemental::followed(
+                state,
+                &channel,
+                owner,
+                origin,
+                conversation,
+                &text,
+                decision,
+            ))
+            .await;
+        }
         return super::gateway_threads::send(state, &channel, origin, conversation, &text).await;
+    }
+    if let Some(decision) = decision.as_mut() {
+        decision.anchor = super::supplemental::Anchor::ThreadBinding;
+        decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
     }
     let outcome = send_bound_reply(
         state,
@@ -795,7 +864,12 @@ pub(crate) async fn send(
     .await?;
     match outcome.error {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => {
+            if let Some(decision) = decision {
+                decision.outcome("confirmed");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -953,6 +1027,9 @@ pub(crate) async fn prelude(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
 ) -> Option<String> {
+    if row.guest_model_setup {
+        return None;
+    }
     let origin = row
         .active_turn
         .as_ref()?
@@ -1086,12 +1163,18 @@ pub(crate) async fn prelude(
         prelude.push_str(&json!({"message_id":m.message_id,"sender":m.sender_id,"time":m.created_at,"kind":m.content_type,"body_available":false}).to_string());
         prelude.push('\n');
     }
+    let mut context_filter = doc! {"_id":&binding.child_id,
+    "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,
+    "binding_generation":binding.generation};
+    if origin.org_execution.is_none() {
+        context_filter.insert("conversation_id", &row.id);
+    }
     let _ = tokio::time::timeout_at(deadline, async {
         state
             .db
             .collection::<NyxbotThread>(THREADS)
             .update_one(
-                doc! {"_id": &binding.child_id,"conversation_id": &row.id},
+                context_filter,
                 doc! {"$set":{"context_status":status,"context_message_count":count as i64}},
             )
             .await

@@ -1189,7 +1189,7 @@ fn spawn_terminal_webhook_delivery(
     dispatcher: crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
     link: ConnectLink,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let (Some(app_id), Some(event_id), Some(event_type)) = (
             link.requesting_app_id.as_deref(),
             link.webhook_event_id.as_deref(),

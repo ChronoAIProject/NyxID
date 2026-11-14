@@ -2972,6 +2972,31 @@ async fn release_native_discord_crash_and_old_replica_delete_preserve_drain_boun
     upstream.abort();
 }
 
+#[tokio::test]
+async fn notifications_are_purged_in_channel_retirement_transaction() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let (state, row, _, _, upstream) = fixture("notifications_channel_purge").await;
+    let removed = seed(&state.db, OWNER, doc! {"channel_id":&row.id}).await;
+    let other_recipient = seed(&state.db, "another-recipient", doc! {"channel_id":&row.id}).await;
+    let retained = seed(&state.db, OWNER, doc! {"channel_id":"another-channel"}).await;
+    release::retire_connection(
+        &state,
+        &row,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+    )
+    .await
+    .unwrap();
+    probe(&state.db, &removed, false).await;
+    probe(&state.db, &other_recipient, false).await;
+    probe(&state.db, &retained, true).await;
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}
+
 async fn stuck_discord_move(
     name: &str,
 ) -> (

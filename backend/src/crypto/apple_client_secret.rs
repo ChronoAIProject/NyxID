@@ -124,6 +124,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
     fn make_test_config(private_key_path: Option<String>) -> AppConfig {
         AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: 600,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "https://auth.example.com".to_string(),

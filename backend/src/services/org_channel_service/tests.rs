@@ -102,7 +102,7 @@ impl Fixture {
             bot,
         }
     }
-    async fn link(&self, actor: &str, sender_id: &str) -> ChannelOrigin {
+    pub(crate) async fn link(&self, actor: &str, sender_id: &str) -> ChannelOrigin {
         let db = &self.org.state.db;
         let issued = links::issue(db, actor, &self.channel).await.unwrap();
         assert!(
@@ -2133,12 +2133,22 @@ async fn setup_guidance_keeps_readiness_and_expiry_checks_closed() {
             .unwrap()["member_verified"],
         false
     );
-    // A live incompatible replica produces the existing distinct readiness error.
+    // An activated capability tolerates an undeclared supporting replica.
+    // Removing that replica's capability must retain the distinct refusal.
     let replicas = db.collection::<Document>(crate::models::security_replica::COLLECTION_NAME);
     let mut replica = replicas.find_one(doc! {}).await.unwrap().unwrap();
     replica.insert("_id", "unready-extra-replica");
     replica.insert("instance_name", "unready-extra-replica");
+    replica.insert("generation_id", "unready-extra-replica");
     replicas.insert_one(replica).await.unwrap();
+    require_target(db, &f.org.admin, &f.agent).await.unwrap();
+    replicas
+        .update_one(
+            doc! {"_id": "unready-extra-replica"},
+            doc! {"$pull": {"capabilities": FLAG}},
+        )
+        .await
+        .unwrap();
     assert!(matches!(
         require_target(db, &f.org.admin, &f.agent).await,
         Err(AppError::SecurityReadinessUnavailable)
@@ -2197,5 +2207,169 @@ async fn org_access_2283_enabled_guest_does_not_revoke_transport_admin() {
 #[path = "guest_settings_tests.rs"]
 mod guest_settings;
 
+#[tokio::test]
+async fn notifications_are_purged_by_exact_org_channel_actor_and_thread() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let f = Fixture::new("notifications_org_channel_purge").await;
+    let db = &f.org.state.db;
+    let removed = seed(db, &f.org.member, doc! {"channel_id":&f.channel.id}).await;
+    let remaining = seed(db, &f.org.admin, doc! {"channel_id":&f.channel.id}).await;
+    let thread = seed(db, &f.org.admin, doc! {"conversation_id":"exact-thread"}).await;
+    let context = (db.clone(), f.channel.id.clone(), f.org.member.clone());
+    crate::services::transaction_service::run_db_only(db, &context, |tx, (db, channel, actor)| {
+        Box::pin(async move { lifecycle::retire_in_session(db, tx, channel, Some(actor)).await })
+    })
+    .await
+    .unwrap();
+    probe(db, &removed, false).await;
+    probe(db, &remaining, true).await;
+    let context = db.clone();
+    crate::services::transaction_service::run_db_only(db, &context, |tx, db| {
+        Box::pin(async move { lifecycle::delete_conversation(db, tx, "exact-thread").await })
+    })
+    .await
+    .unwrap();
+    probe(db, &thread, false).await;
+    probe(db, &remaining, true).await;
+    db.drop().await.unwrap();
+}
+
 #[path = "grants_cutover_tests.rs"]
 mod grants_cutover;
+
+impl Fixture {
+    pub(crate) async fn followed_guest(&self) -> AssistantConversation {
+        self.followed_guest_with_policy("active").await
+    }
+
+    pub(crate) async fn followed_guest_with_policy(&self, policy: &str) -> AssistantConversation {
+        use crate::models::channel_thread::{
+            ChannelThreadFacts, ThreadAddress, ThreadKind, ThreadSenderKind,
+        };
+        use crate::services::{
+            channel_thread_follow_service as follow, channel_thread_service::ThreadReplyTarget,
+        };
+        let f = self;
+        let db = &f.org.state.db;
+        let mut origin = f.guest("fixture-sender").await;
+        crate::services::feature_flag_service::set_platform_override(
+            db,
+            crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            &f.org.admin,
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>("nyxbot_threads")
+        .insert_one(doc! {
+            "_id":"parent","user_id":&f.org.admin,"channel_id":&f.channel.id,"partition":"parent",
+            "kind":"group","platform_chat_id":"group","members":"everyone",
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        })
+        .await
+        .unwrap();
+        let facts = ChannelThreadFacts {
+            version: 1,
+            kind: ThreadKind::ReplyChain,
+            chat_id: "group".into(),
+            message_id: "message".into(),
+            root_id: Some("message".into()),
+            sender_kind: ThreadSenderKind::Human,
+            address: ThreadAddress::Mention,
+            ..Default::default()
+        };
+        let inbound:crate::services::channel_platform::InboundMessage=serde_json::from_value(serde_json::json!({
+        "platform_message_id":"message","conversation_id":"group","conversation_type":"group","sender_platform_id":"fixture-sender",
+        "content_type":"text","text":"Question","attachments":[],"raw_data":{}
+    })).unwrap();
+        let mut source = crate::services::channel_relay_service::inbound_metadata(
+            &f.bot.id,
+            f.channel.route_id.as_deref().unwrap(),
+            &f.org.org,
+            "lark",
+            &inbound,
+            &f.channel.route_api_key_id,
+            "source",
+        );
+        source.thread_context = Some(facts.clone());
+        db.collection::<crate::models::channel_message::ChannelMessage>("channel_messages")
+            .insert_one(source)
+            .await
+            .unwrap();
+        let follow::Selection::Child(child, binding) = follow::select(
+            db,
+            &f.org.admin,
+            &f.channel.id,
+            "parent",
+            "parent",
+            &ThreadReplyTarget::fixture("lark", facts),
+            "source",
+            "fixture-sender",
+            true,
+            false,
+            &f.agent.id,
+            true,
+        )
+        .await
+        .unwrap() else {
+            panic!("guest must open followed thread")
+        };
+        assert!(binding.guest);
+        origin.partition = child.partition.clone();
+        origin.thread = Some(Box::new(binding));
+        let (conversation, _) = transcript::lane(db, &origin, &f.org.org, &f.agent.id)
+            .await
+            .unwrap();
+        match policy {
+            "flag_off" => {
+                crate::services::feature_flag_service::set_platform_override(
+                    db,
+                    crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+                    &crate::services::feature_flag_service::FlagTarget::Global,
+                    false,
+                    &f.org.admin,
+                )
+                .await
+                .unwrap();
+                db.collection::<Document>("nyxbot_threads")
+                    .update_one(
+                        doc! {"_id":&child.id},
+                        doc! {"$set":{"follow_state":"stopped"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "stopped" | "expired" => {
+                db.collection::<Document>("nyxbot_threads")
+                    .update_one(doc! {"_id":"parent"}, doc! {"$set":{"reply_mode":"all"}})
+                    .await
+                    .unwrap();
+                db.collection::<Document>("nyxbot_threads").update_one(doc!{"_id":&child.id},
+                    doc!{"$set":{"follow_state":policy,"follow_expires_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+            }
+            "active" => {}
+            _ => panic!("unknown admission policy"),
+        }
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        follow::admit_turn(db, &f.org.org, &origin, &conversation, &mut tx)
+            .await
+            .unwrap();
+        tx.commit_transaction().await.unwrap();
+        follow::validate_delivery(db, &f.org.org, &origin, &conversation)
+            .await
+            .unwrap();
+        assert!(
+            follow::validate_delivery(db, &f.org.admin, &origin, &conversation)
+                .await
+                .is_err()
+        );
+        let row = channel_turn(f, &origin, "Guest follow question").await;
+        assert!(row.guest_turn && row.channel.as_ref().unwrap().thread.is_some());
+        assert_eq!(row.user_id, f.org.org);
+        row
+    }
+}

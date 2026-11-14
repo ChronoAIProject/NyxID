@@ -85,8 +85,8 @@ approval cards or text decisions and do not enter duplicate-question coalescing.
 
 The default-off `assistant:channel-guest-media` flag is evaluated for the linking
 person alongside `assistant:channel-media`. Enable it only after the fleet reports
-both `assistant:channel-media-v2` and `assistant:channel-guest-media` ready, with
-old workers drained. Stage A replicas do not advertise the guest capability.
+both `assistant:channel-media-v2` and `assistant:channel-guest-media` durably
+activated and serving-ready. Stage A replicas do not advertise the guest capability.
 This admits personal-agent guest media from authenticated relay selectors on
 Lark/Feishu, Discord, Slack, WhatsApp, X and Telegram, including relay-through-CMA.
 Native Discord/WhatsApp retrieval remains deferred to CMA#1402. Org-specialist
@@ -212,13 +212,14 @@ admission; no partially held reservation waits for a larger one.
 
 ### Channel rollout and rollback
 
-Upgrade **all NyxID replicas** and drain pre-release workers before enabling
-`assistant:channel-media`. The added Discord/Slack/WhatsApp/X path requires a
-ready `assistant:channel-media-v2` report at admission and every fetch/recheck;
+Upgrade **all NyxID replicas** before enabling `assistant:channel-media`. The added
+Discord/Slack/WhatsApp/X path under that flag requires
+`assistant:channel-media-v2` serving readiness at admission and every fetch/recheck;
 legacy Lark/Feishu/Telegram owner paths do not acquire this new gate. With the
-existing flag already on, new adapters activate only after the complete roster
-advertises this capability and old workers are declared drained. A red report
-produces the unavailable-media note rather than a download. No new environment
+existing flag already on, new adapters activate only after every live observation supports the capability and activation is recorded,
+without a roster/drain declaration. Once activation is recorded, supported roster overlaps retain media service even when
+strict `ready` is false. Hard serving blockers produce the unavailable-media note
+rather than a download. No new environment
 variable or guest-media authority is introduced in this stage.
 Lark/Feishu gateway delivery also requires CMA at least
 `a570be21` and `CMAEG_MEDIA_ENABLED=true`. CMA's default provider header budget is
@@ -631,8 +632,8 @@ They never submit another Sandbox execution. Recovery updates the saved outcome
 and association atomically. Missing/expired bytes cannot be recreated.
 
 Ship tolerant frontend readers first, then every API/async writer/worker and normal
-startup indexes. Configure the existing replica roster/drain readiness before
-enabling `assistant:generated-artifacts`; acquisition requires that capability.
+startup indexes. Observed support automatically records `assistant:generated-artifacts` before
+its flag can be enabled or acquisition can proceed; no roster/drain setup is required.
 Disabling hides generated rows/outcomes from history and active turns and disables
 both recovery transports. Admitted watches drain and retained owner GETs remain
 readable until expiry. Re-enabling restores exposure/recovery. Keep upgraded

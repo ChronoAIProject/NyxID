@@ -827,6 +827,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .try_collect()
         .await?;
     for marker in &scopes {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         drain_scope(db, &marker.id).await?;
     }
     let expired_turns:Vec<PlatformPublicSession>=db.collection::<PlatformPublicSession>(SESSIONS).find(doc! {
@@ -834,6 +837,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         "$or":[{"turn_recovery_retry_at":{"$exists":false}},{"turn_recovery_retry_at":{"$lte":bson::DateTime::now()}}],
     }).sort(doc! {"active_turn.expires_at":1,"_id":1}).limit(i64::from(limit)).await?.try_collect().await?;
     for row in &expired_turns {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if super::platform_public_credential_service::recover_expired_turn(db, row)
             .await
             .is_err()
@@ -854,6 +860,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .await?;
     let mut processed = (scopes.len() + expired_turns.len()) as u32;
     for row in expired {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         let mut session = db.client().start_session().await?;
         session
             .start_transaction()
@@ -887,6 +896,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .try_collect()
         .await?;
     for record in records {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         process_cleanup_state(db, Some(state), &record.id).await?;
         processed += 1;
     }

@@ -250,7 +250,7 @@ impl MachineSource {
         session: &mut ClientSession,
         task: &TaskAdmission,
     ) -> AppResult<()> {
-        super::super::security_readiness_service::require(db, READINESS).await?;
+        super::super::security_readiness_service::require_serving(db, READINESS).await?;
         let job = db
             .collection::<MachineJob>("machine_jobs")
             .find_one(self.job_filter())
@@ -303,9 +303,9 @@ pub(crate) async fn ready(state: &crate::AppState, context: &RequestContext) -> 
         return Ok(true);
     }
     Ok(
-        super::super::security_readiness_service::report(&state.db, READINESS)
+        super::super::security_readiness_service::serving_report(&state.db, READINESS)
             .await?
-            .ready,
+            .serving_ready,
     )
 }
 

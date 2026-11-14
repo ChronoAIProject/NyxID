@@ -442,8 +442,9 @@ it must never select an owner's unshared inference connection. Actor-owned
 model credentials also require the applicable explicit connection consent;
 an eligible recipient-bound platform model bootstraps stateless inference
 without a personal-connection consent card, because it delegates no personal
-credential. Live platform ACL, exact connection, normal approvals and caller
-billing still apply. BYOK model calls require explicit connection consent in
+credential. Live platform ACL, exact connection, Deny, org approval policy and
+caller billing still apply. Personal approval requirements never gate the live
+turn’s own closed stateless model call; this does not waive connection consent. BYOK model calls require explicit connection consent in
 the existing bounded stateless-model scope; stateful provider actions and other
 service calls retain their exact consent requirements.
 
@@ -719,8 +720,8 @@ gains assistant-management authority for CLI convenience.
 ## 11. Compatibility, flag and rollback
 
 Register **`assistant:shared-agents`**, default off, in the existing feature flag
-system. Add its enforcement capability to security readiness, using the existing
-roster/drain configuration rather than a new environment variable. The flag
+system. Add its enforcement capability to security readiness so observed fleet
+support records activation automatically, without readiness configuration. The flag
 gates publication, new shared-thread admissions/delegation and new multi-person
 group creation/join/turns. Require enabled authority for the publisher/creator
 and acting person for new feature work; guest admission also checks the owner.
@@ -748,12 +749,11 @@ Rollout sequence:
    Ship additive readers, classifiers, indexes and unconditional stored-binding
    enforcement with the flag off. Install indexes before activating writers;
    do not change legacy thread indexes underneath old writers.
-2. Drain old API/auth/proxy/MCP/LLM/worker replicas, including alternate ingress
-   and sweepers. Upgrade the full roster and verify the new readiness capability.
-   Transport extensions additionally require `assistant:shared-agent-transports-v1`
-   in the same readiness roster, under the existing shared-agents flag.
-   Readiness is an operational assertion plus observations, not proof of a
-   hidden old process's absence.
+2. Deploy compatible API/auth/proxy/MCP/LLM/worker readers, including alternate
+   ingress and sweepers. Recorded live support gates new work automatically;
+   roster/drain declarations are optional. Transport extensions additionally
+   require `assistant:shared-agent-transports-v1` under the shared-agents flag.
+   Binaries predating observations are invisible; readiness cannot certify them.
 3. Enable Phase 1 for test publishers and actors. Verify ACL, billing, privacy,
    query counts and revocation with two real identities and no shared secrets.
 4. Ship Phase 2 through the same reader-first/all-replica gate. Enable group UI

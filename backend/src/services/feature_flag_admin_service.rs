@@ -188,11 +188,23 @@ pub async fn mutate(
         }
         if key == flags::EXECUTION_PERMISSIONS_FLAG_KEY && *enabled == Some(true) {
             if *kind != FlagTargetKind::User {
-                security_readiness_service::require(db, enrollment::READINESS).await?;
+                security_readiness_service::require_flag_enable(db, enrollment::READINESS).await?;
             }
-            security_readiness_service::require(db, "permissions:execution-dispatch-v1").await?;
-            security_readiness_service::require(db, "permissions:execution-authoring-v1").await?;
-            security_readiness_service::require(db, "permissions:execution-authoring-v2").await?;
+            security_readiness_service::require_flag_enable(
+                db,
+                "permissions:execution-dispatch-v1",
+            )
+            .await?;
+            security_readiness_service::require_flag_enable(
+                db,
+                "permissions:execution-authoring-v1",
+            )
+            .await?;
+            security_readiness_service::require_flag_enable(
+                db,
+                "permissions:execution-authoring-v2",
+            )
+            .await?;
         }
         if *kind != FlagTargetKind::Global {
             let id = target_id
@@ -212,9 +224,9 @@ pub async fn mutate(
             }
         }
         // Security-gated capabilities may be disabled at any time but enabled
-        // only once every replica reports readiness, for every target scope.
+        // only with durable activation and live support, for every target scope.
         if *enabled == Some(true) {
-            security_readiness_service::require(db, key).await?;
+            security_readiness_service::require_flag_enable(db, key).await?;
         }
     }
     let db = db.clone();
@@ -423,7 +435,7 @@ async fn mutate_in_session(
                             "permissions:execution-authoring-v1",
                             enrollment::READINESS,
                         ] {
-                            security_readiness_service::require(db, capability).await?;
+                            security_readiness_service::require_flag_enable(db, capability).await?;
                         }
                     }
                 }

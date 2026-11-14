@@ -565,7 +565,7 @@ pub(super) fn spawn_title_lookup(state: &AppState, row: &NyxbotChannel, chat: &N
     let state = state.clone();
     let bot_id = row.channel_bot_id.clone();
     let id = chat.id.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let result: AppResult<()> = async {
             if let Some(title) = fetch_title(&state, &bot_id, &chat_id).await? {
                 store_title(&state, &id, &title).await?;
@@ -1321,20 +1321,22 @@ fn follow_response(
         "off"
     };
     dto.follow_guidance = if on && is_group(chat) {
-        Some(if row.transport == "gateway" {
-            "Thread follow is unavailable on this gateway version.".into()
-        } else if let Ok(a) = crate::services::channel_adapters::resolve_adapter(
-            &row.platform,
-            &state.token_exchange_cache,
-        ) {
-            if a.thread_capabilities().thread_follow {
-                a.thread_follow_guidance().into()
+        Some(
+            if row.transport == "gateway" && !dto.thread_capabilities.thread_follow {
+                "Thread follow is unavailable on this gateway version.".into()
+            } else if let Ok(a) = crate::services::channel_adapters::resolve_adapter(
+                &row.platform,
+                &state.token_exchange_cache,
+            ) {
+                if a.thread_capabilities().thread_follow {
+                    a.thread_follow_guidance().into()
+                } else {
+                    "This platform does not support thread follow.".into()
+                }
             } else {
-                "This platform does not support thread follow.".into()
-            }
-        } else {
-            "Thread follow is unavailable.".into()
-        })
+                "Thread follow is unavailable.".into()
+            },
+        )
     } else {
         None
     };

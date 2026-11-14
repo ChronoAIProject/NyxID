@@ -49,6 +49,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
+| `SHUTDOWN_DRAIN_TIMEOUT_SECS` | `600` | Process shutdown budget after SIGTERM/ctrl-c. Requests, response streams and admitted background work drain while both listeners serve. Reserves the smaller of five seconds or 10% of the budget for fenced settlement, release and audit. `0` preserves immediate shutdown, including the existing bounded Discord cancellation. See [Rolling deploys and graceful drain](DEPLOYMENT.md#rolling-deploys-and-graceful-drain). |
 | `BASE_URL` | `http://localhost:3001` | Canonical backend base URL (default JWT issuer/audience); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
 | `CHRONO_PROBE_URL` | *(unset)* | Optional trusted internal chrono-probe HTTP(S) origin; connected-service monitoring also requires the default-off `services:monitoring` flag for the acting person. Unset or invalid configuration returns `monitoring_not_configured` (404). No path, credentials, query or fragment. See [Service monitoring](SERVICE_MONITORING.md). |
 | `INVOCATION_DIAGNOSTICS_ENABLED` | `false` | Startup-only opt-in for automatic failure diagnostic handles; requires `CHRONO_PROBE_URL`. Only ordinary unconstrained access-token callers and downstream 5xx/eligible transport failures qualify. Off performs no diagnostic database write or response decoration. Redemption still checks the live `services:monitoring` flag. |
@@ -95,11 +96,14 @@ expire before removing resource verification support. No runtime restart or
 sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
 
 Deploying the provider still needs a verified drain of existing proxy streams
-and NyxBot turns. The current backend does not track those tasks through a
-graceful shutdown; losing a worker can end its turn as `turn_lost`, without
-automatic replay. Keep existing processes alive until their admitted work is
-complete and new work has been routed elsewhere. The disabled feature flag
-does not protect unrelated in-flight work from a backend process replacement.
+and NyxBot turns. SIGTERM/ctrl-c starts the backend drain described below;
+configure the platform termination grace period to cover it. An early kill
+still ends active turns as `turn_lost`, without automatic replay. The disabled
+feature flag does not protect admitted work from a process replacement.
+
+`GET /ready` is unauthenticated and uses only process state: 200 while serving,
+503 after drain begins. Use it for traffic readiness. `GET /health` retains its
+existing liveness response, including 200 throughout the drain.
 
 ## Remote Machine backend Kubernetes authentication
 
@@ -141,9 +145,9 @@ listener through a public Service, ingress, or load balancer.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INSTANCE_NAME` | `POD_NAME`, then `HOSTNAME` | Stable name for one pod or host. A random process generation fences restarts that reuse this name. Kubernetes sets this from `metadata.name`. |
-| `SECURITY_ROLLOUT_REPLICAS` | *(empty)* | Complete comma-separated serving `INSTANCE_NAME` roster, identical on every upgraded replica. Empty/unready rosters block effective security feature activation with HTTP 503. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md). |
-| `SECURITY_ROLLOUT_DRAINED` | `false` | Exact `true` acknowledges that all old/unregistered serving replicas and relevant writers were drained. This is an operator assertion, not discovery. It must be true on every declared replica for gated security feature activation. |
+| `INSTANCE_NAME` | `POD_NAME`, `HOSTNAME`, or `nyxid-backend` | Process label; any value is supported, including shared names or generated Deployment pod names. Generation IDs separately fence ownership and leases. No readiness naming convention is required. |
+| `SECURITY_ROLLOUT_REPLICAS` | *(empty)* | Optional comma-separated diagnostic roster, still parsed/published for old binaries. Absent, missing, duplicate or differing names never refuse this binary. A matching roster with drained=true makes first recording immediate; otherwise support settles for 90 seconds. No configuration is required. See [security readiness](SECURITY_ROLLOUT_READINESS.md). |
+| `SECURITY_ROLLOUT_DRAINED` | `false` | Optional legacy diagnostic assertion, still published for old binaries. False/absent is advisory here and does not block serving, flag enables, publication or automatic activation. True plus a clean roster enables immediate recording. This does not change independent data-migration drain requirements. |
 | `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
 | `INTERNAL_ADVERTISE_URL` | `POD_IP`, detected local IP, `HOSTNAME`, then `127.0.0.1` | Peer-reachable base URL stored in ownership records. NyxID detects a local routable IP when `POD_IP` is unset and `INTERNAL_BIND_ADDR` is non-loopback. Every generated URL uses the port from `INTERNAL_BIND_ADDR`. Set this variable to override detection with an internal pod IP or private DNS URL. Never set the public ingress URL. |
 | `INTERNAL_DISPATCH_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex characters) used during legacy HMAC preparation. A configured `HMAC_KEYSET_PATH` is authoritative after adoption. All replicas must retain the same final domain key; changing an override against a durable pin fails startup. |
@@ -423,7 +427,7 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `RATE_LIMIT_BURST` | `30` | Cluster-wide burst capacity and per-IP limit |
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
-| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require the complete declared/drained replica roster with this env true, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
+| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require durable activation and live observed support; roster/drain declarations are advisory, with this env true locally and on every live generation, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
 | `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
@@ -639,7 +643,7 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 | `TRIGGER_RATE_LIMIT_BURST` | `20` | Per-trigger token bucket capacity. |
 | `TRIGGER_PAYLOAD_MAX_BYTES` | `262144` | Maximum raw trigger request body size. |
 | `TRIGGER_DELIVERY_RETENTION_HOURS` | `72` | Hours to retain encrypted webhook-target envelopes for durable dedup and replay. `0` disables payload storage/replay while metadata remains bounded to 72 hours. |
-| `AUTOMATION_CONTINUATION_V2_ENABLED` | `false` | Enroll new assistant automation runs in coordinator completion only when every declared, drained replica advertises `automation:coordinator-completion-v2`. Unready runs use legacy behavior; disabling preserves enrolled work. No migration/startup mode. Inspect `GET /api/v1/admin/automation-continuations/readiness` (admin/operator). Disable and drain all v2 work before binary downgrade; see [Automations](NYXBOT_SCHEDULES.md#coordinator-completion-v2). |
+| `AUTOMATION_CONTINUATION_V2_ENABLED` | `false` | Enroll new assistant automation runs using `automation:coordinator-completion-v2` serving readiness. Recorded activation tolerates supported roster warnings; hard-unready runs use legacy behavior; disabling preserves enrolled work. No migration/startup mode. Inspect `GET /api/v1/admin/automation-continuations/readiness` (admin/operator). Disable and drain all v2 work before binary downgrade; see [Automations](NYXBOT_SCHEDULES.md#coordinator-completion-v2). |
 
 Webhook-target dedup uses durable delivery records. Agent and notification targets use fenced claims in the shared MongoDB coordination collection. `CHANNEL_EVENT_DEDUP_TTL_SECS` controls how long a successful event ID remains deduplicated.
 

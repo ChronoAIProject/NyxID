@@ -533,6 +533,12 @@ pub async fn revoke_binding_in_session(
         enqueue_stop_in_session(db, session, &captured).await?;
     }
     db.collection::<PlatformPersonalBinding>(COLLECTION_NAME).update_one(doc! {"_id":&current.id,"generation":current.generation,"state":"active"},doc! {"$set":{"state":"revoked","revocation_reason":bson::to_bson(&reason).map_err(|_|conflict())?,"revoked_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?;
+    super::assistant_notification_service::purge(
+        db,
+        doc! {super::assistant_notification_service::fields::SOURCE_PLATFORM_BINDING_ID: &current.id},
+        Some(&mut *session),
+    )
+    .await?;
     cancel_sender_proofs_in_session(db, session, &current, except_intent).await?;
     Ok(true)
 }
@@ -1567,6 +1573,9 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
         // Cleanup is local and bounded. A conditional controls write serializes
         // against resume; scans stop only origins from earlier personal revisions.
         for _ in 0..limit.min(8) {
+            let Some(_claim) = crate::services::shutdown::process().background() else {
+                break;
+            };
             let Some(pending) = db
                 .collection::<PlatformBotRuntimeControls>(CONTROLS)
                 .find_one(doc! {"cleanup_pending":true})
@@ -1645,6 +1654,9 @@ impl super::platform_manager_contract::ManagerLifecycleProducer for LifecyclePro
         }
         let mut processed = 0;
         for _ in 0..limit {
+            let Some(_claim) = crate::services::shutdown::process().background() else {
+                break;
+            };
             let Some(row) =
                 super::platform_bot_runtime_control_service::claim_stop_effect(db).await?
             else {

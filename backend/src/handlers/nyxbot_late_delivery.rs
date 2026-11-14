@@ -83,12 +83,12 @@ pub(super) async fn prepare(
             &state.db,
             &channel.user_id,
         )
-        && crate::services::security_readiness_service::report(
+        && crate::services::security_readiness_service::serving_report(
             &state.db,
             crate::services::execution_permission_channel::READINESS,
         )
         .await?
-        .ready
+        .serving_ready
         && crate::services::execution_permission_enrollment::live_enabled(
             &state.db,
             &channel.user_id,
@@ -134,9 +134,11 @@ impl Drop for StreamGuard {
         if self.armed {
             let state = self.state.clone();
             let event = self.event.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = delivery::detach(&state.db, &event).await;
-                process(&state, &event).await;
+                if !state.shutdown.is_stopped() {
+                    process(&state, &event).await;
+                }
             });
         }
     }
@@ -235,19 +237,19 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
-                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
-                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
-                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             yield json!({"type": "response.failed", "response": {
                                 "id": &response_id, "status": "failed",
                                 "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}});
@@ -268,7 +270,7 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {
@@ -299,11 +301,13 @@ fn provider_stream_inner(
 /// change stream or the team wake-up sweep. Old events have no delivery version
 /// and are deliberately never picked up (old stream writers cannot claim it).
 pub(crate) fn spawn_sweep(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if sweep(&state).await.is_err() {
                 tracing::warn!(stage = "sweep", "Channel answer delivery deferred");
             }
@@ -323,6 +327,9 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for response in pending {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let event_key = &response.event_key;
         crate::services::nyxbot_response_recovery::refresh(
             &state.db,

@@ -160,3 +160,48 @@ particularly `app/services/fees/apply_taxes_service.rb`,
 `app/services/invoices/calculate_fees_service.rb`,
 `app/services/credits/allocate_prepaid_credits_by_wallets_service.rb`, and
 `app/services/{plans,charges}/update_service.rb`.
+
+
+## Reconcile ownership and verification status
+
+The periodic billing maintenance pass acquires the MongoDB lease
+`billing:reconcile`, including its immediate startup tick. A contender skips its
+tick. The holder uses the shared `CLUSTER_LEASE_TTL_SECS` (default 30 seconds)
+and `CLUSTER_LEASE_RENEW_SECS` (default 10 seconds), renews throughout the pass,
+and releases only its exact token. Crash takeover is eligible at lease expiry;
+work resumes on the next `BILLING_RECONCILE_INTERVAL_SECS` tick (default 300
+seconds), up to 330 seconds after the last successful renewal, excluding outages
+and backlog. No interval or billing admission setting changes.
+
+On renewal loss the pass finishes its current write protocol and stops before
+starting another unit. Sweep rows, price components, and schedule chunks have
+cooperative stop points. A stopped credit-schedule walk leaves its existing
+300-second period lease to expire: that progress row has no exact ownership token
+to release safely, and deterministic grant IDs make chunk replay safe. A graceful
+shutdown stops future ticks and requests the same cooperative stop, then awaits
+the current unit and exact-token release. Renewal continues while that unit
+finishes. If the hard shutdown deadline aborts the pass, shutdown deliberately
+leaves its lease to the shared TTL (30 seconds by default); bulk shutdown release
+never transfers this ownership under an uncertain provider operation. An already
+sent provider request cannot be recalled by a MongoDB lease, and an in-flight
+unit may finish after expiry. Existing row claims, financial locks and dedupe
+remain necessary. This supervisor does not serialize request-time plan writers,
+wallet/rate/tax snapshots, or purchased-credit expiry against other entry points.
+
+Automatic and manual chain verification discard losing `Ok` scans, always log a local
+`Broken` at error level and retry its publication up to three times (on conflict,
+keeping the stored break at an earlier or equal sequence, or returning an error on
+exhaustion), so a late break after repair may restore an alarm that the next scan
+clears by rechecking its break cursor.
+The optional status `revision` distinguishes publications even within one
+millisecond; missing revisions remain readable. `CHAIN_VERIFY_INTERVAL_SECS=0`
+still disables both automatic chain verification and the separate account
+reconciliation runner.
+
+Deploy all replicas before relying on these guarantees. Build `a8bb6c617` does
+not take the maintenance lease and still replaces chain status unconditionally.
+During a mixed rollout an old pass can overlap the new holder and an old status
+write can overwrite a new result. The new writer detects a changed starting
+snapshot, including an old replacement without a revision, but cannot fence an
+old writer's subsequent write. These are the pre-existing mixed-fleet races;
+no financial format, movement or per-row fence changes in this release.

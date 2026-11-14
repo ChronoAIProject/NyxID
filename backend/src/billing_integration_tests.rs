@@ -3,6 +3,7 @@ mod operations;
 mod org_wallet;
 mod taxes;
 mod usage;
+mod wallet_snapshot;
 mod wallet_view;
 
 use std::collections::BTreeSet;
@@ -216,6 +217,7 @@ pub(crate) struct FakeLago {
     wallet_creates: AtomicUsize,
     topup_wallets: std::sync::Mutex<Vec<String>>,
     wallet_balance: Option<crate::models::credits::Credits>,
+    balance_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
@@ -338,6 +340,10 @@ impl LagoApi for FakeLago {
     }
 
     async fn wallet_balance(&self, _customer_id: &str) -> AppResult<i64> {
+        if let Some((entered, resume)) = &self.balance_read_gate {
+            entered.notify_one();
+            resume.notified().await;
+        }
         Ok(10_000)
     }
 

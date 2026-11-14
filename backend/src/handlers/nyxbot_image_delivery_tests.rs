@@ -11,8 +11,8 @@ use crate::services::assistant_acknowledgement_service as acks;
 use crate::services::channel_platform::PlatformAdapter;
 use wiremock::matchers::body_string_contains;
 
-async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
-    let mut f = fixture(&format!("nyxbot_images_{platform}_{transport}")).await;
+pub(super) async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
+    let mut f = Box::pin(fixture(&format!("nyxbot_images_{platform}_{transport}"))).await;
     crate::services::channel_text_delivery::ensure_indexes(&f.state.db)
         .await
         .unwrap();
@@ -1304,11 +1304,9 @@ async fn nyxbot_unsupported_or_unanchored_images_record_refusals_without_loading
         if unsupported {
             f.channel.platform = "openclaw".into();
         }
-        f.state
-            .db
-            .run_command(doc! {"profile":2,"slowms":0})
-            .await
-            .unwrap();
+        // Level 2 captures every operation in this database without changing
+        // the server-wide slow-query threshold for unrelated parallel tests.
+        f.state.db.run_command(doc! {"profile":2}).await.unwrap();
         let thread = thread(&f).await;
         let report = images::send_turn_images(
             &f.state,
@@ -3822,3 +3820,6 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
 
 #[path = "nyxbot_delegated_image_tests.rs"]
 mod delegated_image_tests;
+
+#[path = "nyxbot_supplemental_tests.rs"]
+mod supplemental_tests;

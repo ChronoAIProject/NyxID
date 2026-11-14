@@ -325,6 +325,11 @@ pub async fn observe(db: &Database, node: &Node, report: Option<&Progress>) -> A
     if !row.pending() {
         return Ok(());
     }
+    #[cfg(test)]
+    if let Ok((arrived, resume)) = tests::OBSERVE_GATE.try_with(Clone::clone) {
+        arrived.wait().await;
+        resume.notified().await;
+    }
     if row.replace_companion {
         // Companion replacement never restarts the machine. A fresh capabilities
         // report with real updater metadata is the completion signal, not an old
@@ -383,9 +388,17 @@ pub async fn observe(db: &Database, node: &Node, report: Option<&Progress>) -> A
                         Phase::Downloading => "downloading",
                         _ => "restarting",
                     };
+                    // Only advance within this attempt. Equal/earlier observations
+                    // and every terminal phase leave both progress and timestamps intact.
+                    let predecessors: &[&str] = match report.phase {
+                        Phase::Queued => &["manual_step"],
+                        Phase::Verifying => &["manual_step", "queued"],
+                        Phase::Downloading => &["manual_step", "queued", "verifying"],
+                        _ => &["manual_step", "queued", "verifying", "downloading"],
+                    };
                     db.collection::<MachineUpdate>(COLLECTION_NAME)
                         .update_one(
-                            doc! {"_id":&node.id,"attempt_id":&row.attempt_id},
+                            doc! {"_id":&node.id,"attempt_id":&row.attempt_id,"phase":{"$in":predecessors}},
                             doc! {"$set":{"phase":phase,"updated_at":bson::DateTime::now()}},
                         )
                         .await?;
@@ -495,4 +508,131 @@ pub async fn seed_policy(db: &Database, node_id: &str) -> AppResult<()> {
         .upsert(true)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::{Barrier, Notify};
+    tokio::task_local! {
+        pub(super) static OBSERVE_GATE: (Arc<Barrier>, Arc<Notify>);
+    }
+
+    #[tokio::test]
+    async fn machine_progress_only_advances_within_the_current_attempt() {
+        Box::pin(async {
+            let f =
+                super::super::assistant_authority_tests::fixture("monotonic_update_progress").await;
+            let node = super::super::machine_integration_tests::node(&f, &f.owner).await;
+            let mut row = MachineUpdate::new(&node.id, &node.user_id);
+            row.attempt_id = Some(uuid::Uuid::new_v4().to_string());
+            row.target_version = Some(TARGET.into());
+            row.phase = "manual_step".into();
+            row.requested_at = Some(Utc::now());
+            row.deadline = Some(Utc::now() + Duration::minutes(20));
+            let rows = f.state.db.collection::<MachineUpdate>(COLLECTION_NAME);
+            rows.insert_one(&row).await.unwrap();
+            for (phase, expected) in [
+                (Phase::Queued, "queued"),
+                (Phase::Verifying, "verifying"),
+                (Phase::Downloading, "downloading"),
+                (Phase::Restarting, "restarting"),
+            ] {
+                let report = Progress {
+                    target: TARGET.into(),
+                    phase,
+                    started_at_ms: Utc::now().timestamp_millis() as u64,
+                    code: None,
+                    updater: None,
+                };
+                observe(&f.state.db, &node, Some(&report)).await.unwrap();
+                assert_eq!(get(&f.state.db, &node).await.unwrap().phase, expected);
+            }
+            let before = get(&f.state.db, &node).await.unwrap();
+            for phase in [
+                Phase::Downloading,
+                Phase::Verifying,
+                Phase::Queued,
+                Phase::Restarting,
+            ] {
+                let report = Progress {
+                    target: TARGET.into(),
+                    phase,
+                    started_at_ms: Utc::now().timestamp_millis() as u64,
+                    code: None,
+                    updater: None,
+                };
+                observe(&f.state.db, &node, Some(&report)).await.unwrap();
+                let after = get(&f.state.db, &node).await.unwrap();
+                assert_eq!(after.phase, "restarting");
+                assert_eq!(after.updated_at, before.updated_at);
+            }
+            for terminal in ["failed", "rolled_back"] {
+                rows.update_one(doc! {"_id":&node.id}, doc! {"$set":{"phase":"queued"}})
+                    .await
+                    .unwrap();
+                finish(&f.state.db, &row, terminal, None).await.unwrap();
+                let report = Progress {
+                    target: TARGET.into(),
+                    phase: Phase::Downloading,
+                    started_at_ms: Utc::now().timestamp_millis() as u64,
+                    code: None,
+                    updater: None,
+                };
+                observe(&f.state.db, &node, Some(&report)).await.unwrap();
+                assert_eq!(get(&f.state.db, &node).await.unwrap().phase, terminal);
+            }
+            f.state.db.drop().await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn late_machine_progress_cannot_reopen_a_completed_attempt() {
+        Box::pin(async {
+            let f = super::super::assistant_authority_tests::fixture("late_update_progress").await;
+            let node = super::super::machine_integration_tests::node(&f, &f.owner).await;
+            let mut row = MachineUpdate::new(&node.id, &node.user_id);
+            row.attempt_id = Some(uuid::Uuid::new_v4().to_string());
+            row.target_version = Some(TARGET.into());
+            row.phase = "queued".into();
+            row.requested_at = Some(Utc::now());
+            row.deadline = Some(Utc::now() + Duration::minutes(20));
+            f.state
+                .db
+                .collection::<MachineUpdate>(COLLECTION_NAME)
+                .insert_one(&row)
+                .await
+                .unwrap();
+            let report = Progress {
+                target: TARGET.into(),
+                phase: Phase::Downloading,
+                started_at_ms: Utc::now().timestamp_millis() as u64,
+                code: None,
+                updater: None,
+            };
+            let arrived = Arc::new(Barrier::new(2));
+            let resume = Arc::new(Notify::new());
+            let (late, ()) = tokio::join!(
+                OBSERVE_GATE.scope(
+                    (arrived.clone(), resume.clone()),
+                    observe(&f.state.db, &node, Some(&report))
+                ),
+                async {
+                    arrived.wait().await;
+                    finish(&f.state.db, &row, "connected", None).await.unwrap();
+                    resume.notify_one();
+                }
+            );
+            late.unwrap();
+            assert_eq!(
+                get(&f.state.db, &node).await.unwrap().phase,
+                "connected",
+                "a late downloading observation must not reopen Connected"
+            );
+            f.state.db.drop().await.unwrap();
+        })
+        .await;
+    }
 }

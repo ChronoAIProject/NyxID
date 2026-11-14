@@ -138,28 +138,29 @@ pub(crate) fn admit<'a>(
         }
 
         let now = bson::DateTime::now().to_chrono();
-        let channel_source =
-            if let Some(source) = inherited.as_ref().and_then(|t| t.channel_source.clone()) {
-                if row.agent_owner_id.is_some()
-                    || row.shared_agent_thread
-                    || row.group_id.is_some()
-                    || row.collaboration.is_some()
-                {
-                    return Err(refused());
-                }
-                Some(source)
-            } else if start.origin == crate::models::assistant_conversation::TurnOrigin::Channel {
-                if !crate::services::security_readiness_service::report(db, channel::READINESS)
-                    .await?
-                    .ready
-                {
-                    return Ok(());
-                }
-                let event = start.channel_event_id.as_deref().ok_or_else(refused)?;
-                Some(Box::new(channel::admit(db, session, row, event).await?))
-            } else {
-                None
-            };
+        let channel_source = if let Some(source) =
+            inherited.as_ref().and_then(|t| t.channel_source.clone())
+        {
+            if row.agent_owner_id.is_some()
+                || row.shared_agent_thread
+                || row.group_id.is_some()
+                || row.collaboration.is_some()
+            {
+                return Err(refused());
+            }
+            Some(source)
+        } else if start.origin == crate::models::assistant_conversation::TurnOrigin::Channel {
+            if !crate::services::security_readiness_service::serving_report(db, channel::READINESS)
+                .await?
+                .serving_ready
+            {
+                return Ok(());
+            }
+            let event = start.channel_event_id.as_deref().ok_or_else(refused)?;
+            Some(Box::new(channel::admit(db, session, row, event).await?))
+        } else {
+            None
+        };
         if let Some(source) = &channel_source
             && (start
                 .channel_event_id

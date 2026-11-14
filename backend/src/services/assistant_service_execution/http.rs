@@ -362,13 +362,22 @@ async fn check_http_projected_inner(
     let generation = !method_override
         && super::request_identity::legacy_model_generation(target, method, path, body);
     // Model transport uses the same closed shape for owner admission and guest binding.
-    let model_route = (generation && pool.is_none())
-        .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
-        .flatten()
-        .map(|mut route| {
-            bind_headers(&mut route, &projection.headers(target, headers));
-            route
-        });
+    let model_route = super::request_identity::assistant_model_transport(
+        auth,
+        &target.service,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        pool,
+    )
+    .then(|| super::request_identity::model_route_operation(target, method, path, query, body))
+    .flatten()
+    .map(|mut route| {
+        bind_headers(&mut route, &projection.headers(target, headers));
+        route
+    });
     let mut operation = http_operation(target, method, path, query, body);
     if crate::services::assistant_guest_model_setup::is_setup(&state.db, &chat.conversation_id)
         .await?

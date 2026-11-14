@@ -142,7 +142,7 @@ pub(crate) fn spawn(state: crate::AppState, owner: String, id: String) {
     let Ok(permit) = TITLES.clone().try_acquire_owned() else {
         return;
     };
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(20),

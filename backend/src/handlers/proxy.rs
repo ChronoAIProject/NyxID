@@ -3194,6 +3194,16 @@ async fn preflight_proxy_deny_before_resolution(
     .await?;
 
     if denied {
+        crate::services::assistant_model_observer::denied_before_resolution(
+            state,
+            auth_user,
+            &hint.service_id,
+            &hint.service_owner_id,
+            via_service,
+            method,
+            path,
+        )
+        .await?;
         return Err(AppError::Forbidden(
             "Operation denied by approval policy".to_string(),
         ));
@@ -3863,75 +3873,81 @@ fn execute_resolved_proxy<'a>(
         if let Some(model_request) = &model_request {
             request.extensions_mut().insert(model_request.clone());
         }
-        let result = async {
-            *resolved_slug = resolved.target.service.slug.clone();
-            let managed =
-                crate::services::telnyx_platform_service::contract(&resolved.target.service)
-                    .is_some();
-            let lease = crate::services::service_concurrency_service::acquire(
-                &state.db,
-                &resolved.target.service,
-                &auth_user.user_id.to_string(),
-            )
-            .await?;
-            let mut assistant_decision = None;
-            let mut assistant_approval = None;
-            let receipt_method = request.method().clone();
-            let preparation = execute_resolved_proxy_boxed(
-                state,
-                auth_user,
-                service_id,
-                path,
-                request,
-                extra_outbound_headers,
-                resolved_slug,
-                resolved,
-                lease.clone(),
-                &mut assistant_decision,
-                &mut assistant_approval,
-            );
-            // Finish preparation before polling forwarding, so their large debug
-            // poll frames never overlap. The lease guards both phases together.
-            let execution = async move {
-                match preparation.await? {
-                    ProxyExecutionPhase::Complete(response) => Ok(response),
-                    ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
+        let result = crate::services::assistant_model_observer::CURRENT_MODEL
+            .scope(model_request.clone(), async {
+                *resolved_slug = resolved.target.service.slug.clone();
+                let managed =
+                    crate::services::telnyx_platform_service::contract(&resolved.target.service)
+                        .is_some();
+                let lease = crate::services::service_concurrency_service::acquire(
+                    &state.db,
+                    &resolved.target.service,
+                    &auth_user.user_id.to_string(),
+                )
+                .await?;
+                let mut assistant_decision = None;
+                let mut assistant_approval = None;
+                let receipt_method = request.method().clone();
+                let preparation = execute_resolved_proxy_boxed(
+                    state,
+                    auth_user,
+                    service_id,
+                    path,
+                    request,
+                    extra_outbound_headers,
+                    resolved_slug,
+                    resolved,
+                    lease.clone(),
+                    &mut assistant_decision,
+                    &mut assistant_approval,
+                );
+                // Finish preparation before polling forwarding, so their large debug
+                // poll frames never overlap. The lease guards both phases together.
+                let execution = async move {
+                    match preparation.await? {
+                        ProxyExecutionPhase::Complete(response) => Ok(response),
+                        ProxyExecutionPhase::Forward(forwarding) => forwarding.await,
+                    }
+                };
+                // The managed worker classifies lease loss after dispatch as pending.
+                // An outer cancellation would hide that identity behind a retryable 429.
+                let response = if managed {
+                    execution.await?
+                } else {
+                    match &lease {
+                        Some(lease) => lease.run(execution).await?,
+                        None => execution.await?,
+                    }
+                };
+                let response = match assistant_decision {
+                    Some(decision) => {
+                        decision
+                            .finish_http(
+                                response,
+                                state.db.clone(),
+                                auth_user.assistant_chat.as_deref().cloned(),
+                                receipt_method.as_str(),
+                                assistant_approval,
+                            )
+                            .await
+                    }
+                    None => response,
+                };
+                match lease {
+                    Some(lease) => Ok(lease.hold_response(response)),
+                    None => Ok(response),
                 }
-            };
-            // The managed worker classifies lease loss after dispatch as pending.
-            // An outer cancellation would hide that identity behind a retryable 429.
-            let response = if managed {
-                execution.await?
-            } else {
-                match &lease {
-                    Some(lease) => lease.run(execution).await?,
-                    None => execution.await?,
-                }
-            };
-            let response = match assistant_decision {
-                Some(decision) => {
-                    decision
-                        .finish_http(
-                            response,
-                            state.db.clone(),
-                            auth_user.assistant_chat.as_deref().cloned(),
-                            receipt_method.as_str(),
-                            assistant_approval,
-                        )
-                        .await
-                }
-                None => response,
-            };
-            match lease {
-                Some(lease) => Ok(lease.hold_response(response)),
-                None => Ok(response),
+            })
+            .await;
+        if let (Some(model_request), Err(error)) = (&model_request, &result) {
+            let approval_failed = model_request
+                .approval_refused(error, &state.config.frontend_url)
+                .await
+                .is_err();
+            let diagnostic_failed = model_request.rejected(error).await.is_err();
+            if approval_failed || diagnostic_failed {
+                tracing::warn!("Assistant model refusal diagnostics deferred");
             }
-        }
-        .await;
-        if let (Some(model_request), Err(error)) = (&model_request, &result)
-            && model_request.rejected(error).await.is_err()
-        {
-            tracing::warn!("Assistant model refusal diagnostics deferred");
         }
         result
     })
@@ -4366,6 +4382,7 @@ async fn execute_resolved_proxy_inner<'a>(
         &billing_request_id,
         credential_class,
     );
+    request_audit.observe_model(model_request.as_ref());
     request_audit.business_service(
         auth_user.assistant_chat.as_deref(),
         &target.service,
@@ -4757,6 +4774,22 @@ async fn execute_resolved_proxy_inner<'a>(
         );
     }
 
+    if let Some(model) = &model_request {
+        model.configure_policy(
+            auth_user,
+            &target.service,
+            &method_str,
+            path,
+            query.as_deref(),
+            &all_headers,
+            &body_bytes,
+            pool_authority
+                .as_ref()
+                .map(|p| p.pool_id.as_str())
+                .or(is_pool_attempt.then_some("pool")),
+        );
+    }
+
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
@@ -4813,7 +4846,8 @@ async fn execute_resolved_proxy_inner<'a>(
             is_auto_connected_for_approval,
             None,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.model_approval_error(error))?;
     }
 
     let assistant_ack = all_headers
@@ -5017,6 +5051,13 @@ async fn execute_resolved_proxy_inner<'a>(
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
+            request_audit.model_approval_required();
+            crate::services::assistant_model_observer::before_approval_request(
+                &state.config.frontend_url,
+                false,
+            )
+            .await
+            .inspect_err(|error| request_audit.model_approval_error(error))?;
             let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
                 &approval_owner_user_id,
@@ -6229,7 +6270,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             // Record success metrics (fire-and-forget)
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ =
                                     node_metrics_service::record_success(db_clone, nid, latency_ms)
                                         .await;
@@ -6588,7 +6629,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
                             let err_msg = "Node credential missing".to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
                                     .await;
                             });
@@ -6640,7 +6681,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
                             let err_msg = "Node offline or timeout".to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
                                     .await;
                             });
@@ -7288,6 +7329,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         resource_proof.as_ref(),
                         Some(&dispatch_admission),
                         Some(&dispatch_caller),
+                        None,
                     )
                 }),
             )
@@ -7314,7 +7356,12 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
             }
             let downstream_response = match downstream_result {
-                Ok(Ok(response)) => response,
+                Ok(Ok(response)) => {
+                    if let Some(model) = &model_request {
+                        model.received_headers(response.status().as_u16());
+                    }
+                    response
+                }
                 Ok(Err(proxy_service::ForwardRequestError::PreDispatchRejected(error))) => {
                     if let Some(reservation) = durable_reservation.as_ref() {
                         durable_operation_grant_service::mark_send_rejected(&state.db, reservation)
@@ -7331,6 +7378,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(error);
                 }
                 Ok(Err(error)) => {
+                    request_audit.model_send_failed("model_transport_error");
                     emit_preheader_diagnostics(
                         exchange_started_at,
                         target_admission_ms,
@@ -7359,6 +7407,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(error.into_app_error());
                 }
                 Err(_) => {
+                    request_audit.model_send_failed("model_transport_aborted");
                     emit_preheader_diagnostics(
                         exchange_started_at,
                         target_admission_ms,
@@ -8350,8 +8399,10 @@ async fn bridge_websockets(
 
     let mut shared_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     shared_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let shutdown = crate::services::shutdown::process();
     loop {
         tokio::select! {
+            () = shutdown.stopped() => break,
             _ = shared_tick.tick(), if shared.is_some() => {
                 if let Some(binding) = &shared
                     && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
@@ -8541,8 +8592,15 @@ async fn bridge_websockets(
     }
 
     // Close both sides -- runs regardless of which side triggered the break.
-    let _ = downstream_sink.close().await;
-    let _ = client_sink.close().await;
+    if shutdown.is_stopped() {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let _ = tokio::join!(downstream_sink.close(), client_sink.close());
+        })
+        .await;
+    } else {
+        let _ = downstream_sink.close().await;
+        let _ = client_sink.close().await;
+    }
 
     stats.duration = start.elapsed();
     stats.realtime_llm_usage = realtime_llm_usage.finalize();
@@ -8695,58 +8753,60 @@ async fn handle_ws_passthrough(
     };
 
     Ok(ws_upgrade
-        .on_upgrade(move |client_ws| async move {
-            let stats = bridge_websockets(
-                client_ws,
-                downstream.stream,
-                sid.clone(),
-                collect_realtime_llm_usage,
-                ws_frame_injections,
-                credential,
-                db.clone(),
-                user_id_str.clone(),
-                ak_id.clone(),
-                ak_name.clone(),
-                req_ip.clone(),
-                req_ua.clone(),
-                slot_cancel,
-                shared.clone(),
-            )
-            .await;
-            drop(guard);
-            drop(service_lease);
-            let platform_usage = websocket_platform_usage(&stats);
-            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
-            settle_meter_async(
-                billing,
-                metered_for_settle,
-                platform_usage,
-                resale_usage,
-                None,
-            )
-            .await;
+        .on_upgrade(state.shutdown.clone().upgrade_completion_callback(
+            move |client_ws| async move {
+                let stats = bridge_websockets(
+                    client_ws,
+                    downstream.stream,
+                    sid.clone(),
+                    collect_realtime_llm_usage,
+                    ws_frame_injections,
+                    credential,
+                    db.clone(),
+                    user_id_str.clone(),
+                    ak_id.clone(),
+                    ak_name.clone(),
+                    req_ip.clone(),
+                    req_ua.clone(),
+                    slot_cancel,
+                    shared.clone(),
+                )
+                .await;
+                drop(guard);
+                drop(service_lease);
+                let platform_usage = websocket_platform_usage(&stats);
+                let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
+                settle_meter_async(
+                    billing,
+                    metered_for_settle,
+                    platform_usage,
+                    resale_usage,
+                    None,
+                )
+                .await;
 
-            let mut disconnect_event = serde_json::json!({
-                "service_id": sid,
-                "duration_secs": stats.duration.as_secs(),
-                "acting_client_id": &acting_client_id,
-            });
-            crate::services::shared_agent_transport::annotate(
-                &mut disconnect_event,
-                shared.as_ref(),
-            );
-            add_websocket_usage_provenance(&mut disconnect_event, &stats);
-            audit_service::log_async(
-                db,
-                Some(user_id_str),
-                "proxy_ws_disconnect".to_string(),
-                Some(disconnect_event),
-                req_ip,
-                req_ua,
-                ak_id,
-                ak_name,
-            );
-        })
+                let mut disconnect_event = serde_json::json!({
+                    "service_id": sid,
+                    "duration_secs": stats.duration.as_secs(),
+                    "acting_client_id": &acting_client_id,
+                });
+                crate::services::shared_agent_transport::annotate(
+                    &mut disconnect_event,
+                    shared.as_ref(),
+                );
+                add_websocket_usage_provenance(&mut disconnect_event, &stats);
+                audit_service::log_async(
+                    db,
+                    Some(user_id_str),
+                    "proxy_ws_disconnect".to_string(),
+                    Some(disconnect_event),
+                    req_ip,
+                    req_ua,
+                    ak_id,
+                    ak_name,
+                );
+            },
+        ))
         .into_response())
 }
 
@@ -9008,62 +9068,68 @@ async fn handle_ws_passthrough_via_node(
     state.billing.mark_forwarded(&metered).await?;
 
     Ok(ws_upgrade
-        .on_upgrade(move |client_ws| async move {
-            let stats = bridge_websockets_via_node(
-                client_ws,
-                ws_proxy_session.frames,
-                &node_dispatch,
-                &node_id_owned,
-                &sess_id,
-                sid.clone(),
-                collect_realtime_llm_usage,
-                db.clone(),
-                user_id_str.clone(),
-                ak_id.clone(),
-                ak_name.clone(),
-                owner_for_audit.clone(),
-                actor_for_audit.clone(),
-                req_ip.clone(),
-                req_ua.clone(),
-                slot_cancel,
-            )
-            .await;
+        .on_upgrade(state.shutdown.clone().upgrade_completion_callback(
+            move |client_ws| async move {
+                let stats = bridge_websockets_via_node(
+                    client_ws,
+                    ws_proxy_session.frames,
+                    &node_dispatch,
+                    &node_id_owned,
+                    &sess_id,
+                    sid.clone(),
+                    collect_realtime_llm_usage,
+                    db.clone(),
+                    user_id_str.clone(),
+                    ak_id.clone(),
+                    ak_name.clone(),
+                    owner_for_audit.clone(),
+                    actor_for_audit.clone(),
+                    req_ip.clone(),
+                    req_ua.clone(),
+                    slot_cancel,
+                )
+                .await;
 
-            // Best-effort close the node-side session.
-            let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
-            drop(guard);
-            drop(service_lease);
-            let platform_usage = websocket_platform_usage(&stats);
-            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
-            settle_meter_async(
-                billing,
-                metered_for_settle,
-                platform_usage,
-                resale_usage,
-                None,
-            )
-            .await;
+                // Best-effort close the node-side session.
+                let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
+                drop(guard);
+                drop(service_lease);
+                let platform_usage = websocket_platform_usage(&stats);
+                let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
+                settle_meter_async(
+                    billing,
+                    metered_for_settle,
+                    platform_usage,
+                    resale_usage,
+                    None,
+                )
+                .await;
 
-            let mut disconnect_event = serde_json::json!({
-                "service_id": sid,
-                "duration_secs": stats.duration.as_secs(),
-                "acting_client_id": &acting_client_id,
-                "routed_via": "node",
-                "node_id": node_id_owned,
-            });
-            add_websocket_usage_provenance(&mut disconnect_event, &stats);
-            add_owner_user_id_if_shared(&mut disconnect_event, &owner_for_audit, &actor_for_audit);
-            audit_service::log_async(
-                db,
-                Some(user_id_str),
-                "proxy_ws_disconnect".to_string(),
-                Some(disconnect_event),
-                req_ip,
-                req_ua,
-                ak_id,
-                ak_name,
-            );
-        })
+                let mut disconnect_event = serde_json::json!({
+                    "service_id": sid,
+                    "duration_secs": stats.duration.as_secs(),
+                    "acting_client_id": &acting_client_id,
+                    "routed_via": "node",
+                    "node_id": node_id_owned,
+                });
+                add_websocket_usage_provenance(&mut disconnect_event, &stats);
+                add_owner_user_id_if_shared(
+                    &mut disconnect_event,
+                    &owner_for_audit,
+                    &actor_for_audit,
+                );
+                audit_service::log_async(
+                    db,
+                    Some(user_id_str),
+                    "proxy_ws_disconnect".to_string(),
+                    Some(disconnect_event),
+                    req_ip,
+                    req_ua,
+                    ak_id,
+                    ak_name,
+                );
+            },
+        ))
         .into_response())
 }
 
@@ -9105,8 +9171,10 @@ async fn bridge_websockets_via_node(
     ));
     tokio::pin!(idle_timeout);
 
+    let shutdown = crate::services::shutdown::process();
     loop {
         tokio::select! {
+            () = shutdown.stopped() => break,
             () = slot_cancel.cancelled() => {
                 tracing::warn!(service_id = %service_id, "Node WS passthrough capacity slot was lost");
                 break;
@@ -9261,7 +9329,12 @@ async fn bridge_websockets_via_node(
         }
     }
 
-    let _ = client_sink.close().await;
+    if shutdown.is_stopped() {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(100), client_sink.close()).await;
+    } else {
+        let _ = client_sink.close().await;
+    }
     stats.duration = start.elapsed();
     stats.realtime_llm_usage = realtime_llm_usage.finalize();
     stats
@@ -16465,8 +16538,8 @@ mod nyxbot_readiness_tests {
         let f = crate::services::org_agent_tests::Fixture::new("nyxbot_model_call_readiness").await;
         let db = f.state.db.clone();
         let owner = f.admin.clone();
-        // Mirror prod: readiness-gated flags are globally on while the fleet
-        // readiness roster was never declared (security_replicas empty of this process).
+        // Readiness-gated flags are globally on while the executing process
+        // has no live security_replicas observation.
         for flag in [
             "assistant:live-turn-gate",
             "assistant:operation-scopes",

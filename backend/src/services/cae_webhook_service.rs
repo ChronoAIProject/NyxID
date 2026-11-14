@@ -67,7 +67,7 @@ pub fn dispatch_revocation_event(
     let raw_hmac_secret = Zeroizing::new(raw_hmac_secret);
     let delivery_id = Uuid::new_v4().to_string();
 
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let body = match serde_json::to_vec(&event) {
             Ok(body) => body,
             Err(error) => {

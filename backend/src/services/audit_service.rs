@@ -88,7 +88,7 @@ pub fn log_async(
         api_key_id,
         api_key_name,
     );
-    tokio::spawn(async move {
+    super::shutdown::process().spawn_cleanup(async move {
         let _ = write_audit_entry(db, entry, event_type).await;
     });
 }
