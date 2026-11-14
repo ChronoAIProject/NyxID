@@ -2779,17 +2779,14 @@ mod tests {
                     // source scan. Constant-looking arguments must resolve;
                     // dynamic variables are covered by the call-site's own
                     // registry tests and are intentionally skipped here.
-                    let looks_like_constant = argument
-                        .rsplit("::")
-                        .next()
-                        .is_some_and(|name| {
-                            !name.is_empty()
-                                && name.chars().all(|character| {
-                                    character.is_ascii_uppercase()
-                                        || character.is_ascii_digit()
-                                        || character == '_'
-                                })
-                        });
+                    let looks_like_constant = argument.rsplit("::").next().is_some_and(|name| {
+                        !name.is_empty()
+                            && name.chars().all(|character| {
+                                character.is_ascii_uppercase()
+                                    || character.is_ascii_digit()
+                                    || character == '_'
+                            })
+                    });
                     if looks_like_constant {
                         errors.push(format!(
                             "{label}: unresolved collection constant {argument}"

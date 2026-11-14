@@ -226,9 +226,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "channel_email_batches" => Some(("channels", "channel_email_batches")),
         "channel_email_receipts" => Some(("channels", "channel_email_receipts")),
         "channel_email_sends" => Some(("channels", "channel_email_sends")),
-        "channel_email_subscriptions" => {
-            Some(("channels", "channel_email_subscriptions"))
-        }
+        "channel_email_subscriptions" => Some(("channels", "channel_email_subscriptions")),
         "channel_messages" => Some(("channels", "channel_messages")),
         "channel_reply_deliveries" => Some(("channels", "channel_reply_deliveries")),
         "channel_text_deliveries" => Some(("channels", "channel_text_deliveries")),
