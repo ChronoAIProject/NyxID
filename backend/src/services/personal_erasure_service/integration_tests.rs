@@ -854,16 +854,28 @@ async fn completed_erasure_redacts_every_persisted_attribution_and_global_identi
         .unwrap();
     let state = test_app_state(db.clone());
     until_source_removed(&state, &owner).await;
+    // Complete the real vendor-history gate as well as the local cleanup;
+    // source absence alone must never stand in for overall completion.
+    super::super::telemetry_erasure_service::drain_once(&db, &Default::default())
+        .await
+        .unwrap();
+    super::super::telemetry_erasure_service::operator_reconcile_empty_inventory(
+        &db,
+        &owner,
+        "operator",
+        "evidence://deployment-inventory",
+        "Verified deployment history",
+    )
+    .await
+    .unwrap();
     for _ in 0..20 {
         if status(&db, &owner).await.unwrap().unwrap().status == ErasureStatus::Complete {
             break;
         }
         step(&state).await;
     }
-    assert_eq!(
-        status(&db, &owner).await.unwrap().unwrap().status,
-        ErasureStatus::Complete
-    );
+    let completed = status(&db, &owner).await.unwrap().unwrap();
+    assert_eq!(completed.status, ErasureStatus::Complete, "{completed:?}");
     attribution::assert_cases(&db, &cases, true).await;
     attribution::assert_no_identity_outside_audit(&db).await;
     assert_eq!(
