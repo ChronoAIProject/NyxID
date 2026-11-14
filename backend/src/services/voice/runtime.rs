@@ -38,7 +38,7 @@ pub(super) async fn deliver_start(
 ) -> AppResult<Started> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(
+    state.shutdown.clone().spawn(
         async move {
             let result = work.await;
             let call = result.as_ref().ok().map(|started| started.session.clone());

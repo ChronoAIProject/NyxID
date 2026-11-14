@@ -700,6 +700,59 @@ async fn detached_start_failure_is_a_499_disconnect_without_server_fault_audit()
 }
 
 #[tokio::test]
+async fn voice_start_delivery_is_tracked_as_detached_until_acknowledged() {
+    let (mut state, _, call) = tests::setup("voice_start_shutdown_tracking").await;
+    state.shutdown = crate::services::shutdown::Runtime::default();
+    let baseline = state.shutdown.counts().detached;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let ready = entered.clone();
+    let gate = release.clone();
+    let result = call.clone();
+    let mut start = Box::pin(runtime::deliver_start(
+        state.clone(),
+        crate::errors::voice_start::Stage::Transport,
+        async move {
+            ready.notify_one();
+            gate.notified().await;
+            Ok(runtime::Started {
+                session: result,
+                sdp: "answer".into(),
+            })
+        },
+    ));
+    assert!(futures::poll!(start.as_mut()).is_pending());
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("start work entered the detached delivery task");
+    assert_eq!(
+        state.shutdown.counts().detached,
+        baseline + 1,
+        "the in-flight start owns exactly one detached shutdown work item"
+    );
+
+    release.notify_one();
+    let started = tokio::time::timeout(Duration::from_secs(5), start)
+        .await
+        .expect("released start is delivered")
+        .unwrap();
+    assert_eq!(started.session.id, call.id);
+    assert_eq!(started.sdp, "answer");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.shutdown.counts().detached != baseline {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("acknowledged start releases its detached shutdown work item");
+    assert_eq!(state.shutdown.counts().detached, baseline);
+    session::close(&state.db, &call, "fixture_setup", true)
+        .await
+        .unwrap();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn dropping_buffered_start_response_requests_end_without_client_control() {
     let (state, _, call) = tests::setup("voice_buffered_start").await;
     let completed = Arc::new(Notify::new());
