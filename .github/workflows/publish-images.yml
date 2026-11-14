@@ -216,6 +216,8 @@ jobs:
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          secrets: |
+            crash_artifacts_sentry=${{ matrix.component == 'frontend' && secrets.CRASH_ARTIFACTS_SENTRY || '' }}
           # Build-args: git hash for backend/node-agent surface tagging
           # (stamped on /health). Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no

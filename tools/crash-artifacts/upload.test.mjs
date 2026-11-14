@@ -148,3 +148,95 @@ test("web, iOS and Android upload commands match the pinned CLI and keep tokens 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("web private maps are retained only for release intent and always removed from dist", async () => {
+  const { collectCrashArtifacts } =
+    await import("../../frontend/scripts/collect-crash-artifacts.mjs");
+  for (const retain of [undefined, "1"]) {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "nyx-map-retention-"),
+    );
+    const root = path.join(directory, "frontend");
+    fs.mkdirSync(path.join(root, "dist/assets"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "dist/crash-build.json"),
+      JSON.stringify({ artifact_id: "2e6e467d-54b7-4839-bfb1-c3e563368b37" }),
+    );
+    fs.writeFileSync(path.join(root, "dist/assets/app.js"), "minified");
+    fs.writeFileSync(
+      path.join(root, "dist/assets/app.js.map"),
+      "private symbols",
+    );
+    const result = await collectCrashArtifacts(
+      root,
+      retain ? { CRASH_ARTIFACTS_RETAIN: retain } : {},
+    );
+    assert.equal(
+      fs.existsSync(path.join(root, "dist/assets/app.js.map")),
+      false,
+    );
+    assert.equal(fs.existsSync(result.target), retain === "1");
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+test("iOS and Android never upload with missing build secrets", () => {
+  for (const platform of ["ios", "android"])
+    for (const keys of [
+      [],
+      ["CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN"],
+      ["CRASH_ARTIFACTS_SENTRY_ORG"],
+      ["CRASH_ARTIFACTS_SENTRY_PROJECT_MOBILE"],
+      ["CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN", "CRASH_ARTIFACTS_SENTRY_ORG"],
+    ]) {
+      const environment = Object.fromEntries(keys.map((k) => [k, "sentinel"]));
+      let calls = 0;
+      try {
+        upload("/absent", platform, environment, () => {
+          calls++;
+        });
+      } catch (error) {
+        assert.match(
+          error.message,
+          /Incomplete crash artifact upload configuration/,
+        );
+      }
+      assert.equal(calls, 0);
+    }
+});
+
+test("failed public-map assertions also delete unrequested private copies", async () => {
+  const { collectCrashArtifacts } =
+    await import("../../frontend/scripts/collect-crash-artifacts.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nyx-map-failure-"));
+  const root = path.join(directory, "frontend");
+  const artifact = "2e6e467d-54b7-4839-bfb1-c3e563368b37";
+  try {
+    fs.mkdirSync(path.join(root, "dist/assets"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "dist/crash-build.json"),
+      JSON.stringify({ artifact_id: artifact }),
+    );
+    fs.writeFileSync(
+      path.join(root, "dist/assets/app.js"),
+      "//# sourceMappingURL=app.js.map",
+    );
+    fs.writeFileSync(
+      path.join(root, "dist/assets/app.js.map"),
+      "private symbols",
+    );
+    await assert.rejects(
+      collectCrashArtifacts(root, {}),
+      /Public diagnostic symbols/,
+    );
+    assert.equal(
+      fs.existsSync(path.join(root, "dist/assets/app.js.map")),
+      false,
+    );
+    assert.equal(
+      fs.existsSync(path.join(directory, "crash-artifacts/web", artifact)),
+      false,
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
