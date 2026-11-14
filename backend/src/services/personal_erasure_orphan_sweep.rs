@@ -176,9 +176,22 @@ async fn aggregate_joined_children(
     parent: &'static str,
     field: &'static str,
 ) -> AppResult<Vec<OrphanGroup>> {
+    // Channel send claims encode the conversation id in `<conversation>:<claim>`
+    // rather than a dedicated field.  Keep these children in the orphan sweep
+    // instead of silently skipping the joined-child entry.
+    let pipeline = if collection == "channel_send_claims" && field == "_id" {
+        vec![
+            doc! {"$match": {"_id": {"$type": "string"}}},
+            doc! {"$set": {"parent_id": {"$arrayElemAt": [{"$split": ["$_id", ":"]}, 0]}}},
+            doc! {"$match": {"parent_id": {"$type": "string"}}},
+            doc! {"$group": {"_id": "$parent_id", "row_ids": {"$addToSet": "$_id"}}},
+        ]
+    } else {
+        owner_pipeline(field)
+    };
     let mut cursor = db
         .collection::<Document>(collection)
-        .aggregate(owner_pipeline(field))
+        .aggregate(pipeline)
         .allow_disk_use(true)
         .max_time(AGGREGATE_TIMEOUT)
         .await?;
@@ -305,8 +318,9 @@ fn joined_child_spec(collection: &str, parent: &str) -> Option<(&'static str, &'
         }
         ("channel_send_claims", "channel_conversations") => {
             // Claims use `<conversation_id>:<claim_id>` ids rather than a
-            // dedicated parent field; they are handled by the owning domain.
-            None
+            // dedicated parent field; aggregate_joined_children parses that
+            // stable prefix before checking the parent.
+            Some(("_id", "channel_conversations"))
         }
         ("service_history_heads", "user_services") => Some(("_id", "user_services")),
         ("service_pool_health_observations", "service_pools") => Some(("pool_id", "service_pools")),
@@ -618,6 +632,20 @@ mod tests {
         let mut reordered = one.clone();
         reordered[0].row_ids.reverse();
         assert_eq!(digest(&one).unwrap(), digest(&reordered).unwrap());
+    }
+
+    #[test]
+    fn every_registry_joined_child_has_an_orphan_sweep_spec() {
+        for entry in personal_data_registry::entries() {
+            if let Erasure::JoinedChild { parent } = entry.erasure {
+                assert!(
+                    joined_child_spec(entry.collection, parent).is_some(),
+                    "joined child {} -> {} is missing from the orphan sweep",
+                    entry.collection,
+                    parent
+                );
+            }
+        }
     }
 
     #[test]
