@@ -93,7 +93,12 @@ pub async fn ingest(
         service::count(&state.db, Some(platform), "consent_denied").await;
         return Err(AppError::CrashReportConsentRequired);
     }
-    service::validation::validate(&request.report, chrono::Utc::now())?;
+    if let Err(error) = service::validation::validate(&request.report, chrono::Utc::now()) {
+        // Validation is after the cluster rate limits, so this counter cannot
+        // become an unthrottled write path.
+        service::count(&state.db, Some(platform), "invalid").await;
+        return Err(error);
+    }
     let release = service::releases::RegisterRelease::from_report(&request.report);
     match service::insert(
         &state.db,
@@ -391,7 +396,19 @@ pub async fn register_release(
         api_key_id: None,
         api_key_name: None,
     };
-    crate::services::audit_service::log_actor_event(state.db.clone(), &actor, "crash_reports.release_registered", Some(serde_json::json!({"platform": body.platform.as_str(), "app_version": body.app_version, "app_build": body.app_build, "artifact_id": body.artifact_id, "outcome":outcome.as_str()}))).await?;
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &actor,
+        "crash_reports.release_registered",
+        Some(serde_json::json!({
+            "platform": body.platform.as_str(),
+            "app_version": body.app_version,
+            "app_build": body.app_build,
+            "artifact_id": body.artifact_id,
+            "outcome": outcome.as_str()
+        })),
+    )
+    .await?;
     Ok(no_store(RegisterReleaseResponse {
         status: outcome.as_str(),
     }))

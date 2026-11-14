@@ -364,6 +364,41 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
 }
 
 #[tokio::test]
+async fn server_validation_rejection_increments_invalid_counter_after_rate_limits() {
+    let (db, id, rev) = account("crash_validation_counter").await;
+    readiness::ready_test_replica(&db).await;
+    flags::set_platform_override(&db, service::FLAG, &FlagTarget::User(id.clone()), true, &id)
+        .await
+        .unwrap();
+    let mut raw = serde_json::to_value(report()).unwrap();
+    raw["app_version"] = serde_json::json!("invalid/version");
+    let value = serde_json::json!({
+        "account_id": id,
+        "revision": rev,
+        "report": raw,
+    });
+    let state = test_app_state(db.clone());
+    assert!(matches!(
+        ingest(
+            State(state),
+            test_auth_user(&id),
+            no_peer(),
+            device(&id),
+            Ok(Bytes::from(serde_json::to_vec(&value).unwrap())),
+        )
+        .await,
+        Err(AppError::ValidationError(_))
+    ));
+    let counter = db
+        .collection::<bson::Document>(COUNTERS)
+        .find_one(bson::doc! {"platform":"web", "outcome":"invalid"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(counter.get_i64("count").unwrap(), 1);
+}
+
+#[tokio::test]
 async fn serving_readiness_with_flag_off_does_not_offer_diagnostics_or_fail_consent() {
     let (db, id, _) = account("crash_not_offered").await;
     crate::services::security_readiness_service::ready_test_replica(&db).await;
