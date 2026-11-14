@@ -85,6 +85,7 @@ pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
+pub(crate) mod mobile_redirect;
 pub mod node_admin;
 pub mod node_agent;
 pub mod node_ws;

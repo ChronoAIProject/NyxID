@@ -3006,6 +3006,7 @@ mod tests {
             target_user_id: target_user_id.map(str::to_string),
             credential_user_id: None,
             redirect_path: None,
+            app_return_uri: None,
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,

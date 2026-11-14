@@ -776,6 +776,40 @@ pub async fn initiate_oauth_connect(
     connect_link_id: Option<&str>,
     flow_kind: Option<OAuthFlowKind>,
 ) -> AppResult<OAuthInitiateResult> {
+    initiate_oauth_connect_with_app_return(
+        db,
+        encryption_keys,
+        base_url,
+        user_id,
+        provider_id,
+        on_behalf_of,
+        redirect_path,
+        additional_scopes,
+        scope_override,
+        connection_id,
+        connect_link_id,
+        flow_kind,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn initiate_oauth_connect_with_app_return(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    base_url: &str,
+    user_id: &str,
+    provider_id: &str,
+    on_behalf_of: Option<&str>,
+    redirect_path: Option<&str>,
+    additional_scopes: &[String],
+    scope_override: Option<&[String]>,
+    connection_id: Option<&str>,
+    connect_link_id: Option<&str>,
+    flow_kind: Option<OAuthFlowKind>,
+    app_return_uri: Option<&str>,
+) -> AppResult<OAuthInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
         .find_one(doc! { "_id": provider_id, "is_active": true })
@@ -971,6 +1005,7 @@ pub async fn initiate_oauth_connect(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
+        app_return_uri: app_return_uri.map(String::from),
         flow_kind: flow_kind.map(|kind| kind.as_wire().to_string()),
         attempt_nonce: attempt_nonce.clone(),
         connection_id: connection_id.map(String::from),
@@ -1323,6 +1358,7 @@ pub async fn request_device_code(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
+        app_return_uri: None,
         flow_kind: None,
         attempt_nonce: None,
         connection_id: connection_id.map(String::from),
@@ -3656,6 +3692,7 @@ mod tests {
                 connection_id: None,
                 connect_link_id: None,
                 redirect_path: None,
+                app_return_uri: None,
                 flow_kind: None,
                 attempt_nonce: None,
                 authorization_nonce: None,
