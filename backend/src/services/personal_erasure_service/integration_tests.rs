@@ -38,8 +38,11 @@ fn replace_owner(value: &mut bson::Bson, owner: &str) {
     match value {
         bson::Bson::String(value) if value == owner => {}
         bson::Bson::Document(document) => {
-            for value in document.values_mut() {
-                replace_owner(value, owner);
+            let keys = document.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                if let Some(value) = document.get_mut(&key) {
+                    replace_owner(value, owner);
+                }
             }
         }
         bson::Bson::Array(values) => {
@@ -174,7 +177,8 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         } else {
             bystander
         };
-        if seen.insert((collection, target.get("_id").cloned().unwrap())) {
+        let target_key = target.get_str("_id").unwrap_or(&target_id).to_owned();
+        if seen.insert((collection, target_key)) {
             db.collection::<Document>(collection)
                 .insert_one(target.clone())
                 .await
