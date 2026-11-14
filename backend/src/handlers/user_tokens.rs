@@ -619,33 +619,14 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
         if let Some(uri) = app_return_uri.as_deref() {
-            let frontend_fallback = if let Some(flow) = completion_flow {
-                let code = if normalized_oauth_error_code(error) == "access_denied" {
-                    "access_denied"
-                } else {
-                    "provider_error"
-                };
-                redirect_to_oauth_completion(
-                    frontend_url,
-                    "error",
-                    flow.as_wire(),
-                    Some(code),
-                    completion_nonce.as_deref(),
-                )
-            } else if let Some(path) = redirect_path.as_deref() {
-                redirect_to_path(frontend_url, path, "error", Some(&msg))
+            let code = if normalized_oauth_error_code(error) == "access_denied" {
+                "access_denied"
             } else {
-                redirect_callback(frontend_url, "error", Some(&msg))
+                "provider_error"
             };
-            return redirect_to_app(
-                uri,
-                Some(if normalized_oauth_error_code(error) == "access_denied" {
-                    "access_denied"
-                } else {
-                    "provider_error"
-                }),
-                frontend_fallback,
-            );
+            if let Some(redirect) = app_return_redirect(uri, Some(code)) {
+                return redirect;
+            }
         }
         if let Some(flow) = completion_flow {
             let code = if normalized_oauth_error_code(error) == "access_denied" {
@@ -675,12 +656,9 @@ async fn generic_oauth_callback_impl(
                 && let Ok(oauth_state) =
                     user_token_service::peek_oauth_state(&state.db, state_param).await
                 && let Some(uri) = oauth_state.app_return_uri.as_deref()
+                && let Some(redirect) = app_return_redirect(uri, Some("provider_error"))
             {
-                return redirect_to_app(
-                    uri,
-                    Some("provider_error"),
-                    redirect_callback(frontend_url, "error", Some("Missing authorization code")),
-                );
+                return redirect;
             }
             if let Some(nonce) = query
                 .state
@@ -796,19 +774,10 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
             auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
-        if let Some(uri) = oauth_state.app_return_uri.as_deref() {
-            let frontend_fallback = if let Some(flow) = completion_flow {
-                redirect_to_oauth_completion(
-                    frontend_url,
-                    "error",
-                    flow.as_wire(),
-                    Some("session_mismatch"),
-                    completion_nonce,
-                )
-            } else {
-                redirect_callback(frontend_url, "error", Some(&message))
-            };
-            return redirect_to_app(uri, Some("session_mismatch"), frontend_fallback);
+        if let Some(uri) = oauth_state.app_return_uri.as_deref()
+            && let Some(redirect) = app_return_redirect(uri, Some("session_mismatch"))
+        {
+            return redirect;
         }
         if let Some(flow) = completion_flow {
             return redirect_to_oauth_completion(
@@ -911,21 +880,10 @@ async fn generic_oauth_callback_impl(
                     auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
                     auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
                 );
-                if let Some(uri) = oauth_state.app_return_uri.as_deref() {
-                    let frontend_fallback = if let Some(flow) = completion_flow {
-                        redirect_to_oauth_completion(
-                            frontend_url,
-                            "error",
-                            flow.as_wire(),
-                            Some("exchange_failed"),
-                            completion_nonce,
-                        )
-                    } else if let Some(path) = redirect_path.as_deref() {
-                        redirect_to_path(frontend_url, path, "error", Some(&user_msg))
-                    } else {
-                        redirect_callback(frontend_url, "error", Some(&user_msg))
-                    };
-                    return redirect_to_app(uri, Some("exchange_failed"), frontend_fallback);
+                if let Some(uri) = oauth_state.app_return_uri.as_deref()
+                    && let Some(redirect) = app_return_redirect(uri, Some("exchange_failed"))
+                {
+                    return redirect;
                 }
                 if let Some(flow) = completion_flow {
                     return redirect_to_oauth_completion(
@@ -997,21 +955,10 @@ async fn generic_oauth_callback_impl(
                 }
             }
 
-            if let Some(uri) = oauth_state.app_return_uri.as_deref() {
-                let frontend_fallback = if let Some(flow) = completion_flow {
-                    redirect_to_oauth_completion(
-                        frontend_url,
-                        "complete",
-                        flow.as_wire(),
-                        None,
-                        completion_nonce,
-                    )
-                } else if let Some(path) = redirect_path.as_deref() {
-                    redirect_to_path(frontend_url, path, "success", None)
-                } else {
-                    redirect_callback(frontend_url, "success", None)
-                };
-                redirect_to_app(uri, None, frontend_fallback)
+            if let Some(uri) = oauth_state.app_return_uri.as_deref()
+                && let Some(redirect) = app_return_redirect(uri, None)
+            {
+                redirect
             } else if let Some(flow) = completion_flow {
                 redirect_to_oauth_completion(
                     frontend_url,
@@ -1067,28 +1014,10 @@ async fn generic_oauth_callback_impl(
                 auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
             );
             // Sanitize error for user-facing redirect -- never leak internal details
-            if let Some(uri) = oauth_state.app_return_uri.as_deref() {
-                let code = if oauth_state.expires_at < chrono::Utc::now() {
-                    "state_expired"
-                } else if oauth_state.consumed {
-                    "state_replayed"
-                } else {
-                    "exchange_failed"
-                };
-                let frontend_fallback = if let Some(flow) = completion_flow {
-                    redirect_to_oauth_completion(
-                        frontend_url,
-                        "error",
-                        flow.as_wire(),
-                        Some(code),
-                        completion_nonce,
-                    )
-                } else if let Some(path) = redirect_path.as_deref() {
-                    redirect_to_path(frontend_url, path, "error", Some(&user_msg))
-                } else {
-                    redirect_callback(frontend_url, "error", Some(&user_msg))
-                };
-                redirect_to_app(uri, Some("exchange_failed"), frontend_fallback)
+            if let Some(uri) = oauth_state.app_return_uri.as_deref()
+                && let Some(redirect) = app_return_redirect(uri, Some("exchange_failed"))
+            {
+                redirect
             } else if let Some(flow) = completion_flow {
                 let code = if oauth_state.expires_at < chrono::Utc::now() {
                     "state_expired"
@@ -1128,14 +1057,10 @@ fn validate_mobile_oauth_return(query: &OAuthInitiateQuery, production: bool) ->
 
 /// Only fixed result tokens cross the native return boundary. Remove caller
 /// query parameters too, so neither state nor credential material can be echoed.
-fn redirect_to_app(
-    uri: &str,
-    error_code: Option<&str>,
-    fallback: axum::response::Redirect,
-) -> axum::response::Redirect {
+fn app_return_redirect(uri: &str, error_code: Option<&str>) -> Option<axum::response::Redirect> {
     let Ok(mut url) = url::Url::parse(uri) else {
         tracing::warn!("stored OAuth app return URI could not be parsed; using frontend redirect");
-        return fallback;
+        return None;
     };
     url.set_query(None);
     url.query_pairs_mut().append_pair(
@@ -1149,7 +1074,7 @@ fn redirect_to_app(
     if let Some(code) = error_code {
         url.query_pairs_mut().append_pair("code", code);
     }
-    axum::response::Redirect::to(url.as_str())
+    Some(axum::response::Redirect::to(url.as_str()))
 }
 
 fn is_chat_connect_state(oauth_state: &OAuthState) -> bool {
@@ -4035,14 +3960,7 @@ mod tests {
 
     #[test]
     fn corrupted_stored_app_return_uri_falls_back_to_frontend_redirect() {
-        let fallback = axum::response::Redirect::to(
-            "https://frontend.example/providers/callback?status=error",
-        );
-        let redirect = redirect_to_app("://corrupted", Some("provider_error"), fallback);
-        assert_eq!(
-            redirect_location(redirect),
-            "https://frontend.example/providers/callback?status=error"
-        );
+        assert!(app_return_redirect("://corrupted", Some("provider_error")).is_none());
     }
 
     #[tokio::test]
