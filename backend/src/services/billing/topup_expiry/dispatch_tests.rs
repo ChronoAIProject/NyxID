@@ -8,6 +8,62 @@ use std::sync::{
 };
 use tokio::sync::Notify;
 
+tokio::task_local! { static COUNT_RACE: std::sync::Arc<(Notify, Notify)>; }
+
+pub(super) async fn renewal_count_completed() {
+    if let Ok(resume) = COUNT_RACE.try_with(Clone::clone) {
+        resume.0.notify_one();
+        resume.1.notified().await;
+    }
+}
+
+pub(super) fn renewal_count_lost() {
+    if let Ok(resume) = COUNT_RACE.try_with(Clone::clone) {
+        resume.1.notify_one();
+    }
+}
+
+pub(super) async fn renewal_count_before_renewal() {
+    if let Ok(gate) = COUNT_RACE.try_with(Clone::clone) {
+        gate.0.notified().await;
+    }
+}
+
+#[tokio::test]
+async fn expiry_renewal_count_r2_completed_effect_wins_lost_renewal() {
+    let (db, wallet, operation) = fixture(false).await;
+    let provider = Provider::default();
+    // The operation has been removed in MongoDB, but work cannot return until
+    // renewal observes that removal. No scheduler timing or sleep chooses the race.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        COUNT_RACE.scope(
+            std::sync::Arc::new((Notify::new(), Notify::new())),
+            complete_with_renewal(
+                &db,
+                &provider,
+                &wallet,
+                operation,
+                Utc::now(),
+                std::time::Duration::from_millis(1),
+            ),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let saved = db
+        .collection::<BillingWallet>(BILLING_WALLETS)
+        .find_one(doc! {"_id":"wallet"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.active_topup_expiry.is_none());
+    assert_eq!(provider.voids.load(Ordering::SeqCst), 1);
+    db.drop().await.unwrap();
+    assert_eq!(result, 1, "completed expiry must win the renewal result");
+}
+
 #[derive(Default)]
 struct Provider {
     pause_history: AtomicBool,
@@ -522,6 +578,7 @@ async fn expiry_dispatch_renewal_keeps_polling_the_wallet_transaction() {
             &operation,
             work,
             std::time::Duration::from_millis(50),
+            &AtomicBool::new(false),
         ),
     )
     .await;

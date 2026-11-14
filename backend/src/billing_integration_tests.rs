@@ -4,6 +4,7 @@ mod operations;
 mod org_wallet;
 mod taxes;
 mod usage;
+pub(crate) mod usage_checkpoints;
 mod wallet_snapshot;
 mod wallet_view;
 

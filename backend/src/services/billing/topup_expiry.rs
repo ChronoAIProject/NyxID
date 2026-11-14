@@ -16,6 +16,7 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use mongodb::options::ReturnDocument;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 pub const PURCHASED_CREDIT_LIFETIME_DAYS: i64 = 365;
 const EXPIRY_WALLET_BATCH: i64 = 100;
@@ -328,8 +329,10 @@ async fn complete_with_renewal(
     now: DateTime<Utc>,
     cadence: std::time::Duration,
 ) -> AppResult<u64> {
-    let work = complete_expiry_operation_inner(db, lago, wallet, operation.clone(), now);
-    run_with_expiry_renewal(db, wallet, &operation, work, cadence).await
+    let cleanup_started = AtomicBool::new(false);
+    let work =
+        complete_expiry_operation_inner(db, lago, wallet, operation.clone(), now, &cleanup_started);
+    run_with_expiry_renewal(db, wallet, &operation, work, cadence, &cleanup_started).await
 }
 
 async fn run_with_expiry_renewal(
@@ -338,22 +341,40 @@ async fn run_with_expiry_renewal(
     operation: &PurchasedCreditExpiryOperation,
     work: impl std::future::Future<Output = AppResult<u64>>,
     cadence: std::time::Duration,
+    cleanup_started: &AtomicBool,
 ) -> AppResult<u64> {
     // Renewal touches the wallet too: keep polling the work while a renewal
     // waits for its transaction, and drop cancelled work before releasing.
-    let result = tokio::select! {
-        result = work => result,
-        result = async {
-            let mut renewal = tokio::time::interval(cadence);
-            renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            renewal.tick().await;
-            loop {
+    let result = {
+        tokio::pin!(work);
+        tokio::select! {
+            biased;
+            result = &mut work => result,
+            result = async {
+                let mut renewal = tokio::time::interval(cadence);
+                renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 renewal.tick().await;
-                if !renew_expiry_operation(db, wallet, operation).await? {
-                    return Ok(0);
+                loop {
+                    renewal.tick().await;
+                    #[cfg(test)]
+                    dispatch_tests::renewal_count_before_renewal().await;
+                    if !renew_expiry_operation(db, wallet, operation).await? {
+                        #[cfg(test)]
+                        dispatch_tests::renewal_count_lost();
+                        return Ok(0);
+                    }
+                }
+            } => {
+                // Removal can commit before its acknowledgement is polled.
+                // Once only exact-token cleanup remains, await its result even
+                // if renewal sees that removal first; all money is durable.
+                if cleanup_started.load(Ordering::Relaxed) {
+                    work.await
+                } else {
+                    result
                 }
             }
-        } => result,
+        }
     };
     // Release upgraded processing immediately. Preserve the legacy deadline
     // when a POST may be uncertain: old binaries ignore dispatch markers.
@@ -381,6 +402,7 @@ async fn complete_expiry_operation_inner(
     wallet: &BillingWallet,
     mut operation: PurchasedCreditExpiryOperation,
     now: DateTime<Utc>,
+    cleanup_started: &AtomicBool,
 ) -> AppResult<u64> {
     let Some(wallet_id) = wallet.lago_wallet_id.as_deref() else {
         return Ok(0);
@@ -494,6 +516,7 @@ async fn complete_expiry_operation_inner(
         );
         return Ok(0);
     }
+    cleanup_started.store(true, Ordering::Relaxed);
     let completed = db
         .collection::<BillingWallet>(BILLING_WALLETS)
         .update_one(
@@ -507,6 +530,8 @@ async fn complete_expiry_operation_inner(
             },
         )
         .await?;
+    #[cfg(test)]
+    dispatch_tests::renewal_count_completed().await;
     Ok(if completed.modified_count == 1 {
         operation.items.len() as u64
     } else {

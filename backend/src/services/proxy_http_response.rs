@@ -115,6 +115,8 @@ async fn relay_response_inner(
             let request_len = request_body_len;
             let task_cancellation = downstream_cancellation.clone();
             let model_protocol = crate::services::assistant_model_observer::protocol(path);
+            let checkpoint_eligible = status.is_success()
+                && crate::services::billing::usage_checkpoint::supports_path(path);
             let model_request = model_request.clone().filter(|_| status.is_success());
 
             crate::turn_trace::spawn_cleanup(async move {
@@ -122,6 +124,8 @@ async fn relay_response_inner(
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let mut checkpoints =
+                    stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
                 // Billing keeps the full SSE event; the bounded model observer is diagnostic only.
                 let mut sse_buffer = String::new();
                 let mut model_observer = model_request.as_ref().map(|_| {
@@ -171,22 +175,14 @@ async fn relay_response_inner(
                         }
                         Ok(Ok(Some(Ok(bytes)))) => {
                             response_len += bytes.len() as i64;
-                            sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
-                            while let Some(event) =
-                                super::sse_parser::parse_next_event(&mut sse_buffer)
-                            {
-                                if let Some((mut usage, mode)) =
-                                    llm_usage_service::extract_reported_usage_from_sse_event(
-                                        event.event_type.as_deref(),
-                                        &event.data,
-                                    )
-                                {
-                                    if !status.is_success() {
-                                        usage.images = 0;
-                                    }
-                                    usage_accumulator.observe(usage, mode);
-                                }
-                            }
+                            observe_sse_chunk(
+                                &mut sse_buffer,
+                                &mut usage_accumulator,
+                                &mut checkpoints,
+                                &bytes,
+                                status.is_success(),
+                            )
+                            .await;
 
                             if let (Some(observer), Some(request)) =
                                 (&mut model_observer, &model_request)
@@ -1000,6 +996,33 @@ pub(crate) fn llm_platform_usage(
     fallback_bytes: i64,
 ) -> PlatformUsage {
     llm_usage_service::platform_usage(usage, fallback_bytes, true)
+}
+
+/// The checkpoint reuses the relay's framing and decoded usage value.
+pub(crate) async fn observe_sse_chunk(
+    buffer: &mut String,
+    accumulator: &mut llm_usage_service::ReportedLlmUsageAccumulator,
+    checkpoints: &mut crate::services::billing::usage_checkpoint::StreamCheckpoints,
+    bytes: &[u8],
+    successful: bool,
+) {
+    buffer.push_str(&String::from_utf8_lossy(bytes));
+    while let Some(event) = super::sse_parser::parse_next_event(buffer) {
+        if let Ok(value) = serde_json::from_str(&event.data) {
+            checkpoints
+                .observe_value(event.event_type.as_deref(), &value)
+                .await;
+            if let Some((mut usage, mode)) = llm_usage_service::extract_reported_usage_from_value(
+                event.event_type.as_deref(),
+                &value,
+            ) {
+                if !successful {
+                    usage.images = 0;
+                }
+                accumulator.observe(usage, mode);
+            }
+        }
+    }
 }
 
 pub(crate) async fn settle_meter_async(

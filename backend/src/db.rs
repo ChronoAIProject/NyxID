@@ -3375,6 +3375,17 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
     usage_meter.create_indexes(billing_hold_indexes()).await?;
+    usage_meter.create_index(
+        IndexModel::builder()
+            .keys(doc! {"usage_checkpoint.recover_after":1,"_id":1})
+            .options(IndexOptions::builder()
+                .name("usage_checkpoint_recovery".to_owned())
+                .partial_filter_expression(doc! {
+                    "usage_checkpoint.final_report":true, "usage_checkpoint.recovered":false,
+                    "status":"forwarded", "released":false,
+                }).build())
+            .build(),
+    ).await?;
     usage_meter
         .create_index(
             IndexModel::builder()

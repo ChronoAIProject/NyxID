@@ -39,6 +39,7 @@ pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         quantity: Some(quantity),
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        usage_checkpoint: None,
         pool_attempt: None,
         machine_usage: None,
         status: UsageStatus::Finalized,

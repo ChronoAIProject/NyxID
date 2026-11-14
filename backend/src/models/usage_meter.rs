@@ -321,6 +321,10 @@ pub struct UsageMeterRow {
     /// Crash-recoverable final quantities for all platform components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
+    /// Interim numeric evidence is invisible to final-quantity recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore, value_type = Object)]
+    pub usage_checkpoint: Option<Box<crate::models::usage_checkpoint::UsageCheckpoint>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_attempt: Option<PoolAttemptAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

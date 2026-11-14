@@ -32,6 +32,7 @@ pub mod schedules;
 mod targets;
 pub mod taxes;
 pub mod topup_expiry;
+pub(crate) mod usage_checkpoint;
 pub mod usage_rollup;
 pub mod webhook;
 
@@ -754,6 +755,19 @@ impl BillingService {
             })
             .await?;
         Ok(wallet.is_some())
+    }
+
+    pub(crate) fn stream_checkpoints(
+        &self,
+        metered: &MeteredProxyContext,
+        eligible: bool,
+    ) -> usage_checkpoint::StreamCheckpoints {
+        usage_checkpoint::StreamCheckpoints::new(
+            &self.db,
+            metered,
+            eligible && self.config.billing_enabled && self.lago.is_some(),
+            self.config.billing_reservation_abandon_secs,
+        )
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {

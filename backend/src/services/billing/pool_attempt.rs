@@ -23,6 +23,18 @@ pub async fn finish(
         .await?
         .try_collect()
         .await?;
+    if rows.iter().any(|row| {
+        !row.released
+            && row.quantity.is_none()
+            && row.pending_platform_usage.is_none()
+            && row.pending_resale_quantity.is_none()
+            && row
+                .usage_checkpoint
+                .as_ref()
+                .is_some_and(|c| c.final_report && !c.recovered)
+    }) {
+        super::usage_checkpoint::recover_request(db, request_id, None).await?;
+    }
     for row in &rows {
         if row.pending_platform_usage.is_some() {
             let materialized =
@@ -92,7 +104,8 @@ async fn release_unknown_request(
             })) {
                 return Ok(0);
             }
-            if rows.iter().any(|row| row.pending_platform_usage.is_some() || row.pending_resale_quantity.is_some()) {
+            if rows.iter().any(|row| row.pending_platform_usage.is_some() || row.pending_resale_quantity.is_some()
+                || row.usage_checkpoint.as_ref().is_some_and(|c| c.final_report && !c.recovered)) {
                 return Ok(0);
             }
             let mut released = 0;
@@ -170,6 +183,13 @@ pub async fn recover_expired(db: &mongodb::Database, now: DateTime<Utc>) -> AppR
             return Ok(recovered);
         }
         if row.quantity.is_none() && requests.insert(&row.billing_request_id) {
+            if let Err(error) =
+                super::usage_checkpoint::recover_request(db, &row.billing_request_id, Some(now))
+                    .await
+            {
+                record_recovery_error(db, Some(&row.billing_request_id), &error).await;
+                continue;
+            }
             match Box::pin(release_unknown_request(
                 db,
                 &row.billing_request_id,
