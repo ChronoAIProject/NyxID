@@ -451,6 +451,13 @@ ended by shutdown. Logs at drain start show the signal, budget and in-flight
 counts; another log records a second signal. Database failures and stuck cleanup
 have a shared deadline; they cannot extend the exit budget.
 
+The chained, metadata-only `backend_shutdown_drain_started` and
+`backend_shutdown_drain` events share the process's unique `generation`. The start
+records the budget, cleanup reserve and in-flight counts, including node operations.
+A start without a finish indicates the process was killed before the drain
+completed (a failed finish audit can also leave only a start); compare `budget_secs`
+with the platform's termination grace period. `0` emits neither event.
+
 Cleanup does not clear uncertain provider-send barriers, wallet locks or
 purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
 retain their mutation locks; Discord identify rate windows retain their expiry. These records

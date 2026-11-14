@@ -41,11 +41,11 @@ async fn started_turn(
     (row, consumer)
 }
 
-async fn drain_audit(state: &AppState) -> bson::Document {
+async fn drain_audit_row(state: &AppState, event_type: &str) -> bson::Document {
     let rows: Vec<bson::Document> = state
         .db
         .collection(crate::models::audit_log::COLLECTION_NAME)
-        .find(doc! {"event_type": "backend_shutdown_drain"})
+        .find(doc! {"event_type": event_type})
         .await
         .unwrap()
         .try_collect()
@@ -53,14 +53,24 @@ async fn drain_audit(state: &AppState) -> bson::Document {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].get("seq").is_some());
-    rows[0].get_document("event_data").unwrap().clone()
+    assert_eq!(rows[0].get_str("entry_hash").unwrap().len(), 64);
+    assert_eq!(rows[0].get_str("prev_hash").unwrap().len(), 64);
+    rows.into_iter().next().unwrap()
+}
+
+async fn drain_audit(state: &AppState) -> bson::Document {
+    drain_audit_row(state, "backend_shutdown_drain")
+        .await
+        .get_document("event_data")
+        .unwrap()
+        .clone()
 }
 
 #[tokio::test]
 async fn shutdown_drain_waits_for_slow_turn_complete_reply_without_turn_lost() {
     let (state, _, server) = setup(None, Duration::from_secs(1)).await;
     let (row, consumer) = started_turn(&state).await;
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     assert_eq!(drain.counts.turns.get("user"), Some(&1));
     assert!(
         tokio::time::timeout(Duration::from_millis(50), state.shutdown.idle())
@@ -100,7 +110,7 @@ async fn shutdown_drain_waits_for_slow_turn_complete_reply_without_turn_lost() {
 async fn shutdown_deadline_settles_immediately_old_sweep_and_next_send_do_not_settle_twice() {
     let (state, _, server) = setup(None, Duration::from_secs(60)).await;
     let (row, consumer) = started_turn(&state).await;
-    let drain = Drain::begin(&state.shutdown, Duration::from_millis(100), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_millis(100), "SIGTERM").unwrap();
     assert_eq!(
         drain
             .wait(&state, drain.deadline, std::future::pending())
@@ -180,7 +190,7 @@ async fn shutdown_audit_keeps_interrupted_turn_id_when_mongodb_rejects_settlemen
         })
         .await
         .unwrap();
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     state.shutdown.interrupt();
     state.shutdown.stop();
     tokio::time::timeout(Duration::from_secs(3), state.shutdown.execution_stopped())
@@ -216,17 +226,32 @@ async fn shutdown_audit_keeps_interrupted_turn_id_when_mongodb_rejects_settlemen
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_actual_server_process_sigterm_completes_slow_turn_and_exits_zero() {
-    actual_server_process(false).await;
+    actual_server_process(ProcessDrain::SlowTurn).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_actual_server_idle_node_and_subscriptions_exit_idle_after_grace() {
-    actual_server_process(true).await;
+    actual_server_process(ProcessDrain::IdleObservers).await;
 }
 
 #[cfg(unix)]
-async fn actual_server_process(idle_observers: bool) {
+#[tokio::test]
+async fn shutdown_actual_server_killed_during_drain_retains_start_audit_only() {
+    actual_server_process(ProcessDrain::Killed).await;
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessDrain {
+    SlowTurn,
+    IdleObservers,
+    Killed,
+}
+
+#[cfg(unix)]
+async fn actual_server_process(scenario: ProcessDrain) {
+    let idle_observers = scenario == ProcessDrain::IdleObservers;
     use std::process::{Command, Stdio};
     struct Child(CommandChild);
     type CommandChild = std::process::Child;
@@ -238,7 +263,12 @@ async fn actual_server_process(idle_observers: bool) {
             }
         }
     }
-    let (state, _, upstream) = setup(None, Duration::from_secs(3)).await;
+    let delay = if scenario == ProcessDrain::Killed {
+        600
+    } else {
+        3
+    };
+    let (state, _, upstream) = setup(None, Duration::from_secs(delay)).await;
     let directory = tempfile::tempdir().unwrap();
     let private = directory.path().join("private.pem");
     let public = directory.path().join("public.pem");
@@ -402,6 +432,55 @@ async fn actual_server_process(idle_observers: bool) {
             .unwrap()
             .success()
     );
+    if scenario == ProcessDrain::Killed {
+        let audits = state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if audits
+                    .find_one(doc! {"event_type": "backend_shutdown_drain_started"})
+                    .await
+                    .unwrap()
+                    .is_some()
+                {
+                    break;
+                }
+                assert!(child.0.try_wait().unwrap().is_none());
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("start audit must be visible while the turn is still in flight");
+        assert!(child.0.try_wait().unwrap().is_none());
+        child.0.kill().unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(child.0.wait().unwrap().signal(), Some(9));
+        let start = drain_audit_row(&state, "backend_shutdown_drain_started").await;
+        let initial = start
+            .get_document("event_data")
+            .unwrap()
+            .get_document("in_flight_at_start")
+            .unwrap();
+        assert_eq!(
+            initial
+                .get_document("turns")
+                .unwrap()
+                .get_i64("user")
+                .unwrap(),
+            1
+        );
+        assert_eq!(initial.get_i64("streams").unwrap(), 1);
+        assert_eq!(
+            audits
+                .count_documents(doc! {"event_type": "backend_shutdown_drain"})
+                .await
+                .unwrap(),
+            0
+        );
+        upstream.abort();
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if client
@@ -627,7 +706,34 @@ async fn idle_node_and_subscriptions(
         std::fs::read_to_string(output).unwrap()
     );
     assert!(started.elapsed() < bound);
-    let audit = drain_audit(state).await;
+    let start = drain_audit_row(state, "backend_shutdown_drain_started").await;
+    let finish = drain_audit_row(state, "backend_shutdown_drain").await;
+    assert!(start.get_i64("seq").unwrap() < finish.get_i64("seq").unwrap());
+    let start = start.get_document("event_data").unwrap();
+    let audit = finish.get_document("event_data").unwrap();
+    for field in [
+        "generation",
+        "instance_name",
+        "engine_worker_id",
+        "build_commit",
+        "signal",
+        "started_at",
+        "cleanup_reserve_ms",
+        "in_flight_at_start",
+    ] {
+        assert_eq!(
+            start.get(field).unwrap(),
+            audit.get(field).unwrap(),
+            "{field}"
+        );
+    }
+    assert_eq!(start.get_i64("budget_secs").unwrap(), 30);
+    assert_eq!(start.get_i64("cleanup_reserve_ms").unwrap(), 3_000);
+    assert_eq!(start.get_i64("node_operations_at_start").unwrap(), 0);
+    let counts = start.get_document("in_flight_at_start").unwrap();
+    assert_eq!(counts.len(), 6);
+    assert!(counts.get_i64("detached").unwrap() >= 0);
+    assert!(counts.get_i64("background").unwrap() >= 0);
     assert_eq!(audit.get_str("end").unwrap(), "idle");
     assert!(!audit.get_bool("deadline_reached").unwrap());
     assert!(audit.get_array("turns_interrupted").unwrap().is_empty());
@@ -660,7 +766,7 @@ fn shutdown_process_child() {
 #[tokio::test]
 async fn shutdown_accepts_new_turn_during_drain_and_waits_for_its_complete_reply() {
     let (state, _, server) = setup(None, Duration::from_millis(200)).await;
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     assert!(drain.counts.turns.is_empty());
     let (_, consumer) = started_turn(&state).await;
     assert_eq!(
@@ -695,7 +801,7 @@ async fn shutdown_fallback_settles_unstarted_turn_preserves_stop_and_fences_repl
         .await
         .unwrap();
     let turn = row.active_turn.as_ref().unwrap().turn_id.clone();
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     // Exercise the actual coordinator's fallback, without a running task to
     // settle cooperatively. Cleanup and the audit share its bounded budget.
     crate::finish_shutdown(
@@ -806,7 +912,7 @@ async fn shutdown_mcp_and_live_subscriptions_end_cleanly_after_grace_with_recove
     assert_eq!(state.shutdown.counts().streams, 0);
     let mcp_body = tokio::spawn(axum::body::to_bytes(mcp.into_body(), 100_000));
     let live_body = tokio::spawn(axum::body::to_bytes(live.into_body(), 100_000));
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(30), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(30), "SIGTERM").unwrap();
     let event = json!({"jsonrpc":"2.0", "method":"notifications/tools/list_changed"});
     assert!(
         state
@@ -898,7 +1004,7 @@ async fn shutdown_turn_sse_is_not_ended_at_subscription_grace() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let consumer = tokio::spawn(axum::body::to_bytes(response.into_body(), 100_000));
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(30), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(30), "SIGTERM").unwrap();
     tokio::time::sleep(grace).await;
     assert_eq!(state.shutdown.counts().streams, 1);
     assert_eq!(state.shutdown.subscriptions_ended(), 0);
@@ -918,7 +1024,7 @@ async fn shutdown_turn_sse_is_not_ended_at_subscription_grace() {
 #[tokio::test]
 async fn shutdown_new_turn_after_signal_outlives_wait_and_settles_within_runner_grace() {
     let (state, _, server) = setup(None, Duration::from_secs(60)).await;
-    let drain = Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let drain = Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     use axum::{middleware, routing::get};
     use tower::ServiceExt;
     let app = Router::new()
@@ -994,7 +1100,7 @@ async fn shutdown_new_turn_after_signal_outlives_wait_and_settles_within_runner_
 async fn shutdown_aborted_runner_and_fallback_cannot_both_write_the_reply() {
     let (state, _, server) = setup(None, Duration::from_secs(60)).await;
     let (row, consumer) = started_turn(&state).await;
-    let _drain = Drain::begin(&state.shutdown, Duration::from_secs(10), "SIGTERM").unwrap();
+    let _drain = Drain::begin(&state, Duration::from_secs(10), "SIGTERM").unwrap();
     // Simulate the runner exhausting its ordinary-settlement allowance.
     state.shutdown.interrupt();
     state.shutdown.stop();

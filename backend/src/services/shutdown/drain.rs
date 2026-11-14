@@ -12,6 +12,8 @@ use super::{Counts, Runtime};
 
 const CLEANUP_RESERVE_DIVISOR: u32 = 10;
 const MAX_CLEANUP_RESERVE: Duration = Duration::from_secs(5);
+// Above half the default cleanup reserve, so that half is the effective bound.
+const START_AUDIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 type ReleaseFuture<'a> = std::pin::Pin<Box<dyn Future<Output = AppResult<u64>> + Send + 'a>>;
 
@@ -45,15 +47,16 @@ impl Drain {
     }
 
     /// Zero does not change readiness or stop background intake.
-    pub fn begin(runtime: &Runtime, timeout: Duration, signal: &'static str) -> Option<Self> {
+    pub fn begin(state: &AppState, timeout: Duration, signal: &'static str) -> Option<Self> {
         if timeout.is_zero() {
             return None;
         }
+        let runtime = &state.shutdown;
         let counts = runtime.begin_drain()?;
         let started = Instant::now();
         tracing::info!(target: "nyxid::shutdown", signal, budget_secs = timeout.as_secs(),
             in_flight = ?counts, "Backend drain started; a second signal skips the wait and exits immediately after bounded cleanup");
-        Some(Self {
+        let drain = Self {
             runtime: runtime.clone(),
             deadline: started
                 .checked_add(timeout)
@@ -64,7 +67,43 @@ impl Drain {
             signal,
             timeout,
             audit_attempted: std::sync::atomic::AtomicBool::new(false),
-        })
+        };
+        let commit = std::env::var("NYXID_GIT_HASH")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| env!("NYXID_GIT_HASH").to_owned());
+        let metadata = serde_json::json!({
+            "generation": state.replica_identity.generation_id,
+            "instance_name": state.replica_identity.instance_name,
+            "engine_worker_id": crate::services::assistant_engine_worker::instance().id,
+            "build_commit": commit,
+            "signal": drain.signal,
+            "started_at": drain.started_at,
+            "budget_secs": drain.timeout.as_secs(),
+            "cleanup_reserve_ms": drain.cleanup_reserve().as_millis(),
+            "in_flight_at_start": drain.counts,
+            "node_operations_at_start": state.node_ws_manager.in_flight_operations(),
+        });
+        // Fit the completion join even when a second signal starts cleanup immediately.
+        let audit_deadline = started + START_AUDIT_TIMEOUT.min(drain.cleanup_reserve() / 2);
+        let db = state.db.clone();
+        state.shutdown.spawn_cleanup(async move {
+            if !matches!(
+                tokio::time::timeout_at(
+                    audit_deadline,
+                    crate::services::audit_service::log_system_event(
+                        db,
+                        "backend_shutdown_drain_started",
+                        Some(metadata),
+                    ),
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!(target: "nyxid::shutdown", "Shutdown start audit unavailable or timed out");
+            }
+        });
+        Some(drain)
     }
 
     pub fn second_signal(&self, signal: &str) -> End {
