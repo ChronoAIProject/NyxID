@@ -1,4 +1,7 @@
 //! Lifecycle notifications/projections and durable metadata-only investigations.
+//! Optional notification delivery remains at-least-once after an accepted send
+//! without a durable completion. A fresh exact claim and bounded send prevent a
+//! live request from outlasting its claim; provider idempotency is not assumed.
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -17,6 +20,10 @@ use mongodb::{
     bson::{self, Document, doc},
     options::IndexOptions,
 };
+
+const NOTICE_CLAIM_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
+const NOTICE_DISPATCH_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(NOTICE_CLAIM_LIFETIME.as_secs() / 2);
 
 pub const ORPHAN_INVENTORY: &str = "machine_orphan_inventory";
 
@@ -429,35 +436,28 @@ async fn escalate_cleanup(db: &Database, op: &MachineOperation) -> AppResult<()>
 /// visible and does not block lifecycle reconciliation or physical cleanup.
 pub async fn deliver_pending(state: &crate::AppState) -> AppResult<()> {
     for _ in 0..16 {
-        let now = Utc::now();
         let claim = uuid::Uuid::new_v4().to_string();
         let event=state.db.collection::<Document>(EVENTS).find_one_and_update(doc! {
             "notification":true,"notification_delivered_at":bson::Bson::Null,
-            "$and":[{"$or":[{"notification_retry_at":bson::Bson::Null},{"notification_retry_at":{"$lte":bson::DateTime::from_chrono(now)}}]},
-              {"$or":[{"notification_claim_until":bson::Bson::Null},{"notification_claim_until":{"$lte":bson::DateTime::from_chrono(now)}}]}]
-        },doc! {"$set":{"notification_claim":&claim,"notification_claim_until":bson::DateTime::from_chrono(now+Duration::minutes(2))},"$inc":{"notification_attempts":1_i64}}).sort(doc! {"created_at":1}).return_document(mongodb::options::ReturnDocument::After).await?;
+            "$expr":{"$and":[
+                {"$lte":[{"$ifNull":["$notification_retry_at","$$NOW"]},"$$NOW"]},
+                {"$lte":[{"$ifNull":["$notification_claim_until","$$NOW"]},"$$NOW"]}
+            ]}
+        },vec![doc! {"$set":{
+            "notification_claim":&claim,
+            "notification_claim_until":{"$add":["$$NOW",NOTICE_CLAIM_LIFETIME.as_millis() as i64]},
+            "notification_attempts":{"$add":[{"$ifNull":["$notification_attempts",0_i64]},1_i64]}
+        }}]).sort(doc! {"created_at":1}).return_document(mongodb::options::ReturnDocument::After).await?;
         let Some(document) = event else { break };
         let event: MachineLifecycleEvent = bson::from_document(document.clone())
             .map_err(|_| AppError::Internal("lifecycle event invalid".into()))?;
-        let result = super::notification_service::send_machine_lifecycle_notification(
-            &state.db,
-            &state.config,
-            &state.http_client,
-            state.fcm_auth.as_deref(),
-            state.apns_auth.as_deref(),
-            &event.owner_id,
-            event.machine_id.as_deref().unwrap_or_default(),
-            &event.operation_id,
-            &event.message,
-        )
-        .await;
+        #[cfg(test)]
+        notice_tests::age_claim(&state.db, &event.id).await;
+        let result = dispatch_lifecycle_notice(state, &event, &claim).await;
         let attempts = document.get_i64("notification_attempts").unwrap_or(1);
         let mut updates = doc! {"notification_claim":bson::Bson::Null,"notification_claim_until":bson::Bson::Null};
         if result.as_ref().is_ok_and(|r| !r.channels.is_empty()) {
-            updates.insert(
-                "notification_delivered_at",
-                bson::DateTime::from_chrono(now),
-            );
+            updates.insert("notification_delivered_at", "$$NOW");
         } else {
             // Optional delivery is bounded; the owner still has the in-site event.
             let retry = if attempts >= 8 {
@@ -469,7 +469,7 @@ pub async fn deliver_pending(state: &crate::AppState) -> AppResult<()> {
             };
             updates.insert(
                 "notification_retry_at",
-                bson::DateTime::from_chrono(now + retry),
+                doc! {"$add":["$$NOW",retry.num_milliseconds()]},
             );
         }
         state
@@ -477,11 +477,73 @@ pub async fn deliver_pending(state: &crate::AppState) -> AppResult<()> {
             .collection::<Document>(EVENTS)
             .update_one(
                 doc! {"_id":&event.id,"notification_claim":&claim},
-                doc! {"$set":updates},
+                vec![doc! {"$set":updates}],
             )
             .await?;
     }
     Ok(())
+}
+
+async fn dispatch_lifecycle_notice(
+    state: &crate::AppState,
+    event: &MachineLifecycleEvent,
+    claim: &str,
+) -> AppResult<super::notification_service::NotificationResult> {
+    // Include the final claim check and all channel preparation in the budget.
+    // A slow claim-check response cannot grant a fresh local timeout afterward.
+    let deadline = tokio::time::Instant::now() + NOTICE_DISPATCH_BOUND;
+    tokio::time::timeout_at(deadline, async {
+        let renewed = state
+            .db
+            .collection::<Document>(EVENTS)
+            .update_one(
+                doc! {"_id": &event.id, "notification_claim": claim,
+                "notification_delivered_at": bson::Bson::Null,
+                "$expr": {"$gt": ["$notification_claim_until", "$$NOW"]}},
+                vec![doc! {"$set": {"notification_claim_until": {"$add": ["$$NOW", NOTICE_CLAIM_LIFETIME.as_millis() as i64]}}}],
+            )
+            .await?;
+        if renewed.matched_count != 1 || tokio::time::Instant::now() >= deadline {
+            return Err(AppError::Conflict("Lifecycle notice claim changed".into()));
+        }
+        send_lifecycle_notice(state, event).await
+    })
+    .await
+    .map_err(|_| AppError::ChannelPlatformError("Lifecycle notice delivery timed out".into()))?
+}
+
+async fn send_lifecycle_notice(
+    state: &crate::AppState,
+    event: &MachineLifecycleEvent,
+) -> AppResult<super::notification_service::NotificationResult> {
+    #[cfg(test)]
+    if let Ok(gate) = notice_tests::SEND.try_with(Clone::clone) {
+        if gate.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            gate.started.notify_one();
+            gate.resume.notified().await;
+        }
+        return Ok(super::notification_service::NotificationResult {
+            channels: if gate.delivered {
+                vec!["test".into()]
+            } else {
+                Vec::new()
+            },
+            telegram_chat_id: None,
+            telegram_message_id: None,
+        });
+    }
+    super::notification_service::send_machine_lifecycle_notification(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &event.owner_id,
+        event.machine_id.as_deref().unwrap_or_default(),
+        &event.operation_id,
+        &event.message,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1093,5 +1155,284 @@ mod pagination_tests {
                 .is_err()
         );
         db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[derive(Clone)]
+    pub(super) struct SendGate {
+        pub calls: Arc<AtomicUsize>,
+        pub age_claim: bool,
+        pub delivered: bool,
+        pub started: Arc<tokio::sync::Notify>,
+        pub resume: Arc<tokio::sync::Notify>,
+    }
+    tokio::task_local! {pub(super) static SEND: SendGate;}
+    pub(super) async fn age_claim(db: &Database, id: &str) {
+        if SEND.try_with(|gate| gate.age_claim).unwrap_or(false) {
+            db.collection::<Document>(EVENTS)
+                .update_one(
+                    doc! {"_id":id},
+                    vec![doc! {"$set":{"notification_claim_until":{"$add":["$$NOW",300_i64]}}}],
+                )
+                .await
+                .unwrap();
+        }
+    }
+    type ClaimCommands = Arc<std::sync::Mutex<Vec<Document>>>;
+    async fn clock_fixture() -> (
+        crate::AppState,
+        MachineLifecycleEvent,
+        SendGate,
+        ClaimCommands,
+    ) {
+        let commands = ClaimCommands::default();
+        let seen = commands.clone();
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "lifecycle_clock",
+            mongodb::event::EventHandler::callback(move |event| {
+                if let mongodb::event::command::CommandEvent::Started(event) = event
+                    && (event.command.get_str("findAndModify") == Ok(EVENTS)
+                        || event.command.get_str("update") == Ok(EVENTS))
+                {
+                    seen.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let event = MachineLifecycleEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner_id: uuid::Uuid::new_v4().to_string(),
+            machine_id: None,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            kind: "ready".into(),
+            message: "Ready".into(),
+            notification: true,
+            responsibility: "platform".into(),
+            created_at: Utc::now(),
+            expires_at: None,
+        };
+        db.collection::<MachineLifecycleEvent>(EVENTS)
+            .insert_one(&event)
+            .await
+            .unwrap();
+        let gate = SendGate {
+            calls: Arc::new(AtomicUsize::new(0)),
+            age_claim: false,
+            delivered: true,
+            started: Arc::new(tokio::sync::Notify::new()),
+            resume: Arc::new(tokio::sync::Notify::new()),
+        };
+        gate.resume.notify_one();
+        (state, event, gate, commands)
+    }
+
+    fn assert_server_clock_commands(commands: &ClaimCommands) {
+        fn has_wall_clock(value: &bson::Bson) -> bool {
+            match value {
+                bson::Bson::DateTime(_) => true,
+                bson::Bson::Document(doc) => doc.values().any(has_wall_clock),
+                bson::Bson::Array(values) => values.iter().any(has_wall_clock),
+                _ => false,
+            }
+        }
+        let commands = commands.lock().unwrap();
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd.get_str("findAndModify") == Ok(EVENTS))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| cmd.get_str("update") == Ok(EVENTS))
+        );
+        for command in commands.iter() {
+            assert!(
+                !has_wall_clock(&bson::Bson::Document(command.clone())),
+                "client clock in {command:?}"
+            );
+            assert!(
+                command.to_string().contains("$$NOW"),
+                "no server clock in {command:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn round2_lifecycle_claim_renews_with_process_clock_behind_database() {
+        Box::pin(async {
+            let (state, event, gate, commands) = clock_fixture().await;
+            let legacy_claim_until = bson::DateTime::from_chrono(
+                Utc::now() - Duration::minutes(5) + Duration::minutes(2),
+            );
+            assert!(
+                state
+                    .db
+                    .collection::<Document>(EVENTS)
+                    .find_one(doc! {
+                        "_id": &event.id, "$expr": {"$lt": [legacy_claim_until, "$$NOW"]}
+                    })
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a process-clock claim would fail the server-time renewal"
+            );
+            SEND.scope(gate.clone(), deliver_pending(&state))
+                .await
+                .unwrap();
+            assert_eq!(
+                gate.calls.load(Ordering::SeqCst),
+                1,
+                "a process-clock claim would already be expired in database time"
+            );
+            let row = state
+                .db
+                .collection::<Document>(EVENTS)
+                .find_one(doc! {"_id":&event.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(row.get_datetime("notification_delivered_at").is_ok());
+            assert_server_clock_commands(&commands);
+            state.db.drop().await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn round2_lifecycle_eligibility_and_backoff_use_database_time() {
+        Box::pin(async {
+            let (state,event,mut gate,commands)=clock_fixture().await;
+            gate.delivered=false;
+            let rows=state.db.collection::<Document>(EVENTS);
+            rows.update_one(doc!{"_id":&event.id},vec![doc!{"$set":{"notification_retry_at":{"$add":["$$NOW",300_000_i64]}}}]).await.unwrap();
+            SEND.scope(gate.clone(),deliver_pending(&state)).await.unwrap();
+            assert_eq!(gate.calls.load(Ordering::SeqCst),0,"a fast process clock must not bypass the server retry deadline");
+            rows.update_one(doc!{"_id":&event.id},vec![doc!{"$set":{"notification_retry_at":{"$subtract":["$$NOW",1_i64]}}}]).await.unwrap();
+            SEND.scope(gate.clone(),deliver_pending(&state)).await.unwrap();
+            assert_eq!(gate.calls.load(Ordering::SeqCst),1);
+            assert!(rows.find_one(doc!{"_id":&event.id,"$expr":{"$and":[
+                {"$gt":["$notification_retry_at","$$NOW"]},{"$lt":["$notification_retry_at",{"$add":["$$NOW",120_000_i64]}]}
+            ]}}).await.unwrap().is_some(),"backoff is scheduled from the database clock");
+            assert_server_clock_commands(&commands);
+            state.db.drop().await.unwrap();
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_notice_lost_claim_is_never_dispatched() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("lifecycle_notice_lost").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let event = MachineLifecycleEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner_id: uuid::Uuid::new_v4().to_string(),
+            machine_id: None,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            kind: "ready".into(),
+            message: "Ready".into(),
+            notification: true,
+            responsibility: "platform".into(),
+            created_at: Utc::now(),
+            expires_at: None,
+        };
+        let mut document = bson::to_document(&event).unwrap();
+        document.insert("notification_claim", "successor");
+        document.insert(
+            "notification_claim_until",
+            bson::DateTime::from_chrono(Utc::now() + Duration::minutes(2)),
+        );
+        db.collection::<Document>(EVENTS)
+            .insert_one(document.clone())
+            .await
+            .unwrap();
+        let gate = SendGate {
+            age_claim: true,
+            delivered: true,
+            calls: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(tokio::sync::Notify::new()),
+            resume: Arc::new(tokio::sync::Notify::new()),
+        };
+        let result = SEND
+            .scope(
+                gate.clone(),
+                dispatch_lifecycle_notice(&state, &event, "old"),
+            )
+            .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            db.collection::<Document>(EVENTS)
+                .find_one(doc! {"_id":&event.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            document
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_notice_send_outlives_original_claim_without_a_second_sender() {
+        Box::pin(async {
+            let db = crate::test_utils::connect_transaction_test_database("lifecycle_notice_claim")
+                .await;
+            let state = crate::test_utils::test_app_state(db.clone());
+            let event = MachineLifecycleEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                owner_id: uuid::Uuid::new_v4().to_string(),
+                machine_id: Some(uuid::Uuid::new_v4().to_string()),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                kind: "ready".into(),
+                message: "Ready".into(),
+                notification: true,
+                responsibility: "platform".into(),
+                created_at: Utc::now(),
+                expires_at: None,
+            };
+            db.collection::<MachineLifecycleEvent>(EVENTS)
+                .insert_one(&event)
+                .await
+                .unwrap();
+            let gate = SendGate {
+                age_claim: true,
+                delivered: true,
+                calls: Arc::new(AtomicUsize::new(0)),
+                started: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+            };
+            let (first, second) =
+                tokio::join!(SEND.scope(gate.clone(), deliver_pending(&state)), async {
+                    gate.started.notified().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let result = SEND.scope(gate.clone(), deliver_pending(&state)).await;
+                    gate.resume.notify_one();
+                    result
+                });
+            first.unwrap();
+            second.unwrap();
+            assert_eq!(
+                gate.calls.load(Ordering::SeqCst),
+                1,
+                "a live lifecycle sender must retain its claim past the old expiry"
+            );
+            let row = db
+                .collection::<Document>(EVENTS)
+                .find_one(doc! {"_id":&event.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(row.get_datetime("notification_delivered_at").is_ok());
+            db.drop().await.unwrap();
+        })
+        .await;
     }
 }
