@@ -94,7 +94,7 @@ pub async fn ingest(
         return Err(AppError::CrashReportConsentRequired);
     }
     service::validation::validate(&request.report, chrono::Utc::now())?;
-    service::releases::auto_register_web(&state.db, &state.config, &request.report).await;
+    let release = service::releases::RegisterRelease::from_report(&request.report);
     match service::insert(
         &state.db,
         &state.crash_reports,
@@ -106,6 +106,13 @@ pub async fn ingest(
     .await
     {
         Ok((duplicate, report_id)) => {
+            if platform == Platform::Web {
+                let db = state.db.clone();
+                let config = state.config.clone();
+                tokio::spawn(async move {
+                    service::releases::auto_register_web(&db, &config, &release).await;
+                });
+            }
             let status = if duplicate { "duplicate" } else { "accepted" };
             service::count(&state.db, Some(platform), status).await;
             let mut response = no_store(IngestResponse { status, report_id });
@@ -370,15 +377,22 @@ pub async fn register_release(
     super::login_client_context::require_first_party_human(&auth)?;
     super::admin_helpers::require_admin(&state, &auth).await?;
     body.validate()?;
-    crate::services::audit_service::log_actor_event(state.db.clone(), &crate::services::audit_service::AuditActor::from_auth_user(&auth), "crash_reports.release_registered", Some(serde_json::json!({"platform": body.platform.as_str(), "app_version": body.app_version, "app_build": body.app_build, "artifact_id": body.artifact_id}))).await?;
-    service::releases::register(
+    let outcome = service::releases::register(
         &state.db,
         &body,
         crate::models::client_release_registry::ReleaseSource::Admin,
         Some(&auth.user_id.to_string()),
     )
     .await?;
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: auth.user_id.to_string(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    crate::services::audit_service::log_actor_event(state.db.clone(), &actor, "crash_reports.release_registered", Some(serde_json::json!({"platform": body.platform.as_str(), "app_version": body.app_version, "app_build": body.app_build, "artifact_id": body.artifact_id, "outcome":outcome.as_str()}))).await?;
     Ok(no_store(RegisterReleaseResponse {
-        status: "registered",
+        status: outcome.as_str(),
     }))
 }

@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterRelease {
     pub platform: Platform,
@@ -20,6 +20,14 @@ pub struct RegisterRelease {
     pub artifact_id: Option<String>,
 }
 impl RegisterRelease {
+    pub fn from_report(report: &CrashReportV1) -> Self {
+        Self {
+            platform: report.platform,
+            app_version: report.app_version.clone(),
+            app_build: report.app_build.clone(),
+            artifact_id: report.artifact_id.clone(),
+        }
+    }
     pub fn validate(&self) -> AppResult<()> {
         if !validation::valid_release(
             &self.app_version,
@@ -35,12 +43,25 @@ impl RegisterRelease {
         doc! {"platform": self.platform.as_str(), "app_version": &self.app_version, "app_build": &self.app_build, "artifact_id": &self.artifact_id}
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Registration {
+    Registered,
+    AlreadyRegistered,
+}
+impl Registration {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::AlreadyRegistered => "already_registered",
+        }
+    }
+}
 pub async fn register(
     db: &Database,
     identity: &RegisterRelease,
     source: ReleaseSource,
     actor: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<Registration> {
     identity.validate()?;
     let row = ClientRelease {
         id: uuid::Uuid::new_v4().to_string(),
@@ -52,15 +73,26 @@ pub async fn register(
         registered_at: Utc::now(),
         registered_by: actor.map(str::to_owned),
     };
-    db.collection::<ClientRelease>(RELEASES).update_one(identity.filter(), doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| AppError::Internal("Release serialization failed".into()))?}).upsert(true).await?;
-    Ok(())
+    let result = db.collection::<ClientRelease>(RELEASES).update_one(identity.filter(), doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| AppError::Internal("Release serialization failed".into()))?}).upsert(true).await?;
+    Ok(if result.upserted_id.is_some() {
+        Registration::Registered
+    } else {
+        Registration::AlreadyRegistered
+    })
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     artifact_id: String,
     app_version: String,
     app_build: String,
+}
+impl Manifest {
+    fn matches(&self, identity: &RegisterRelease) -> bool {
+        Some(self.artifact_id.as_str()) == identity.artifact_id.as_deref()
+            && self.app_version == identity.app_version
+            && self.app_build == identity.app_build
+    }
 }
 fn manifest_urls(config: &crate::config::AppConfig) -> Vec<url::Url> {
     std::iter::once(&config.frontend_url)
@@ -82,111 +114,128 @@ fn manifest_urls(config: &crate::config::AppConfig) -> Vec<url::Url> {
         })
         .collect()
 }
-async fn fetch_manifest(client: &reqwest::Client, url: url::Url) -> Option<Manifest> {
+async fn fetch_manifest(url: url::Url) -> Result<Manifest, logging::ManifestFailure> {
+    use logging::ManifestFailure::*;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .no_proxy()
+        .referer(false)
+        .build()
+        .map_err(|_| Transport)?;
     // Public build metadata only: no report, user, cookies or authorization.
-    let mut response = client.get(url).send().await.ok()?;
-    if !response.status().is_success() || response.content_length().is_some_and(|n| n > 4096) {
-        return None;
+    let mut response = client.get(url).send().await.map_err(|_| Transport)?;
+    if !response.status().is_success() {
+        return Err(Status);
+    }
+    if response.content_length().is_some_and(|n| n > 4096) {
+        return Err(Oversize);
     }
     let mut data = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
+    while let Some(chunk) = response.chunk().await.map_err(|_| Transport)? {
         if data.len() + chunk.len() > 4096 {
-            return None;
+            return Err(Oversize);
         }
         data.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&data).ok()
+    let manifest: Manifest = serde_json::from_slice(&data).map_err(|_| InvalidJson)?;
+    if !validation::valid_release(
+        &manifest.app_version,
+        &manifest.app_build,
+        Some(&manifest.artifact_id),
+    ) {
+        return Err(InvalidJson);
+    }
+    Ok(manifest)
 }
-type Gate = Arc<tokio::sync::Mutex<Option<Instant>>>;
+struct CachedManifest {
+    fetched_at: Instant,
+    manifest: Option<Manifest>,
+}
+type Gate = Arc<tokio::sync::Mutex<Option<CachedManifest>>>;
 static FLIGHTS: LazyLock<std::sync::Mutex<HashMap<String, Gate>>> = LazyLock::new(Default::default);
+async fn cached_manifest(url: url::Url, identity: &RegisterRelease) -> Option<Manifest> {
+    let key = url.origin().ascii_serialization();
+    let gate = {
+        let mut gates = FLIGHTS.lock().expect("manifest flights");
+        if gates.len() >= 1024 {
+            gates.retain(|_, g| {
+                Arc::strong_count(g) > 1
+                    || g.try_lock().map_or(true, |cached| {
+                        cached
+                            .as_ref()
+                            .is_some_and(|v| v.fetched_at.elapsed() < Duration::from_secs(60))
+                    })
+            });
+        }
+        if gates.len() >= 1024 && !gates.contains_key(&key) {
+            return None;
+        }
+        gates.entry(key).or_default().clone()
+    };
+    let mut cached = gate.lock().await;
+    if let Some(value) = cached
+        .as_ref()
+        .filter(|v| v.fetched_at.elapsed() < Duration::from_secs(60))
+    {
+        return value.manifest.clone();
+    }
+    // Cache even cancellation as a negative result. The gate stays locked for
+    // the bounded fetch so all distinct report identities share one request.
+    *cached = Some(CachedManifest {
+        fetched_at: Instant::now(),
+        manifest: None,
+    });
+    let manifest = match fetch_manifest(url.clone()).await {
+        Ok(manifest) => {
+            if !manifest.matches(identity) {
+                logging::manifest_failure(
+                    logging::ManifestFailure::Mismatch,
+                    url.host_str().unwrap_or_default(),
+                );
+            }
+            Some(manifest)
+        }
+        Err(reason) => {
+            logging::manifest_failure(reason, url.host_str().unwrap_or_default());
+            None
+        }
+    };
+    *cached = Some(CachedManifest {
+        fetched_at: Instant::now(),
+        manifest: manifest.clone(),
+    });
+    manifest
+}
 pub async fn auto_register_web(
     db: &Database,
     config: &crate::config::AppConfig,
-    report: &CrashReportV1,
+    identity: &RegisterRelease,
 ) {
-    if report.platform != Platform::Web {
+    if identity.platform != Platform::Web || identity.validate().is_err() {
         return;
     }
-    let identity = RegisterRelease {
-        platform: report.platform,
-        app_version: report.app_version.clone(),
-        app_build: report.app_build.clone(),
-        artifact_id: report.artifact_id.clone(),
-    };
-    if identity.validate().is_err() {
-        return;
-    }
-    let Ok(Some(_)) = db
+    match db
         .collection::<ClientRelease>(RELEASES)
         .find_one(identity.filter())
         .await
-    else {
-        let key = format!(
-            "{}:{}:{}",
-            db.name(),
-            config.frontend_url,
-            report.artifact_id.as_deref().unwrap_or_default()
-        );
-        let gate = {
-            let mut gates = FLIGHTS.lock().expect("manifest flights");
-            // Evict only idle entries; active waiters keep their single-flight identity.
-            if gates.len() >= 1024 {
-                gates.retain(|_, g| {
-                    Arc::strong_count(g) > 1
-                        || g.try_lock().map_or(true, |at| {
-                            at.is_some_and(|at| at.elapsed() < Duration::from_secs(60))
-                        })
-                });
-            }
-            if gates.len() >= 1024 && !gates.contains_key(&key) {
-                return;
-            }
-            gates.entry(key).or_default().clone()
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(3), async {
-            let mut failure = gate.lock().await;
-            if failure.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
-                return;
-            }
-            if db
-                .collection::<ClientRelease>(RELEASES)
-                .find_one(identity.filter())
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                return;
-            }
-            // Set before I/O so cancellation/timeout is negative-cached too.
-            *failure = Some(Instant::now());
-            let Ok(client) = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(3))
-                .no_proxy()
-                .referer(false)
-                .build()
-            else {
-                return;
-            };
-            for url in manifest_urls(config) {
-                if let Some(manifest) = fetch_manifest(&client, url).await
-                    && manifest.artifact_id == report.artifact_id.as_deref().unwrap_or_default()
-                    && manifest.app_version == report.app_version
-                    && manifest.app_build == report.app_build
-                    && register(db, &identity, ReleaseSource::FrontendManifest, None)
-                        .await
-                        .is_ok()
-                {
-                    return;
-                }
-            }
-            *failure = Some(Instant::now());
-        })
-        .await;
-        return;
-    };
+    {
+        Ok(None) => {}
+        // A database failure is not authority to perform outbound I/O.
+        _ => return,
+    }
+    for url in manifest_urls(config) {
+        if let Some(manifest) = cached_manifest(url, identity).await
+            && manifest.matches(identity)
+        {
+            let _ = register(db, identity, ReleaseSource::FrontendManifest, None).await;
+            return;
+        }
+    }
 }
+#[cfg(test)]
+#[path = "releases_review_tests.rs"]
+mod review_tests;
 /// A web identity binds its artifact; store binaries bind platform/version/build.
 /// Verification is query-time so registration requires no report backfill.
 pub fn verification_lookup() -> Document {
@@ -225,14 +274,15 @@ mod tests {
     #[tokio::test]
     async fn web_manifest_is_bounded_strict_single_flight_and_never_uses_report_urls() {
         let (db, _, _) = super::super::tests::account("crash_manifest").await;
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let r = super::super::tests::report();
         let mut config = crate::test_utils::test_app_state(db.clone()).config;
         config.environment = "development".into();
         config.frontend_url = server.uri();
         config.domain_aliases.frontend_urls.clear();
         Mock::given(method("GET")).and(path("/crash-build.json")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"artifact_id":r.artifact_id,"app_version":r.app_version,"app_build":r.app_build}))).expect(1).mount(&server).await;
-        futures::future::join_all((0..8).map(|_| auto_register_web(&db, &config, &r))).await;
+        let identity = RegisterRelease::from_report(&r);
+        futures::future::join_all((0..8).map(|_| auto_register_web(&db, &config, &identity))).await;
         let rows: Vec<_> = db
             .collection::<ClientRelease>(RELEASES)
             .find(doc! {})
@@ -253,7 +303,7 @@ mod tests {
         }
         let mut contaminated = r.clone();
         contaminated.app_build = "https://evil.test/private".into();
-        auto_register_web(&db, &config, &contaminated).await; // Closed identity validation rejects it before I/O.
+        auto_register_web(&db, &config, &RegisterRelease::from_report(&contaminated)).await; // Closed identity validation rejects it before I/O.
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         config.environment = "production".into();
         assert!(manifest_urls(&config).is_empty());
@@ -262,8 +312,8 @@ mod tests {
     async fn mismatch_unknown_fields_oversize_and_redirect_are_unverified_and_negative_cached() {
         for mode in ["mismatch", "extra", "oversize", "redirect"] {
             let (db, _, _) = super::super::tests::account("crash_manifest_refused").await;
-            let server = MockServer::start().await;
-            let target = MockServer::start().await;
+            let server = MockServer::builder().start().await;
+            let target = MockServer::builder().start().await;
             Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(200))
                 .expect(0)
@@ -294,8 +344,8 @@ mod tests {
                 .expect(1)
                 .mount(&server)
                 .await;
-            auto_register_web(&db, &config, &r).await;
-            auto_register_web(&db, &config, &r).await;
+            auto_register_web(&db, &config, &RegisterRelease::from_report(&r)).await;
+            auto_register_web(&db, &config, &RegisterRelease::from_report(&r)).await;
             assert_eq!(
                 db.collection::<ClientRelease>(RELEASES)
                     .count_documents(doc! {})

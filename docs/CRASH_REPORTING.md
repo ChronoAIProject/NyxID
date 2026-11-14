@@ -278,7 +278,7 @@ An explicit global flag override off is the kill switch, including narrower
 user/org enables. Ingestion refuses, clients purge when they observe denial,
 and export discards pending records. Disable first for binary rollback; older
 binaries ignore additive fields and new collections. Diagnostic reports and
-counters TTL-expire; the non-personal release registry persists. No migration
+counters TTL-expire; the release registry persists with shared attribution. No migration
 of existing analytics consent is performed.
 
 ## Third-party components
@@ -310,27 +310,38 @@ label transition include the Swift compiler.
 
 ## Release identity registry
 
-`client_release_registry` is release metadata, not personal report data, and is
-never exported. Its unique key is platform/version/build/artifact; UUID IDs and
+`client_release_registry` stores operational release metadata with shared
+attribution and is never exported. Its unique key is platform/version/build/artifact; UUID IDs and
 BSON registration timestamps follow the model conventions. Optional
-`registered_by` is administrative attribution, not report ownership. WS5 must
-classify this collection as non-personal release metadata (the existing
+`registered_by` is shared administrative attribution, not report ownership:
+only the opaque admin ID is retained, never names or emails. Personal erasure
+does not delete operational release identities; this retained-with-reason
+disposition is recorded in the personal-erasure inventory (the existing
 `client_error_reports` is owner-linked personal diagnostic data;
 `client_error_report_counters` is anonymous aggregate operational data).
 
-Unknown web artifacts trigger a single-flight check of `crash-build.json` at
+After a consent-verified report is successfully inserted, a background task
+checks `crash-build.json` for unknown web identities at
 `FRONTEND_URL` and each `FRONTEND_URL_ALIASES` origin only. Report fields never
 form URLs. Production requires HTTPS; configured development HTTP is allowed.
 Requests disable redirects and carry no account data, authorization or cookies,
 with a three-second timeout, 4 KiB response cap and closed JSON schema. A
-matching version/build/artifact is registered from `frontend_manifest`; failed
-checks have a sixty-second negative cache per artifact.
+matching version/build/artifact is registered from `frontend_manifest`. Positive
+and negative fetch results are cached per configured origin for sixty seconds
+with single-flight: distinct untrusted artifact IDs cannot increase the fetch
+rate. Ingestion never waits for these requests. Each failed fetch emits one
+metadata-only warning with a closed reason code (`transport`, `status`,
+`oversize`, `invalid_json` or `mismatch`) and the origin host only; report fields,
+artifact IDs, response bodies and URL paths/queries never enter that warning.
 
 An administrator registers each TestFlight/Play build using the Unverified
 releases action in `/admin/crash-reports`, or admin-only first-party-human
 `POST /api/v1/admin/crash-reports/releases` with
 `{platform, app_version, app_build, artifact_id?}`. Operators can inspect unverified
-counts but cannot register. Registration is metadata-audited. Mobile cannot
+counts but cannot register. Registration first upserts the registry identity,
+then writes a metadata-only audit event with the actual outcome and returns
+`{status: "registered" | "already_registered"}`. Repeats preserve the existing
+row and attribution. A failed registry write never audits success. Mobile cannot
 register automatically because store binaries have no server-reachable manifest.
 Verification uses a query-time registry lookup: version totals contain only
 verified records, and Unverified releases shows the others. Later registration

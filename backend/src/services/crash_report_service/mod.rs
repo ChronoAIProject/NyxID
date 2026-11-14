@@ -1,5 +1,6 @@
 //! First-party, policy-2 diagnostic admission and owner-linked local storage.
 pub mod admin;
+pub(crate) mod logging;
 pub mod releases;
 pub mod validation;
 use crate::{
@@ -168,9 +169,9 @@ pub async fn count(db: &Database, platform: Option<Platform>, outcome: &'static 
             .await;
     }
     if result.is_err() {
-        tracing::warn!(outcome = "counter_unavailable", "Crash ingestion health");
+        logging::counter_unavailable();
     }
-    tracing::debug!(outcome, platform, "Crash ingestion outcome");
+    logging::ingestion(outcome, platform);
 }
 pub async fn insert(
     db: &Database,

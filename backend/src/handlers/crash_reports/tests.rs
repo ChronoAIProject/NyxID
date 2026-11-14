@@ -297,37 +297,16 @@ async fn admin_operator_projection_and_nonhuman_denial() {
     }
 }
 
-#[derive(Clone)]
-struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-impl std::io::Write for Capture {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 #[tokio::test]
 async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
+    use tracing::instrument::WithSubscriber;
     let (db, id, rev) = account("crash_log_privacy").await;
     readiness::ready_test_replica(&db).await;
     flags::set_platform_override(&db, service::FLAG, &FlagTarget::User(id.clone()), true, &id)
         .await
         .unwrap();
     let state = test_app_state(db.clone());
-    let capture = Capture(Default::default());
-    let writer = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_writer(move || writer.clone())
-        .finish();
-    // Keep the dispatcher installed for this current-thread runtime's entire
-    // capture, including nested database futures and their production outcomes.
-    let capture_guard = tracing::subscriber::set_default(subscriber);
-    tracing::callsite::rebuild_interest_cache();
+    let capture = service::logging::tests::Capture::default();
     async {
         let mut raw = serde_json::json!({"account_id":id,"revision":rev,"report":report()});
         raw["report"]["message"] = serde_json::json!(
@@ -352,10 +331,17 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
         .await
         .unwrap();
     }
+    .with_subscriber(capture.subscriber())
     .await;
-    drop(capture_guard);
-    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let logs = capture.text();
     assert!(logs.contains("Crash ingestion outcome"));
+    let fields: Vec<_> = capture
+        .events()
+        .into_iter()
+        .map(|e| e["fields"].clone())
+        .collect();
+    assert!(fields.contains(&serde_json::json!({"message":"Crash ingestion outcome", "outcome":"invalid", "platform":"unknown"})));
+    assert!(fields.contains(&serde_json::json!({"message":"Crash ingestion outcome", "outcome":"accepted", "platform":"web"})));
     for text in [
         "SECRET_SENTINEL",
         "Bearer secret",
@@ -448,72 +434,132 @@ async fn crash_status_lookup_failures_do_not_fail_consent_get_or_put() {
 }
 
 #[tokio::test]
-async fn release_registration_is_admin_only_first_party_validated_and_metadata_audited() {
+async fn release_registration_is_admin_only_first_party_idempotent_and_metadata_audited() {
     use crate::services::role_service;
+    use futures::TryStreamExt;
     use mongodb::bson::doc;
     let (db, id, _) = account("crash_register_admin").await;
     role_service::seed_system_roles(&db).await.unwrap();
     let roles = role_service::get_platform_role_ids(&db).await.unwrap();
     let state = test_app_state(db.clone());
-    let auth = test_auth_user(&id);
+    let mut auth = test_auth_user(&id);
+    auth.ip_address = Some("SECRET_SENTINEL".into());
+    auth.user_agent = Some("person@example.test".into());
     let request = || service::releases::RegisterRelease {
         platform: Platform::Ios,
         app_version: "1.0.4".into(),
         app_build: "45".into(),
         artifact_id: None,
     };
-    for (role, allowed) in [
-        (None, false),
-        (Some(roles.operator), false),
-        (Some(roles.admin), true),
-    ] {
+    for role in [None, Some(roles.operator)] {
         db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
             .update_one(
                 doc! {"_id":&id},
-                doc! {"$set":{"role_ids":role.clone().into_iter().collect::<Vec<_>>()}},
+                doc! {"$set":{"role_ids":role.into_iter().collect::<Vec<_>>()}},
             )
             .await
             .unwrap();
-        let result = register_release(State(state.clone()), auth.clone(), Json(request())).await;
-        assert_eq!(result.is_ok(), allowed);
-    }
-    // The final loop role was admin, and the authoritative registry proves it succeeded.
-    assert_eq!(
-        db.collection::<bson::Document>(crate::models::client_release_registry::COLLECTION_NAME)
-            .count_documents(doc! {})
+        let error = register_release(State(state.clone()), auth.clone(), Json(request()))
             .await
-            .unwrap(),
-        1
-    );
-    let audit = db
-        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {"event_type":"crash_reports.release_registered"})
+            .err()
+            .unwrap();
+        assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+    }
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id":&id}, doc! {"$set":{"role_ids":[roles.admin]}})
         .await
-        .unwrap()
         .unwrap();
-    let text = serde_json::to_string(&audit).unwrap();
-    assert!(!text.contains("consent_revision"));
-    assert!(text.contains("1.0.4"));
     for method in [
         crate::mw::auth::AuthMethod::ApiKey,
         crate::mw::auth::AuthMethod::Delegated,
         crate::mw::auth::AuthMethod::ServiceAccount,
+        crate::mw::auth::AuthMethod::AccessToken,
     ] {
         let mut other = auth.clone();
-        other.auth_method = method;
+        other.auth_method = method.clone();
+        if method == crate::mw::auth::AuthMethod::AccessToken {
+            other.oauth_client_id = Some(uuid::Uuid::new_v4().to_string());
+        }
         assert!(
             register_release(State(state.clone()), other, Json(request()))
                 .await
                 .is_err()
         );
     }
+    let releases =
+        db.collection::<bson::Document>(crate::models::client_release_registry::COLLECTION_NAME);
+    let audits = db.collection::<crate::models::audit_log::AuditLog>(
+        crate::models::audit_log::COLLECTION_NAME,
+    );
+    assert_eq!(releases.count_documents(doc! {}).await.unwrap(), 0);
+    assert_eq!(
+        audits
+            .count_documents(doc! {"event_type":"crash_reports.release_registered"})
+            .await
+            .unwrap(),
+        0
+    );
+    for status in ["registered", "already_registered"] {
+        let response = register_release(State(state.clone()), auth.clone(), Json(request()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"status":status})
+        );
+    }
+    assert_eq!(releases.count_documents(doc! {}).await.unwrap(), 1);
+    let stored = releases.find_one(doc! {}).await.unwrap().unwrap();
+    assert_eq!(stored.get_str("registered_by").unwrap(), id);
+    let rows: Vec<_> = audits
+        .find(doc! {"event_type":"crash_reports.release_registered"})
+        .sort(doc! {"seq":1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, outcome) in rows.iter().zip(["registered", "already_registered"]) {
+        assert_eq!(row.user_id.as_deref(), Some(id.as_str()));
+        assert!(row.ip_address.is_none() && row.user_agent.is_none());
+        let bytes = serde_json::to_string(row).unwrap();
+        assert!(!bytes.contains("SECRET_SENTINEL") && !bytes.contains("person@example.test"));
+        assert_eq!(
+            row.event_data,
+            Some(
+                serde_json::json!({"platform":"ios","app_version":"1.0.4","app_build":"45","artifact_id":null,"outcome":outcome})
+            )
+        );
+    }
     let mut bad = request();
     bad.app_version = "SECRET_SENTINEL/person@example.test".into();
     assert!(matches!(
-        register_release(State(state), auth, Json(bad)).await,
+        register_release(State(state.clone()), auth.clone(), Json(bad)).await,
         Err(AppError::ValidationError(_))
     ));
     assert!(serde_json::from_value::<service::releases::RegisterRelease>(serde_json::json!({"platform":"ios","app_version":"1","app_build":"1","message":"SECRET_SENTINEL"})).is_err());
+    // A rejected registry write must never claim a successful registration in audit.
+    db.run_command(doc! {"collMod":crate::models::client_release_registry::COLLECTION_NAME,"validator":{"_id":{"$type":"int"}}}).await.unwrap();
+    let mut rejected = request();
+    rejected.app_build = "46".into();
+    assert!(
+        register_release(State(state), auth, Json(rejected))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        audits
+            .count_documents(doc! {"event_type":"crash_reports.release_registered"})
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(releases.count_documents(doc! {}).await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -535,6 +581,76 @@ async fn default_off_ingestion_never_performs_an_unthrottled_counter_write() {
     }
     assert_eq!(
         db.collection::<bson::Document>(COUNTERS)
+            .count_documents(bson::doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn web_manifest_runs_only_after_successful_insert_and_never_delays_ingestion() {
+    use std::{sync::Arc, time::Duration};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let (db, id, revision) = account("crash_manifest_after_insert").await;
+    readiness::ready_test_replica(&db).await;
+    flags::set_platform_override(&db, service::FLAG, &FlagTarget::User(id.clone()), true, &id)
+        .await
+        .unwrap();
+    let server = MockServer::builder().start().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let notify = started.clone();
+    Mock::given(path("/crash-build.json"))
+        .respond_with(move |_: &wiremock::Request| {
+            notify.notify_one();
+            ResponseTemplate::new(503).set_delay(Duration::from_secs(3))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut state = test_app_state(db.clone());
+    state.config.environment = "development".into();
+    state.config.frontend_url = server.uri();
+    state.config.domain_aliases.frontend_urls.clear();
+    let send = |rev: &str| {
+        ingest(
+            State(state.clone()),
+            test_auth_user(&id),
+            no_peer(),
+            device(&id),
+            Ok(body(&id, rev)),
+        )
+    };
+    assert!(matches!(
+        send(&uuid::Uuid::new_v4().to_string()).await,
+        Err(AppError::CrashReportConsentRequired)
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    db.run_command(bson::doc! {"collMod":COLLECTION_NAME,"validator":{"_id":{"$type":"int"}}})
+        .await
+        .unwrap();
+    assert!(send(&revision).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    db.run_command(bson::doc! {"collMod":COLLECTION_NAME,"validator":{}})
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(2), send(&revision))
+        .await
+        .expect("manifest I/O must not be inline")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .count_documents(bson::doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("background fetch must start");
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::client_release_registry::COLLECTION_NAME)
             .count_documents(bson::doc! {})
             .await
             .unwrap(),

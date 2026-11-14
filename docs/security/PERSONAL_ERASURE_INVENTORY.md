@@ -870,3 +870,9 @@ counts with a 30-day TTL and has no owner to erase. Crash rows expire within 30
 days and all reads enforce expiry. Sentry events have no person/account/IP/UA
 mapping; local row removal deletes the only event-to-person link. Vendor expiry
 and owner acceptance are specified in [CRASH_REPORTING.md](../CRASH_REPORTING.md).
+
+`client_release_registry` has a **shared attribution** classification and a
+**retained-with-reason** disposition. Its optional `registered_by` retains only
+the opaque admin user ID, never names or emails. Personal erasure does not delete
+these rows: they preserve operational release identity and verification for
+reports from every account, independently of the registering administrator.
