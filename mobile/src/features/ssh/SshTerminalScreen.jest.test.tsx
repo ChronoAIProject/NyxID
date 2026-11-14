@@ -277,6 +277,55 @@ test("background grace restarts after an active return and unmount clears it", a
   jest.useRealTimers();
 });
 
+test("a 403 after the upgrade entered approval wait explains denial or expiry", async () => {
+  jest.useFakeTimers();
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(2000);
+  });
+  expect(screen.getByText("Waiting for approval or the node…")).toBeTruthy();
+  await act(async () => {
+    Socket.instances[0]!.onerror?.({});
+    Socket.instances[0]!.onclose?.({
+      reason: "Unexpected server response: 403",
+    });
+  });
+  expect(
+    screen.getByText(
+      "This session wasn't approved — the request was denied or expired. Reconnect to ask again.",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText("You don't have permission to open this terminal.")).toBeNull();
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("an immediate 403 retains the permission guidance", async () => {
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  await act(async () => {
+    Socket.instances[0]!.onerror?.({ status: 403 });
+  });
+  expect(screen.getByText("You don't have permission to open this terminal.")).toBeTruthy();
+  expect(
+    screen.queryByText(
+      "This session wasn't approved — the request was denied or expired. Reconnect to ask again.",
+    ),
+  ).toBeNull();
+  await screen.unmount();
+});
+
 test("approval review returns to the same waiting terminal and an approval unblock continues it", async () => {
   jest.useFakeTimers();
   const screen = await renderTerminal(
@@ -425,6 +474,13 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
     });
     expect(screen.getByText(detail)).toBeTruthy();
     expect(
+      mockInject.mock.calls.some(
+        ([script]) =>
+          script.includes('"type":"session-ended"') &&
+          script.includes(detail),
+      ),
+    ).toBe(true);
+    expect(
       screen.queryByText("Couldn't open the terminal connection. Check your network and reconnect."),
     ).toBeNull();
     expect(screen.getByText("Reconnect")).toBeTruthy();
@@ -463,8 +519,38 @@ test("remote close and invalid bridge data never replay shell input; resizing is
     socket.onclose?.();
   });
   expect(screen.getByText("Closed by remote host")).toBeTruthy();
+  expect(
+    mockInject.mock.calls.some(
+      ([script]) =>
+        script.includes('"type":"session-ended"') &&
+        script.includes("Session closed by remote host."),
+    ),
+  ).toBe(true);
   await screen.unmount();
   jest.useRealTimers();
+});
+
+test("long server errors wrap in a full error line below the status row", async () => {
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
+  const detail =
+    "No node agent is bound to this SSH service. Deploy a NyxID node agent on the target's network and verify its host key before reconnecting.";
+  await act(async () => {
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "error", message: detail }),
+    });
+  });
+  const error = screen.getByText(detail);
+  expect(error.props.numberOfLines).toBeUndefined();
+  expect(error.props.accessibilityRole).toBe("alert");
+  expect(screen.getByText("Disconnected")).toBeTruthy();
+  await screen.unmount();
 });
 
 test("several principals require selection; a clipboard read resolving after blur cannot inject", async () => {

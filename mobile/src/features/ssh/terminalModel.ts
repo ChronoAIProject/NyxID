@@ -102,6 +102,12 @@ export const terminalCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("key"), key: z.enum(terminalKeys) }).strict(),
   z.object({ type: z.literal("paste"), text: z.string().max(65536) }).strict(),
   z.object({ type: z.literal("reset") }).strict(),
+  z
+    .object({
+      type: z.literal("session-ended"),
+      message: z.string().max(8192),
+    })
+    .strict(),
   z.object({ type: z.literal("fit") }).strict(),
 ]);
 export type TerminalCommand = z.infer<typeof terminalCommandSchema>;
@@ -113,11 +119,16 @@ export function terminalScript(command: TerminalCommand): string {
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029")});true;`;
 }
-export const terminalUpgradeError = (status?: number): string =>
+export const terminalUpgradeError = (
+  status?: number,
+  waitingForApproval = false,
+): string =>
   status === 401
     ? "Your session expired. Sign in again to open the terminal."
     : status === 403
-      ? "You don't have permission to open this terminal."
+      ? waitingForApproval
+        ? "This session wasn't approved — the request was denied or expired. Reconnect to ask again."
+        : "You don't have permission to open this terminal."
       : status === 404
         ? "This SSH connection is no longer available."
         : status === 429

@@ -76,6 +76,8 @@ export function SshTerminalScreen({
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const { colors } = useTheme();
   const { t } = useAppLanguage();
+  const translateRef = useRef(t);
+  translateRef.current = t;
   const [connection, setConnection] = useState<ServiceConnection>();
   const [notConnected, setNotConnected] = useState(false);
   const [loadUnavailable, setLoadUnavailable] = useState(false);
@@ -85,6 +87,8 @@ export function SshTerminalScreen({
   const [state, setState] = useState("Connecting…");
   const [error, setError] = useState<string>();
   const [waiting, setWaiting] = useState(false);
+  const waitingRef = useRef(false);
+  const sessionEndedRef = useRef(false);
   const [ctrl, setCtrl] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [documentVersion, setDocumentVersion] = useState(0);
@@ -111,11 +115,19 @@ export function SshTerminalScreen({
   );
   const send = (message: TerminalCommand) =>
     web.current?.injectJavaScript(terminalScript(message));
+  const endSessionDocument = (
+    message = translateRef.current("Connection closed."),
+  ) => {
+    if (sessionEndedRef.current) return;
+    sessionEndedRef.current = true;
+    send({ type: "session-ended", message });
+  };
   const output = useMemo(
     () =>
       new TerminalOutput(
         (data, id) => send({ type: "output", data, id }),
         () => {
+          endSessionDocument();
           socket.current?.close(1000);
           setError("Terminal output is too far behind. Reconnect to continue.");
           setState("Disconnected");
@@ -212,15 +224,17 @@ export function SshTerminalScreen({
     let retries = 0;
     const current = () =>
       !closed && epoch === generation.current && account === getAuthAccountId();
-    const close = () => {
+    const close = (notice?: string) => {
       closed = true;
       generation.current++;
+      if (notice) endSessionDocument(notice);
       output.clear();
       clearTimeout(resizeTimer.current);
       clearTimeout(waitingTimer.current);
       clearTimeout(backgroundTimer.current);
       backgroundTimer.current = undefined;
       setWaiting(false);
+      waitingRef.current = false;
       const ws = socket.current;
       socket.current = null;
       if (ws) {
@@ -234,16 +248,25 @@ export function SshTerminalScreen({
     const connect = async (force = false) => {
       setState("Connecting…");
       setError(undefined);
+      sessionEndedRef.current = false;
+      waitingRef.current = false;
       setWaiting(false);
       clearTimeout(waitingTimer.current);
       waitingTimer.current = setTimeout(() => {
-        if (current()) setWaiting(true);
+        if (current()) {
+          waitingRef.current = true;
+          setWaiting(true);
+        }
       }, 2000);
       try {
         await refreshAccessTokenIfNeeded(force);
         const session = await loadStoredAuthSession();
         if (!current()) return;
         if (!session?.accessToken) {
+          clearTimeout(waitingTimer.current);
+          waitingRef.current = false;
+          setWaiting(false);
+          endSessionDocument();
           setError(terminalUpgradeError(401));
           setState("Disconnected");
           return;
@@ -270,8 +293,11 @@ export function SshTerminalScreen({
         let terminalSettled = false;
         const fail = (status?: number) => {
           if (terminalSettled) return;
+          const waitingForApproval = waitingRef.current;
           clearTimeout(waitingTimer.current);
+          waitingRef.current = false;
           setWaiting(false);
+          endSessionDocument();
           socket.current = null;
           output.clear();
           ws.onclose = null;
@@ -282,7 +308,7 @@ export function SshTerminalScreen({
             void connect(true);
             return;
           }
-          setError(terminalUpgradeError(status));
+          setError(terminalUpgradeError(status, waitingForApproval));
           setState("Disconnected");
         };
         ws.onmessage = (event) => {
@@ -295,14 +321,18 @@ export function SshTerminalScreen({
             const message = serverMessage.parse(JSON.parse(event.data));
             if (message.type === "connected") {
               clearTimeout(waitingTimer.current);
+              waitingRef.current = false;
               setWaiting(false);
+              sessionEndedRef.current = false;
               send({ type: "reset" });
               setState("Connected");
             }
             if (message.type === "error") {
               terminalSettled = true;
               clearTimeout(waitingTimer.current);
+              waitingRef.current = false;
               setWaiting(false);
+              endSessionDocument(message.message);
               setError(message.message);
               setState("Disconnected");
               socket.current = null;
@@ -312,14 +342,26 @@ export function SshTerminalScreen({
             if (message.type === "closed") {
               terminalSettled = true;
               clearTimeout(waitingTimer.current);
+              waitingRef.current = false;
               setWaiting(false);
+              endSessionDocument(
+                translateRef.current("Session closed by remote host."),
+              );
               setState("Closed by remote host");
               socket.current = null;
               output.clear();
               ws.close(1000);
             }
           } catch {
+            terminalSettled = true;
+            clearTimeout(waitingTimer.current);
+            waitingRef.current = false;
+            setWaiting(false);
+            endSessionDocument();
             setError("The terminal server sent an invalid message.");
+            setState("Disconnected");
+            socket.current = null;
+            output.clear();
             ws.close(1000);
           }
         };
@@ -340,6 +382,10 @@ export function SshTerminalScreen({
             fail(status);
             return;
           }
+          clearTimeout(waitingTimer.current);
+          waitingRef.current = false;
+          setWaiting(false);
+          endSessionDocument();
           socket.current = null;
           output.clear();
           setState((value) =>
@@ -348,6 +394,10 @@ export function SshTerminalScreen({
         };
       } catch {
         if (current()) {
+          clearTimeout(waitingTimer.current);
+          waitingRef.current = false;
+          setWaiting(false);
+          endSessionDocument();
           setError(terminalUpgradeError());
           setState("Disconnected");
         }
@@ -359,7 +409,7 @@ export function SshTerminalScreen({
         clearTimeout(backgroundTimer.current);
         backgroundTimer.current = setTimeout(() => {
           backgroundTimer.current = undefined;
-          close();
+          close(translateRef.current("Connection closed."));
           setState("Disconnected");
         }, TERMINAL_BACKGROUND_GRACE_MS);
       } else if (value === "active") {
@@ -404,6 +454,7 @@ export function SshTerminalScreen({
     }
     if (
       message.type === "input" &&
+      !sessionEndedRef.current &&
       socket.current?.readyState === WebSocket.OPEN
     ) {
       socket.current.send(
@@ -433,6 +484,7 @@ export function SshTerminalScreen({
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, []);
   const reconnect = () => {
+    endSessionDocument();
     generation.current++;
     const ws = socket.current;
     socket.current = null;
@@ -445,6 +497,7 @@ export function SshTerminalScreen({
     }
     output.clear();
     clearTimeout(waitingTimer.current);
+    waitingRef.current = false;
     setWaiting(false);
     setAttempt((value) => value + 1);
   };
@@ -468,19 +521,17 @@ export function SshTerminalScreen({
   const invalidPrincipal = Boolean(
     route.params.principal && !principal && principals.length,
   );
-  const statusMessage = error
-    ? error
-    : waiting
-      ? "Waiting for approval or the node…"
-      : connection?.has_node_binding === false
-        ? "Bind an online credential node to this SSH service before opening a terminal."
-        : eligible && invalidPrincipal
-          ? "That SSH principal is not allowed for this service. Choose one below."
-          : eligible && !principal
-            ? principals.length
-              ? "Choose an SSH principal to connect."
-              : "No SSH principals are configured for this service."
-            : state;
+  const statusMessage = waiting
+    ? "Waiting for approval or the node…"
+    : connection?.has_node_binding === false
+      ? "Bind an online credential node to this SSH service before opening a terminal."
+      : eligible && invalidPrincipal
+        ? "That SSH principal is not allowed for this service. Choose one below."
+        : eligible && !principal
+          ? principals.length
+            ? "Choose an SSH principal to connect."
+            : "No SSH principals are configured for this service."
+          : state;
   return (
     <WorkspacePage
       title={t("SSH terminal")}
@@ -533,7 +584,6 @@ export function SshTerminalScreen({
               </Pressable>
             ) : null}
             <Text
-              accessibilityRole={error ? "alert" : undefined}
               accessibilityLiveRegion="polite"
               style={[styles.status, { color: colors.textSecondary }]}
               numberOfLines={2}
@@ -569,6 +619,15 @@ export function SshTerminalScreen({
               </Pressable>
             )}
           </View>
+          {error ? (
+            <Text
+              accessibilityRole="alert"
+              accessibilityLiveRegion="polite"
+              style={[styles.error, { color: colors.textPrimary }]}
+            >
+              {t(error)}
+            </Text>
+          ) : null}
           {principalPickerOpen && principals.length > 0 ? (
             <SettingsGroup title={t("SSH principal")}>
               {principals.map((value) => (
@@ -726,6 +785,7 @@ const styles = StyleSheet.create({
   chipText: { ...typeScale.label },
   terminal: { flex: 1, minHeight: 100, backgroundColor: "#0f172a" },
   status: { ...typeScale.label, flex: 1 },
+  error: { ...typeScale.label, alignSelf: "stretch" },
   statusAction: {
     flexShrink: 0,
     paddingHorizontal: spacing.xs,

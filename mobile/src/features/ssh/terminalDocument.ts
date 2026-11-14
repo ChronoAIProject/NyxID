@@ -42,15 +42,18 @@ const send=(message)=>window.ReactNativeWebView.postMessage(JSON.stringify(messa
 const term=new Terminal({fontFamily:"'JetBrains Mono', monospace",fontSize:14,convertEol:false,scrollback:2000,allowProposedApi:false,theme:${JSON.stringify(theme)},linkHandler:{activate(){},hover(){},leave(){}}});
 const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('terminal'));
 const textarea=document.querySelector('textarea');if(textarea){textarea.setAttribute('autocorrect','off');textarea.setAttribute('autocapitalize','off');textarea.setAttribute('autocomplete','off');textarea.setAttribute('spellcheck','false');}
-term.onData((data)=>send({type:'input',data}));
+let interactive=true;
+const endSession=(message)=>{interactive=false;term.options.disableStdin=true;term.options.cursorBlink=false;if(textarea)textarea.disabled=true;term.write('\\r\\n\\x1b[0m\\x1b[2m'+String(message).replace(/[\\u0000-\\u001f\\u007f-\\u009f]/g,c=>c==='\\n'?'\\r\\n':'')+'\\x1b[0m\\r\\n\\x1b[?25l');term.blur();};
+term.onData((data)=>{if(interactive)send({type:'input',data});});
 let resizeTimer;function resize(){clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{try{fit.fit();send({type:'resize',cols:Math.max(10,Math.min(500,term.cols)),rows:Math.max(2,Math.min(200,term.rows))});}catch{}},100);}
 const keyInput=(key,application)=>{const arrows={ArrowUp:'A',ArrowDown:'B',ArrowRight:'C',ArrowLeft:'D'};return arrows[key]?'\\x1b'+(application?'O':'[')+arrows[key]:key==='Esc'?'\\x1b':key==='Tab'?'\\t':key;};
 window.nyxTerminal=(message)=>{switch(message.type){
 case 'output': {const raw=atob(message.data);const data=Uint8Array.from(raw,c=>c.charCodeAt(0));term.write(data,()=>send({type:'ack',id:message.id}));break;}
-case 'paste':term.paste(message.text);term.focus();break;
-case 'key':term.input(keyInput(message.key,term.modes.applicationCursorKeysMode),true);term.focus();break;
+case 'paste':if(interactive){term.paste(message.text);term.focus();}break;
+case 'key':if(interactive){term.input(keyInput(message.key,term.modes.applicationCursorKeysMode),true);term.focus();}break;
 case 'fit':resize();break;
-case 'reset':term.reset();term.focus();break;
+case 'session-ended':endSession(message.message);break;
+case 'reset':interactive=true;term.options.disableStdin=false;if(textarea)textarea.disabled=false;term.reset();term.write('\\x1b[?25h');term.focus();break;
 }};
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(document.getElementById('terminal'));resize();send({type:'ready'});
 </script></body></html>`;

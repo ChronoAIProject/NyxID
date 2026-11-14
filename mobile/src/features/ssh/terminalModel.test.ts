@@ -90,6 +90,18 @@ test("bridge messages are strict and bounded; command serialization cannot injec
     }).success,
     true,
   );
+  assert.equal(
+    terminalCommandSchema.safeParse({
+      type: "session-ended",
+      message: "x".repeat(8192),
+    }).success,
+    true,
+  );
+  for (const command of [
+    { type: "session-ended", message: "x".repeat(8193) },
+    { type: "session-ended", message: "Closed", token: "secret" },
+    { type: "session-ended" },
+  ]) assert.equal(terminalCommandSchema.safeParse(command).success, false);
   const text = "');window.fetch('https://evil.example');</script>";
   let received: unknown;
   runInNewContext(terminalScript({ type: "paste", text }), {
@@ -147,10 +159,19 @@ test("offline WebView has no network permissions, navigation or external assets"
   );
 });
 test("upgrade status copy distinguishes auth, permissions, missing service, capacity and server errors", () => {
-  const messages = [401, 403, 404, 429, 503, 400].map(terminalUpgradeError);
+  const messages = [401, 403, 404, 429, 503, 400].map((status) =>
+    terminalUpgradeError(status),
+  );
   assert.equal(new Set(messages).size, 6);
   assert.match(messages[0]!, /session expired/);
   assert.match(messages[4]!, /server is unavailable/);
+  assert.equal(messages[1], "You don't have permission to open this terminal.");
+  assert.equal(
+    terminalUpgradeError(403, true),
+    "This session wasn't approved — the request was denied or expired. Reconnect to ask again.",
+  );
+  for (const status of [401, 404, 429, 503, 400])
+    assert.equal(terminalUpgradeError(status, true), terminalUpgradeError(status));
 });
 test("output batches preserve binary bytes and wait for acknowledgements; queue overflow is bounded", async () => {
   const sent: { data: string; id: number }[] = [];
@@ -225,11 +246,12 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
   const posted: unknown[] = [];
   const inputs: string[] = [];
   const pastes: string[] = [];
-  const writes: number[][] = [];
+  const writes: (number[] | string)[] = [];
   let dataListener!: (input: string) => void;
   let terminal: any;
   const attributes: Record<string, string> = {};
   const textarea = {
+    disabled: false,
     setAttribute(name: string, value: string) {
       attributes[name] = value;
     },
@@ -254,6 +276,9 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
     },
     Terminal: class {
       modes = { applicationCursorKeysMode: false };
+      options = { disableStdin: false, cursorBlink: true };
+      focused = false;
+      resets = 0;
       cols = 80;
       rows = 24;
       constructor() {
@@ -261,7 +286,9 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
       }
       loadAddon() {}
       open() {}
-      focus() {}
+      focus() { this.focused = true; }
+      blur() { this.focused = false; }
+      reset() { this.resets++; }
       onData(listener: typeof dataListener) {
         dataListener = listener;
       }
@@ -273,9 +300,9 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
         pastes.push(value);
         dataListener(`\x1b[200~${value}\x1b[201~`);
       }
-      write(value: Uint8Array, callback: () => void) {
-        writes.push([...value]);
-        callback();
+      write(value: Uint8Array | string, callback?: () => void) {
+        writes.push(typeof value === "string" ? value : [...value]);
+        callback?.();
       }
     },
     FitAddon: {
@@ -318,6 +345,33 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
   );
   assert.deepEqual(writes, [[0, 27, 255]]);
   assert.deepEqual(posted.at(-1), { type: "ack", id: 1 });
+  const serverError = "Connection refused.\nCheck the target.\x1b[31m\x07";
+  runInNewContext(
+    terminalScript({ type: "session-ended", message: serverError }),
+    context,
+  );
+  assert.equal(
+    writes.at(-1),
+    "\r\n\x1b[0m\x1b[2mConnection refused.\r\nCheck the target.[31m\x1b[0m\r\n\x1b[?25l",
+  );
+  assert.equal(terminal.options.disableStdin, true);
+  assert.equal(terminal.options.cursorBlink, false);
+  assert.equal(terminal.focused, false);
+  assert.equal(textarea.disabled, true);
+  const postedBefore = posted.length;
+  const inputsBefore = inputs.length;
+  runInNewContext(terminalScript({ type: "key", key: "Tab" }), context);
+  runInNewContext(terminalScript({ type: "paste", text: "ls\r" }), context);
+  dataListener("typed after closure");
+  assert.equal(posted.length, postedBefore);
+  assert.equal(inputs.length, inputsBefore);
+  assert.equal(terminal.focused, false);
+  runInNewContext(terminalScript({ type: "reset" }), context);
+  assert.equal(terminal.options.disableStdin, false);
+  assert.equal(terminal.resets, 1);
+  assert.equal(textarea.disabled, false);
+  runInNewContext(terminalScript({ type: "key", key: "Tab" }), context);
+  assert.deepEqual(posted.at(-1), { type: "input", data: "\t" });
   for (const api of ["fetch", "WebSocket", "XMLHttpRequest", "open"])
     assert.equal(context.window[api], undefined);
   assert.deepEqual(attributes, {
