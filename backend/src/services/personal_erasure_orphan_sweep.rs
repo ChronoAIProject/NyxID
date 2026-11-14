@@ -15,7 +15,9 @@ use crate::{
     services::personal_data_registry::{self, Erasure, OwnerSelector},
 };
 
-const AGGREGATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+// Production collections are scanned through owner indexes.  This bound allows
+// a large indexed pass to finish while still preventing an unbounded request.
+const AGGREGATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const APPLY_BATCH: usize = 64;
 const OWNER_ID_REPORT_CAP: usize = 128;
 
@@ -45,6 +47,7 @@ struct OrphanGroup {
     field: &'static str,
     owner_id: String,
     row_ids: Vec<Bson>,
+    row_count: usize,
     disposition: Erasure,
     /// Joined-child rows have no owner field. `owner_id` is the parent id and
     /// this marker tells apply to remove the row only because its parent is
@@ -128,7 +131,6 @@ fn owner_pipeline(field: &str) -> Vec<Document> {
     pipeline.push(doc! {
         "$group": {
             "_id": format!("${field}"),
-            "row_ids": {"$addToSet": "$_id"},
             "row_count": {"$sum": 1_i32},
         }
     });
@@ -155,15 +157,19 @@ async fn aggregate_groups(
         if !candidate_owner_id(owner_id) {
             continue;
         }
-        let row_ids = row.get_array("row_ids").cloned().unwrap_or_default();
-        if row_ids.is_empty() {
+        let row_count = row
+            .get_i64("row_count")
+            .or_else(|_| row.get_i32("row_count").map(i64::from))
+            .unwrap_or(0) as usize;
+        if row_count == 0 {
             continue;
         }
         groups.push(OrphanGroup {
             collection,
             field,
             owner_id: owner_id.to_owned(),
-            row_ids,
+            row_ids: Vec::new(),
+            row_count,
             disposition,
             joined_parent: None,
         });
@@ -188,7 +194,7 @@ async fn aggregate_joined_children(
             doc! {"$match": {"_id": {"$type": "string"}}},
             doc! {"$set": {"parent_id": {"$arrayElemAt": [{"$split": ["$_id", ":"]}, 0]}}},
             doc! {"$match": {"parent_id": {"$type": "string"}}},
-            doc! {"$group": {"_id": "$parent_id", "row_ids": {"$addToSet": "$_id"}}},
+            doc! {"$group": {"_id": "$parent_id", "row_count": {"$sum": 1_i32}}},
         ]
     } else {
         owner_pipeline(field)
@@ -199,7 +205,7 @@ async fn aggregate_joined_children(
         .allow_disk_use(true)
         .max_time(AGGREGATE_TIMEOUT)
         .await?;
-    let mut groups = Vec::new();
+    let mut candidates = Vec::new();
     while let Some(row) = cursor.try_next().await? {
         let Ok(parent_id) = row.get_str("_id") else {
             continue;
@@ -207,29 +213,44 @@ async fn aggregate_joined_children(
         if !candidate_owner_id(parent_id) {
             continue;
         }
-        let parent_exists = db
-            .collection::<Document>(parent)
-            .find_one(doc! {"_id": parent_id})
-            .projection(doc! {"_id": 1})
-            .max_time(AGGREGATE_TIMEOUT)
-            .await?
-            .is_some();
-        if parent_exists {
-            continue;
-        }
-        let row_ids = row.get_array("row_ids").cloned().unwrap_or_default();
-        if !row_ids.is_empty() {
-            groups.push(OrphanGroup {
-                collection,
-                field,
-                owner_id: parent_id.to_owned(),
-                row_ids,
-                disposition: Erasure::JoinedChild { parent },
-                joined_parent: Some(parent),
-            });
+        let row_count = row
+            .get_i64("row_count")
+            .or_else(|_| row.get_i32("row_count").map(i64::from))
+            .unwrap_or(0) as usize;
+        if row_count > 0 {
+            candidates.push((parent_id.to_owned(), row_count));
         }
     }
-    Ok(groups)
+    let mut live_parents = HashSet::new();
+    for chunk in candidates.chunks(256) {
+        let ids: Vec<&str> = chunk.iter().map(|(id, _)| id.as_str()).collect();
+        let mut parents = db
+            .collection::<Document>(parent)
+            .find(doc! {"_id": {"$in": ids}})
+            .projection(doc! {"_id": 1})
+            .batch_size(256)
+            .max_time(AGGREGATE_TIMEOUT)
+            .await?;
+        while let Some(row) = parents.try_next().await? {
+            if let Ok(id) = row.get_str("_id") {
+                live_parents.insert(id.to_owned());
+            }
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(parent_id, row_count)| {
+            (!live_parents.contains(&parent_id)).then_some(OrphanGroup {
+                collection,
+                field,
+                owner_id: parent_id,
+                row_ids: Vec::new(),
+                row_count,
+                disposition: Erasure::JoinedChild { parent },
+                joined_parent: Some(parent),
+            })
+        })
+        .collect())
 }
 
 async fn live_owner_ids(
@@ -302,6 +323,37 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
     }
     let live = live_owner_ids(db, &all).await?;
     all.retain(|group| !live.contains(&group.owner_id));
+    // Only orphan owners reach this point. Stream their sorted ids after the
+    // liveness filter so a live account can never create a giant group document.
+    for group in &mut all {
+        let filter = if let Some(parent) = group.joined_parent {
+            if group.collection == "channel_send_claims" && group.field == "_id" {
+                doc! {"_id": {"$regex": format!("^{}:", regex::escape(&group.owner_id))}}
+            } else {
+                let mut filter = Document::new();
+                filter.insert(group.field, group.owner_id.as_str());
+                filter
+            }
+        } else {
+            let mut filter = Document::new();
+            filter.insert(group.field, group.owner_id.as_str());
+            filter
+        };
+        let mut cursor = db
+            .collection::<Document>(group.collection)
+            .find(filter)
+            .projection(doc! {"_id": 1})
+            .sort(doc! {"_id": 1})
+            .batch_size(APPLY_BATCH as u32)
+            .max_time(AGGREGATE_TIMEOUT)
+            .await?;
+        while let Some(mut row) = cursor.try_next().await? {
+            if let Some(id) = row.remove("_id") {
+                group.row_ids.push(id);
+            }
+        }
+        group.row_count = group.row_ids.len();
+    }
     all.sort_by(|left, right| {
         (&left.collection, &left.field, &left.owner_id).cmp(&(
             &right.collection,
@@ -328,6 +380,11 @@ fn joined_child_spec(collection: &str, parent: &str) -> Option<(&'static str, &'
         }
         ("service_history_heads", "user_services") => Some(("_id", "user_services")),
         ("service_pool_health_observations", "service_pools") => Some(("pool_id", "service_pools")),
+        ("platform_delivery_tests", "platform_bot_installations") => {
+            Some(("installation_id", "platform_bot_installations"))
+        }
+        ("platform_setup_notices", "platform_setups") => Some(("setup_id", "platform_setups")),
+        ("platform_setup_steps", "platform_setups") => Some(("setup_id", "platform_setups")),
         _ => None,
     }
 }
@@ -359,7 +416,7 @@ fn digest(groups: &[OrphanGroup]) -> AppResult<String> {
                 collection: group.collection,
                 field: group.field,
                 owner_id: &group.owner_id,
-                row_count: group.row_ids.len(),
+                row_count: group.row_count,
                 row_ids_sha256: row_id_hash(&group.row_ids)?,
             })
         })
@@ -373,7 +430,7 @@ fn reports(groups: &[OrphanGroup]) -> (Vec<OrphanCollectionReport>, usize) {
     let mut grouped = BTreeMap::<String, OrphanCollectionReport>::new();
     let mut count = 0;
     for group in groups {
-        count += group.row_ids.len();
+        count += group.row_count;
         let report = grouped
             .entry(group.collection.to_owned())
             .or_insert_with(|| OrphanCollectionReport {
@@ -382,7 +439,7 @@ fn reports(groups: &[OrphanGroup]) -> (Vec<OrphanCollectionReport>, usize) {
                 owner_ids: Vec::new(),
                 owner_ids_truncated: false,
             });
-        report.candidate_count += group.row_ids.len();
+        report.candidate_count += group.row_count;
         if report.owner_ids.len() < OWNER_ID_REPORT_CAP
             && !report.owner_ids.contains(&group.owner_id)
         {
@@ -627,6 +684,7 @@ mod tests {
             field: "owner_id",
             owner_id: Uuid::new_v4().to_string(),
             row_ids: vec![Bson::String("b".into()), Bson::String("a".into())],
+            row_count: 2,
             disposition: Erasure::LocalInventory,
             joined_parent: None,
         }];
@@ -672,6 +730,7 @@ mod tests {
                     Uuid::new_v4().to_string()
                 },
                 row_ids: vec![Bson::String(index.to_string())],
+                row_count: 1,
                 disposition: Erasure::LocalInventory,
                 joined_parent: None,
             })

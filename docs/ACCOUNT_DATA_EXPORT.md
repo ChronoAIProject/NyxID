@@ -223,7 +223,12 @@ file contents, transient lease/coordination/deduplication records, erasure
 bookkeeping, and retained financial or integrity content. MCP session IDs are
 credentials and are excluded. Decimal128 values are emitted as decimal strings;
 BSON documents and arrays are converted recursively, dates are RFC3339 strings,
-and BSON binary values are omitted. The successful response emits a chained
+and BSON binary values are omitted. URL-valued fields use one sanitizer: userinfo, query strings, and fragments are removed. URL kinds where providers may embed credentials in path segments (avatar, redirect, webhook, target, project, and schedule URLs) also omit the path; endpoint base URLs retain only their scheme, host, port, and non-sensitive path. Instructions and memory export only the requesting person's authored text; shared/team memory, system-injected instructions, and messages authored by other people are omitted. The successful response emits a chained
 metadata-only `user.data_exported` audit event containing format/version,
 subsection counts, truncation names and serialized byte size; it never records
 export content.
+
+
+## Orphan cleanup operations
+
+The operator orphan sweep uses owner-field indexes and a 60-second MongoDB statement bound. It groups only owner counts, filters live users and service accounts in batches, then streams sorted row ids for orphan owners. Run a dry run, apply its digest, and repeat the dry run until it reports no candidates; children of parents removed during an apply appear on the next pass.

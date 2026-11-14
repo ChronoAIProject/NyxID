@@ -307,7 +307,28 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
             "service_pools",
             "pool_id",
         ),
+        (
+            "platform_delivery_tests",
+            "platform_bot_installations",
+            "installation_id",
+        ),
+        ("platform_setup_notices", "platform_setups", "setup_id"),
+        ("platform_setup_steps", "platform_setups", "setup_id"),
     ];
+    let registry_joined: std::collections::BTreeSet<_> = crate::services::personal_data_registry::entries()
+        .iter()
+        .filter_map(|entry| match entry.erasure {
+            crate::services::personal_data_registry::Erasure::JoinedChild { parent } => {
+                Some((entry.collection, parent))
+            }
+            _ => None,
+        })
+        .collect();
+    let seeded_joined: std::collections::BTreeSet<_> = joined_cases
+        .iter()
+        .map(|(child, parent, _)| (*child, *parent))
+        .collect();
+    assert_eq!(seeded_joined, registry_joined, "joined-child fixture drifted from registry");
     let mut joined_children = Vec::new();
     for (index, (child, parent, field)) in joined_cases.into_iter().enumerate() {
         let parent_id = format!("registry-joined-parent-{index}");
