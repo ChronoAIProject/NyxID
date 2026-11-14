@@ -3463,6 +3463,16 @@ mod tests {
         }
     }
 
+    fn snapshot_has_prefix(definitions: &[mongodb::bson::Document], field: &str) -> bool {
+        definitions.iter().any(|definition| {
+            definition
+                .get_document("key")
+                .ok()
+                .and_then(|key| key.keys().next())
+                .is_some_and(|first| first == field)
+        })
+    }
+
     fn assert_no_duplicate_keys(snapshot: &BTreeMap<String, Vec<mongodb::bson::Document>>) {
         for (collection, definitions) in snapshot {
             let mut keys = BTreeSet::new();
@@ -3560,6 +3570,32 @@ mod tests {
             .await
             .unwrap();
         let origin = index_snapshot(&db).await;
+
+        // The checked-in gap manifest is complete relative to the origin/main
+        // fixture: every uncovered registry/join predicate appears once, and
+        // no manifest entry redundantly duplicates an origin index.
+        for (collection, field) in registry_owner_predicates() {
+            let covered = field == "_id"
+                || snapshot_has_prefix(&origin[collection], field);
+            assert_eq!(
+                covered,
+                !OWNER_INDEX_GAPS.contains(&(collection, field)),
+                "owner-index manifest drift for {collection}.{field}"
+            );
+        }
+        for spec in JOINED_CHILD_SPECS {
+            if spec.child_parent_field == "_id" {
+                continue;
+            }
+            let covered = snapshot_has_prefix(&origin[spec.child], spec.child_parent_field);
+            assert_eq!(
+                covered,
+                !OWNER_INDEX_GAPS.contains(&(spec.child, spec.child_parent_field)),
+                "joined-child index manifest drift for {}.{}",
+                spec.child,
+                spec.child_parent_field
+            );
+        }
 
         // The branch must be safe for an existing deployment and idempotent
         // when both a new and an old replica restart during the rollout.
