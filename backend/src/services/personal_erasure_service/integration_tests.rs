@@ -170,6 +170,7 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
 
     let mut target_rows = Vec::new();
     let mut bystander_rows = Vec::new();
+    let mut org_rows = Vec::new();
     let mut retained_rows = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for (index, (collection, filter)) in super::local::inventory(&owner).into_iter().enumerate() {
@@ -194,6 +195,14 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         } else {
             bystander
         };
+        let org_row = if filter_has_owner_id(&filter, &owner) {
+            let mut row =
+                seed_from_inventory_filter(&filter, &org, &format!("registry-org-{index}"));
+            row.insert("_id", org.clone());
+            row
+        } else {
+            seed_from_inventory_filter(&filter, &org, &format!("registry-org-{index}"))
+        };
         let target_key = target.get_str("_id").unwrap_or(&target_id).to_owned();
         if seen.insert((collection, target_key)) {
             db.collection::<Document>(collection)
@@ -204,13 +213,79 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                 .insert_one(bystander.clone())
                 .await
                 .unwrap();
+            db.collection::<Document>(collection)
+                .insert_one(org_row.clone())
+                .await
+                .unwrap();
             target_rows.push((collection, target.get("_id").cloned().unwrap()));
             bystander_rows.push((
                 collection,
                 bystander.get("_id").cloned().unwrap(),
                 bystander,
             ));
+            org_rows.push((collection, org_row.get("_id").cloned().unwrap(), org_row));
         }
+    }
+
+    // Joined children have no personal owner field. Seed every registry join
+    // with a target parent and child so the worker's authoritative-parent
+    // cleanup is exercised automatically when a new join is added.
+    let joined_cases = [
+        (
+            "assistant_agent_learning_rejections",
+            "assistant_agents",
+            "agent_id",
+        ),
+        (
+            "channel_event_logs",
+            "channel_conversations",
+            "conversation_id",
+        ),
+        (
+            "channel_send_claims",
+            "channel_conversations",
+            "conversation_id",
+        ),
+        ("service_history_heads", "user_services", "_id"),
+        (
+            "service_pool_health_observations",
+            "service_pools",
+            "pool_id",
+        ),
+    ];
+    let mut joined_children = Vec::new();
+    for (index, (child, parent, field)) in joined_cases.into_iter().enumerate() {
+        let parent_id = format!("registry-joined-parent-{index}");
+        let child_id = if child == "channel_send_claims" {
+            format!("{parent_id}:claim")
+        } else if field == "_id" {
+            parent_id.clone()
+        } else {
+            format!("registry-joined-child-{index}")
+        };
+        let parent_row = if parent == "user_services" {
+            doc! {"_id": &parent_id, "user_id": &owner}
+        } else if parent == "service_pools" {
+            doc! {"_id": &parent_id, "user_id": &owner}
+        } else {
+            doc! {"_id": &parent_id, "user_id": &owner}
+        };
+        db.collection::<Document>(parent)
+            .insert_one(parent_row)
+            .await
+            .unwrap();
+        let mut child_row = doc! {"_id": &child_id, "fixture_marker": "registry-joined"};
+        if field != "_id" {
+            child_row.insert(field, &parent_id);
+        }
+        if child == "channel_send_claims" {
+            child_row.insert("status", "sent");
+        }
+        db.collection::<Document>(child)
+            .insert_one(child_row)
+            .await
+            .unwrap();
+        joined_children.push((child, child_id));
     }
 
     for (index, entry) in crate::services::personal_data_registry::entries()
@@ -287,6 +362,26 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                 .unwrap(),
             Some(expected),
             "bystander changed in {collection}"
+        );
+    }
+    for (collection, id, expected) in org_rows {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap(),
+            Some(expected),
+            "organization row changed in {collection}"
+        );
+    }
+    for (collection, id) in joined_children {
+        assert!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .is_none(),
+            "joined child survived in {collection}"
         );
     }
     for (collection, id) in retained_rows {
