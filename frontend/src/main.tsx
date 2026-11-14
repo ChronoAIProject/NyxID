@@ -22,10 +22,8 @@ import "./app.css";
 import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
 
 import { installCrashReporting, crashRootOptions } from "./lib/crash-reporting/install";
-import { refreshCrashPermission } from "./lib/crash-reporting/reporter";
+import { subscribeCrashPermission } from "./lib/crash-reporting/permission-refresh";
 installCrashReporting();
-useAuthStore.subscribe(() => { void refreshCrashPermission(); });
-useConsentStore.subscribe(() => { void refreshCrashPermission(); });
 installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -49,6 +47,7 @@ const queryClient = new QueryClient({
     },
   },
 });
+subscribeCrashPermission(queryClient);
 
 subscribeAssistantIdentity(() => {
   queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
@@ -86,7 +85,6 @@ function Root() {
   const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
-  useEffect(() => { if (ready) void refreshCrashPermission(); }, [ready, telemetryAccountId, consentEnabled]);
 
   // Runtime telemetry config. Cached with `staleTime: Infinity`
   // (see hooks/use-public-config.ts), so fetched at most once per

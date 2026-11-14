@@ -13,46 +13,79 @@ import {
   type CrashReport,
 } from "../../../../shared/crash-report";
 let available = false,
+  diagnosticsOffered = false,
   generation = 0,
   stopped = false,
   admissions = 0,
   total = 0;
+let permissionRefresh: {
+  identity: string;
+  epoch: number;
+  promise: Promise<void>;
+} | undefined;
 const seen = new WeakSet<object>();
 const signatures = new Map<string, number>();
 export function invalidateCrashPermission(): void {
   available = false;
   generation++;
 }
-export async function refreshCrashPermission(): Promise<void> {
-  invalidateCrashPermission();
+export function refreshCrashPermission(offered = diagnosticsOffered): Promise<void> {
+  diagnosticsOffered = offered;
   const actor = useAuthStore.getState().user?.id;
   const device = useConsentStore.getState();
+  const dnt = isDntActive();
+  const identity = JSON.stringify([
+    actor,
+    device.enabled,
+    device.policy,
+    device.accountId,
+    device.revision,
+    offered,
+    dnt,
+  ]);
+  if (
+    permissionRefresh?.identity === identity &&
+    permissionRefresh.epoch === generation
+  )
+    return permissionRefresh.promise;
+  invalidateCrashPermission();
   const epoch = generation;
   if (
+    !offered ||
     !actor ||
     !device.enabled ||
     device.policy !== 2 ||
     device.accountId !== actor ||
-    isDntActive()
+    dnt
   )
-    return;
-  try {
-    const permission = await readAnalyticsConsent(actor);
-    if (
-      generation === epoch &&
-      useConsentStore.getState().revision === device.revision &&
-      useAuthStore.getState().user?.id === actor
-    ) {
-      available =
-        permission.diagnostics_status === "available" &&
-        permission.enabled &&
-        permission.policy_version === "2" &&
-        permission.diagnostics_available === true;
-      if (available) stopped = false;
-    }
-  } catch {
-    /* Fail closed; capture is optional. */
-  }
+    return Promise.resolve();
+  // Publish the flight before starting I/O so synchronous triggers share it.
+  const promise = Promise.resolve()
+    .then(async () => {
+      if (generation !== epoch) return;
+      try {
+        const permission = await readAnalyticsConsent(actor);
+        if (
+          generation === epoch &&
+          useConsentStore.getState().revision === device.revision &&
+          useAuthStore.getState().user?.id === actor
+        ) {
+          available =
+            permission.diagnostics_status === "available" &&
+            permission.enabled &&
+            permission.policy_version === "2" &&
+            permission.diagnostics_available === true;
+          if (available) stopped = false;
+        }
+      } catch {
+        /* Fail closed; capture is optional. */
+      }
+    })
+    .finally(() => {
+      if (permissionRefresh?.promise === promise) permissionRefresh = undefined;
+    });
+  permissionRefresh = { identity, epoch, promise };
+  return promise;
 }
 function localGate(): boolean {
   const device = useConsentStore.getState(),

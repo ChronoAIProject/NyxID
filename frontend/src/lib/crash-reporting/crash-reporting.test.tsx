@@ -63,7 +63,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 async function boot() {
   const reporter = await import("./reporter");
-  await reporter.refreshCrashPermission();
+  await reporter.refreshCrashPermission(true);
   return reporter;
 }
 it("stack parsers reconstruct locations and never forward sentinels, URLs, names, messages or causes", () => {
