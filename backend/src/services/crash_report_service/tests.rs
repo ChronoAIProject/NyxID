@@ -7,7 +7,7 @@ use serde_json::json;
 
 // Integration assertions exercise production admission once, after establishing
 // the healthy majority-I/O precondition its bounded consent gate requires.
-async fn insert(
+pub(super) async fn insert(
     db: &Database,
     config: &CrashConfig,
     environment: &str,
@@ -177,17 +177,24 @@ async fn consent_matrix_storage_duplicate_ttl_and_expired_reads() {
         let disabled = consent::set_acknowledging(&db, &id, false, policy)
             .await
             .unwrap();
-        assert!(!consent::permits_diagnostics(&db, &id, &disabled.revision).await);
+        assert!(
+            !(consent::permits_diagnostics(&db, &id, &disabled.revision).await
+                == consent::ConsentPermission::Permitted(()))
+        );
         let enabled = consent::set_acknowledging(&db, &id, true, policy)
             .await
             .unwrap();
         crate::test_utils::await_responsive_majority_io(&db).await;
         assert!(consent::permits_dispatch(&db, &id, &enabled.revision).await);
         assert_eq!(
-            consent::permits_diagnostics(&db, &id, &enabled.revision).await,
+            (consent::permits_diagnostics(&db, &id, &enabled.revision).await
+                == consent::ConsentPermission::Permitted(())),
             matches!(policy, consent::PolicyVersion::Diagnostics)
         );
-        assert!(!consent::permits_diagnostics(&db, &id, &rev).await);
+        assert!(
+            !(consent::permits_diagnostics(&db, &id, &rev).await
+                == consent::ConsentPermission::Permitted(()))
+        );
     }
     db.collection::<Document>(COLLECTION_NAME)
         .update_one(
@@ -583,7 +590,10 @@ async fn diagnostics_gate_requires_a_policy_acknowledgement_without_changing_ana
         .unwrap();
     crate::test_utils::await_responsive_majority_io(&db).await;
     assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
-    assert!(!consent::permits_diagnostics(&db, &id, &permission.revision).await);
+    assert!(
+        !(consent::permits_diagnostics(&db, &id, &permission.revision).await
+            == consent::ConsentPermission::Permitted(()))
+    );
     db.collection::<Document>(crate::models::user::COLLECTION_NAME)
         .update_one(
             doc! {"_id":&id},
@@ -593,7 +603,10 @@ async fn diagnostics_gate_requires_a_policy_acknowledgement_without_changing_ana
         .unwrap();
     crate::test_utils::await_responsive_majority_io(&db).await;
     assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
-    assert!(!consent::permits_diagnostics(&db, &id, &permission.revision).await);
+    assert!(
+        !(consent::permits_diagnostics(&db, &id, &permission.revision).await
+            == consent::ConsentPermission::Permitted(()))
+    );
     assert!(!available(&db, &id).await);
 }
 

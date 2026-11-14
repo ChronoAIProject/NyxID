@@ -122,10 +122,10 @@ pub async fn policy_status(
 }
 pub async fn rate_limits(db: &Database, actor: &str, ip: Option<&str>) -> AppResult<()> {
     let limits = [
-        ("crash:global", "all", 600, 60),
-        ("crash:ip", ip.unwrap_or("unattributed"), 30, 60),
         ("crash:account-minute", actor, 5, 60),
         ("crash:account-day", actor, 50, 86400),
+        ("crash:ip", ip.unwrap_or("unattributed"), 30, 60),
+        ("crash:global", "all", 600, 60),
     ];
     for (namespace, key, limit, seconds) in limits {
         let admission = super::coordination_service::RateWindowStore::admit(
@@ -195,10 +195,35 @@ pub async fn insert(
     revision: &str,
     report: CrashReportV1,
 ) -> AppResult<(bool, String)> {
+    insert_with_consent(
+        db,
+        config,
+        environment,
+        actor,
+        revision,
+        report,
+        consent::permits_diagnostics(db, actor, revision),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_with_consent(
+    db: &Database,
+    config: &CrashConfig,
+    environment: &str,
+    actor: &str,
+    revision: &str,
+    mut report: CrashReportV1,
+    permission: impl std::future::Future<Output = consent::ConsentPermission>,
+) -> AppResult<(bool, String)> {
     let now = Utc::now();
     validation::validate(&report, now)?;
-    if !consent::permits_diagnostics(db, actor, revision).await {
-        return Err(AppError::CrashReportConsentRequired);
+    report.captured_at = validation::captured_at(&report.captured_at)?.to_rfc3339();
+    match permission.await {
+        consent::ConsentPermission::Permitted(()) => {}
+        consent::ConsentPermission::Denied => return Err(AppError::CrashReportConsentRequired),
+        consent::ConsentPermission::Unknown => return Err(AppError::SecurityReadinessUnavailable),
     }
     let destination = config.destination(report.platform);
     let row = ClientErrorReport {

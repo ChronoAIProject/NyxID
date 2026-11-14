@@ -130,6 +130,18 @@ async fn dispatch(
     row: ClientErrorReport,
     lease: &str,
 ) -> AppResult<()> {
+    let permission =
+        analytics_consent_service::permits_diagnostics(db, &row.user_id, &row.consent_revision);
+    dispatch_with_consent(db, config, &row, lease, permission).await
+}
+
+async fn dispatch_with_consent(
+    db: &Database,
+    config: &CrashConfig,
+    row: &ClientErrorReport,
+    lease: &str,
+    permission: impl std::future::Future<Output = analytics_consent_service::ConsentPermission>,
+) -> AppResult<()> {
     let destination = config
         .destination(row.report.platform)
         .filter(|d| Some(d.destination_id()) == row.export.destination_id.as_deref());
@@ -168,16 +180,22 @@ async fn dispatch(
         Some("destination_unavailable")
     } else if !eligibility.offered() {
         Some("reporting_unavailable")
-    } else if !analytics_consent_service::permits_diagnostics(
-        db,
-        &row.user_id,
-        &row.consent_revision,
-    )
-    .await
-    {
-        Some("consent_denied")
     } else {
-        None
+        match permission.await {
+            analytics_consent_service::ConsentPermission::Permitted(()) => None,
+            analytics_consent_service::ConsentPermission::Denied => Some("consent_denied"),
+            analytics_consent_service::ConsentPermission::Unknown => {
+                return settle(
+                    db,
+                    &row.id,
+                    lease,
+                    ExportStatus::Pending,
+                    Some("consent_unknown"),
+                    Some(10),
+                )
+                .await;
+            }
+        }
     };
     if let Some(code) = code {
         return settle(
@@ -465,6 +483,51 @@ mod tests {
             .unwrap()
             .unwrap()
     }
+    #[tokio::test]
+    async fn crash_worker_consent_permitted_sends_denied_discards_and_unknown_retries() {
+        for outcome in ["permitted", "denied", "unknown"] {
+            let (db, actor, revision, id, config, exporter) = setup("crash_consent_read", 0).await;
+            let lease = uuid::Uuid::new_v4().to_string();
+            db.collection::<Document>(COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &id},
+                    vec![doc! {"$set": {
+                        "export.lease_id": &lease,
+                        "export.lease_until": {"$add": ["$$NOW", 60000_i64]}
+                    }}],
+                )
+                .await
+                .unwrap();
+            crate::test_utils::await_responsive_majority_io(&db).await;
+            let permission = async {
+                match outcome {
+                    "permitted" => consent::permits_diagnostics(&db, &actor, &revision).await,
+                    "denied" => consent::permits_diagnostics(&db, &actor, "stale").await,
+                    _ => consent::bounded_consent_read(std::future::pending(), Duration::ZERO)
+                        .await
+                        .for_revision(&revision),
+                }
+            };
+            dispatch_with_consent(&db, &config, &row(&db, &id).await, &lease, permission)
+                .await
+                .unwrap();
+            let saved = row(&db, &id).await;
+            let (status, code, calls) = match outcome {
+                "permitted" => (ExportStatus::Exported, None, 1),
+                "denied" => (ExportStatus::Discarded, Some("consent_denied"), 0),
+                _ => (ExportStatus::Pending, Some("consent_unknown"), 0),
+            };
+            assert_eq!(saved.export.status, status);
+            assert_eq!(saved.export.last_error_code.as_deref(), code);
+            assert_eq!(exporter.calls.load(Ordering::SeqCst), calls);
+            assert!(saved.export.lease_id.is_none());
+            if outcome == "unknown" {
+                assert_eq!(saved.export.attempts, 0);
+                assert!(saved.export.next_attempt_at.unwrap() > saved.received_at);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn mixed_destination_replicas_release_pending_rows_and_matching_replica_exports() {
         let (db, _, _, id, config, exporter) = setup("crash_mixed_dsn", 0).await;

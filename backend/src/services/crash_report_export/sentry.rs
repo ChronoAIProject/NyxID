@@ -85,7 +85,9 @@ pub fn envelope(safe: &SanitizedReport<'_>) -> Vec<u8> {
         )
     };
     let mut event = json!({
-        "event_id": event_id, "timestamp": r.captured_at, "level": safe.severity,
+        "event_id": event_id, "timestamp": crate::services::crash_report_service::validation::captured_at(
+            &r.captured_at
+        ).expect("validated timestamp").to_rfc3339(), "level": safe.severity,
         "platform": if native {"cocoa"} else {"javascript"},
         "release": release, "dist": r.app_build,
         "environment": safe.environment,

@@ -7,6 +7,7 @@ use crate::{
     },
     test_utils::*,
 };
+use chrono::Timelike;
 use mongodb::event::{EventHandler, command::CommandEvent};
 use std::sync::{Arc, Mutex};
 
@@ -98,7 +99,10 @@ async fn unserving_readiness_is_unknown_and_ingestion_returns_503_without_destro
     .unwrap();
     assert!(matches!(error, AppError::SecurityReadinessUnavailable));
     crate::test_utils::await_responsive_majority_io(&db).await;
-    assert!(consent::permits_diagnostics(&db, &id, &rev).await);
+    assert!(
+        (consent::permits_diagnostics(&db, &id, &rev).await
+            == consent::ConsentPermission::Permitted(()))
+    );
     flags::set_platform_override(&db, FLAG, &FlagTarget::Global, false, &id)
         .await
         .unwrap();
@@ -134,6 +138,15 @@ async fn policy_two_put_requires_an_offer_and_legacy_put_stays_policy_one() {
         .unwrap();
     let (_, axum::Json(new)) = put(Some("2")).await.unwrap();
     assert_eq!(new.diagnostics_status, DiagnosticsStatus::Available);
+    let extra = readiness::overlapping_test_replica(&db).await;
+    readiness::remove_test_replica_capability(&db, &extra, FLAG).await;
+    let error = put(Some("2")).await.err().unwrap();
+    assert!(matches!(error, AppError::SecurityReadinessUnavailable));
+    use axum::response::IntoResponse;
+    assert_eq!(
+        error.into_response().status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
 }
 
 #[tokio::test]
@@ -184,4 +197,163 @@ async fn admin_rollout_write_invalidates_the_negative_scope_cache() {
         eligibility(&db, &id).await,
         DiagnosticsStatus::ConsentRequired
     );
+}
+
+#[tokio::test]
+async fn crash_ingestion_distinguishes_permitted_denied_and_unknown_consent_reads() {
+    use consent::ConsentPermission;
+    let (db, id, revision) = tests::account("crash_consent_tristate").await;
+    crate::test_utils::await_responsive_majority_io(&db).await;
+    let permission = consent::permits_diagnostics(&db, &id, &revision).await;
+    assert_eq!(permission, ConsentPermission::Permitted(()));
+    let result = insert_with_consent(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &revision,
+        tests::report(),
+        std::future::ready(permission),
+    )
+    .await;
+    assert!(result.is_ok());
+    let denial = consent::permits_diagnostics(&db, &id, "stale").await;
+    assert_eq!(denial, ConsentPermission::Denied);
+    let error = insert_with_consent(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &revision,
+        tests::report(),
+        std::future::ready(denial),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::CrashReportConsentRequired));
+    let unknown = async {
+        consent::bounded_consent_read(std::future::pending(), Duration::ZERO)
+            .await
+            .for_revision(&revision)
+    };
+    let error = insert_with_consent(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &revision,
+        tests::report(),
+        unknown,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::SecurityReadinessUnavailable));
+    use axum::response::IntoResponse;
+    assert_eq!(
+        error.into_response().status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        db.collection::<Document>(COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn crash_timestamp_is_bounded_and_normalized_in_storage_and_export() {
+    let (db, id, revision) = tests::account("crash_timestamp_normalized").await;
+    let now = Utc::now();
+    let mut report = tests::report();
+    report.captured_at = format!("{}Z", now.format("%Y-%m-%dT%H:%M:%S"))
+        .replace('Z', ".000000000000000000000000000000000000Z");
+    assert!(validation::validate(&report, now).is_err());
+    let expected = now.with_nanosecond(120_000_000).unwrap().to_rfc3339();
+    report.captured_at = format!("{}.120000000Z", now.format("%Y-%m-%dT%H:%M:%S"));
+    let (_, row_id) = tests::insert(&db, &CrashConfig::default(), "test", &id, &revision, report)
+        .await
+        .unwrap();
+    let stored = db
+        .collection::<ClientErrorReport>(COLLECTION_NAME)
+        .find_one(doc! {"_id": row_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.report.captured_at, expected);
+    let safe = crate::services::crash_report_export::SanitizedReport {
+        report: &stored.report,
+        environment: &stored.environment,
+        severity: &stored.severity,
+    };
+    let bytes = crate::services::crash_report_export::sentry::envelope(&safe);
+    let payload: serde_json::Value =
+        serde_json::from_slice(bytes.split(|b| *b == b'\n').nth(2).unwrap()).unwrap();
+    assert_eq!(payload["timestamp"], expected);
+}
+
+#[tokio::test]
+async fn crash_rate_limits_check_account_then_ip_then_global_without_spending_global_on_refusal() {
+    use crate::models::coordination::RATE_WINDOW_COLLECTION_NAME as WINDOWS;
+    let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+    let seen = commands.clone();
+    let db = connect_test_database_with_command_handler(
+        "crash_rate_order",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                seen.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    crate::test_utils::ensure_rate_window_headroom(
+        Duration::from_secs(60),
+        Duration::from_secs(10),
+    )
+    .await;
+    rate_limits(&db, "one", Some("127.0.0.1")).await.unwrap();
+    let updates: Vec<_> = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|command| command.get_str("findAndModify") == Ok(WINDOWS))
+        .map(|command| command.to_string())
+        .collect();
+    assert_eq!(updates.len(), 4);
+    for (command, namespace) in updates.iter().zip([
+        "crash:account-minute",
+        "crash:account-day",
+        "crash:ip",
+        "crash:global",
+    ]) {
+        assert!(command.contains(namespace), "{command}");
+    }
+    db.collection::<Document>(WINDOWS)
+        .update_one(
+            doc! {"namespace": "crash:account-minute"},
+            doc! {"$set": {"count": 5_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        rate_limits(&db, "one", Some("127.0.0.1")).await,
+        Err(AppError::RateLimitedWithRetry { .. })
+    ));
+    let global = db
+        .collection::<Document>(WINDOWS)
+        .find_one(doc! {"namespace": "crash:global"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(global.get_i64("count").unwrap(), 1);
+    rate_limits(&db, "two", Some("127.0.0.2")).await.unwrap();
+    let global = db
+        .collection::<Document>(WINDOWS)
+        .find_one(doc! {"namespace": "crash:global"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(global.get_i64("count").unwrap(), 2);
 }

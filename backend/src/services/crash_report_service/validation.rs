@@ -22,11 +22,18 @@ fn uuid(value: &str, v4: bool) -> bool {
             && (!v4 || id.get_version_num() == 4)
     })
 }
+/// Bound before parsing; only the normalized UTC value is stored or exported.
+pub fn captured_at(value: &str) -> AppResult<DateTime<Utc>> {
+    if value.len() > 40 {
+        return Err(AppError::ValidationError("Invalid crash report".into()));
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| AppError::ValidationError("Invalid crash report".into()))
+}
 pub fn validate(report: &CrashReportV1, now: DateTime<Utc>) -> AppResult<()> {
     let bad = || AppError::ValidationError("Invalid crash report".into());
-    let captured = DateTime::parse_from_rfc3339(&report.captured_at)
-        .map_err(|_| bad())?
-        .with_timezone(&Utc);
+    let captured = captured_at(&report.captured_at)?;
     if report.schema_version != 1
         || !uuid(&report.event_id, true)
         || captured > now + chrono::Duration::minutes(5)
