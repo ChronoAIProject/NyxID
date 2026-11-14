@@ -2535,6 +2535,29 @@ mod tests {
         assert_eq!(names.len(), ENTRIES.len());
     }
 
+    #[test]
+    fn every_registry_entry_has_collection_specific_rationale() {
+        let boilerplate = "Reviewed against the production collection call sites.";
+        let mut rationales = BTreeSet::new();
+        for entry in ENTRIES {
+            assert!(
+                entry.why.contains(entry.collection),
+                "rationale does not name {}",
+                entry.collection
+            );
+            assert_ne!(
+                entry.why, boilerplate,
+                "boilerplate rationale for {}",
+                entry.collection
+            );
+            assert!(
+                rationales.insert(entry.why),
+                "duplicate rationale for {}",
+                entry.collection
+            );
+        }
+    }
+
     fn strip_cfg_test_modules(source: &str) -> String {
         let marker = "#[cfg(test)]";
         let mut output = String::with_capacity(source.len());
