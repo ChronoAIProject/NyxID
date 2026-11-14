@@ -13,7 +13,7 @@ Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.m
 
 ## Critical Rules
 
-- SIGTERM/ctrl-c drains admitted work while serving both listeners; stop background claims, retain renewals, settle deadline turns as `turn_lost`/`shutdown`, and release exact generation/claim fences. `/ready` becomes 503; `/health` stays 200. See `docs/DEPLOYMENT.md#rolling-deploys-and-graceful-drain`.
+- SIGTERM/ctrl-c drains admitted work while serving both listeners; stop background claims, retain renewals, settle deadline turns as `turn_lost`/`shutdown`, and release exact generation/claim fences. `/ready` becomes 503; `/health` stays 200; chained start/finish audits share the process generation. See `docs/DEPLOYMENT.md#rolling-deploys-and-graceful-drain`.
 
 ### 1. MongoDB Model Conventions
 

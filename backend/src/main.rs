@@ -1972,7 +1972,7 @@ async fn server_run(cli: Cli) {
     };
     if let Some(signal) = signal
         && let Some(drain) = services::shutdown::drain::Drain::begin(
-            &shutdown_state.shutdown,
+            &shutdown_state,
             std::time::Duration::from_secs(config.shutdown_drain_timeout_secs),
             signal,
         )
