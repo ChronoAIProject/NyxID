@@ -472,8 +472,9 @@ export function SshTerminalScreen({
                 style={[
                   styles.key,
                   {
-                    backgroundColor:
-                      key === "Ctrl" && ctrl ? colors.primary : colors.card,
+                    backgroundColor: colors.card,
+                    borderColor:
+                      key === "Ctrl" && ctrl ? colors.primary : colors.border,
                   },
                 ]}
                 onPress={() => {
@@ -486,7 +487,17 @@ export function SshTerminalScreen({
                     });
                 }}
               >
-                <Text style={[styles.keyText, { color: colors.textPrimary }]}>
+                <Text
+                  style={[
+                    styles.keyText,
+                    {
+                      color:
+                        key === "Ctrl" && ctrl
+                          ? colors.primary
+                          : colors.textPrimary,
+                    },
+                  ]}
+                >
                   {t(
                     (
                       {
@@ -517,6 +528,7 @@ const styles = StyleSheet.create({
   status: { ...typeScale.label },
   keys: { flexGrow: 0, maxHeight: 48 },
   key: {
+    borderWidth: 1,
     minWidth: 44,
     minHeight: 44,
     justifyContent: "center",

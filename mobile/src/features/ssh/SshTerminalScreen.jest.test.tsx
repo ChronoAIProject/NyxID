@@ -215,6 +215,28 @@ test("background and blur close the socket and require explicit reconnect; 401 r
   await screen.unmount();
 });
 
+test("sticky Ctrl-C sends a binary interrupt once and releases the selected key", async () => {
+  const screen = await render(
+    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+  );
+  const view = screen.getByTestId("terminal-webview");
+  await act(async () => {
+    message(view, { type: "ready" });
+  });
+  await fireEvent.press(screen.getByLabelText("Ctrl"));
+  expect(screen.getByLabelText("Ctrl").props.accessibilityState.selected).toBe(true);
+  await act(async () => {
+    message(view, { type: "input", data: "c" });
+  });
+  expect([...Socket.instances[0]!.send.mock.calls[0]![0]]).toEqual([3]);
+  expect(screen.getByLabelText("Ctrl").props.accessibilityState.selected).toBe(false);
+  await act(async () => {
+    message(view, { type: "input", data: "c" });
+  });
+  expect([...Socket.instances[0]!.send.mock.calls[1]![0]]).toEqual([99]);
+  await screen.unmount();
+});
+
 test.each(["The credential node is offline", "SSH host key mismatch"])(
   "server errors retain actionable node/host messages: %s",
   async (detail) => {
