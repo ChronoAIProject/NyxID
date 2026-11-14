@@ -75,6 +75,7 @@ import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnect
 import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
 import { AssistantScreen } from "../features/assistant/AssistantScreen";
 import { AssistantLinkHost } from "../features/assistant/AssistantLinkHost";
+import { SshTerminalScreen } from "../features/ssh/SshTerminalScreen";
 import { ServicesScreen } from "../features/services/ServicesScreen";
 import { AgentsScreen } from "../features/agents/AgentsScreen";
 import { AgentsGroupsScreen } from "../features/agents/AgentsGroupsScreen";
@@ -465,6 +466,7 @@ function WorkspaceNavigator() {
           title: route.params?.groupId ? t("Crew settings") : t("New crew"),
         })}
       />
+      <ContentStack.Screen name="SshTerminal" component={SshTerminalScreen} options={{ title: t("SSH terminal") }} />
       <ContentStack.Screen
         name="ServiceSetup"
         component={ServiceSetupRoute}

@@ -544,6 +544,38 @@ export function ServicesScreen({
             {connection.error_message && (
               <Notice message={connection.error_message} tone="error" />
             )}
+            {connection.service_type === "ssh" && (
+              <SettingsGroup
+                inset={false}
+                footer={
+                  connection.ssh_auth_mode !== "cert"
+                    ? t(
+                        "The mobile terminal is available for active certificate-mode SSH services. Use the web terminal or nyxid ssh exec for other modes.",
+                      )
+                    : undefined
+                }
+              >
+                {connection.ssh_auth_mode === "cert" &&
+                connection.is_active &&
+                connection.status === "active" ? (
+                  <SettingsRow
+                    label={t("Open terminal")}
+                    tone="action"
+                    onPress={() =>
+                      navigation.navigate("SshTerminal", {
+                        serviceId: connection.id,
+                      })
+                    }
+                  />
+                ) : (
+                  <SettingsRow
+                    label={t("Open web terminal")}
+                    tone="action"
+                    onPress={() => void openWeb("overview")}
+                  />
+                )}
+              </SettingsGroup>
+            )}
             <SettingsGroup
               title="Use in Chat"
               inset={false}

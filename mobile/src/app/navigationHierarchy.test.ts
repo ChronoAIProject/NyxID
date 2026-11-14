@@ -50,6 +50,7 @@ const mainEntries = [
   ["Agents", { tab: "groups" }],
   ["Plugins", { tab: "skills" }],
   ["Services", undefined],
+  ["SshTerminal", { serviceId: "connection", principal: "ops" }],
   ["Machines", undefined],
   ["Activity", { challengeId: "pending" }],
   ["WorkspaceSearch", undefined],

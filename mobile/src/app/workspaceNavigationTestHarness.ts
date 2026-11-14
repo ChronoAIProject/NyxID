@@ -20,6 +20,7 @@ export const contentNames = [
   "Agents",
   "Plugins",
   "Services",
+  "SshTerminal",
   "Machines",
   "Activity",
   "Notifications",

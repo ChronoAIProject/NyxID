@@ -344,19 +344,19 @@ const refreshAccessTokenWithSingleFlight = createSessionRefresh({
   request: requestRefreshAccessToken, expiresAt: computeAccessTokenExpiresAt,
 });
 
-export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
+export async function refreshAccessTokenIfNeeded(force = false): Promise<boolean> {
   const session = await loadStoredAuthSession();
   if (!session?.accessToken || !session.refreshToken) {
     return false;
   }
 
   const expiresAt = resolveAccessTokenExpiresAt(session);
-  if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) {
+  if (!force && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) {
     return false;
   }
 
-  const remainingMs = expiresAt - Date.now();
-  if (remainingMs > PROACTIVE_REFRESH_BUFFER_MS) {
+  const remainingMs = typeof expiresAt === "number" ? expiresAt - Date.now() : 0;
+  if (!force && remainingMs > PROACTIVE_REFRESH_BUFFER_MS) {
     return false;
   }
 
@@ -364,7 +364,7 @@ export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   return Boolean(refreshed);
 }
 
-function clientHeaders(): Record<string, string> {
+export function clientHeaders(): Record<string, string> {
   return {
     ...analyticsDeviceHeaders(),
     "X-NyxID-Client": "mobile",

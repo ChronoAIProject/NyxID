@@ -78,6 +78,7 @@ export type WorkspaceContentParamList = Omit<
   AgentDetail: { agentId: string };
   AgentProfileEdit: { agentId: string; field: AgentProfileField };
   GroupEditor: { groupId?: string } | undefined;
+  SshTerminal: { serviceId: string; principal?: string };
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
   SkillDetail: SkillPageParams;
@@ -174,6 +175,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "Agents",
   "Plugins",
   "Services",
+  "SshTerminal",
   "Machines",
   "Activity",
   "Notifications",
