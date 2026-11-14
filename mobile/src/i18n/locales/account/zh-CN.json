@@ -5,6 +5,7 @@
   "Allow account usage analytics": "允许账号用量分析",
   "Allow for my account": "允许此账户使用",
   "Allow on this device": "允许此设备使用",
+  "Allow updated analytics": "允许更新后的分析功能",
   "Allow usage analytics on this device": "允许此设备的使用情况分析",
   "An https link to a square image. Your initial is shown until you add one.": "正方形图片的 https 链接。添加前会显示姓名首字母。",
   "App language": "应用语言",
@@ -17,8 +18,12 @@
   "Conversation": "对话",
   "Copy Recovery Codes": "复制恢复码",
   "Copy Setup Key": "复制设置密钥",
+  "Could not save updated analytics permission. This device remains off.": "无法保存更新后的分析授权。本设备保持关闭。",
   "Couldn't load active sessions": "无法加载活跃会话",
   "Couldn't load your profile": "无法加载个人资料",
+  "Crash diagnostics": "崩溃诊断",
+  "Crash diagnostics enabled": "崩溃诊断已启用",
+  "Crash diagnostics need updated permission": "崩溃诊断需要更新授权",
   "Creates a bounded JSON export. You can request one up to three times per hour.": "创建有大小限制的 JSON 导出。每小时最多请求三次。",
   "Current password": "当前密码",
   "Custom image": "自定义图片",
@@ -65,6 +70,7 @@
   "Retry saving device choice": "重试保存设备选择",
   "Retry saving language": "重试保存语言",
   "Reveal Codes": "显示代码",
+  "Review updated analytics": "查看更新后的分析功能",
   "Saved on this device. Dictation language is set separately in Voice settings. Messages stay in their original language.": "保存在此设备上。听写语言可在语音设置中单独选择。消息保留原始语言。",
   "Set Up Authenticator": "设置验证器",
   "Setup key": "设置密钥",
@@ -108,5 +114,6 @@
   "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.": "你的数据导出暂时受到频率限制。请在 {{minutes}} 分钟后重试。",
   "Your data export is temporarily rate limited. Try again in {{seconds}} seconds.": "你的数据导出暂时受到频率限制。请在 {{seconds}} 秒后重试。",
   "Your name": "您的姓名",
-  "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您保存的声音（{{voice}}）已不可用。请选择声音以继续。"
+  "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您保存的声音（{{voice}}）已不可用。请选择声音以继续。",
+  "iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured.": "iOS 包含原生崩溃和 JavaScript 错误。Android 仅报告 JavaScript 错误及 JavaScript 致命错误，不采集 JVM 或 NDK 崩溃。"
 }

@@ -1,3 +1,4 @@
+import { crashLifecycle } from "../lib/crashReporting/runtime";
 import { Component, type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -10,6 +11,8 @@ export class AppErrorBoundary extends Component<Props, State> {
   static getDerivedStateFromError(error: Error): State {
     return { hasError: true, error };
   }
+
+  override componentDidCatch(error: Error) { void crashLifecycle?.capture(error, "render_error"); }
 
   override render() {
     if (this.state.hasError) {

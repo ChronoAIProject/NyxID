@@ -165,6 +165,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
     ],
     extra: {
+      crashArtifactId: process.env.NYXID_CRASH_ARTIFACT_ID,
       APP_ENV: appEnv,
       TELEMETRY_DSN: r.telemetryDsn,
       TELEMETRY_HOST: r.telemetryHost,

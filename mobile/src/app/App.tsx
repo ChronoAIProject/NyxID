@@ -1,3 +1,6 @@
+import { useDiagnosticsNotice } from '../lib/crashReporting/useDiagnosticsNotice';
+import { installMobileCrashReporting } from "../lib/crashReporting/runtime";
+installMobileCrashReporting();
 import { LanguageProvider } from "../i18n/LanguageProvider";
 import "react-native-gesture-handler";
 import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
@@ -472,6 +475,10 @@ function ThemedAppShell({
   const { width } = useWindowDimensions();
   const persistentSidebar =
     isAuthenticated && workspaceSidebarLayout(width).persistent;
+  const reviewDiagnostics = useCallback(() => {
+    if (navigationRef.isReady()) navigationRef.navigate('WorkspaceSheet', {screen:'PrivacySettings'});
+  }, [navigationRef]);
+  useDiagnosticsNotice(isAuthenticated, reviewDiagnostics);
   const authenticatedNow = useRef(isAuthenticated);
   authenticatedNow.current = isAuthenticated && getAuthAccountId() !== null;
   const edgeBacks = useRef(new Map<symbol, () => void>());

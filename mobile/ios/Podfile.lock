@@ -303,6 +303,10 @@ PODS:
   - libwebp/sharpyuv (1.6.0)
   - libwebp/webp (1.6.0):
     - libwebp/sharpyuv
+  - NyxCrashReporter (1.0.0):
+    - ExpoModulesCore
+    - PLCrashReporter (= 1.12.0)
+  - PLCrashReporter (1.12.0)
   - RCTDeprecation (0.83.4)
   - RCTRequired (0.83.4)
   - RCTSwiftUI (0.83.4)
@@ -2529,6 +2533,7 @@ DEPENDENCIES:
   - EXUpdatesInterface (from `../node_modules/expo-updates-interface/ios`)
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
+  - NyxCrashReporter (from `../modules/nyx-crash-reporter/ios`)
   - RCTDeprecation (from `../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../node_modules/react-native/Libraries/Required`)
   - RCTSwiftUI (from `../node_modules/react-native/ReactApple/RCTSwiftUI`)
@@ -2619,6 +2624,7 @@ SPEC REPOS:
   trunk:
     - JitsiWebRTC
     - libwebp
+    - PLCrashReporter
     - SDWebImage
     - SDWebImageWebPCoder
     - ZXingObjC
@@ -2703,6 +2709,8 @@ EXTERNAL SOURCES:
   hermes-engine:
     :podspec: "../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec"
     :tag: hermes-v0.14.1
+  NyxCrashReporter:
+    :path: "../modules/nyx-crash-reporter/ios"
   RCTDeprecation:
     :path: "../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation"
   RCTRequired:
@@ -2907,9 +2915,11 @@ SPEC CHECKSUMS:
   ExpoWebBrowser: f81f8e35afd7f61ec809622ef354c579a3b580e2
   EXUpdatesInterface: 39d05400a9226c438565dbaaa8447b5f0672ba45
   FBLazyVector: 061f518bbd81677ed8a8317e2ae60b8779495808
-  hermes-engine: 9d1bd13e0c2d31a7047edcdb9b00d801780a4f84
+  hermes-engine: ca1268331906e2a60816bf65c77717c50e732ffe
   JitsiWebRTC: a8ac2b2b54c523fb156016de4ab86b6666dc99d9
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
+  NyxCrashReporter: d55214ab6db9c123e8bee17e8327f8b7fe8aa1a9
+  PLCrashReporter: db59ef96fa3d25f3650040d02ec2798cffee75f2
   RCTDeprecation: 5045f20b2cc1239bf422764004338c720684a22f
   RCTRequired: b6b9724225dd780ac2989d2e575d5513c50fe04b
   RCTSwiftUI: 395b65655229fa2006415207adcfcb6e35dc78ed
@@ -2918,7 +2928,7 @@ SPEC CHECKSUMS:
   React: 3e14066ac707b3e369d09e2e923d8bee7f8c33ff
   React-callinvoker: bd7959a24564feaf5e4c8c11789e64884da13482
   React-Core: f060f4e14e9301685ce63ea65fbe903bf3397e45
-  React-Core-prebuilt: 6c567b64684d8f1302f2929da35ba4bdcf0a0086
+  React-Core-prebuilt: 2ee963332098e7bedcb2368247edbfcff3adb35d
   React-CoreModules: 89a1a544297be88ca4cdff317423f9e0d0c192a4
   React-cxxreact: 81b1bfa305b1b759cc0fe18327644816216e5993
   React-debug: 234fddb309822e13b9b442ef1bdca8d2b8c3cbf2
@@ -2983,7 +2993,7 @@ SPEC CHECKSUMS:
   ReactAppDependencyProvider: 2b19d66e5ddfe8dc7afb6338a4626156cbf2bab1
   ReactCodegen: 43f0948182edee9407c7b977fb059455dfeb9361
   ReactCommon: c6e81cc1ae185fa84863f3ea1d58caac4be741d7
-  ReactNativeDependencies: 17a83f902e5ea864038e21661c4a2d4eb00e5f26
+  ReactNativeDependencies: c18ed1f8f14b74944717252e92f4107569b66c90
   RNCAsyncStorage: 3a4f5e2777dae1688b781a487923a08569e27fe4
   RNGestureHandler: 0ea8153746a92b3744d4eaadade647debedf646e
   RNReanimated: 86e5991396f1aa514db90d6c79d4c3e37a37bb10
@@ -2998,4 +3008,4 @@ SPEC CHECKSUMS:
 
 PODFILE CHECKSUM: 5db0669a35402282bd77394d8d2d66a37eb3d8bf
 
-COCOAPODS: 1.16.2
+COCOAPODS: 1.17.0

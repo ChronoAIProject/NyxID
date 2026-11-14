@@ -244,3 +244,12 @@ test("Privacy export watchdog failures use the existing localized error toast", 
     } finally { env.harness.unmount(); }
   }
 });
+
+test("Privacy shows diagnostics status and explicitly limits Android coverage", () => {
+  const env=setupSettingsScreen("./PrivacySettingsScreen.tsx","PrivacySettingsScreen");
+  assert.ok(env.row("Crash diagnostics"));
+  assert.ok(env.row("Review updated analytics"));
+  assert.ok(env.text("Crash diagnostics need updated permission"));
+  assert.ok(env.text("iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured."));
+  env.harness.unmount();
+});
