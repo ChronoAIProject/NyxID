@@ -92,7 +92,6 @@ export function LoginKeyDraft({
         <fieldset disabled={disabled} className="space-y-4">
           <LoginGrantReview
             apiKey={summary}
-            comparison={comparison}
             kind="new"
             nameField={<ApiKeyNameField form={form} />}
             customize={

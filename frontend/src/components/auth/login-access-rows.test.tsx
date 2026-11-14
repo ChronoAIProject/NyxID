@@ -7,7 +7,7 @@ import {
 } from "@/lib/__fixtures__/login-inventory";
 import { compareKey } from "@/lib/login-permissions";
 import { agentKeyOptionsSchema } from "@/schemas/agent-key-login";
-import { LoginAccessRows } from "./login-access-rows";
+import { AUTO_EXPAND_ROW_LIMIT, LoginAccessRows } from "./login-access-rows";
 
 afterEach(cleanup);
 
@@ -83,4 +83,89 @@ describe("login access ownership and expansion", () => {
       expect(summary).toHaveTextContent("Organization · Engineering");
     },
   );
+
+  it("names an organization connection the approver lost, marks it unavailable and never shows its raw ID", () => {
+    const inventory = loginInventory();
+    const key = inventory.options.keys[0]!;
+    const lost = { ...inventory.connections[0]!, id: "lost-svc", label: "GitHub", owner_id: "org-id" };
+    // The key still lists the connection, but the approver's usable services no longer do.
+    key.effective_services = [...inventory.connections, lost];
+    key.allowed_service_ids = ["svc", "lost-svc"];
+    key.allowed_services = [
+      ...key.allowed_services,
+      { id: "lost-svc", name: "github", owner_id: "org-id", owner_name: "Engineering" },
+    ];
+    const { rerender } = render(
+      <LoginAccessRows
+        apiKey={key}
+        comparison={compareKey(key, requestedRead, inventory)}
+        requested={requestedRead}
+        inventory={inventory}
+        disabled={false}
+      />,
+    );
+    const summary = screen.getByLabelText("GitHub access").querySelector("summary")!;
+    expect(summary).toHaveTextContent("GitHub personal (Personal)");
+    expect(summary).toHaveTextContent("GitHub (Organization · Engineering) No longer available");
+    // A neutral pill, not a warning colour, marks the lost connection.
+    expect(within(summary).getByText("No longer available")).not.toHaveClass("text-warning");
+
+    // Without any name source the label stays generic rather than exposing an ID.
+    key.allowed_services = key.allowed_services.map((s) =>
+      s.id === "lost-svc" ? { ...s, owner_name: null } : s,
+    );
+    rerender(
+      <LoginAccessRows
+        apiKey={{ ...key }}
+        comparison={compareKey(key, requestedRead, inventory)}
+        requested={requestedRead}
+        inventory={inventory}
+        disabled={false}
+      />,
+    );
+    expect(summary).toHaveTextContent("GitHub (Organization) No longer available");
+    expect(summary).not.toHaveTextContent("org-id");
+  });
+
+  it("opens only rows needing a choice in long lists and collapses or expands every row", async () => {
+    const user = userEvent.setup();
+    const inventory = loginInventory();
+    const key = inventory.options.keys[0]!;
+    const extra = ["notion", "figma", "linear", "stripe", "sentry", "asana"].map((slug) => ({
+      ...inventory.connections[0]!,
+      id: slug,
+      label: slug,
+      slug,
+      catalog_service_slug: slug,
+    }));
+    inventory.connections.push(...extra);
+    inventory.options.services.push(...extra.map((c) => ({ id: c.id, name: c.slug, owner_id: "user" })));
+    key.effective_services = inventory.connections;
+    key.allowed_service_ids = inventory.connections.map((c) => c.id);
+    // A requested service with no connection must stay open as "Choose account".
+    const requested = { ...requestedRead, service_permissions: [...requestedRead.service_permissions, "slack::chat:write"] };
+    const { container } = render(
+      <LoginAccessRows
+        apiKey={key}
+        comparison={compareKey(key, requested, inventory)}
+        requested={requested}
+        inventory={inventory}
+        disabled={false}
+      />,
+    );
+    const rows = () => [...container.querySelectorAll("details")];
+    expect(rows().length).toBeGreaterThan(AUTO_EXPAND_ROW_LIMIT);
+    const openRows = () => rows().filter((r) => r.open).map((r) => r.getAttribute("aria-label"));
+    expect(openRows()).toEqual(["slack access"]);
+    expect(screen.getByLabelText("slack access").querySelector("summary")).toHaveTextContent("Choose account");
+
+    await user.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(openRows()).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Expand all" }));
+    expect(openRows()).toHaveLength(rows().length);
+    // An individual toggle still works after a bulk change.
+    await user.click(screen.getByLabelText("notion access").querySelector("summary")!);
+    expect(screen.getByLabelText("notion access")).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Collapse all" })).toBeVisible();
+  });
 });

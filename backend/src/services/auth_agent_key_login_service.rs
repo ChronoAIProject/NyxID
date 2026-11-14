@@ -331,6 +331,28 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
             .await?
             .try_collect()
             .await?;
+    // One batched read names organization owners of the key's services, so a
+    // connection the approver can no longer use still shows its organization.
+    let foreign_owner_ids: Vec<&str> = services
+        .iter()
+        .map(|s| s.user_id.as_str())
+        .filter(|id| *id != key.user_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let org_names: std::collections::HashMap<String, String> = if foreign_owner_ids.is_empty() {
+        Default::default()
+    } else {
+        db.collection::<User>(USERS)
+            .find(doc! {"_id": {"$in": &foreign_owner_ids}})
+            .await?
+            .try_collect::<Vec<User>>()
+            .await?
+            .into_iter()
+            .filter(|u| u.user_type.is_org())
+            .map(|u| (u.id, u.display_name.unwrap_or(u.email)))
+            .collect()
+    };
     let nodes: Vec<Node> = db
         .collection::<Node>(NODES)
         .find(doc! {"_id": {"$in": &key.allowed_node_ids}})
@@ -366,7 +388,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable service".into(), |r| r.slug.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
-                    owner_name: None,
+                    owner_name: row.and_then(|r| org_names.get(&r.user_id).cloned()),
                     auto_connected: row.is_some_and(consent::auto_connected),
                 }
             })

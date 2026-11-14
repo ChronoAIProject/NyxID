@@ -1032,7 +1032,7 @@ fn new_child_default_is_finite_clamped_and_stored_none_is_unchanged() {
 
 #[tokio::test]
 async fn login_options_show_shared_service_organization_to_members_without_key_admin_access() {
-    let (db, actor, _, _) = fixture("login_options_connection_owners").await;
+    let (db, actor, mut key, _) = fixture("login_options_connection_owners").await;
     let org = Uuid::new_v4().to_string();
     let mut owner = test_user(&org, UserType::Org);
     owner.display_name = Some("Engineering".into());
@@ -1082,6 +1082,18 @@ async fn login_options_show_shared_service_organization_to_members_without_key_a
     let viewer = options_for_actor(&db, &actor).await.unwrap();
     assert!(viewer.services.iter().all(|s| s.id != service_id));
     assert!(viewer.connections.iter().all(|c| c.id != service_id));
+
+    // A key that still lists the lost connection names its organization (one
+    // batched owner read) so the approver sees which access no longer works.
+    key.allowed_service_ids = vec![service_id.clone()];
+    let summary = key_summary(&db, &key, false).await.unwrap();
+    let listed = summary
+        .allowed_services
+        .iter()
+        .find(|s| s.id == service_id)
+        .unwrap();
+    assert_eq!(listed.owner_id, org);
+    assert_eq!(listed.owner_name.as_deref(), Some("Engineering"));
     db.drop().await.unwrap();
 }
 

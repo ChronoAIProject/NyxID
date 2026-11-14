@@ -12077,5 +12077,7 @@
   "By {{name}}": "作者：{{name}}",
   "Drafted by {{name}}": "由 {{name}} 起草",
   "System skill": "系統技能",
-  "System skill for {{service}}": "{{service}} 的系統技能"
+  "System skill for {{service}}": "{{service}} 的系統技能",
+  "Collapse all": "全部折疊",
+  "Expand all": "全部展開"
 }

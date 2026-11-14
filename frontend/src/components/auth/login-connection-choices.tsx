@@ -5,7 +5,8 @@ import {
   canonicalScope,
   connectionCovers,
   connectionReady,
-  connectionOrganization,
+  connectionOwner,
+  connectionOwnerLabel,
   connectionSlug,
   permissionOptions,
   requestedGroups,
@@ -119,10 +120,10 @@ export function LoginConnectionChoices({
         const implied =
           selection.allowAll || selection.impliedIds.includes(service.id);
         const checked = implied || selection.selectedIds.includes(service.id);
-        const organization = connectionOrganization(connection, selection.inventory);
-        const owner = organization
-          ? t("Organization · {{org_name}}", { org_name: organization })
-          : t("Personal");
+        const owner = connectionOwnerLabel(
+          connectionOwner(connection, selection.inventory),
+          t,
+        );
         return (
           <label
             key={service.id}
