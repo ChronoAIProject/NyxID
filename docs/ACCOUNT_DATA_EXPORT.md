@@ -26,9 +26,10 @@ its fully qualified name (`section.subsection`) appears in
 `truncated_sections`. The complete serialized document is capped at 32 MiB;
 when that cap is reached the oldest rows are removed incrementally from the
 largest subsections until the document fits. Queries have a three-second
-MongoDB `maxTimeMS` bound. Each replica permits two concurrent exports and a
-person may start three exports per hour; a busy or rate-limited request returns
-`429` with `Retry-After`.
+MongoDB `maxTimeMS` bound. Each replica permits two concurrent exports. The rate
+limit is three exports per person per fixed hourly window; `Retry-After` gives
+the seconds until the window resets. A busy or rate-limited request returns
+`429` with `Retry-After`; a busy response requests a one-second retry.
 
 The stable section set is `account`, `services`, `security`, `assistant`,
 `channels`, `account_activity`, `machines`, and `billing`. Empty sections are
