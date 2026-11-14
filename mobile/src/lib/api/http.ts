@@ -5,6 +5,7 @@ import { fetch as expoFetch } from "expo/fetch";
 import { executeAuthenticatedRequest, type RequestOptions } from "./authenticatedTransport";
 import { mapBackendRequestToChallenge, mapChallengeStatus, type BackendApprovalRequestItem } from "./approvalAdapter";
 import { getAuthEpoch } from "../auth/authEpoch";
+import { getAuthAccountId } from "../auth/authAccount";
 import { readBoundedBytes } from "./readBoundedBytes";
 import { guardedJsonTransport } from "./guardedTransport";
 import { analyticsConsentState, analyticsDeviceHeaders } from "../analyticsConsentState";
@@ -428,8 +429,8 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     if (options.signal?.aborted) throw Object.assign(new Error("Request cancelled"), { name: "AbortError" });
     if (requiresAuth && getAuthEpoch() !== expectedEpoch) throw new Error("auth_session_changed");
     if (requiresAuth && authSessionGeneration() !== expectedSessionGeneration) throw new Error("auth_session_changed");
-    if (options.expectedAccountId && analyticsConsentState.getSnapshot().accountId !== options.expectedAccountId)
-      throw new Error("analytics_account_changed");
+    if (options.expectedAccountId && getAuthAccountId() !== options.expectedAccountId)
+      throw new Error("auth_account_changed");
   };
 
   // Device narrowing is bound to the expected actor; it cannot authorize

@@ -31,6 +31,7 @@ export function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fet
     "./authenticatedTransport": { executeAuthenticatedRequest },
     "./approvalAdapter": {},
     "../auth/authEpoch": { getAuthEpoch: () => 0 },
+    "../auth/authAccount": { getAuthAccountId: () => "test-user" },
     "./readBoundedBytes": {},
     "./guardedTransport": { guardedJsonTransport },
     "../analyticsConsentState": { analyticsDeviceHeaders: () => ({}) },

@@ -35,12 +35,13 @@ export function PrivacySettingsScreen(
     return () => clearTimeout(timer);
   }, [toast]);
   const deviceConsent = useMobileConsent();
+  const accountId = getAuthAccountId();
   const analyticsPermission = useQuery({
-    queryKey: ["analytics-consent", deviceConsent.accountId],
-    enabled: Boolean(deviceConsent.accountId),
+    queryKey: ["analytics-consent", accountId],
+    enabled: Boolean(accountId),
     staleTime: 0,
     queryFn: async () => {
-      const accountId = deviceConsent.accountId!;
+      if (!accountId) throw new Error("auth_session_missing");
       const permission = await requestJson<AnalyticsPermission>(
         "/users/me/preferences/analytics",
         { expectedAccountId: accountId },
@@ -53,7 +54,7 @@ export function PrivacySettingsScreen(
   const saveAnalytics = useMutation({
     mutationFn: (enabled: boolean) =>
       saveAnalyticsPermission(
-        deviceConsent.accountId!,
+        accountId!,
         enabled,
         requestJson,
         analyticsConsentState.getSnapshot,
@@ -107,11 +108,18 @@ export function PrivacySettingsScreen(
         const minutes = seconds
           ? Math.max(1, Math.ceil(seconds / 60))
           : undefined;
-        const retry = minutes
-          ? ` ${minutes === 1 ? t("Try again in 1 minute.") : t("Try again in {{minutes}} minutes.", { minutes })}`
-          : "";
         setToast({
-          message: `${t("Your data export is temporarily rate limited.")}${retry}`,
+          message:
+            minutes === undefined
+              ? t("Your data export is temporarily rate limited.")
+              : minutes === 1
+                ? t(
+                    "Your data export is temporarily rate limited. Try again in 1 minute.",
+                  )
+                : t(
+                    "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
+                    { minutes },
+                  ),
           kind: "error",
         });
       } else if (
