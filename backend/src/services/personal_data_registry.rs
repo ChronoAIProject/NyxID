@@ -2526,7 +2526,6 @@ pub fn entries() -> &'static [Entry] {
     ENTRIES
 }
 
-#[cfg(test)]
 pub fn find(collection: &str) -> Option<&'static Entry> {
     ENTRIES.iter().find(|entry| entry.collection == collection)
 }
