@@ -744,6 +744,7 @@ mod tests {
     async fn completed_job_reconciliation_cleans_new_inventory_once_and_stamps_revision() {
         let (db, user) = super::super::tests::fixture().await;
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
         db.collection::<Document>("assistant_wire_logs")
             .insert_one(doc! {
                 "_id": "reconciliation-leftover",
@@ -853,7 +854,6 @@ mod tests {
     async fn stale_reconciliation_lease_cannot_stamp_revision() {
         let (db, user) = super::super::tests::fixture().await;
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
-        let state = crate::test_utils::test_app_state(db.clone());
         db.collection::<Document>(JOBS)
             .update_one(
                 doc! {"_id": &accepted.id},
