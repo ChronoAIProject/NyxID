@@ -1,5 +1,5 @@
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Switch } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AudioLines, Bell, Languages, Mic } from "lucide-react-native";
@@ -17,7 +17,11 @@ import { nativeVoiceEnvironment } from "../../lib/api/assistantVoiceApi";
 import { useTheme } from "../../theme/ThemeContext";
 import type { VoicePreferences } from "../assistant/voice/voiceContracts";
 import { voiceTariff } from "../assistant/voice/voiceSelection";
-import { useDictationLanguage } from "../assistant/voice/useDictationLanguage";
+import {
+  AUTOMATIC_DICTATION_LANGUAGE,
+  useDictationLanguage,
+} from "../assistant/voice/useDictationLanguage";
+import { DictationLanguagePicker } from "../assistant/voice/DictationLanguagePicker";
 import { voiceSettingsView } from "./voiceSettingsModel";
 
 const MODES = [
@@ -46,6 +50,7 @@ export function VoiceSettingsScreen({
   const { colors } = useTheme();
   const voiceEnabled = route?.params?.voice ?? true;
   const language = useDictationLanguage(true);
+  const [languagePicker, setLanguagePicker] = useState(false);
   const queryClient = useQueryClient();
   const { isConnected } = useNetworkStatus();
   const environment = useMemo(() => {
@@ -211,21 +216,27 @@ export function VoiceSettingsScreen({
       <SettingsGroup
         title={t("Dictation")}
         footer={t(
-          "The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending.",
+          "This language is used for message dictation and crew voice dictation. Voice conversations use their own language preference. Words dictated into a message can be edited before sending.",
         )}
       >
-        <SettingsMenuRow
+        <SettingsRow
           icon={Languages}
           label={t("Language")}
-          value={language.value}
-          options={language.options.map((option) =>
-            option.value === "automatic"
-              ? { ...option, label: t("Device language") }
-              : option,
-          )}
-          onChange={language.choose}
+          value={language.label}
+          detail={
+            language.value === AUTOMATIC_DICTATION_LANGUAGE
+              ? t("Device language")
+              : undefined
+          }
+          onPress={() => setLanguagePicker(true)}
         />
       </SettingsGroup>
+      {languagePicker && (
+        <DictationLanguagePicker
+          language={language}
+          onClose={() => setLanguagePicker(false)}
+        />
+      )}
     </SettingsPage>
   );
 }

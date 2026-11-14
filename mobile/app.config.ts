@@ -54,6 +54,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       buildNumber: r.iosBuildNumber,
       associatedDomains,
       infoPlist: {
+        UIBackgroundModes: ["audio", "fetch", "remote-notification"],
         ITSAppUsesNonExemptEncryption: false,
         UISupportedInterfaceOrientations: [
           "UIInterfaceOrientationPortrait",

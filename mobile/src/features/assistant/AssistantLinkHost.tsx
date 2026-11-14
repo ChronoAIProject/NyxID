@@ -84,8 +84,12 @@ export function ScopedAssistantLinkHost({
     };
   }, []);
   const open = useCallback(
-    (href: string, source?: number) => {
-      const value = assistantLinkTarget(href, firstPartyFrontendUrls());
+    (href: string, source?: number, bareAutolink = false) => {
+      const value = assistantLinkTarget(
+        href,
+        firstPartyFrontendUrls(),
+        bareAutolink,
+      );
       if (!value) return false;
       if (!available.current()) return true;
       trigger.current = source;

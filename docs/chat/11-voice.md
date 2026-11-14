@@ -2063,3 +2063,53 @@ audio-unit reactivation; a temporary AVAudioSession override alone can be reset
 by the next call. Connected headphones remain system-selected. App gain remains
 1.0 unless the person explicitly mutes playback. The Expo `withVoiceAudio` plugin
 preserves this setup when native files are regenerated.
+
+### Voice link, startup and mobile lifecycle contracts
+
+URLs and connect tokens are redacted from every model-facing context: summary
+input and context fallback in [speech.rs](../../backend/src/services/voice/speech.rs),
+initial history in [runtime.rs](../../backend/src/services/voice/runtime.rs), and
+every Responses function output in [responses.rs](../../backend/src/services/voice/responses.rs).
+Direct MCP execution in [tools.rs](../../backend/src/services/voice/tools.rs) alone
+calls [links.rs::present](../../backend/src/services/voice/links.rs) to publish
+frontend-origin links once per `(session, tool call)`. The exact URLs appear in
+one assistant message bounded as `<url>`, with `via: "voice"` and no voice segment
+metadata. Publication never enters channel delivery, even when the home thread
+has `reply_channel`. The model receives placeholders; publication failure is
+reported as not sent, so it must not claim the link reached the chat.
+
+Admission onward runs in a detached task through `runtime.rs::deliver_start`,
+including [grok_runtime.rs::prepare](../../backend/src/services/voice/grok_runtime.rs)
+and Agent Key starts. An undelivered successful start requests End through
+[session.rs::end_undelivered_start](../../backend/src/services/voice/session.rs)
+with the existing `client_lost` reason; provider closure uses `runtime.rs::drain_close`.
+Late startup failures after the caller leaves are recorded as `ClientDisconnected`
+(499/8012), never as an HTTP server fault. A replica crash between provider create
+and `provider_session_id` persistence remains an unknown provider outcome: without
+that id recovery cannot close the provider and holds the live slot until the call
+deadline to avoid double-paid sessions. Closing this crash window requires a
+recoverable provider identity recorded before create, such as a provider-supported
+idempotency key or handle that can be looked up or closed.
+
+Connected iOS native WebRTC (`openai_live`) calls retain their session, audio and
+transcript in the background with the `audio` UIBackgroundMode.
+[useNativeVoice.ts](../../mobile/src/features/assistant/voice/useNativeVoice.ts)
+resyncs on foreground; only definitive server state ends the call. Errors,
+timeouts and stale revisions are inconclusive. Android, WebView/Grok and
+still-connecting calls end with a specific localized reason. In
+[AssistantVoiceClient.ts](../../mobile/src/features/assistant/voice/AssistantVoiceClient.ts),
+End is sent before media teardown. A dispatched start POST keeps its own deadline
+and is never aborted by local End; `closeLateStart` ends the exact late session.
+Owned-session recovery re-sends End when needed and polls that session with
+backoff while mounted and active, bounded to 45 seconds per recovery attempt.
+Foreign conflicts require explicit takeover; recovery never auto-ends them.
+
+Web and mobile use [voiceMessageGroups.ts](../../shared/voiceMessageGroups.ts) to
+group consecutive same-session assistant voice segments for presentation only;
+stored rows remain unchanged. User rows, different sessions, failed/error rows,
+transient captions and any row without a segment id break the run, including
+receipts, system messages, cards, approvals, task results and published links.
+`turn_id`, `sealed` and `complete` do not split a run. The first segment keeps the
+row identity; one author/header and footer cover the group. Copy joins segments
+with paragraph breaks; feedback and Report target the latest segment with saved
+feedback, otherwise the last segment.

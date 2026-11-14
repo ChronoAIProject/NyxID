@@ -1,0 +1,132 @@
+[
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example。",
+    "suffix": "。",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example，",
+    "suffix": "，",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example、",
+    "suffix": "、",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example！",
+    "suffix": "！",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example？",
+    "suffix": "？",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example；",
+    "suffix": "；",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example：",
+    "suffix": "：",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example）",
+    "suffix": "）",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example」",
+    "suffix": "」",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example』",
+    "suffix": "』",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example】",
+    "suffix": "】",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example》",
+    "suffix": "》",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example”",
+    "suffix": "”",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example，然后继续。",
+    "suffix": "，然后继续。",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example…",
+    "suffix": "…",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example・",
+    "suffix": "・",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example！",
+    "suffix": "！",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "（https://x.y/z）",
+    "suffix": "）",
+    "hrefs": ["https://x.y/z"]
+  },
+  {
+    "text": "www.example.com/path。然后",
+    "suffix": "。然后",
+    "hrefs": []
+  },
+  {
+    "text": "https://x.y/z.",
+    "suffix": ".",
+    "hrefs": ["https://x.y/z"]
+  },
+  {
+    "text": "(https://x.y/z)",
+    "suffix": ")",
+    "hrefs": ["https://x.y/z"]
+  },
+  {
+    "text": "https://x.y/z?q=1&a=b。",
+    "suffix": "。",
+    "hrefs": ["https://x.y/z?q=1&a=b"]
+  },
+  {
+    "text": "生产环境链接示例：https://nyxid.ai/connect/bot/nyx_bcl_example。另一个：https://nyxid.ai/connect/nyx_clk_example，然后继续。括号（https://x.y/z）结束。",
+    "hrefs": [
+      "https://nyxid.ai/connect/bot/nyx_bcl_example",
+      "https://nyxid.ai/connect/nyx_clk_example",
+      "https://x.y/z"
+    ]
+  },
+  {
+    "text": "https://x.y/one，https://x.y/two，然后继续。",
+    "hrefs": ["https://x.y/one", "https://x.y/two"]
+  },
+  {
+    "text": "https://x.y/one。http://example.com/unsafe，然后https://x.y/two。",
+    "hrefs": ["https://x.y/one", "https://x.y/two"]
+  },
+  {
+    "text": "https://x.y/one。https://x.y/two?q=1&a=b.",
+    "hrefs": ["https://x.y/one", "https://x.y/two?q=1&a=b"]
+  }
+]

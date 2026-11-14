@@ -12,6 +12,16 @@ import type {
 
 type Element = { type: unknown; props: Record<string, any> };
 type Listener = (event?: any) => void;
+
+function permissionResponse(status: "granted" | "denied" | "undetermined") {
+  return {
+    status,
+    granted: status === "granted",
+    canAskAgain: status !== "denied",
+    expires: "never" as const,
+    restricted: false,
+  };
+}
 const CHAT = `nyxa-${"a".repeat(32)}`;
 const agent = {
   id: "nyxbot",
@@ -57,7 +67,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
   let generation = 0;
   const listeners = new Set<(state: string) => void>();
   const nativeListeners = new Map<string, Set<Listener>>();
-  const permission = deferred<{ granted: boolean }>();
+  const permission = deferred<ReturnType<typeof permissionResponse>>();
   const pendingHistory: ReturnType<
     typeof deferred<ReturnType<typeof historySchema.parse>>
   >[] = [];
@@ -69,7 +79,9 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
   };
   const native = {
     setAudioSessionActiveIOS: () => {},
-    permissionStatus: { granted: false },
+    permissionStatus: permissionResponse("undetermined"),
+    getMicrophonePermissionsAsync: async () => native.permissionStatus,
+    getSpeechRecognizerPermissionsAsync: async () => native.permissionStatus,
     getPermissionsAsync: async () => native.permissionStatus,
     requestPermissionsAsync: () => {
       events.push("permission");
@@ -114,6 +126,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       ]),
     ),
     "react-native": {
+      Settings: { get: () => ["en-US"] },
       useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
       Platform: { OS: "ios" },
       AppState: {
@@ -166,6 +179,17 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       },
     },
     "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
+    "./voice/useDictationLanguage": {
+      useDictationLanguage: () => ({
+        label: "English",
+        options: [],
+        suggested: [],
+        choose() {},
+      }),
+    },
+    "./voice/DictationLanguagePicker": {
+      DictationLanguagePicker: "DictationLanguagePicker",
+    },
     "./voice/dictationLanguage": {
       savedDictationLanguage: async () => "en-US",
     },
@@ -327,7 +351,7 @@ test("saved and new chat microphone taps retain pending permission and start aft
     await x.h.settle();
     assert.deepEqual(x.events, ["permission"]);
     x.app("inactive");
-    x.permission.resolve({ granted: true });
+    x.permission.resolve(permissionResponse("granted"));
     await x.h.settle();
     assert.deepEqual(x.events, ["permission"]);
     x.refresh();
@@ -357,7 +381,8 @@ test("saved and new chat permission denial remains actionable during a foregroun
     await x.h.settle();
     assert.deepEqual(x.events, ["permission"]);
     x.app("inactive");
-    x.permission.resolve({ granted: false });
+    x.native.permissionStatus = permissionResponse("denied");
+    x.permission.resolve(permissionResponse("denied"));
     await x.h.settle();
     x.refresh();
     x.app("active");
@@ -382,7 +407,7 @@ test("saved and new chat permission denial remains actionable during a foregroun
 test("already granted microphone permission starts saved and new chat dictation on the first tap", async () => {
   for (const saved of [true, false]) {
     const x = await setup(saved);
-    x.native.permissionStatus = { granted: true };
+    x.native.permissionStatus = permissionResponse("granted");
     x.h.value().button.props.onPress();
     await x.h.settle();
     assert.deepEqual(x.events, ["start"]);
@@ -441,7 +466,7 @@ test("background, navigation, account and scope changes still cancel a saved cha
     if (action === "blur") x.blur();
     if (action === "account") x.account();
     if (action === "scope") x.scope();
-    x.permission.resolve({ granted: true });
+    x.permission.resolve(permissionResponse("granted"));
     await x.h.settle();
     assert.equal(x.h.value().dictation.phase, "idle");
     assert.deepEqual(x.events, ["permission"]);
@@ -476,7 +501,7 @@ test("a foreground history response with an active turn cancels pending permissi
   await x.release(true);
   assert.equal(x.h.value().dictation.phase, "idle");
   assert.equal(x.h.value().button.props.disabled, true);
-  x.permission.resolve({ granted: true });
+  x.permission.resolve(permissionResponse("granted"));
   await x.h.settle();
   assert.deepEqual(x.events, ["permission"]);
   assert.deepEqual(x.inserted, []);

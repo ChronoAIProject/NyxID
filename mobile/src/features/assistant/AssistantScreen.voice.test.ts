@@ -17,6 +17,7 @@ import {
   type AssistantMessage,
 } from "./assistantTypes";
 import { voiceSnapshotSchema } from "./voice/voiceContracts";
+import voiceGroupFixtures from "../../../../shared/voice-message-groups.json";
 import { VOICE_RECOVERY_TIMEOUT_MS } from "./voice/voiceRequestDeadline";
 
 // Exercise the screen's real handlers and render conditions. Native UI, network,
@@ -656,6 +657,106 @@ function liveVoice(text: string, sealed = false) {
     tasks: [],
   });
 }
+
+test("persisted voice segments render one Copy/date footer and Report targets the latest feedback anchor", () => {
+  for (const savedFeedback of [false, true]) {
+    const x = setup(A);
+    const fixture = voiceGroupFixtures[0]!;
+    x.assistant.history!.messages = fixture.rows.map((row, index) =>
+      messageSchema.parse({
+        ...row,
+        seq: index + 6,
+        role: "assistant",
+        status: "completed",
+        error_code: null,
+        created_at: `2026-11-09T01:00:0${index}Z`,
+        via: "voice",
+        ...(savedFeedback && index === 1 ? { feedback: { vote: "down" } } : {}),
+      }),
+    );
+    x.harness.render();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    const footers = rendered.filter(
+      (node) => node.type === "AssistantMessageFooter",
+    );
+    assert.equal(footers.length, 1);
+    assert.equal(footers[0]!.props.text, fixture.copy![0]);
+    assert.equal(footers[0]!.props.timestamp, "2026-11-09T01:00:00Z");
+    assert.equal(footers[0]!.props.report.messageId, savedFeedback ? "7" : "8");
+    assert.equal(footers[0]!.props.report.id, x.assistant.conversationId);
+    assert.equal(x.assistant.history!.messages.length, 3);
+    x.harness.unmount();
+  }
+});
+
+test("appending voice parts keeps the mobile row key stable and Report follows its anchor", () => {
+  const x = setup(A);
+  const rows = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: `2026-11-09T01:00:0${index}Z`,
+      via: "voice",
+    }),
+  );
+  x.assistant.history!.messages = rows.slice(0, 1);
+  x.harness.render();
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const key = list().props.keyExtractor(list().props.data[0]);
+  x.assistant.history!.messages = rows;
+  x.harness.render();
+  assert.equal(list().props.keyExtractor(list().props.data[0]), key);
+  const rendered = elements(
+    expand(list().props.renderItem({ item: list().props.data[0], index: 0 })),
+  );
+  assert.equal(
+    rendered.find((node) => node.type === "AssistantMessageFooter")!.props
+      .report.messageId,
+    "8",
+  );
+  x.harness.unmount();
+});
+test("voice footers hide unsealed speech but include sealed disconnect partial groups", () => {
+  for (const sealed of [false, true]) {
+    const x = setup(A);
+    x.assistant.history!.messages = voiceGroupFixtures[0]!.rows
+      .slice(0, 2)
+      .map((row, index) =>
+        messageSchema.parse({
+          ...row,
+          seq: index + 6,
+          role: "assistant",
+          status: "completed",
+          error_code: null,
+          created_at: `2026-11-09T01:00:0${index}Z`,
+          via: "voice",
+          voice: {
+            ...row.voice,
+            sealed: index === 0 || sealed,
+            complete: index === 0,
+          },
+        }),
+      );
+    x.harness.render();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    assert.equal(
+      rendered.filter((node) => node.type === "AssistantMessageFooter").length,
+      sealed ? 1 : 0,
+    );
+    x.harness.unmount();
+  }
+});
 
 test("live speech grows in the main chat and sealed history replaces it once", async () => {
   const x = setup(A);

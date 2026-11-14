@@ -582,7 +582,7 @@ impl Executions {
             // its late result. Ordinary Stop owns upstream cancellation.
             self.finish(state, delegation, true).await?;
         }
-        Ok(result)
+        Ok(super::links::present(state, call, call_id, result).await)
     }
 
     pub(super) async fn finish(

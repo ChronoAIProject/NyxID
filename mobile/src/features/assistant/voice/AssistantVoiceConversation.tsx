@@ -1151,7 +1151,18 @@ function VoiceConversation({
             ) : null}
           </>
         ) : null}
-        {needsRetry && showPreCall ? (
+        {voice.microphonePermission && showPreCall ? (
+          <ActionButton
+            label={t("Open Settings")}
+            variant="secondary"
+            compact
+            onPress={voice.openSettings}
+          />
+        ) : null}
+        {needsRetry &&
+        showPreCall &&
+        (!voice.microphonePermission ||
+          voice.microphonePermission.canAskAgain) ? (
           <ActionButton
             label="Try again"
             variant="secondary"

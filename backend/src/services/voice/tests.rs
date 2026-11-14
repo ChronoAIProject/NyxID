@@ -18,6 +18,16 @@ pub(super) async fn setup(
     VoiceSession,
 ) {
     let db = connect_transaction_test_database(name).await;
+    setup_in_db(db).await
+}
+
+pub(super) async fn setup_in_db(
+    db: mongodb::Database,
+) -> (
+    crate::AppState,
+    crate::models::assistant_conversation::AssistantConversation,
+    VoiceSession,
+) {
     engine::ensure_indexes(&db).await.unwrap();
     super::super::assistant_voice::ensure_indexes(&db)
         .await

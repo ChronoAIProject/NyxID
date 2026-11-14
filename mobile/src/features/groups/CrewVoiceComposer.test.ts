@@ -60,6 +60,7 @@ function setup(withNativeRecognition = false) {
         jsxs: (type: unknown, props: unknown) => ({ type, props }),
       },
       "react-native": {
+        Settings: { get: () => ["en-US"] },
         Platform: { OS: "ios" },
         ...Object.fromEntries(
           ["Pressable", "ScrollView", "TextInput", "Text", "View"].map((n) => [

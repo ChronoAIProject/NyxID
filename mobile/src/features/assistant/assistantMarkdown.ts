@@ -1,3 +1,8 @@
+import {
+  bareAutolinkBoundary,
+  bareAutolinkTarget,
+  splitBareAutolinks,
+} from "./autolinkPunctuation";
 import type MarkdownIt from "markdown-it";
 import imageRule from "markdown-it/lib/rules_inline/image";
 import footnote from "markdown-it-footnote";
@@ -13,7 +18,9 @@ export const assistantMarkdownOptions = {
 export function safeAssistantLinkUrl(
   url: string,
   frontendUrl: string | readonly string[] = firstPartyFrontendUrls(),
+  bareAutolink = false,
 ): string | null {
+  if (bareAutolink) url = bareAutolinkTarget(url);
   if (url.trim().startsWith("#")) return url.trim();
   const internal = assistantLinkTarget(url, frontendUrl);
   if (internal) return internal.href;
@@ -35,6 +42,48 @@ export function safeAssistantLinkUrl(
 export function configureAssistantMarkdown(parser: MarkdownIt): MarkdownIt {
   parser.validateLink = (url) => safeAssistantLinkUrl(url) !== null;
   parser.use(footnote);
+  parser.core.ruler.after("linkify", "cjk_autolink_punctuation", (state) => {
+    for (const token of state.tokens) {
+      const children = token.children;
+      if (!children) continue;
+      for (let index = 0; index < children.length - 2; index++) {
+        const open = children[index]!;
+        const text = children[index + 1]!;
+        const close = children[index + 2]!;
+        if (
+          open.type !== "link_open" ||
+          open.markup !== "linkify" ||
+          text.type !== "text" ||
+          close.type !== "link_close"
+        )
+          continue;
+        open.attrSet("data-nyx-bare-autolink", "true");
+        const boundary = bareAutolinkBoundary(text.content);
+        if (boundary === text.content.length) continue;
+        const replacements = splitBareAutolinks(text.content).flatMap(
+          (part) => {
+            const label = new state.Token("text", "", 0);
+            label.content = part.text;
+            if (!part.href) return [label];
+            const href = state.md.normalizeLink(part.href);
+            if (!state.md.validateLink(href)) return [label];
+            const link = new state.Token("link_open", "a", 1);
+            link.markup = "linkify";
+            link.info = "auto";
+            link.attrSet("href", href);
+            link.attrSet("data-nyx-bare-autolink", "true");
+            const end = new state.Token("link_close", "a", -1);
+            end.markup = "linkify";
+            end.info = "auto";
+            return [link, label, end];
+          },
+        );
+        children.splice(index, 3, ...replacements);
+        index += replacements.length - 1;
+      }
+    }
+    return true;
+  });
   parser.inline.ruler.disable("footnote_inline");
   // Parse image labels even when their URL is unsafe. The native renderer
   // literalizes them, matching the web sanitizer, without fetching any bytes.

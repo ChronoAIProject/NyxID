@@ -1,3 +1,4 @@
+import { groupVoiceMessages, type GroupedVoiceMessage } from "./voice/voiceMessageGroups";
 import {
   ChatComposerDock,
   ChatIconButton as IconButton,
@@ -382,7 +383,7 @@ export function AssistantScreen({
   // Caption IDs own voice messages. Microphone energy also includes noise and
   // playback, so it must not create a separate transcription placeholder.
   const messages = useMemo(
-    () => mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot),
+    () => groupVoiceMessages(mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot)),
     [historyMessages, voiceSnapshot],
   );
   const voiceHistory = useRef(historyMessages);
@@ -944,7 +945,7 @@ export function AssistantScreen({
     item,
     index,
   }: {
-    item: VoiceTranscriptMessage;
+    item: GroupedVoiceMessage;
     index: number;
   }) {
     const isUser = item.role === "user";
@@ -992,7 +993,10 @@ export function AssistantScreen({
         {index > 0 &&
         !item.voiceTransient &&
         !messages[index - 1]?.voiceTransient &&
-        item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
+        item.seq >
+          (messages[index - 1]?.voiceGroup?.at(-1)?.seq ??
+            messages[index - 1]?.seq ??
+            item.seq) + 1 ? (
           <Notice message="Messages between these pages haven't loaded yet. Load missing messages to restore them." />
         ) : null}
         {resetHere ? (
@@ -1179,9 +1183,9 @@ export function AssistantScreen({
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
     const footer =
-      !item.voiceTransient && !voiceLabel ? (
+      !item.voiceTransient && item.voice?.sealed !== false ? (
         <AssistantMessageFooter
-          key={`${assistant.conversationId}:${item.id}`}
+          key={`${assistant.conversationId}:${item.anchorId ?? item.id}`}
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
           timestamp={item.created_at}
           user={isUser}
@@ -1192,7 +1196,7 @@ export function AssistantScreen({
               ? {
                   kind: "conversation",
                   id: assistant.conversationId,
-                  messageId: item.id,
+                  messageId: item.anchorId ?? item.id,
                   reported: isReported(item.feedback),
                 }
               : undefined

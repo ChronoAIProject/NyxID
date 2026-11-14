@@ -1,7 +1,7 @@
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { waitForVoiceForeground } from "./voicePermission";
 import { useEffect, useRef, useState } from "react";
-import { AppState, Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import { Camera } from "expo-camera";
 import * as Crypto from "expo-crypto";
 import { getAuthEpoch } from "../../../lib/auth/authEpoch";
@@ -22,6 +22,9 @@ import type {
 
 type Environment = ReturnType<typeof nativeVoiceEnvironment>;
 const MICROPHONE_PERMISSION_TIMEOUT_MS = 60_000;
+// 30s heartbeat expiry + the server's 7s close budget, with 8s scheduling margin.
+export const OWNED_CALL_RECOVERY_MS = 45_000;
+type MicrophonePermission = { kind: "denied"; canAskAgain: boolean };
 type PermissionAttempt = {
   generation: number;
   androidBackgroundAllowed: boolean;
@@ -34,6 +37,7 @@ type RecoveryTarget = {
   thread?: string;
   unknown: boolean;
   pendingStart?: boolean;
+  endedHere?: boolean;
 };
 // Only safe session metadata survives the surface. A new account or explicit
 // recovery action fences late completions from an older client.
@@ -61,6 +65,12 @@ export function useNativeVoice(
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
   const [error, setError] = useState<string>();
+  const [microphonePermission, setMicrophonePermission] =
+    useState<MicrophonePermission>();
+  const permissionState = useRef(microphonePermission);
+  permissionState.current = microphonePermission;
+  const nativeConnected = useRef(false);
+  const recoveryStarted = useRef<number | undefined>(undefined);
   const [recovery, setRecovery] = useState<VoiceStartRecovery>();
   const [conflict, setConflict] = useState<VoiceSession | null>(null);
   const [conflictThread, setConflictThread] = useState<string>();
@@ -178,6 +188,11 @@ export function useNativeVoice(
     busy.current = false;
     conflictBusy.current = false;
     const previous = current.current;
+    if (previous) {
+      recoveryStarted.current = Date.now();
+      conflictChecks.current = 0;
+    }
+    nativeConnected.current = false;
     current.current = null;
     // The client silences capture/output synchronously and owns the bounded
     // transport drain. Closing its media here would cut off session.closed.
@@ -195,6 +210,7 @@ export function useNativeVoice(
     if (previous?.pendingEnd)
       remember({
         session: previous.pendingEnd,
+        endedHere: true,
         thread: clientThread.current,
         unknown: false,
       });
@@ -264,7 +280,52 @@ export function useNativeVoice(
           permission.androidBackgroundAllowed = false;
           permission.androidBackgrounded = false;
         }
-        // Foreground resumes bounded recovery checks, never an audio call.
+        if (sameScope() && permissionState.current) {
+          const generation = ticket.current;
+          void Camera.getMicrophonePermissionsAsync()
+            .then((permission) => {
+              if (
+                !sameScope() ||
+                ticket.current !== generation ||
+                current.current
+              )
+                return;
+              if (permission.granted) {
+                setMicrophonePermission(undefined);
+                reportError();
+              } else {
+                setMicrophonePermission({
+                  kind: "denied",
+                  canAskAgain: permission.canAskAgain !== false,
+                });
+              }
+            })
+            .catch(() => {});
+        }
+        const client = current.current;
+        if (client && nativeConnected.current) {
+          const generation = ticket.current;
+          void client.resync().then((result) => {
+            if (
+              !sameScope() ||
+              current.current !== client ||
+              ticket.current !== generation ||
+              result !== "ended"
+            )
+              return;
+            stopRef.current();
+            reportError(
+              translate.current(
+                "The call ended while NyxID was in the background. Start a new call.",
+              ),
+            );
+          });
+        }
+        if (retainedRecovery?.endedHere) {
+          recoveryStarted.current = Date.now();
+          conflictChecks.current = 0;
+        }
+        // Foreground resumes exact-session recovery; it never creates a call.
         if (sameScope()) setConflictCheckAttempt((attempt) => attempt + 1);
         return;
       }
@@ -279,10 +340,29 @@ export function useNativeVoice(
         permission.androidBackgrounded = true;
         return;
       }
+      if (
+        Platform.OS === "ios" &&
+        nativeConnected.current &&
+        current.current &&
+        latestSnapshot.current?.session.state === "active" &&
+        !latestSnapshot.current.session.end_requested
+      )
+        return;
       if (!(state === "inactive" && awaitingPermission)) {
+        const wasConnecting =
+          busy.current || (!nativeConnected.current && !latestSnapshot.current);
         const hadVoiceWork = busy.current || current.current !== null;
         stopRef.current();
-        if (hadVoiceWork) reportError();
+        if (hadVoiceWork)
+          reportError(
+            translate.current(
+              wasConnecting
+                ? "The call ended because NyxID went to the background while it was still connecting."
+                : Platform.OS === "android"
+                  ? "The call ended because NyxID went to the background. Android can't keep the microphone on in the background."
+                  : "The call ended because this voice service can't keep the microphone on in the background.",
+            ),
+          );
       }
     });
     return () => {
@@ -305,21 +385,33 @@ export function useNativeVoice(
       snapshot.session.state !== "failed" &&
       (!conflict ||
         (conflict.id === snapshot.session.id && conflictThread === thread));
+    const ownedRecovery = !!retainedRecovery?.endedHere || !!ownedDisconnected;
     if (
       (!conflict && !conflictUnknown && !ownedDisconnected) ||
-      conflictChecks.current >= 6
+      (ownedRecovery
+        ? recoveryStarted.current !== undefined &&
+          Date.now() - recoveryStarted.current >= OWNED_CALL_RECOVERY_MS
+        : conflictChecks.current >= 6)
     )
       return;
-    const timer = setTimeout(() => {
-      if (
-        AppState.currentState === "active" &&
-        !conflictBusy.current &&
-        !draining.current
-      ) {
-        conflictChecks.current++;
-        void checkConflict(false);
-      }
-    }, 500);
+    recoveryStarted.current ??= Date.now();
+    const timer = setTimeout(
+      () => {
+        if (
+          AppState.currentState === "active" &&
+          (!ownedRecovery ||
+            Date.now() - recoveryStarted.current! < OWNED_CALL_RECOVERY_MS) &&
+          !conflictBusy.current &&
+          !draining.current
+        ) {
+          conflictChecks.current++;
+          void checkConflict(false);
+        }
+      },
+      ownedRecovery
+        ? Math.min(500 * 2 ** Math.min(conflictChecks.current, 3), 4000)
+        : 500,
+    );
     return () => clearTimeout(timer);
   }, [
     conflict,
@@ -412,6 +504,14 @@ export function useNativeVoice(
         Camera.getMicrophonePermissionsAsync(),
       );
       if (!valid()) return;
+      if (!permission.granted && permission.canAskAgain === false) {
+        setMicrophonePermission({ kind: "denied", canAskAgain: false });
+        throw new Error(
+          translate.current(
+            "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
+          ),
+        );
+      }
       if (!permission.granted) {
         const attempt: PermissionAttempt = {
           generation,
@@ -435,12 +535,17 @@ export function useNativeVoice(
           clearTimeout(attempt.requestTimer);
           attempt.requestTimer = undefined;
           if (!valid()) return;
-          if (!permission.granted)
+          if (!permission.granted) {
+            setMicrophonePermission({
+              kind: "denied",
+              canAskAgain: permission.canAskAgain !== false,
+            });
             throw new Error(
               translate.current(
                 "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
               ),
             );
+          }
           await waitForVoiceForeground(AppState, controller.signal, valid, {
             allowInitialBackground: attempt.androidBackgroundAllowed,
           });
@@ -456,6 +561,7 @@ export function useNativeVoice(
         throw new Error(
           translate.current("Keep NyxID open to start a voice call."),
         );
+      setMicrophonePermission(undefined);
       const nextMedia = new NativeVoiceMedia();
       const owner = claimRecovery();
       let connectedOnce = false;
@@ -498,6 +604,8 @@ export function useNativeVoice(
         onReady: () => {
           if (!valid() || current.current !== next) return;
           connectedOnce = true;
+          nativeConnected.current =
+            Platform.OS === "ios" && nextMedia.usesNativeMedia;
           // The call clock starts when the provider is truly ready, not at Start.
           setConnectedAt((previous) => previous ?? Date.now());
           setStarting(false);
@@ -521,6 +629,7 @@ export function useNativeVoice(
               session,
               thread: session ? (conversationId ?? thread) : undefined,
               unknown,
+              endedHere: !!session && next.pendingEnd?.id === session.id,
             },
             owner,
           );
@@ -533,6 +642,7 @@ export function useNativeVoice(
               thread: session ? (conversationId ?? thread) : undefined,
               unknown,
               pendingStart: !session && next.pendingStart,
+              endedHere: !!session && next.pendingEnd?.id === session.id,
             },
             owner,
           );
@@ -542,7 +652,12 @@ export function useNativeVoice(
           if (current.current === next) current.current = null;
           if (next.pendingEnd) {
             remember(
-              { session: next.pendingEnd, thread, unknown: false },
+              {
+                session: next.pendingEnd,
+                thread,
+                unknown: false,
+                endedHere: true,
+              },
               owner,
             );
             conflictChecks.current = 0;
@@ -592,7 +707,12 @@ export function useNativeVoice(
     const cleanup = stopLocal();
     const generation = ticket.current;
     if (sameScope() && previous?.pendingEnd) {
-      remember({ session: previous.pendingEnd, thread, unknown: false });
+      remember({
+        session: previous.pendingEnd,
+        thread,
+        unknown: false,
+        endedHere: true,
+      });
       conflictChecks.current = 0;
     }
     await cleanup;
@@ -600,6 +720,7 @@ export function useNativeVoice(
       if (!previous.pendingStart)
         remember({
           session: previous.pendingEnd ?? null,
+          endedHere: !!previous.pendingEnd,
           thread: previous.pendingEnd ? thread : undefined,
           unknown: false,
         });
@@ -639,7 +760,12 @@ export function useNativeVoice(
     const generation = ++ticket.current;
     const controller = new AbortController();
     pending.current = controller;
-    const target = latestConflict.current;
+    const target = {
+      ...latestConflict.current,
+      endedHere:
+        retainedRecovery?.session?.id === latestConflict.current.session?.id &&
+        retainedRecovery?.endedHere,
+    };
     const localSession = latestSnapshot.current?.session;
     // A completed client cleanup can clear recovery after local End has
     // fenced its final snapshot. Retain the owned snapshot's exact identity
@@ -649,7 +775,7 @@ export function useNativeVoice(
       localSession &&
       localSession.state !== "closed" &&
       localSession.state !== "failed"
-        ? { ...target, session: localSession, thread }
+        ? { ...target, session: localSession, thread, endedHere: true }
         : target;
     const owner = claimRecovery();
     remember(priorTarget, owner);
@@ -659,13 +785,42 @@ export function useNativeVoice(
     setConfirmedEnded(false);
     if (manual) {
       conflictChecks.current = 0;
+      recoveryStarted.current = Date.now();
       reportError();
     }
     try {
       return await withVoiceRequestDeadline(controller, async () => {
+        const discovered =
+          priorTarget.endedHere &&
+          typeof environment.api.accountActive === "function"
+            ? await discoverActiveVoiceCall(
+                environment.api,
+                priorTarget.thread ?? thread,
+                controller.signal,
+              )
+                .then((active) => ({ active }))
+                .catch(() => undefined)
+            : undefined;
+        if (!valid()) return false;
+        if (
+          discovered?.active &&
+          discovered.active.session.id !== priorTarget.session?.id
+        ) {
+          remember(
+            {
+              session: discovered.active.session,
+              thread: discovered.active.conversationId,
+              unknown: false,
+            },
+            owner,
+          );
+          reportStatusError();
+          return false;
+        }
+        // An empty account slot must not bypass exact-session End delivery.
         if (priorTarget.session && priorTarget.thread) {
           try {
-            const prior = voiceSessionSchema.parse(
+            let prior = voiceSessionSchema.parse(
               await environment.api.status(
                 priorTarget.thread,
                 priorTarget.session.id,
@@ -688,6 +843,59 @@ export function useNativeVoice(
                   (prior.generation === value.generation &&
                     prior.control_revision >= value.control_revision)),
             );
+            if (
+              currentStatus &&
+              priorTarget.endedHere &&
+              prior.state !== "closed" &&
+              prior.state !== "failed"
+            ) {
+              if (!prior.end_requested) {
+                const ended = voiceSessionSchema.parse(
+                  await environment.api.control(
+                    priorTarget.thread,
+                    prior.id,
+                    {
+                      command_id: Crypto.randomUUID(),
+                      expected_revision: prior.control_revision,
+                      action: "end",
+                    },
+                    controller.signal,
+                  ),
+                );
+                if (!valid() || ended.id !== prior.id) return false;
+                prior = ended;
+                remember(
+                  {
+                    session: ended,
+                    thread: priorTarget.thread,
+                    unknown: false,
+                    endedHere: true,
+                  },
+                  owner,
+                );
+              } else {
+                remember(
+                  {
+                    session: prior,
+                    thread: priorTarget.thread,
+                    unknown: false,
+                    endedHere: true,
+                  },
+                  owner,
+                );
+              }
+              if (prior.state !== "closed" && prior.state !== "failed") {
+                if (discovered && !discovered.active && prior.end_requested) {
+                  // The exact End is acknowledged and account admission proves
+                  // the slot is empty; keep the transcript's last real snapshot.
+                  remember({ session: null, unknown: false }, owner);
+                  setConfirmedEnded(true);
+                  reportStatusError();
+                  return true;
+                }
+                return false;
+              }
+            }
             if (
               currentStatus &&
               (prior.state === "closed" || prior.state === "failed")
@@ -730,6 +938,9 @@ export function useNativeVoice(
             session: call?.session ?? null,
             thread: call?.conversationId,
             unknown: false,
+            endedHere:
+              !!priorTarget.endedHere &&
+              call?.session.id === priorTarget.session?.id,
           },
           owner,
         );
@@ -769,7 +980,12 @@ export function useNativeVoice(
     const generation = ++ticket.current;
     const owner = claimRecovery();
     remember(
-      { session: conflict, thread: conflictThread ?? thread, unknown: false },
+      {
+        session: conflict,
+        thread: conflictThread ?? thread,
+        unknown: false,
+        endedHere: true,
+      },
       owner,
     );
     const controller = new AbortController();
@@ -800,6 +1016,7 @@ export function useNativeVoice(
             remember(
               {
                 session: terminal ? null : next,
+                endedHere: !terminal,
                 thread: terminal ? undefined : (conflictThread ?? thread),
                 unknown: false,
               },
@@ -895,6 +1112,19 @@ export function useNativeVoice(
     speakerMuted,
     error,
     recovery,
+    microphonePermission,
+    openSettings: () => {
+      void Linking.openSettings().catch(() => {
+        if (sameScope())
+          reportError(
+            translate.current(
+              Platform.OS === "ios"
+                ? "Open Settings › NyxID Mobile › Microphone to allow microphone access."
+                : "Open Settings › Apps › NyxID Mobile › Permissions › Microphone to allow microphone access.",
+            ),
+          );
+      });
+    },
     conflict,
     conflictThread,
     conflictUnknown,

@@ -146,6 +146,7 @@ const TRANSPORT_START_TIMEOUT_MS = 15_000;
 /** One explicit call attempt. It never retries a POST or silently restarts audio. */
 export class AssistantVoiceClient {
   private readonly abort = new AbortController();
+  private readonly mediaAbort = new AbortController();
   private readonly clock: VoiceClientClock;
   private readonly randomId: () => string;
   private readonly unsubscribe: () => void;
@@ -201,11 +202,12 @@ export class AssistantVoiceClient {
     operation: (signal: AbortSignal) => Promise<T>,
     timeoutMs: number,
     lateResult?: (value: T) => void | Promise<void>,
+    lifetime: AbortSignal = this.abort.signal,
   ): Promise<T> {
     const controller = new AbortController();
     const interrupted = () => controller.abort();
-    this.abort.signal.addEventListener("abort", interrupted, { once: true });
-    if (this.abort.signal.aborted) controller.abort();
+    lifetime.addEventListener("abort", interrupted, { once: true });
+    if (lifetime.aborted) controller.abort();
     let request: Promise<T>;
     try {
       request = controller.signal.aborted
@@ -237,7 +239,7 @@ export class AssistantVoiceClient {
       // Completed media still belongs to the call's cancellation lifetime.
       // Successful stages retain their once-listener until dispose aborts it.
       if (controller.signal.aborted)
-        this.abort.signal.removeEventListener("abort", interrupted);
+        lifetime.removeEventListener("abort", interrupted);
     }
   }
 
@@ -245,8 +247,48 @@ export class AssistantVoiceClient {
     if (!raw || typeof raw !== "object" || !("session" in raw)) return;
     const owned = voiceSessionSchema.safeParse(raw.session);
     if (!owned.success) return;
+    if (this.endingSessions.has(owned.data.id)) return;
     this.session = owned.data;
     await this.endRemote(owned.data);
+  }
+
+  private async startOnServer(input: VoiceStartRequest): Promise<unknown> {
+    // Once dispatched, creation owns its deadline independently of local End.
+    // The late-result callback retains the exact identity for durable cleanup.
+    const request = this.startupOperation(
+      (signal) =>
+        this.options.api.start(this.options.conversationId, input, signal),
+      SERVER_START_TIMEOUT_MS,
+      (value) => this.closeLateStart(value),
+      new AbortController().signal,
+    );
+    void request
+      .then(
+        (value) => {
+          this.startInFlight = false;
+          if (this.closed) return this.closeLateStart(value);
+        },
+        async () => {
+          this.startInFlight = false;
+          if (this.closed && !this.session) await this.observeUncertainStart();
+        },
+      )
+      .catch(() => {});
+    let rejectInterrupted!: (error: Error) => void;
+    const interrupted = new Promise<never>((_, reject) => {
+      rejectInterrupted = reject;
+    });
+    const onAbort = () =>
+      rejectInterrupted(
+        Object.assign(new Error("cancelled"), { name: "AbortError" }),
+      );
+    this.abort.signal.addEventListener("abort", onAbort, { once: true });
+    if (this.abort.signal.aborted) onAbort();
+    try {
+      return await Promise.race([request, interrupted]);
+    } finally {
+      this.abort.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   async start(
@@ -273,6 +315,7 @@ export class AssistantVoiceClient {
         (signal) => this.options.media.prepare(protocol, signal),
         MEDIA_START_TIMEOUT_MS,
         () => this.options.media.close(),
+        this.mediaAbort.signal,
       );
       if (this.closed) {
         this.options.media.close();
@@ -285,21 +328,11 @@ export class AssistantVoiceClient {
       requested = true;
       this.startInFlight = true;
       step = "server";
-      const raw = await this.startupOperation(
-        (signal) =>
-          this.options.api.start(
-            this.options.conversationId,
-            {
-              client_request_id: this.randomId(),
-              preferences: requestedPreferences,
-              sdp_offer: protocol === "xai_realtime" ? "" : sdp,
-            },
-            signal,
-          ),
-        SERVER_START_TIMEOUT_MS,
-        (value) => this.closeLateStart(value),
-      );
-      this.startInFlight = false;
+      const raw = await this.startOnServer({
+        client_request_id: this.randomId(),
+        preferences: requestedPreferences,
+        sdp_offer: protocol === "xai_realtime" ? "" : sdp,
+      });
       step = "response";
       if (raw && typeof raw === "object" && "session" in raw) {
         const ownSession = voiceSessionSchema.safeParse(raw.session);
@@ -321,19 +354,21 @@ export class AssistantVoiceClient {
           () => this.options.media.answer(result.sdp_answer),
           MEDIA_START_TIMEOUT_MS,
           () => this.options.media.close(),
+          this.mediaAbort.signal,
         );
       } else this.started = true;
       if (this.closed) return;
       step = "transport";
       await this.openControls();
     } catch (error) {
+      // The dispatched POST still owns settlement and late-session cleanup.
+      if (this.closed && step === "server") return;
       if (
         !this.closed &&
         error instanceof Error &&
         error.name === "VoiceRequestTimeoutError"
       )
         this.fail(voiceStartError(error, step));
-      this.startInFlight = false;
       // A cancelled attempt can still return an owned session with a malformed
       // answer. Its validated identity remains enough to end that call, even
       // though the closed client must not publish errors or observe another one.
@@ -368,8 +403,6 @@ export class AssistantVoiceClient {
           conflict ? "conflict" : undefined,
         );
       }
-    } finally {
-      this.startInFlight = false;
     }
   }
 
@@ -751,6 +784,54 @@ export class AssistantVoiceClient {
     this.options.media.muteSpeaker(muted);
   }
 
+  /** Foreground verification preserves the existing peer, clock and captions. */
+  async resync(): Promise<"active" | "ended" | "inconclusive"> {
+    if (this.closed || !this.session || !this.options.api.status)
+      return "inconclusive";
+    const id = this.session.id;
+    try {
+      const observed = voiceSessionSchema.parse(
+        await this.startupOperation(
+          (signal) =>
+            this.options.api.status!(this.options.conversationId, id, signal),
+          5000,
+        ),
+      );
+      if (this.closed || this.session.id !== id) return "inconclusive";
+      if (observed.id !== id) return "ended";
+      const current = this.session;
+      if (
+        observed.generation < current.generation ||
+        (observed.generation === current.generation &&
+          observed.control_revision < current.control_revision)
+      )
+        return "inconclusive";
+      if (
+        observed.state === "closed" ||
+        observed.state === "failed" ||
+        observed.end_requested
+      )
+        return "ended";
+      if (observed.state !== "active") return "inconclusive";
+      this.session = observed;
+      this.snapshot = {
+        type: "snapshot",
+        ...this.snapshot,
+        session: observed,
+        captions: this.snapshot?.captions ?? [],
+        tasks: this.snapshot?.tasks ?? [],
+      };
+      this.options.onSnapshot(this.snapshot);
+      this.updateInput();
+      this.sendHeartbeat();
+      return "active";
+    } catch {
+      // The existing socket and heartbeat handling remain authoritative during
+      // offline, timed-out or otherwise inconclusive foreground status reads.
+      return "inconclusive";
+    }
+  }
+
   async resumeAudio() {
     if (this.closed) return;
     this.options.media.muteSpeaker(this.speakerMuted);
@@ -851,10 +932,18 @@ export class AssistantVoiceClient {
       this.options.media.flush();
       this.pendingAudio = undefined;
       this.options.media.beginEndDrain?.();
-    } else this.dispose();
+    } else {
+      this.closed = true;
+      this.ready = false;
+      // Cancel the foreground startup wait. Media has a separate lifetime:
+      // its native abort listeners run only after endRemote dispatches End.
+      this.abort.abort();
+    }
     this.endPromise = session
       ? this.endRemote(session, drain)
       : Promise.resolve();
+    // Invoke End while transport/media still exist, including Android and Grok.
+    if (!drain) this.dispose();
     return this.endPromise;
   }
 
@@ -1005,6 +1094,7 @@ export class AssistantVoiceClient {
     this.ready = false;
     this.releaseHeldInput();
     this.abort.abort();
+    this.mediaAbort.abort();
     this.clearReadinessTimeout();
     if (this.heartbeat !== undefined) this.clock.clearInterval(this.heartbeat);
     this.heartbeat = undefined;
