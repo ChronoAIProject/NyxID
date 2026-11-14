@@ -1784,7 +1784,7 @@ mod tests {
         assert!(value.get("client_name").is_none());
         assert!(value.get("redirect_uris").is_none());
         assert!(value.get("client_secret").is_none());
-        assert!(!value.to_string().contains("secret"));
+        assert!(value.to_string().find("secret").is_none());
     }
 
     #[tokio::test]

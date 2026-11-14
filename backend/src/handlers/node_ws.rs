@@ -443,27 +443,29 @@ async fn drain_queued_pending_ciphertexts(state: &AppState, node_id: &str) {
                 error = %err,
                 "Failed to mark queued pending credential ciphertext sent"
             );
-        } else if pending.fan_out_nodes.is_empty() {
-            log_rci_for_node_pending(
-                state.db.clone(),
-                None,
-                None,
-                &pending,
-                RciAuditEventKind::CiphertextReplayed {
-                    delivery: RciAuditDelivery::QueuedReplay,
-                },
-            );
         } else {
-            log_rci_for_node_fan_out_target(
-                state.db.clone(),
-                None,
-                None,
-                &pending,
-                node_id,
-                RciAuditEventKind::CiphertextReplayed {
-                    delivery: RciAuditDelivery::QueuedReplay,
-                },
-            );
+            if pending.fan_out_nodes.is_empty() {
+                log_rci_for_node_pending(
+                    state.db.clone(),
+                    None,
+                    None,
+                    &pending,
+                    RciAuditEventKind::CiphertextReplayed {
+                        delivery: RciAuditDelivery::QueuedReplay,
+                    },
+                );
+            } else {
+                log_rci_for_node_fan_out_target(
+                    state.db.clone(),
+                    None,
+                    None,
+                    &pending,
+                    node_id,
+                    RciAuditEventKind::CiphertextReplayed {
+                        delivery: RciAuditDelivery::QueuedReplay,
+                    },
+                );
+            }
         }
     }
 }

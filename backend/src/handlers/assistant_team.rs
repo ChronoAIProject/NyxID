@@ -1377,13 +1377,13 @@ async fn execute_tool_inner(
             "Shared agents cannot use account, team, machine or permission management tools. Ask the owner to change the agent's sharing settings.",
         );
     }
-    if !(chat.is_orchestrator()
-        || assistant_team_tools::is_agent_tool(name)
-        || (name == "list_channel_chats"
+    if !chat.is_orchestrator()
+        && !assistant_team_tools::is_agent_tool(name)
+        && !(name == "list_channel_chats"
             && chat
                 .org_agent_access
                 .as_ref()
-                .is_some_and(|a| a.shared().is_some())))
+                .is_some_and(|a| a.shared().is_some()))
     {
         return refusal(
             "orchestrator_only",

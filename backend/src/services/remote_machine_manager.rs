@@ -631,17 +631,19 @@ impl Manager {
                 .apply_if_uid(&intent, &uid)
                 .await
                 .map_err(api_error)?
-        } else if let Some(current) = self.api.get_for_intent(&intent).await.map_err(api_error)? {
-            current
         } else {
-            if let Some(dispatch) = &running_dispatch
-                && !self
-                    .running_dispatch_is_live(&machine, &effect.id, dispatch)
-                    .await?
-            {
-                return Ok(());
+            if let Some(current) = self.api.get_for_intent(&intent).await.map_err(api_error)? {
+                current
+            } else {
+                if let Some(dispatch) = &running_dispatch
+                    && !self
+                        .running_dispatch_is_live(&machine, &effect.id, dispatch)
+                        .await?
+                {
+                    return Ok(());
+                }
+                self.api.apply(&intent).await.map_err(api_error)?
             }
-            self.api.apply(&intent).await.map_err(api_error)?
         };
         if let Some(dispatch) = &running_dispatch {
             operations::finish_submission(&self.db, &effect.id, dispatch, Some(&observation))

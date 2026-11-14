@@ -262,7 +262,7 @@ pub(crate) async fn authority_with_access(
     }
     if agent.user_id != conversation.user_id
         && (conversation.guest_turn || conversation.channel.is_some())
-        && snapshot.is_none_or(|s| s.channel().is_none())
+        && !snapshot.is_some_and(|s| s.channel().is_some())
     {
         return Err(AppError::Forbidden(
             "Organization agents require a private member thread".into(),

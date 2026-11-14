@@ -1,3 +1,4 @@
+#![cfg(test)]
 pub(crate) async fn funded_fixture() -> Fixture {
     super::platform_inference_service::funded_test_fixture().await
 }

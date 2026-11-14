@@ -2268,7 +2268,7 @@ mod tests {
         assert!(value.get("display_name").is_none());
         assert!(value.get("slug").is_none());
         assert!(value.get("contact_email").is_none());
-        assert!(!value.to_string().contains("nyxid_"));
+        assert!(value.to_string().find("nyxid_").is_none());
     }
 
     #[test]
@@ -2291,7 +2291,7 @@ mod tests {
         .unwrap();
         assert!(value.get("display_name").is_none());
         assert!(value.get("email").is_none());
-        assert!(!value.to_string().contains("nyxid_"));
+        assert!(value.to_string().find("nyxid_").is_none());
     }
 
     // ── ORG_INVITE_MAX_TTL_HOURS constant ───────────────────────────────
