@@ -1,11 +1,15 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
-import type { ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { Fragment, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronsDownUp, ChevronsUpDown } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { AgentKeySummary } from "@/schemas/agent-key-login";
 import type { RequestedPermissions } from "@/schemas/login-request";
 import {
   connectionCovers,
   connectionSlug,
+  connectionOwner,
+  connectionOwnerLabel,
   effectiveLoginConnections,
   permissionOptions,
   requestedGroups,
@@ -18,6 +22,9 @@ import {
   LoginConnectionChoices,
   type ConnectionSelection,
 } from "./login-connection-choices";
+
+/** Above this many service rows, only rows that still need a choice open. */
+export const AUTO_EXPAND_ROW_LIMIT = 5;
 
 export function LoginAccessRows({
   apiKey,
@@ -37,6 +44,9 @@ export function LoginAccessRows({
   disabled: boolean;
 }) {
   const { t } = useUiTranslation();
+  // Rows the approver opened or closed (individually or via Collapse/Expand
+  // all) keep that choice; others follow their default.
+  const [openOverrides, setOpenOverrides] = useState<Record<string, boolean>>({});
   const required = requestedGroups(requested);
   const connections = effectiveLoginConnections(apiKey, inventory);
   const options = permissionOptions(inventory);
@@ -48,9 +58,7 @@ export function LoginAccessRows({
       ...comparison.extras.map((e) => e.group),
     ]),
   ];
-  return (
-    <div className="divide-y divide-border rounded-xl border border-border">
-      {groups.map((group) => {
+  const rows = groups.map((group) => {
         const matched = comparison.matched.filter((e) => e.group === group);
         const extras = comparison.extras.filter((e) => e.group === group);
         const accounts = connections.filter((c) => connectionSlug(c) === group);
@@ -84,9 +92,73 @@ export function LoginAccessRows({
             scope: o.value,
             description: o.description,
           }));
+        return {
+          group,
+          matched,
+          extras,
+          accounts,
+          name,
+          missing,
+          nyxidMissing,
+          requestedEntries,
+          // Short lists open fully; long lists open only rows awaiting a choice.
+          defaultOpen:
+            groups.length <= AUTO_EXPAND_ROW_LIMIT || missing || nyxidMissing,
+        };
+  });
+  const isOpen = (row: (typeof rows)[number]) =>
+    openOverrides[row.group] ?? row.defaultOpen;
+  const anyOpen = rows.some(isOpen);
+  const setAll = (open: boolean) =>
+    setOpenOverrides(Object.fromEntries(groups.map((g) => [g, open])));
+  return (
+    <div className="space-y-2">
+      <div className="sticky top-0 z-10 -mx-1 flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-card px-1 py-2 text-11">
+        <p className="font-medium">{t("Allow this device to access")}</p>
+        <span className="flex items-center gap-2">
+          <span
+            className={
+              comparison.extras.length ? "text-warning" : "text-muted-foreground"
+            }
+          >
+            {comparison.matches
+              ? comparison.exact
+                ? t("Exact match")
+                : t("Matched + {{count}} extra permissions", { count: comparison.extras.length })
+              : t("Selection needed")}
+          </span>
+          {rows.length > 1 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-expanded={anyOpen}
+              onClick={() => setAll(!anyOpen)}
+            >
+              {anyOpen ? (
+                <ChevronsDownUp aria-hidden="true" />
+              ) : (
+                <ChevronsUpDown aria-hidden="true" />
+              )}
+              {anyOpen ? t("Collapse all") : t("Expand all")}
+            </Button>
+          )}
+        </span>
+      </div>
+      <div className="divide-y divide-border rounded-xl border border-border">
+      {rows.map((row) => {
+        const { group, matched, extras, accounts, name, missing, nyxidMissing, requestedEntries } = row;
+        const open = isOpen(row);
         return (
           <details
             key={group}
+            open={open}
+            onToggle={(e) => {
+              const next = e.currentTarget.open;
+              if (next !== open) {
+                setOpenOverrides((prev) => ({ ...prev, [group]: next }));
+              }
+            }}
             className="group/row"
             aria-label={t("{{name}} access", { name: name })}
           >
@@ -100,7 +172,25 @@ export function LoginAccessRows({
                   {group === "nyxid"
                     ? apiKey.scopes
                     : accounts.length
-                      ? accounts.map((c) => c.label).join(", ")
+                      ? accounts.map((c, index) => {
+                          const owner = connectionOwner(c, inventory, apiKey);
+                          const unavailable =
+                            owner.kind === "organization" && owner.unavailable;
+                          return (
+                            <Fragment key={c.id}>
+                              {index > 0 && ", "}
+                              {c.label} ({connectionOwnerLabel(owner, t)})
+                              {unavailable && (
+                                <>
+                                  {" "}
+                                  <Badge variant="secondary" className="align-middle">
+                                    {t("No longer available")}
+                                  </Badge>
+                                </>
+                              )}
+                            </Fragment>
+                          );
+                        })
                       : missing
                         ? t("{{count}} requested permissions", { count: requestedEntries.length || 1 })
                         : t("{{value}} permissions", { value: matched.length + extras.length })}
@@ -149,6 +239,7 @@ export function LoginAccessRows({
           </details>
         );
       })}
+      </div>
     </div>
   );
 }

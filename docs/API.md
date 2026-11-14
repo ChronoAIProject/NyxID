@@ -662,6 +662,11 @@ Approve and deny use the same pending-status guard, so exactly one wins a concur
 #### Selectable Device Login V2
 
 Options expose per-key effective bindings and platform availability metadata.
+The shared device and Agent Key options response includes an additive, nullable
+`services[].owner_name` for organization-owned connections. It comes from the
+authorized service listing, including organization connections usable by members;
+`orgs` remains limited to organizations where the approver can manage Keys.
+Use `personal_owner_id` and each service's `owner_id` to identify personal rows.
 `allow_auto_connected_services` covers active same-owner rows with either
 `source=auto_provision` or `credential_binding=platform`, including future rows.
 This durable grant is disclosed as extra access; unreported provider scopes are

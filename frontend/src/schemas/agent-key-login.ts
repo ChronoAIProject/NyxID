@@ -27,6 +27,7 @@ export const resourceSummarySchema = z.object({
   id: z.string(),
   name: z.string(),
   owner_id: z.string(),
+  owner_name: z.string().nullable().optional(),
   auto_connected: z.boolean().optional(),
 });
 export const agentKeySummarySchema = z.object({

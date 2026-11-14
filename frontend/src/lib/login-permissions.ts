@@ -83,6 +83,49 @@ export function canonicalScope(slug: string, scope: string): string {
 export function connectionSlug(connection: LoginConnection) {
   return connection.catalog_service_slug ?? connection.slug;
 }
+export type ConnectionOwner =
+  | { kind: "personal" }
+  // `name` is absent only when no response names the organization; never
+  // substitute its raw ID. `unavailable` marks a connection an existing key
+  // still lists but the approver can no longer use.
+  | { kind: "organization"; name?: string; unavailable: boolean };
+
+// Organization choices only include Key administrators. Service ownership must
+// also cover ordinary members who can use a shared organization connection,
+// and existing keys that still list a connection the approver lost access to.
+export function connectionOwner(
+  connection: LoginConnection,
+  inventory: LoginInventory,
+  apiKey?: AgentKeySummary,
+): ConnectionOwner {
+  const service = inventory.options.services.find((s) => s.id === connection.id);
+  const keyService = apiKey?.allowed_services.find((s) => s.id === connection.id);
+  const ownerId = service?.owner_id ?? connection.owner_id ?? keyService?.owner_id;
+  if (!ownerId || ownerId === inventory.options.personal_owner_id) {
+    return { kind: "personal" };
+  }
+  const organization = inventory.options.orgs.find((o) => o.id === ownerId);
+  const ownerKey = inventory.options.keys.find((k) => k.owner_id === ownerId);
+  if (ownerKey?.owner_type === "personal") return { kind: "personal" };
+  const name =
+    service?.owner_name?.trim() ||
+    keyService?.owner_name?.trim() ||
+    organization?.name?.trim() ||
+    ownerKey?.owner_name?.trim() ||
+    undefined;
+  return { kind: "organization", name, unavailable: !service };
+}
+
+/** Owner text shown beside a connection: "Personal" or "Organization · Name". */
+export function connectionOwnerLabel(
+  owner: ConnectionOwner,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  if (owner.kind === "personal") return t("Personal");
+  return owner.name
+    ? t("Organization · {{org_name}}", { org_name: owner.name })
+    : t("Organization");
+}
 export function connectionReady(connection: LoginConnection, now = Date.now()) {
   return (
     connection.is_active &&
