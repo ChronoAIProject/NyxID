@@ -1125,19 +1125,23 @@ fn parse_mobile_app_return_schemes(raw: Option<&str>) -> Result<Vec<String>, &'s
         return Ok(Vec::new());
     }
     let mut schemes = Vec::new();
-    for value in raw.split(',').map(str::trim) {
-        if value.is_empty()
-            || value.len() > 32
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let value = value.to_ascii_lowercase();
+        if value.len() > 32
             || !value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
             || !value.bytes().all(|byte| {
                 byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte)
             })
-            || RESERVED.contains(&value)
+            || RESERVED.contains(&value.as_str())
         {
-            return Err("expected lowercase non-web mobile URL schemes");
+            return Err("expected non-web mobile URL schemes");
         }
-        if !schemes.iter().any(|existing| existing == value) {
-            schemes.push(value.to_string());
+        if !schemes.iter().any(|existing| existing == &value) {
+            schemes.push(value);
         }
     }
     Ok(schemes)
@@ -2704,6 +2708,17 @@ mod mobile_app_return_scheme_tests {
     #[test]
     fn mobile_return_schemes_validate_lowercase_custom_schemes() {
         assert_eq!(
+            parse_mobile_app_return_schemes(Some(",acme-nyx,,ACME-NYX,")).unwrap(),
+            ["acme-nyx"]
+        );
+        for empty in ["", " ", ", ,,"] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(empty))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
             parse_mobile_app_return_schemes(Some(" acme-nyx,foo+bar,acme-nyx ")).unwrap(),
             ["acme-nyx", "foo+bar"]
         );
@@ -2714,15 +2729,14 @@ mod mobile_app_return_scheme_tests {
                 .is_empty()
         );
         for invalid in [
-            "ACME-NYX",
+            "HTTPS",
             "1acme",
             "acme_nyx",
             "https",
             "exp",
             "javascript",
             "acme nyx",
-            "acme,",
-            ",acme",
+            "abcdefghijklmnopqrstuvwxyzabcdefg",
         ] {
             assert!(
                 parse_mobile_app_return_schemes(Some(invalid)).is_err(),
