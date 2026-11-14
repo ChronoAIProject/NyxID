@@ -6,6 +6,7 @@ import {
   subscribeAuthAccount,
 } from "../../lib/auth/authAccount";
 import { servicesApi } from "../../lib/api/servicesApi";
+import { isApiError } from "../../lib/api/ApiError";
 import { reconnectScopeOverride } from "./connectionPresentation";
 import {
   validateBrowserUrl,
@@ -176,7 +177,10 @@ export function useServiceOAuth(
     repairing = false,
   ) => {
     const accountId = getAuthAccountId();
-    if (!accountId || !entry.provider_config_id) return;
+    if (!accountId) return;
+    if (!entry.provider_config_id) {
+      throw new Error("This service has no OAuth provider configured.");
+    }
     const epoch = generation.current;
     const current = () =>
       epoch === generation.current && getAuthAccountId() === accountId;
@@ -200,14 +204,23 @@ export function useServiceOAuth(
     browserOpen.current = true;
     let browserStarted = false;
     try {
-      const response = await servicesApi.initiateOAuth(
+      let response;
+      const initiateArgs = [
         entry.provider_config_id,
         connection.id,
         connection.credential_source?.type === "org"
           ? connection.credential_source.org_id
           : undefined,
         repairing ? reconnectScopeOverride(connection, entry) : undefined,
-      );
+      ] as const;
+      try {
+        response = await servicesApi.initiateOAuth(...initiateArgs);
+      } catch (error) {
+        if (!isApiError(error) || error.statusCode !== 400) throw error;
+        response = await servicesApi.initiateOAuth(...initiateArgs, {
+          appReturnUri: null,
+        });
+      }
       if (!current()) return;
       const authorizationUrl = validateBrowserUrl(response.authorization_url);
       browserStarted = true;

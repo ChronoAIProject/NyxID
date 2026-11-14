@@ -21,6 +21,7 @@ import {
 } from "../lib/auth/authAccount";
 import { nativeNotificationUrl } from "../lib/notifications/notificationDestination";
 import { notificationPushSignalFromResponse } from "../lib/notifications/notificationPushSignal";
+import { isPushDeliverySuppressed } from "../lib/notifications/pushDeliveryState";
 
 type AccountBinding = { accountId: string | null; invalidated: boolean };
 
@@ -137,6 +138,10 @@ export function useNotificationNavigation(
     coldBinding.current = binding;
     const handle = (response: Notifications.NotificationResponse | null) => {
       if (!mounted || !response) return;
+      if (isPushDeliverySuppressed()) {
+        void Notifications.clearLastNotificationResponseAsync().catch(() => {});
+        return;
+      }
       const id = `${response.notification.request.identifier}:${response.actionIdentifier}`;
       if (handled.current === id) return;
       const destination = extractUrlFromNotificationResponse(response);

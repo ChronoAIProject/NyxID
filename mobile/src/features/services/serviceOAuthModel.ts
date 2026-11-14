@@ -34,12 +34,18 @@ export type OAuthOutcome =
   | "session_mismatch";
 
 export function isServiceOAuthReturn(url: string, scheme: string): boolean {
+  // URL normalizes protocol casing. Check the raw prefix first so a lookalike
+  // or uppercase scheme cannot be treated as the exact registered destination.
+  if (!url.startsWith(`${scheme}://`)) return false;
   try {
     const parsed = new URL(url);
     return (
       parsed.protocol === `${scheme}:` &&
       parsed.host === "services" &&
-      parsed.pathname === "/oauth-return"
+      parsed.pathname === "/oauth-return" &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.hash
     );
   } catch {
     return false;

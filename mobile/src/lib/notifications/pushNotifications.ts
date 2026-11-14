@@ -10,8 +10,13 @@ import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import * as TaskManager from "expo-task-manager";
 import { AppState, Platform } from "react-native";
+import { onlineManager } from "@tanstack/react-query";
 import { mobileApi } from "../api/mobileApi";
 import { signalApprovalStateMayHaveChanged } from "./approvalRefreshSignal";
+import {
+  isPushDeliverySuppressed as readPushDeliverySuppressed,
+  setPushDeliverySuppressed,
+} from "./pushDeliveryState";
 
 type PushActivateResult = {
   permission: "granted" | "denied";
@@ -26,6 +31,7 @@ type PushActivateOptions = {
 };
 
 const PUSH_TOKEN_STORE_KEY = "nyxid.push.device_token";
+const PUSH_PENDING_UNBIND_KEY = "nyxid.push.pending_unbind";
 const PUSH_PENDING_SYNC_SIGNAL_KEY = "nyxid.push.pending_sync_signal";
 const BACKGROUND_NOTIFICATION_TASK = "NYXID_BACKGROUND_NOTIFICATION_TASK";
 
@@ -50,6 +56,75 @@ let pushSyncHandler: PushSyncHandler | null = null;
 let isNotificationHandlerConfigured = false;
 let isBackgroundTaskRegistered = false;
 let isBootstrapped = false;
+let pendingUnbind = false;
+let pushOperationQueue: Promise<void> = Promise.resolve();
+let lastKnownNativeToken:
+  | { token: string; provider: "apns" | "fcm"; platform: "ios" | "android" }
+  | undefined;
+
+type PendingPushUnbind = {
+  token: string;
+  provider: "apns" | "fcm";
+  platform: "ios" | "android";
+  createdAt: string;
+};
+
+function enqueuePushOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const run = pushOperationQueue.then(operation, operation);
+  pushOperationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function readPendingUnbind(): Promise<PendingPushUnbind | null> {
+  try {
+    const raw = await SecureStore.getItemAsync(PUSH_PENDING_UNBIND_KEY);
+    if (!raw) {
+      pendingUnbind = false;
+      setPushDeliverySuppressed(false);
+      return null;
+    }
+    const value = JSON.parse(raw) as Partial<PendingPushUnbind>;
+    if (
+      typeof value.token !== "string" ||
+      (value.platform !== "ios" && value.platform !== "android") ||
+      (value.provider !== "apns" && value.provider !== "fcm") ||
+      typeof value.createdAt !== "string"
+    ) {
+      pendingUnbind = false;
+      setPushDeliverySuppressed(false);
+      return null;
+    }
+    pendingUnbind = true;
+    return value as PendingPushUnbind;
+  } catch {
+    pendingUnbind = false;
+    setPushDeliverySuppressed(false);
+    return null;
+  }
+}
+
+export function isPushDeliverySuppressed(): boolean {
+  return readPushDeliverySuppressed();
+}
+
+async function setPendingUnbind(value: PendingPushUnbind): Promise<void> {
+  pendingUnbind = true;
+  setPushDeliverySuppressed(true);
+  await SecureStore.setItemAsync(PUSH_PENDING_UNBIND_KEY, JSON.stringify(value));
+}
+
+async function clearPendingUnbind(): Promise<void> {
+  pendingUnbind = false;
+  setPushDeliverySuppressed(false);
+  await SecureStore.deleteItemAsync(PUSH_PENDING_UNBIND_KEY);
+}
+
+// Hydrate before notification taps are wired by the app shell. The runtime
+// initializer awaits the same read before installing its listeners.
+void readPendingUnbind();
 
 const NOTIFICATION_DEDUPE_WINDOW_MS = 2000;
 const lastShownAtByNotificationKey = new Map<string, number>();
@@ -142,6 +217,10 @@ function configureNotificationHandler() {
     handleNotification: async (notification) => {
       const content = notification.request.content;
 
+      if (pendingUnbind || (await readPendingUnbind())) {
+        return SUPPRESS_OS_NOTIFICATION;
+      }
+
       // Data-only pushes carry no user-visible copy; showing them yields an
       // empty alert.
       const isSilent = !content.title && !content.body;
@@ -192,7 +271,7 @@ function presentForegroundNotification(
   content: Notifications.NotificationContent,
   signal: PushSyncSignal | null
 ): void {
-  if (AppState.currentState !== "active") return;
+  if (pendingUnbind || AppState.currentState !== "active") return;
 
   const title = asNonEmptyString(content.title);
   const body = asNonEmptyString(content.body);
@@ -550,8 +629,11 @@ export async function consumePendingPushSyncSignal(): Promise<PushSyncSignal | n
 export async function initializeNotificationRuntime(): Promise<() => void> {
   let foregroundSubscription: Notifications.EventSubscription | null = null;
   let tokenSubscription: Notifications.EventSubscription | null = null;
+  let appStateSubscription: { remove: () => void } | null = null;
+  let networkSubscription: (() => void) | null = null;
 
   try {
+    await readPendingUnbind();
     configureNotificationHandler();
     await ensureAndroidChannels();
     await ensureBackgroundTaskRegistered();
@@ -594,6 +676,14 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
       const token = normalizeDeviceToken(devicePushToken);
       if (token) void syncTokenWithBackend(token, false);
     });
+    appStateSubscription = AppState.addEventListener("change", (state) => {
+      if (state === "active" && pendingUnbind && getAuthAccountId())
+        void activatePushAfterLogin({ forceRegister: true });
+    });
+    networkSubscription = onlineManager.subscribe(() => {
+      if (onlineManager.isOnline() && pendingUnbind && getAuthAccountId())
+        void activatePushAfterLogin({ forceRegister: true });
+    });
   } catch (error) {
     if (__DEV__) console.warn("[push] initialize runtime failed", error);
   }
@@ -601,6 +691,8 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
   return () => {
     foregroundSubscription?.remove();
     tokenSubscription?.remove();
+    appStateSubscription?.remove();
+    networkSubscription?.();
   };
 }
 
@@ -624,38 +716,61 @@ export async function clearPendingPushSyncSignal(): Promise<void> {
 }
 
 export async function deactivatePushOnLogout(): Promise<boolean> {
-  let unbound = false;
-  try {
-    const token = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
-    const platform = resolvePlatform();
-    if (token && (platform === "ios" || platform === "android")) {
-      await mobileApi.unregisterPushToken({ token, provider: resolveProvider(platform), platform });
+  const unbound = await enqueuePushOperation(async () => {
+    const storedToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
+    // A first registration may fail after the server accepted it. Keep the
+    // token in memory until logout reaches this queue so the authenticated
+    // DELETE still has a chance to detach that uncertain registration.
+    const token = lastKnownNativeToken?.token ?? storedToken;
+    const platform = lastKnownNativeToken?.platform ?? resolvePlatform();
+    const pending = await readPendingUnbind();
+    const provider =
+      lastKnownNativeToken?.provider ??
+      (platform === "ios" || platform === "android"
+        ? resolveProvider(platform)
+        : null);
+    if (!token || !provider || (platform !== "ios" && platform !== "android")) {
+      if (!pending) await clearPendingUnbind();
+      await clearLocalPushRegistrationState();
+      lastKnownNativeToken = undefined;
+      return !pending;
     }
-    unbound = true;
-  } catch {
-    // Invalidate delivery locally when server unbind is unavailable. The next
-    // login obtains a native token and force-registers even if it is unchanged.
     try {
-      if (
-        Platform.OS !== "web" &&
-        typeof Notifications.unregisterForNotificationsAsync === "function"
-      )
-        await Notifications.unregisterForNotificationsAsync();
+      await mobileApi.unregisterPushToken({ token, provider, platform });
+      if (!pending || pending.token === token) await clearPendingUnbind();
+      await clearLocalPushRegistrationState();
+      lastKnownNativeToken = undefined;
+      return true;
     } catch {
-      if (__DEV__) console.warn("[push] native unregister unavailable");
+      try {
+        if (
+          Platform.OS !== "web" &&
+          typeof Notifications.unregisterForNotificationsAsync === "function"
+        )
+          await Notifications.unregisterForNotificationsAsync();
+      } catch {
+        if (__DEV__) console.warn("[push] native unregister unavailable");
+      }
+      await setPendingUnbind({
+        token,
+        provider,
+        platform,
+        createdAt: new Date().toISOString(),
+      });
+      await clearLocalPushRegistrationState();
+      lastKnownNativeToken = undefined;
+      return false;
     }
-  } finally {
-    // Each cleanup is independent: a badge failure must not retain tray entries
-    // or a cached registration that could skip the next account's bind.
-    await Promise.allSettled([
-      Promise.resolve().then(() => Notifications.dismissAllNotificationsAsync()),
-      Promise.resolve().then(() => Notifications.setBadgeCountAsync(0)),
-      Promise.resolve().then(() =>
-        Notifications.clearLastNotificationResponseAsync(),
-      ),
-      clearLocalPushRegistrationState(),
-    ]);
-  }
+  });
+  // Each cleanup is independent: a badge failure must not retain tray entries
+  // or a cached registration that could skip the next account's bind.
+  await Promise.allSettled([
+    Promise.resolve().then(() => Notifications.dismissAllNotificationsAsync()),
+    Promise.resolve().then(() => Notifications.setBadgeCountAsync(0)),
+    Promise.resolve().then(() =>
+      Notifications.clearLastNotificationResponseAsync(),
+    ),
+  ]);
   return unbound;
 }
 
@@ -706,78 +821,98 @@ async function syncTokenWithBackend(
   token: string,
   forceRegister: boolean
 ): Promise<PushActivateResult> {
-  const accountId = getAuthAccountId();
-  const previousToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
-  if (!accountId || accountId !== getAuthAccountId())
-    return {
-      permission: "granted",
-      token,
-      registered: false,
-      mode: "none",
-      reason: "register_failed",
-    };
   const platform = resolvePlatform();
-  if (platform !== "ios" && platform !== "android") {
-    return {
-      permission: "granted",
+  if (platform === "ios" || platform === "android") {
+    lastKnownNativeToken = {
       token,
-      registered: false,
-      mode: "none",
-      reason: "register_failed",
+      provider: resolveProvider(platform),
+      platform,
     };
   }
-  const provider = resolveProvider(platform);
-
-  try {
-    if (previousToken && previousToken !== token) {
-      await mobileApi.rotatePushToken({
-        token,
-        previous_token: previousToken,
-        provider,
-        platform,
-      });
-      if (accountId === getAuthAccountId())
-        await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+  return enqueuePushOperation(async () => {
+    const accountId = getAuthAccountId();
+    const previousToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
+    const pending = await readPendingUnbind();
+    if (!accountId || accountId !== getAuthAccountId())
       return {
-        permission: "granted",
+        permission: "granted" as const,
         token,
-        registered: true,
-        mode: "rotated",
+        registered: false,
+        mode: "none" as const,
+        reason: "register_failed" as const,
+      };
+    if (platform !== "ios" && platform !== "android") {
+      return {
+        permission: "granted" as const,
+        token,
+        registered: false,
+        mode: "none" as const,
+        reason: "register_failed" as const,
       };
     }
+    const provider = resolveProvider(platform);
 
-    if (!previousToken || forceRegister) {
-      await mobileApi.registerPushToken({
-        token,
-        previous_token:
-          previousToken && previousToken !== token ? previousToken : undefined,
-        provider,
-        platform,
-      });
-      if (accountId === getAuthAccountId())
-        await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+    try {
+      if (previousToken && previousToken !== token && !pending) {
+        await mobileApi.rotatePushToken({
+          token,
+          previous_token: previousToken,
+          provider,
+          platform,
+        });
+        if (accountId === getAuthAccountId())
+          await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+        return {
+          permission: "granted" as const,
+          token,
+          registered: true,
+          mode: "rotated" as const,
+        };
+      }
+
+      if (!previousToken || forceRegister || pending) {
+        await mobileApi.registerPushToken({
+          token,
+          provider,
+          platform,
+        });
+        if (accountId === getAuthAccountId())
+          await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+        if (pending) await clearPendingUnbind();
+        return {
+          permission: "granted" as const,
+          token,
+          registered: true,
+          mode: "registered" as const,
+        };
+      }
+
       return {
-        permission: "granted",
+        permission: "granted" as const,
         token,
         registered: true,
-        mode: "registered",
+        mode: "unchanged" as const,
+      };
+    } catch (error) {
+      if (pending) {
+        try {
+          if (
+            Platform.OS !== "web" &&
+            typeof Notifications.unregisterForNotificationsAsync === "function"
+          )
+            await Notifications.unregisterForNotificationsAsync();
+        } catch {
+          if (__DEV__) console.warn("[push] native unregister unavailable");
+        }
+      }
+      if (__DEV__) console.warn("[push] register token failed", error);
+      return {
+        permission: "granted" as const,
+        token,
+        registered: false,
+        mode: "none" as const,
+        reason: "register_failed" as const,
       };
     }
-
-    return {
-      permission: "granted",
-      token,
-      registered: true,
-      mode: "unchanged",
-    };
-  } catch (error) {
-    if (__DEV__) console.warn("[push] register token failed", error);
-    return {
-      permission: "granted",
-      token,
-      registered: false,
-      mode: "none",
-      reason: "register_failed",
-    };
-  }
+  });
 }

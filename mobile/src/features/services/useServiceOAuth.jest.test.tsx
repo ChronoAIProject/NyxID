@@ -3,6 +3,7 @@ import * as WebBrowser from "expo-web-browser";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AppState, type AppStateStatus } from "react-native";
 import { servicesApi } from "../../lib/api/servicesApi";
+import { ApiError } from "../../lib/api/ApiError";
 import { setAuthAccountId } from "../../lib/auth/authAccount";
 import { useServiceOAuth } from "./useServiceOAuth";
 import {
@@ -223,6 +224,94 @@ test("provider setup errors before browser launch stay actionable and clear the 
   expect(result.current.banner?.outcome).toBe("failed");
   expect(await loadServiceOAuth()).toBeNull();
   expect(WebBrowser.openAuthSessionAsync).not.toHaveBeenCalled();
+  await unmount();
+});
+
+test("a return-destination 400 retries once without the app parameter", async () => {
+  jest.mocked(servicesApi.initiateOAuth)
+    .mockRejectedValueOnce(
+      new ApiError({
+        errorKey: "bad_request",
+        errorCode: 1000,
+        statusCode: 400,
+        message: "invalid app return",
+      }),
+    )
+    .mockResolvedValueOnce({ authorization_url: "https://provider.example/authorize" });
+  const { result, unmount } = await renderHook(() => useServiceOAuth(true, changed));
+  await flush();
+  let task!: Promise<void>;
+  await act(async () => {
+    task = result.current.start(connection, entry);
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(500);
+    await task;
+  });
+  expect(servicesApi.initiateOAuth).toHaveBeenCalledTimes(2);
+  expect(jest.mocked(servicesApi.initiateOAuth).mock.calls[1]?.[4]).toEqual({
+    appReturnUri: null,
+  });
+  expect(WebBrowser.openAuthSessionAsync).toHaveBeenCalledWith(
+    "https://provider.example/authorize",
+    "nyxid://services/oauth-return",
+  );
+  expect(result.current.banner?.outcome).toBe("pending");
+  await unmount();
+});
+
+test.each([403, 500])("non-400 initiate status %s is not retried", async (status) => {
+  const error = new ApiError({
+    errorKey: "request_failed",
+    errorCode: 1000,
+    statusCode: status,
+    message: "server rejected",
+  });
+  jest.mocked(servicesApi.initiateOAuth).mockRejectedValueOnce(error);
+  const { result, unmount } = await renderHook(() => useServiceOAuth(true, changed));
+  await flush();
+  await act(async () => {
+    await expect(result.current.start(connection, entry)).rejects.toBe(error);
+  });
+  expect(servicesApi.initiateOAuth).toHaveBeenCalledTimes(1);
+  await unmount();
+});
+
+test("a second 400 is surfaced after the one fallback attempt", async () => {
+  const first = new ApiError({
+    errorKey: "bad_request",
+    errorCode: 1000,
+    statusCode: 400,
+    message: "first",
+  });
+  const second = new ApiError({
+    errorKey: "bad_request",
+    errorCode: 1000,
+    statusCode: 400,
+    message: "second",
+  });
+  jest.mocked(servicesApi.initiateOAuth)
+    .mockRejectedValueOnce(first)
+    .mockRejectedValueOnce(second);
+  const { result, unmount } = await renderHook(() => useServiceOAuth(true, changed));
+  await flush();
+  await act(async () => {
+    await expect(result.current.start(connection, entry)).rejects.toBe(second);
+  });
+  expect(servicesApi.initiateOAuth).toHaveBeenCalledTimes(2);
+  expect(WebBrowser.openAuthSessionAsync).not.toHaveBeenCalled();
+  await unmount();
+});
+
+test("missing OAuth provider is surfaced explicitly", async () => {
+  const { result, unmount } = await renderHook(() =>
+    useServiceOAuth(true, changed),
+  );
+  await flush();
+  await expect(
+    result.current.start(connection, { ...entry, provider_config_id: null }),
+  ).rejects.toThrow("This service has no OAuth provider configured.");
+  expect(servicesApi.initiateOAuth).not.toHaveBeenCalled();
   await unmount();
 });
 

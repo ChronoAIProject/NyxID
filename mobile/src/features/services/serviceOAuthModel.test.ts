@@ -75,6 +75,7 @@ test("return recognition consumes only the app callback and normalizes untrusted
     "https://evil.example/services/oauth-return",
     "nyxid://services/other",
     "nyxidx://services/oauth-return",
+    "NYXID://services/oauth-return?status=success",
   ])
     assert.equal(isServiceOAuthReturn(url, "nyxid"), false);
   assert.equal(

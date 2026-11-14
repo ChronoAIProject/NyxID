@@ -208,7 +208,7 @@ export function ServicesScreen({
     try {
       await action();
     } catch (cause) {
-      setError(messageOf(cause));
+      setError(t(messageOf(cause)));
     } finally {
       actionLock.current = false;
       setBusy(false);
@@ -574,6 +574,7 @@ export function ServicesScreen({
                       navigation.navigate("SshTerminal", {
                         serviceId: connection.catalog_service_id ?? connection.id,
                         connectionId: connection.id,
+                        autoConnect: true,
                       })
                     }
                   />
