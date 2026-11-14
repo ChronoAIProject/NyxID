@@ -63,7 +63,15 @@ fn bson_json(value: &Bson) -> Option<serde_json::Value> {
             value
                 .iter()
                 .filter(|(key, _)| !forbidden_key(key))
-                .filter_map(|(key, value)| bson_json(value).map(|value| (key.clone(), value)))
+                .filter_map(|(key, value)| {
+                    let value = bson_json(value)?;
+                    let value = if is_url_field(key) {
+                        sanitize_json_url(value, key)
+                    } else {
+                        value
+                    };
+                    Some((key.clone(), value))
+                })
                 .collect(),
         ),
         Bson::Array(values) => {
@@ -79,7 +87,10 @@ fn bson_json(value: &Bson) -> Option<serde_json::Value> {
 /// tokens in path segments opt into `drop_path` at the allowlist boundary.
 fn sanitize_url(value: &str, drop_path: bool) -> String {
     let Ok(mut parsed) = url::Url::parse(value) else {
-        return value.to_owned();
+        // An invalid URL cannot be safely decomposed into an origin and path;
+        // omit it rather than returning an opaque value that may contain a
+        // credential or token.
+        return String::new();
     };
     let _ = parsed.set_username("");
     let _ = parsed.set_password(None);
@@ -92,37 +103,26 @@ fn sanitize_url(value: &str, drop_path: bool) -> String {
 }
 
 fn is_url_field(field: &str) -> bool {
-    matches!(
-        field,
-        "avatar_url"
-            | "url"
-            | "base_url"
-            | "endpoint"
-            | "openapi_spec_url"
-            | "target_url"
-            | "project_url"
-            | "redirect_uris"
-            | "delivery.url"
-            | "schedule.url"
-            | "webhook_url"
-            | "connection_webhook_url"
-            | "revocation_webhook_url"
-    )
+    field == "url"
+        || field == "base_url"
+        || field == "endpoint"
+        || field == "redirect_uris"
+        || field == "delivery.url"
+        || field == "schedule.url"
+        || field.ends_with("_url")
 }
 
 fn url_path_is_opaque(field: &str) -> bool {
-    matches!(
-        field,
-        "avatar_url"
-            | "redirect_uris"
-            | "target_url"
-            | "project_url"
-            | "delivery.url"
-            | "schedule.url"
-            | "webhook_url"
-            | "connection_webhook_url"
-            | "revocation_webhook_url"
-    )
+    field == "avatar_url"
+        || field == "redirect_uris"
+        || field == "target_url"
+        || field == "project_url"
+        || field == "openapi_spec_url"
+        || field == "page_url"
+        || field == "chatgpt_url"
+        || field == "delivery.url"
+        || field == "schedule.url"
+        || field.ends_with("_webhook_url")
 }
 
 fn forbidden_key(key: &str) -> bool {
@@ -144,7 +144,7 @@ fn forbidden_key(key: &str) -> bool {
         || key.contains("oauth")
         || key.contains("authorization_code")
         || key.contains("api_key")
-        || key.contains("webhook")
+        || key.contains("webhook_secret")
         || key.contains("key_prefix")
         || key == "kid"
         || key == "key_id"
@@ -408,8 +408,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "platform_bot_cleanup" => Some(("account", "platform_bot_cleanup")),
         "platform_bot_configs" => Some(("account", "platform_bot_configs")),
         "platform_bot_installations" => Some(("account", "platform_bot_installations")),
-        "platform_bot_runtime_controls" => Some(("account", "platform_bot_runtime_controls")),
-        "platform_delivery_tests" => Some(("account", "platform_delivery_tests")),
+        "platform_delivery_tests" => Some(("account_activity", "platform_delivery_tests")),
         "platform_discord_control_installation_history" => {
             Some(("account", "platform_discord_control_installation_history"))
         }
@@ -417,7 +416,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
             Some(("account", "platform_discord_control_installations"))
         }
         "platform_guide_selections" => Some(("account_activity", "platform_guide_selections")),
-        "platform_native_entry_receipts" => Some(("account", "platform_native_entry_receipts")),
         "platform_native_replies" => Some(("account_activity", "platform_native_replies")),
         "platform_onboarding_binding_requests" => {
             Some(("account_activity", "platform_onboarding_binding_requests"))
@@ -431,7 +429,9 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "platform_personal_setup_selections" => {
             Some(("account_activity", "platform_personal_setup_selections"))
         }
-        "platform_personal_stop_effects" => Some(("account", "platform_personal_stop_effects")),
+        "platform_personal_stop_effects" => {
+            Some(("account_activity", "platform_personal_stop_effects"))
+        }
         "platform_public_deployment_activations" => {
             Some(("account", "platform_public_deployment_activations"))
         }
@@ -441,7 +441,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "platform_public_probe_consents" => Some(("account", "platform_public_probe_consents")),
         "platform_public_readiness_probes" => Some(("account", "platform_public_readiness_probes")),
         "platform_setup_notices" => Some(("account", "platform_setup_notices")),
-        "platform_setup_steps" => Some(("account", "platform_setup_steps")),
+        "platform_setup_steps" => Some(("account_activity", "platform_setup_steps")),
         "platform_setups" => Some(("account", "platform_setups")),
         "refresh_tokens" => Some(("security", "refresh_tokens")),
         "saved_logins" => Some(("account", "saved_logins")),
@@ -471,7 +471,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "user_service_connections" => Some(("services", "user_service_connections")),
         "user_services" => Some(("services", "user_services")),
         "assistant_voice_sessions" => Some(("account_activity", "assistant_voice_sessions")),
-        "node_pending_credentials" => Some(("services", "node_pending_credentials")),
         "oracle_login_snapshots" => Some(("account", "oracle_login_snapshots")),
         "oracle_sessions" => Some(("assistant", "oracle_sessions")),
         "oracle_tasks" => Some(("assistant", "oracle_tasks")),
@@ -600,6 +599,133 @@ const ASSISTANT_AGENT_FIELDS: &[&str] = &[
     "created_at",
     "updated_at",
 ];
+const VOICE_SESSION_FIELDS: &[&str] = &[
+    "user_id",
+    "conversation_id",
+    "protocol",
+    "dictation",
+    "measured_ms",
+    "state",
+    "created_at",
+    "deadline",
+    "last_user_at",
+    "closed_at",
+    "observed_seconds",
+    "playback_ms",
+    "final_usage_confirmed",
+    "billing_finalized",
+];
+const ORACLE_SESSION_FIELDS: &[&str] = &[
+    "owner_user_id",
+    "origin",
+    "tag",
+    "turn_count",
+    "last_task_id",
+    "chatgpt_url",
+    "owner_worker_label",
+    "closed_at",
+    "created_at",
+    "updated_at",
+];
+const ORACLE_TASK_FIELDS: &[&str] = &[
+    "submitter_user_id",
+    "kind",
+    "target_url",
+    "prompt",
+    "model_label",
+    "project_url",
+    "tag",
+    "pdf_name",
+    "attachment_name",
+    "status",
+    "conversation_id",
+    "worker_label",
+    "required_worker_label",
+    "phase",
+    "phase_detail",
+    "response",
+    "response_chars",
+    "chatgpt_url",
+    "failure_reason",
+    "observed_model_switcher",
+    "observed_model_effort",
+    "created_at",
+    "updated_at",
+    "completed_at",
+    "expires_at",
+    "error_code",
+];
+const ORACLE_WORKER_COMMAND_FIELDS: &[&str] = &[
+    "created_by_user_id",
+    "worker_label",
+    "kind",
+    "status",
+    "required_capability",
+    "delivery_count",
+    "result_code",
+    "bundle_version",
+    "delivered_at",
+    "completed_at",
+    "deadline_at",
+    "expires_at",
+    "created_at",
+    "updated_at",
+];
+const ORACLE_WORKER_FIELDS: &[&str] = &[
+    "enrollment.owner_user_id",
+    "worker_label",
+    "generation",
+    "last_seen_at",
+    "current_task_id",
+    "script_version",
+    "page_url",
+    "first_seen_at",
+    "provisioned_at",
+    "platform",
+    "capabilities",
+    "desired_state",
+    "logged_in",
+    "chrome_alive",
+    "last_error",
+    "cooldown_until",
+];
+const ORACLE_LOGIN_SNAPSHOT_FIELDS: &[&str] = &[
+    "created_by_user_id",
+    "format_version",
+    "envelope_size",
+    "created_at",
+    "expires_at",
+];
+const ORG_CHANNEL_LANE_FIELDS: &[&str] = &[
+    "actor_id",
+    "channel_id",
+    "conversation_id",
+    "state",
+    "status",
+    "created_at",
+    "updated_at",
+    "expires_at",
+];
+const ORG_CHANNEL_LINK_FIELDS: &[&str] =
+    &["user_id", "channel_id", "org_id", "active", "created_at"];
+const ORG_CHANNEL_MESSAGE_FIELDS: &[&str] = &[
+    "author_user_id",
+    "actor_id",
+    "channel_id",
+    "conversation_id",
+    "text",
+    "content",
+    "content_type",
+    "created_at",
+];
+const ORG_CHANNEL_CHALLENGE_FIELDS: &[&str] = &[
+    "user_id",
+    "channel_id",
+    "org_id",
+    "state",
+    "created_at",
+    "expires_at",
+];
 const ASSISTANT_CONVERSATION_FIELDS: &[&str] = &[
     "user_id",
     "title",
@@ -638,10 +764,27 @@ const TRIGGER_FIELDS: &[&str] = &[
     "label",
     "status",
     "source",
-    "schedule",
+    "schedule.kind",
+    "schedule.expression",
+    "schedule.timezone",
+    "schedule.amount",
+    "schedule.unit",
+    "schedule.anchor",
+    "schedule.at",
+    "schedule.start",
+    "schedule.end",
+    "schedule.max_runs",
+    "schedule.grace_seconds",
     "schedule_state",
     "overlap",
-    "delivery",
+    "delivery.type",
+    "delivery.url",
+    "delivery.conversation_id",
+    "delivery.confirmation_policy",
+    "delivery.agent_id",
+    "delivery.thread_policy",
+    "delivery.instruction",
+    "delivery.deliver_to",
     "created_at",
     "updated_at",
 ];
@@ -1035,12 +1178,10 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "platform_bot_cleanup" => ACCOUNT_RECORD_FIELDS,
         "platform_bot_configs" => ACCOUNT_RECORD_FIELDS,
         "platform_bot_installations" => ACCOUNT_RECORD_FIELDS,
-        "platform_bot_runtime_controls" => ACCOUNT_RECORD_FIELDS,
         "platform_delivery_tests" => ACCOUNT_RECORD_FIELDS,
         "platform_discord_control_installation_history" => ACCOUNT_RECORD_FIELDS,
         "platform_discord_control_installations" => ACCOUNT_RECORD_FIELDS,
         "platform_guide_selections" => ACTIVITY_RECORD_FIELDS,
-        "platform_native_entry_receipts" => ACCOUNT_RECORD_FIELDS,
         "platform_native_replies" => ACTIVITY_RECORD_FIELDS,
         "platform_onboarding_binding_requests" => ACCOUNT_RECORD_FIELDS,
         "platform_onboarding_bindings" => ACCOUNT_RECORD_FIELDS,
@@ -1081,18 +1222,17 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "user_provider_tokens" => SERVICE_RECORD_FIELDS,
         "user_service_connections" => SERVICE_CONNECTION_FIELDS,
         "user_services" => SERVICE_RECORD_FIELDS,
-        "assistant_voice_sessions" => ACTIVITY_RECORD_FIELDS,
+        "assistant_voice_sessions" => VOICE_SESSION_FIELDS,
         "generated_artifact_content_series" => FILE_METADATA_FIELDS,
-        "node_pending_credentials" => SERVICE_RECORD_FIELDS,
-        "oracle_login_snapshots" => ACCOUNT_RECORD_FIELDS,
-        "oracle_sessions" => ASSISTANT_RECORD_FIELDS,
-        "oracle_tasks" => ASSISTANT_RECORD_FIELDS,
-        "oracle_worker_commands" => ACTIVITY_RECORD_FIELDS,
-        "oracle_workers" => ACCOUNT_RECORD_FIELDS,
-        "org_channel_lanes" => CHANNEL_RECORD_FIELDS,
-        "org_channel_link_challenges" => ACTIVITY_RECORD_FIELDS,
-        "org_channel_messages" => CHANNEL_FIELDS,
-        "org_channel_sender_links" => CHANNEL_RECORD_FIELDS,
+        "oracle_login_snapshots" => ORACLE_LOGIN_SNAPSHOT_FIELDS,
+        "oracle_sessions" => ORACLE_SESSION_FIELDS,
+        "oracle_tasks" => ORACLE_TASK_FIELDS,
+        "oracle_worker_commands" => ORACLE_WORKER_COMMAND_FIELDS,
+        "oracle_workers" => ORACLE_WORKER_FIELDS,
+        "org_channel_lanes" => ORG_CHANNEL_LANE_FIELDS,
+        "org_channel_link_challenges" => ORG_CHANNEL_CHALLENGE_FIELDS,
+        "org_channel_messages" => ORG_CHANNEL_MESSAGE_FIELDS,
+        "org_channel_sender_links" => ORG_CHANNEL_LINK_FIELDS,
         "platform_personal_bindings" => ACCOUNT_RECORD_FIELDS,
         "platform_personal_link_challenges" => ACTIVITY_RECORD_FIELDS,
         "platform_personal_link_intents" => ACTIVITY_RECORD_FIELDS,
@@ -1138,11 +1278,11 @@ struct ExportBudget {
 }
 
 impl ExportBudget {
-    fn new() -> Self {
+    fn new(max_bytes: usize) -> Self {
         // Leave room for the fixed envelope, section names, and truncation
         // metadata. The final cap pass remains a correctness backstop.
         Self {
-            remaining: MAX_BYTES.saturating_sub(64 * 1024),
+            remaining: max_bytes.saturating_sub(64 * 1024),
         }
     }
 
@@ -1181,6 +1321,10 @@ async fn rows(
         .find(filter)
         .projection(projection)
         .sort(sort)
+        // Keep the driver's prefetch bounded as well as the accumulated
+        // export. Once the running budget rejects a row, no later batch is
+        // requested by this cursor.
+        .batch_size(64)
         .limit(SUBSECTION_ROW_CAP + 1)
         .max_time(QUERY_TIMEOUT)
         .await?;
@@ -1280,38 +1424,22 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
     export.truncated_sections = truncated.into_iter().collect();
 }
 
-fn enforce_cap(export: &mut AccountExport) {
-    enforce_cap_with_limit(export, MAX_BYTES);
-}
-
-pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<AccountExport> {
+async fn build_with_limit(
+    db: &mongodb::Database,
+    account_id: &str,
+    max_bytes: usize,
+) -> AppResult<AccountExport> {
     let mut sections = empty_sections();
-    let mut budget = ExportBudget::new();
+    let mut budget = ExportBudget::new(max_bytes);
     let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let profile = safe_item(&account, PROFILE_FIELDS);
+    let profile_admitted = budget.admit(&profile);
     sections.entry("account".into()).or_default().insert(
         "profile".into(),
         ExportSubsection {
-            items: vec![safe_item(
-                &account,
-                &[
-                    "email",
-                    "display_name",
-                    "avatar_url",
-                    "email_verified",
-                    "mfa_enabled",
-                    "social_provider",
-                    "created_at",
-                    "updated_at",
-                    "last_login_at",
-                    "profile_config.security.skip_mfa_for_approved_sign_ins",
-                    "profile_config.analytics.enabled",
-                    "profile_config.services_view",
-                    "profile_config.service_views",
-                    "profile_config.onboarding.ai_services_completed_at",
-                ],
-            )],
+            items: profile_admitted.then_some(profile).into_iter().collect(),
             total_count: 1,
-            truncated: false,
+            truncated: !profile_admitted,
         },
     );
     let mut handled = BTreeSet::new();
@@ -1531,7 +1659,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         generated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         account_id: account_id.to_owned(),
         limits: ExportLimits {
-            max_bytes: MAX_BYTES,
+            max_bytes,
             subsection_row_cap: SUBSECTION_ROW_CAP,
             query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
             file_payloads: if FILE_PAYLOADS_METADATA_ONLY {
@@ -1549,8 +1677,12 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         ],
         sections,
     };
-    enforce_cap(&mut export);
+    enforce_cap_with_limit(&mut export, max_bytes);
     Ok(export)
+}
+
+pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<AccountExport> {
+    build_with_limit(db, account_id, MAX_BYTES).await
 }
 
 #[cfg(test)]
@@ -1600,6 +1732,18 @@ mod tests {
     }
 
     #[test]
+    fn export_budget_is_shared_across_subsections() {
+        let mut budget = ExportBudget::new(100_000);
+        let row = serde_json::json!({"body": "x".repeat(12_000)});
+        assert!(budget.admit(&row));
+        assert!(budget.admit(&row));
+        assert!(!budget.admit(&row));
+        // A later subsection sees the same exhausted budget and must mark
+        // itself truncated without accumulating another row batch.
+        assert!(!budget.admit(&row));
+    }
+
+    #[test]
     fn per_collection_allowlists_keep_authored_text_and_only_own_memory() {
         let row = doc! {
             "title": "PERSON_TITLE",
@@ -1607,13 +1751,20 @@ mod tests {
             "memory": [{"text": "PERSON_MEMORY"}],
             "notes": [{"text": "PERSON_NOTE"}],
             "comment": "PERSON_FEEDBACK",
+            "label": "PERSON_TRIGGER_LABEL",
+            "schedule": {"expression": "PERSON_SCHEDULE", "timezone": "UTC"},
+            "delivery": {"instruction": "PERSON_TRIGGER_INSTRUCTION", "url": "https://example.test/hook"},
+            "description": "PERSON_DESCRIPTION",
+            "credential_label": "PERSON_CONNECTION_LABEL",
+            "name": "PERSON_NODE_NAME",
             "url": "https://user:pass@example.test/v1?token=URL_QUERY#URL_FRAGMENT",
             "shared_memory": "OTHER_PERSON_SHARED_MEMORY",
         };
-        let value = safe_item(&row, ASSISTANT_AGENT_FIELDS);
+        let value = safe_item(&row, ASSISTANT_CONVERSATION_FIELDS);
         assert_eq!(value["title"], "PERSON_TITLE");
-        assert_eq!(value["persona"], "PERSON_PERSONA");
-        assert_eq!(value["memory"][0]["text"], "PERSON_MEMORY");
+        let agent = safe_item(&row, ASSISTANT_AGENT_FIELDS);
+        assert_eq!(agent["persona"], "PERSON_PERSONA");
+        assert_eq!(agent["memory"]["text"][0], "PERSON_MEMORY");
         assert!(
             safe_item(&row, ASSISTANT_RECORD_FIELDS)
                 .get("memory")
@@ -1621,24 +1772,85 @@ mod tests {
         );
         let notes = safe_item(&row, PRIVATE_NOTES_FIELDS);
         assert_eq!(notes["notes"][0]["text"], "PERSON_NOTE");
+        let feedback = safe_item(&row, FEEDBACK_FIELDS);
+        assert_eq!(feedback["comment"], "PERSON_FEEDBACK");
+        let trigger = safe_item(&row, TRIGGER_FIELDS);
+        assert_eq!(trigger["label"], "PERSON_TRIGGER_LABEL");
+        assert_eq!(trigger["schedule"]["expression"], "PERSON_SCHEDULE");
+        assert_eq!(trigger["delivery"]["instruction"], "PERSON_TRIGGER_INSTRUCTION");
+        let endpoint = safe_item(&row, USER_ENDPOINT_FIELDS);
+        assert_eq!(endpoint["url"], "https://example.test/v1");
+        let connection = safe_item(&row, SERVICE_CONNECTION_FIELDS);
+        assert_eq!(connection["credential_label"], "PERSON_CONNECTION_LABEL");
+        let node = safe_item(&row, NODE_FIELDS);
+        assert_eq!(node["name"], "PERSON_NODE_NAME");
         assert!(
-            !serde_json::to_string(&value)
+            !serde_json::to_string(&agent)
                 .unwrap()
                 .contains("OTHER_PERSON_SHARED_MEMORY")
         );
     }
 
     #[test]
+    fn shared_agent_memory_and_other_authors_are_outside_person_export() {
+        let row = doc! {
+            "memory": [{"text": "TEAM_MEMORY", "owner_id": "other-person"}],
+            "text": "OTHER_AUTHOR_MESSAGE",
+            "author_user_id": "other-person",
+            "user_id": "account",
+        };
+        let sharing = safe_item(&row, &["user_id", "updated_at"]);
+        assert!(serde_json::to_string(&sharing).unwrap().contains("account"));
+        assert!(
+            !serde_json::to_string(&sharing)
+                .unwrap()
+                .contains("TEAM_MEMORY")
+        );
+        let group = safe_item(&row, GROUP_MESSAGE_FIELDS);
+        assert_eq!(group["author_user_id"], "other-person");
+        assert_eq!(group["text"], "OTHER_AUTHOR_MESSAGE");
+        // The runtime owner filter requires both identifiers to match. A row
+        // authored by another participant is therefore never queried.
+        let filter = owner_filter(
+            personal_data_registry::find("assistant_group_messages").unwrap(),
+            "account",
+        )
+        .unwrap();
+        assert_eq!(filter.get_document("$and").ok(), None);
+        assert_eq!(filter.get_str("user_id"), Ok("account"));
+        assert_eq!(filter.get_str("author_user_id"), Ok("account"));
+    }
+
+    #[test]
     fn every_url_allowlist_field_uses_the_common_sanitizer() {
         let row = doc! {
             "avatar_url": "https://u:URL_USERINFO@example.test/avatar/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
-            "url": "https://u:URL_USERINFO@example.test/v1/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "url": "https://u:URL_USERINFO@example.test/v1/safe-path?key=URL_QUERY#URL_FRAGMENT",
+            "openapi_spec_url": "https://u:URL_USERINFO@example.test/openapi/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "target_url": "https://u:URL_USERINFO@example.test/target/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "project_url": "https://u:URL_USERINFO@example.test/project/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "page_url": "https://u:URL_USERINFO@example.test/page/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "chatgpt_url": "https://u:URL_USERINFO@example.test/chat/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "connection_webhook_url": "https://u:URL_USERINFO@example.test/connect/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "revocation_webhook_url": "https://u:URL_USERINFO@example.test/revoke/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
             "redirect_uris": ["https://u:URL_USERINFO@example.test/cb/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"],
             "delivery": {"url": "https://u:URL_USERINFO@example.test/hook/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"},
         };
         let value = safe_item(
             &row,
-            &["avatar_url", "url", "redirect_uris", "delivery.url"],
+            &[
+                "avatar_url",
+                "url",
+                "openapi_spec_url",
+                "target_url",
+                "project_url",
+                "page_url",
+                "chatgpt_url",
+                "connection_webhook_url",
+                "revocation_webhook_url",
+                "redirect_uris",
+                "delivery.url",
+            ],
         );
         let bytes = serde_json::to_vec(&value).unwrap();
         for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
@@ -1648,7 +1860,54 @@ mod tests {
                     .any(|window| window == sentinel.as_bytes())
             );
         }
-        assert_eq!(value["url"], "https://example.test/v1/PATH_TOKEN");
+        assert_eq!(value["url"], "https://example.test/v1/safe-path");
+        assert_eq!(value["delivery"]["url"], "https://example.test/");
+        for field in [
+            "avatar_url",
+            "openapi_spec_url",
+            "target_url",
+            "project_url",
+            "page_url",
+            "chatgpt_url",
+            "connection_webhook_url",
+            "revocation_webhook_url",
+        ] {
+            assert_eq!(value[field], "https://example.test/");
+        }
+    }
+
+    #[test]
+    fn every_declared_url_field_drops_distinct_secret_sentinels() {
+        let fields = [
+            ("avatar_url", PROFILE_FIELDS),
+            ("chatgpt_url", ORACLE_SESSION_FIELDS),
+            ("target_url", ORACLE_TASK_FIELDS),
+            ("project_url", ORACLE_TASK_FIELDS),
+            ("page_url", ORACLE_WORKER_FIELDS),
+            ("delivery.url", TRIGGER_FIELDS),
+            ("url", USER_ENDPOINT_FIELDS),
+            ("openapi_spec_url", USER_ENDPOINT_FIELDS),
+            ("redirect_uris", OAUTH_CLIENT_FIELDS),
+            ("connection_webhook_url", OAUTH_CLIENT_FIELDS),
+            ("revocation_webhook_url", OAUTH_CLIENT_FIELDS),
+        ];
+        for (field, allowlist) in fields {
+            assert!(allowlist.contains(&field), "URL field {field} is not allowlisted");
+            let value = "https://export-user:URL_USERINFO@example.test/token/PATH_TOKEN?token=URL_QUERY#URL_FRAGMENT";
+            let mut row = Document::new();
+            if field == "redirect_uris" {
+                row.insert(field, Bson::Array(vec![Bson::String(value.into())]));
+            } else if let Some((parent, child)) = field.split_once('.') {
+                row.insert(parent, doc! {child: value});
+            } else {
+                row.insert(field, value);
+            }
+            let json = safe_item(&row, allowlist);
+            let bytes = serde_json::to_vec(&json).unwrap();
+            for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
+                assert!(!bytes.windows(sentinel.len()).any(|window| window == sentinel.as_bytes()), "{field} leaked {sentinel}");
+            }
+        }
     }
 
     #[test]
@@ -1773,7 +2032,9 @@ mod tests {
                     match entry.export {
                         personal_data_registry::Export::Section(section) => section,
                         _ => unreachable!(),
-                    }
+                    },
+                    "section mismatch for {}",
+                    entry.collection
                 );
                 assert!(
                     !spec.fields.is_empty(),
@@ -1788,6 +2049,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unknown_export_collection_returns_typed_error() {
+        let error = explicit_export_spec("collection_added_after_registry").unwrap_err();
+        assert_eq!(error.0, "collection_added_after_registry");
     }
 
     fn put_owner(document: &mut Document, path: &str, owner: &str) {
