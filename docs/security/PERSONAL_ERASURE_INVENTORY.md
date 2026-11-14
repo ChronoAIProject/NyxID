@@ -16,6 +16,12 @@ can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
 not change retention or ownership decisions.
 
+Each row below is a real missing prefix, so its owner query would otherwise
+scan the whole collection before the page limit could be applied. The listed
+collections are the user-facing or lifecycle collections that can grow with
+account activity; collections already covered by an existing compound or
+single-field prefix receive no additional index.
+
 The checked-in origin/main startup fixture in the registry tests is generated
 from `db::ensure_indexes` plus origin/main's security-readiness and personal
 erasure index calls. The upgrade tests run that fixture first, run the branch
