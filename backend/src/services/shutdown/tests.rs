@@ -600,7 +600,8 @@ async fn shutdown_fallback_query_uses_existing_heartbeat_index_without_collectio
 }
 
 #[tokio::test]
-async fn shutdown_cluster_release_covers_owner_constants_and_excludes_billing_pass_token() {
+async fn shutdown_cluster_release_covers_owner_constants_and_excludes_billing_and_provision_tokens()
+{
     let db = connect_transaction_test_database("shutdown_owner_constants").await;
     let owner = identity("owner", "gen", "http://127.0.0.1:1");
     let runtime = ClusterLeaseRuntime::new(
@@ -627,6 +628,11 @@ async fn shutdown_cluster_release_covers_owner_constants_and_excludes_billing_pa
         .await
         .unwrap()
         .unwrap();
+    let provisioning = runtime
+        .acquire(&db, "billing:provision:owner")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         release::cluster(&db, &owner).await.unwrap(),
         names.len() as u64
@@ -643,6 +649,13 @@ async fn shutdown_cluster_release_covers_owner_constants_and_excludes_billing_pa
         assert!(peer.acquire(&db, &name).await.unwrap().is_some());
     }
     assert!(peer.acquire(&db, &billing.name).await.unwrap().is_none());
+    assert!(
+        peer.acquire(&db, &provisioning.name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(LeaseStore::release(&db, &provisioning).await.unwrap());
     assert!(LeaseStore::release(&db, &billing).await.unwrap());
     db.drop().await.unwrap();
 }

@@ -254,6 +254,52 @@ commit together, fenced by the operation token. Provider receipts recognize
 legacy history writes. Dedupe confirmation retains the expiry lock until every
 transactional expiry posting is durable.
 
+Expiry processing claims use MongoDB time with a 600-second lease renewed every
+60 seconds and released immediately on return. Before each void POST, the exact
+live operation/token must durably set `dispatch_started_at`. Definite provider
+refusals clear that marker for a later pass; uncertain responses retain the hold
+and appear in Integrity. Every later pass reads history first. After 24 hours
+without a matching receipt, one timestamp-fenced re-dispatch is allowed, with a
+metadata-only audit event and warning. Lago v1.50 applies voids synchronously;
+the full-day quiet period is conservative protection against a double void.
+Each further uncertain attempt waits another 24 hours. The diagnostic clears
+automatically on receipt recovery and reports the next retry time.
+
+The additive processing deadline is bound to its token. The legacy `lease_until`
+stays at least as late as an uncertain dispatch's retry boundary, so an old
+binary cannot use the upgraded worker's immediate release to re-send. An old
+takeover changes the token, restoring that old worker's lease as the authority.
+Old workers still ignore dispatch markers once their lease permits takeover;
+these retry rules require every writer to upgrade. A void name is not provider
+idempotency: a pause between the final sender check and the socket write can
+still let an old request land after a later retry.
+
+Cold wallet provisioning takes the renewable `billing:provision:{owner_id}` lease;
+existing wallets return before any lease command. Lago customer/subscription ids
+remain deterministic, and new wallets use the unique active customer/code pair
+with code `nyxid`. A definite create refusal clears its dispatch marker. An
+uncertain create is read back on retry; after two minutes (six 20-second client
+timeouts) without a wallet, one new create is allowed. The stable provider code
+also protects against a late first create. The checkpoint is deleted in the
+same transaction as the local wallet and funding posting, leaving no cleanup
+gap after that commit. Old binaries ignore these barriers; old code-less creates
+can still race using another code. Rollback needs no data change.
+
+Both dispatches capture monotonic and wall-clock time when their marker commit
+returns. Immediately before HTTP send, either clock showing more than 30 seconds
+elapsed suppresses the send as ambiguous; the marker stays for readback and the
+existing quiet period. A backward wall-clock step also fails this check. Along
+with the 20-second client timeout this limits ordinary sender delay to about 50
+seconds after observing the commit, not an absolute bound across a pause after
+the check. No new database command is added.
+
+During graceful drain, expiry finishes the current wallet operation's durable
+step before the reconcile pass stops at its next unit boundary. Renewal continues
+and normal return releases only that operation's processing token. Request-path
+provisioning remains request work; its owner lease is excluded from bulk shutdown
+release. On return it is released or deleted by exact token; on abort it expires
+by the shared lease TTL while its dispatch checkpoint remains recoverable.
+
 ## D5. Cutover and operations
 
 Existing installations must drain all pre-v2 billing writers before cutover:

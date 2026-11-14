@@ -55,6 +55,19 @@ crate::exact_credit_model! {
         pub items: Vec<PurchasedCreditExpiryItem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub lago_void_transaction_id: Option<String>,
+        /// Last attempted POST; uncertain dispatches wait 24h before retry.
+        #[serde(default)]
+        pub dispatch_attempts: i64,
+        /// Upgraded workers release this lease while the legacy deadline still
+        /// prevents old binaries from retrying an uncertain provider request.
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub processing_lease_until: Option<DateTime<Utc>>,
+        #[serde(default)]
+        pub processing_lease_token: Option<String>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub dispatch_started_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub unresolved_reported_at: Option<DateTime<Utc>>,
         #[serde(default)]
         pub wallet_balance_applied: bool,
         /// History totals and this marker commit together while the operation is

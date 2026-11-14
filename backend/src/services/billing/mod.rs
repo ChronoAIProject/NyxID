@@ -169,6 +169,7 @@ pub async fn startup_diagnostics(
             detected_at:diagnostic.updated_at,
         });
     }
+    items.extend(topup_expiry::unresolved_diagnostics(db).await?);
     Ok(items)
 }
 

@@ -1069,6 +1069,7 @@ mod tests {
         let decision = decide_lago_push(Err(LagoError {
             status: Some(StatusCode::UNPROCESSABLE_ENTITY),
             code: Some("billable_metric_not_found".to_string()),
+            code_conflict: false,
             message: "missing metric".to_string(),
             kind: LagoErrorKind::DeadLetter,
         }));

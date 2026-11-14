@@ -30,6 +30,10 @@ struct Provider {
     mode: AtomicU8,
     calls: Mutex<Vec<&'static str>>,
     pause_push: std::sync::atomic::AtomicBool,
+    pause_expiry: std::sync::atomic::AtomicBool,
+    expiry_entered: tokio::sync::Notify,
+    resume_expiry: tokio::sync::Notify,
+    expiry_posts: std::sync::atomic::AtomicUsize,
     pause_sync: std::sync::atomic::AtomicBool,
     sync_entered: tokio::sync::Notify,
     resume_sync: tokio::sync::Notify,
@@ -103,6 +107,26 @@ impl LagoApi for Provider {
     async fn wallet_balance(&self, _: &str) -> AppResult<i64> {
         self.calls.lock().unwrap().push("balance");
         Ok(0)
+    }
+
+    async fn wallet_transactions(&self, _: &str) -> AppResult<Vec<LagoWalletTransaction>> {
+        if self.pause_expiry.swap(false, Ordering::SeqCst) {
+            self.expiry_entered.notify_one();
+            self.resume_expiry.notified().await;
+        }
+        Ok(vec![])
+    }
+
+    async fn void_wallet_credits(
+        &self,
+        _: &str,
+        _: crate::models::credits::Credits,
+        _: &str,
+    ) -> AppResult<String> {
+        self.expiry_posts.fetch_add(1, Ordering::SeqCst);
+        Err(AppError::BillingProviderUnavailable(
+            "uncertain test dispatch".into(),
+        ))
     }
 
     async fn entitlements(&self, _: &str) -> AppResult<Vec<Entitlement>> {
@@ -882,5 +906,97 @@ async fn shutdown_reconcile_deadline_abort_retains_active_provider_unit_lease_un
             .is_none()
     );
     assert!(shutdown.released().is_empty());
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_reconcile_expiry_finishes_current_operation_and_preserves_marker() {
+    let f = Fixture::new("shutdown_expiry", SUCCESS).await;
+    let now = bson::DateTime::now();
+    let operation = doc! {
+        "operation_id": "expiry-a", "processing_token": "prior-a",
+        "lease_until": bson::DateTime::from_millis(0),
+        "amount": crate::models::credits::Credits::from_whole(3), "items": [],
+        "created_at": now, "updated_at": now,
+    };
+    f.db.collection::<Document>(super::BILLING_WALLET)
+        .update_one(
+            doc! {"_id":"wallet-1"},
+            doc! {"$set": {"lago_wallet_id":"provider-wallet-1",
+            "active_topup_expiry": &operation,
+            "topup_expiry_checked_at": bson::DateTime::from_millis(0),
+            "pending_topup_expiry_credits": crate::models::credits::Credits::from_whole(3)}},
+        )
+        .await
+        .unwrap();
+    let mut next = operation.clone();
+    next.insert("operation_id", "expiry-b");
+    next.insert("processing_token", "prior-b");
+    f.db.collection::<Document>(super::BILLING_WALLET)
+        .insert_one(doc! {
+            "_id":"wallet-2", "owner_id":"owner-2", "lago_customer_id":"customer-2",
+            "lago_wallet_id":"provider-wallet-2", "lago_subscription_id":"subscription-2",
+            "plan_kind":"prepaid", "collection_state":"good", "active_topup_expiry":next,
+            "topup_expiry_checked_at":now,
+            "pending_topup_expiry_credits":crate::models::credits::Credits::from_whole(3),
+            "created_at":now, "balance_synced_at":now,
+            "updated_at":bson::DateTime::from_chrono(Utc::now() + Duration::seconds(1)),
+        })
+        .await
+        .unwrap();
+    f.provider.pause_expiry.store(true, Ordering::SeqCst);
+    let shutdown = crate::services::shutdown::Runtime::default();
+    let lease = lease_runtime("expiry-a", 30_000);
+    let (result, ()) = tokio::join!(
+        f.reconciler.run_once_with_shutdown(&lease, &shutdown),
+        async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                f.provider.expiry_entered.notified(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(shutdown.counts().background, 1);
+            shutdown.begin_drain();
+            assert!(shutdown.background().is_none());
+            f.provider.resume_expiry.notify_one();
+        }
+    );
+    result.unwrap();
+    assert_eq!(f.provider.expiry_posts.load(Ordering::SeqCst), 1);
+    let current =
+        f.db.collection::<Document>(super::BILLING_WALLET)
+            .find_one(doc! {"_id":"wallet-1"})
+            .await
+            .unwrap()
+            .unwrap();
+    let active = current.get_document("active_topup_expiry").unwrap();
+    assert!(active.get_datetime("dispatch_started_at").is_ok());
+    assert!(active.get_datetime("unresolved_reported_at").is_ok());
+    assert_eq!(
+        active.get_datetime("processing_lease_until").unwrap(),
+        &bson::DateTime::from_millis(0)
+    );
+    let next =
+        f.db.collection::<Document>(super::BILLING_WALLET)
+            .find_one(doc! {"_id":"wallet-2"})
+            .await
+            .unwrap()
+            .unwrap();
+    let active = next.get_document("active_topup_expiry").unwrap();
+    assert_eq!(active.get_str("processing_token"), Ok("prior-b"));
+    assert!(!active.contains_key("dispatch_started_at"));
+    assert_eq!(shutdown.tracked_units(), 0);
+    let peer = lease_runtime("expiry-peer", 30_000);
+    let token = peer
+        .acquire(&f.db, super::RECONCILE_LEASE)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::services::coordination_service::LeaseStore::release(&f.db, &token)
+            .await
+            .unwrap()
+    );
     f.db.drop().await.unwrap();
 }
