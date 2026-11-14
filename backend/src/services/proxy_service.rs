@@ -4611,7 +4611,7 @@ async fn forward_request_with_egress_guard_inner(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
-    admission: Option<&super::service_dispatch_registry::DispatchAdmission>,
+    admission: Option<&super::service_dispatch_registry::DispatchAdmission<'_>>,
     dispatch_caller: Option<&super::service_dispatch_registry::DispatchCaller<'_>>,
     catalog_route: Option<&super::lark_attachment_tool::routing::BotRoute>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
@@ -4743,6 +4743,18 @@ async fn forward_request_with_egress_guard_inner(
         &prepared.delegated_headers,
         &extra_outbound_headers,
     );
+
+    if let (Some(guard), ProxyBody::Buffered(bytes)) = (dispatch_guard, &body) {
+        guard
+            .validate_original_request(super::service_dispatch_guard::OriginalRequest {
+                method: method.as_str(),
+                path,
+                query,
+                body: bytes.as_deref().unwrap_or_default(),
+                headers: &outbound_headers,
+            })
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
 
     crate::turn_trace::inject_secret_egress(&mut outbound_headers);
 

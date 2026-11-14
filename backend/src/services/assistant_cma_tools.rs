@@ -16,6 +16,44 @@ use mongodb::{
 use serde_json::{Value, json};
 
 pub const NAMES: &[&str] = &["list_cma_resources", "cma_save_attachment", "cma_guide"];
+// Includes the connection identity and JSON escaping around an upstream cursor.
+const MAX_RESOURCE_CURSOR_BYTES: usize = 4096;
+
+fn cursor_error() -> AppError {
+    AppError::ValidationError("Invalid CMA resource cursor".into())
+}
+
+fn validate_resource_cursor(connection: &str, upstream: Option<&str>) -> AppResult<()> {
+    super::assistant_cma_gateway::validate_remote_id(connection).map_err(|_| cursor_error())?;
+    if upstream.is_some_and(|cursor| {
+        cursor.is_empty()
+            || cursor.len() > super::assistant_cma_gateway::MAX_CURSOR_BYTES
+            || cursor.chars().any(char::is_control)
+    }) {
+        return Err(cursor_error());
+    }
+    Ok(())
+}
+
+fn decode_resource_cursor(cursor: &str) -> AppResult<(String, Option<String>)> {
+    if cursor.len() > MAX_RESOURCE_CURSOR_BYTES {
+        return Err(cursor_error());
+    }
+    let (connection, upstream): (String, Option<String>) =
+        serde_json::from_str(cursor).map_err(|_| cursor_error())?;
+    validate_resource_cursor(&connection, upstream.as_deref())?;
+    Ok((connection, upstream))
+}
+
+fn encode_resource_cursor(connection: &str, upstream: Option<&str>) -> AppResult<String> {
+    validate_resource_cursor(connection, upstream)?;
+    let encoded = serde_json::to_string(&(connection, upstream)).map_err(|_| cursor_error())?;
+    if encoded.len() > MAX_RESOURCE_CURSOR_BYTES {
+        return Err(cursor_error());
+    }
+    Ok(encoded)
+}
+
 pub fn owns(name: &str) -> bool {
     NAMES.contains(&name)
 }
@@ -79,7 +117,7 @@ pub fn schema(name: &str) -> Value {
     let id = json!({"type":"string","minLength":1,"maxLength":256});
     match name {
         "list_cma_resources" => {
-            json!({"type":"object","properties":{"cursor":{"type":"string","maxLength":1024}},"required":[],"additionalProperties":false})
+            json!({"type":"object","properties":{"cursor":{"type":"string","maxLength":MAX_RESOURCE_CURSOR_BYTES}},"required":[],"additionalProperties":false})
         }
         "cma_save_attachment" => {
             json!({"type":"object","properties":{"agent_id":id,"attachment_id":id,"path":{"type":"string","minLength":1,"maxLength":4096,"description":"Path relative to the CMA filesystem API root /home/. Use the returned absolute_path in Agent commands."},"acknowledgement_id":id},"required":["agent_id","attachment_id","path"],"additionalProperties":false})
@@ -103,17 +141,23 @@ fn field<'a>(args: &'a Value, key: &str) -> AppResult<&'a str> {
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::ValidationError("Invalid CMA tool arguments".into()))
 }
-async fn remote_id(db: &Database, owner: &str, input: &str) -> AppResult<String> {
-    if input.starts_with("agt_") {
-        super::assistant_cma_gateway::validate_remote_id(input)?;
-        return Ok(input.into());
+async fn resource_reference(
+    db: &Database,
+    owner: &str,
+    input: &str,
+) -> AppResult<AssistantCmaAgent> {
+    super::assistant_cma_gateway::validate_remote_id(input)?;
+    let mut rows: Vec<AssistantCmaAgent> = db.collection(crate::models::assistant_cma_agent::COLLECTION_NAME)
+        .find(doc! {"user_id":owner,"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"},"$or":[{"_id":input},{"cma_agent_id":input}]}).limit(2).await?.try_collect().await?;
+    if rows.len() > 1 {
+        return Err(AppError::Conflict(
+            "Use the exact NyxID Agent reference for this connection".into(),
+        ));
     }
-    db.collection::<AssistantCmaAgent>(crate::models::assistant_cma_agent::COLLECTION_NAME)
-        .find_one(doc! {"_id":input,"user_id":owner})
-        .await?
-        .map(|row| row.cma_agent_id)
+    rows.pop()
         .ok_or_else(|| AppError::NotFound("CMA Agent not found".into()))
 }
+
 fn check_scope_inputs(
     scopes: &crate::models::agent_operation_scope::OperationScopes,
     connection: &str,
@@ -149,6 +193,7 @@ fn check_scope_inputs(
 pub(crate) async fn scope(
     db: &Database,
     chat: &acks::ChatAuthority,
+    user_service_id: &str,
     service: &str,
     method: &str,
     path: &str,
@@ -170,6 +215,7 @@ pub(crate) async fn scope(
         db,
         &live.user_id,
         &live.api_key_id,
+        user_service_id,
         service,
         method,
         path,
@@ -184,6 +230,7 @@ async fn key_scope(
     db: &Database,
     owner: &str,
     key_id: &str,
+    user_service_id: &str,
     service: &str,
     method: &str,
     path: &str,
@@ -205,35 +252,25 @@ async fn key_scope(
         return Err(refused());
     }
     let allowed = super::key_service::effective_allowed_service_ids(db, &key).await?;
-    let connections: Vec<crate::models::user_service::UserService> = db
-        .collection(crate::models::user_service::COLLECTION_NAME)
-        .find(
-            doc! {"user_id":owner,"catalog_service_id":service,"is_active":true,"deleted_at":null},
-        )
-        .await?
-        .try_collect()
-        .await?;
+    let connection = db.collection::<crate::models::user_service::UserService>(crate::models::user_service::COLLECTION_NAME)
+        .find_one(doc! {"_id":user_service_id,"user_id":owner,"catalog_service_id":service,"is_active":true,"deleted_at":null})
+        .await?.ok_or_else(refused)?;
     if !key.allow_all_services
-        && !allowed.iter().any(|id| id == service)
-        && !connections.iter().any(|row| allowed.contains(&row.id))
+        && !allowed
+            .iter()
+            .any(|id| id == service || id == &connection.id)
     {
         return Err(refused());
     }
-    for connection in connections
-        .iter()
-        .filter(|row| key.allow_all_services || allowed.contains(&row.id))
-    {
-        // Applicable restrictions remain an intersection, even when an alias is used.
-        check_scope_inputs(
-            &key.assistant_operation_scopes,
-            &connection.id,
-            service,
-            method,
-            path,
-            query,
-            body,
-        )?;
-    }
+    check_scope_inputs(
+        &key.assistant_operation_scopes,
+        &connection.id,
+        service,
+        method,
+        path,
+        query,
+        body,
+    )?;
     check_scope_inputs(
         &key.assistant_operation_scopes,
         service,
@@ -403,6 +440,7 @@ pub(crate) async fn watch_scope(
         db,
         &watch.user_id,
         &watch.api_key_id,
+        &watch.service_id,
         service,
         method,
         path,
@@ -472,43 +510,74 @@ pub async fn execute(
         });
     }
     let mode = acks::effective_access_mode(tools.db, chat).await?;
-    // Select the producer-owned catalog identity, never a supplied connection.
-    let catalog =
-        super::catalog_service::get_downstream_service_by_slug(tools.db, "cma", &chat.user_id)
-            .await?;
     let gateway =
-        CatalogCmaGateway::from_parts(tools.db, tools.jwt_keys, tools.config, &catalog.id)
+        CatalogCmaGateway::from_owner_parts(tools.db, tools.keys, tools.jwt_keys, tools.config)
             .with_native_authority(chat, mode);
-    gateway.verify_catalog(&chat.user_id, &catalog).await?;
     if name == "list_cma_resources" {
+        let cursor = args
+            .get("cursor")
+            .and_then(Value::as_str)
+            .map(decode_resource_cursor)
+            .transpose()?;
         // The gateway checks the live key and the exact inputs for every page,
         // detail read and effect, including requests made during registration.
         let sandbox_list = sandboxes::list_live(tools.db, &gateway, &chat.user_id, None).await?;
         let parents = sandboxes::active_created(tools.db, &chat.user_id).await?;
-        let parent_ids: std::collections::HashSet<&str> = parents
-            .iter()
-            .filter(|parent| parent.cma_service_id == catalog.id)
-            .filter_map(|parent| parent.cma_sandbox_id.as_deref())
-            .collect();
+        let mut groups = std::collections::BTreeMap::new();
+        for parent in parents {
+            groups
+                .entry(parent.user_service_id.clone())
+                .or_insert_with(|| (parent.clone(), std::collections::HashSet::new()))
+                .1
+                .extend(parent.cma_sandbox_id);
+        }
+        let current = cursor.as_ref().map(|(connection, _)| connection.as_str());
         let mut rows = Vec::new();
         let mut next_cursor = None;
-        if !parent_ids.is_empty() {
-            let page = gateway
-                .list_agents(&chat.user_id, args.get("cursor").and_then(Value::as_str))
+        let mut groups = groups.into_iter().peekable();
+        let mut selected = false;
+        while let Some((connection, (parent, parent_ids))) = groups.next() {
+            if current.is_some_and(|id| id != connection) {
+                continue;
+            }
+            selected = true;
+            let scoped = gateway.for_binding(
+                &connection,
+                &parent.cma_service_id,
+                &parent.execution_base_url,
+            );
+            let page = scoped
+                .list_agents(
+                    &chat.user_id,
+                    cursor.as_ref().and_then(|(_, cursor)| cursor.as_deref()),
+                )
                 .await?;
-            for remote in &page.items {
+            for remote in page.items {
                 if remote
                     .sandbox_id
                     .as_deref()
                     .is_some_and(|id| parent_ids.contains(id))
                 {
                     rows.push(
-                        agents::register_live(tools.db, &gateway, &chat.user_id, &remote.id, None)
+                        agents::register_live(tools.db, &scoped, &chat.user_id, &remote.id, None)
                             .await?,
                     );
                 }
             }
-            next_cursor = page.next_cursor;
+            next_cursor = if let Some(cursor) = page.next_cursor {
+                Some(encode_resource_cursor(&connection, Some(&cursor))?)
+            } else {
+                groups
+                    .peek()
+                    .map(|(id, _)| encode_resource_cursor(id, None))
+                    .transpose()?
+            };
+            break;
+        }
+        if current.is_some() && !selected {
+            return Err(AppError::ValidationError(
+                "CMA resource cursor is no longer available".into(),
+            ));
         }
         let value = resource_list_result(&sandbox_list, &rows, next_cursor);
         if value.to_string().len() > 64 * 1024 {
@@ -520,8 +589,20 @@ pub async fn execute(
             permission_request: None,
         });
     }
-    let remote = remote_id(tools.db, &chat.user_id, field(args, "agent_id")?).await?;
-    let row = agents::register_live(tools.db, &gateway, &chat.user_id, &remote, None).await?;
+    let original = resource_reference(tools.db, &chat.user_id, field(args, "agent_id")?).await?;
+    let gateway = gateway.for_binding(
+        &original.user_service_id,
+        &original.cma_service_id,
+        &original.execution_base_url,
+    );
+    let row = agents::register_live(
+        tools.db,
+        &gateway,
+        &chat.user_id,
+        &original.cma_agent_id,
+        None,
+    )
+    .await?;
     let attachment = field(args, "attachment_id")?;
     let upload = super::assistant_upload_service::for_chat(tools.db, chat, attachment).await?;
     if upload.conversation_id != chat.conversation_id
@@ -589,7 +670,7 @@ fn attachment_receipt(saved: &CmaFileWrite) -> Value {
 }
 
 /// Recheck the exact created parent immediately before the native file effect.
-/// The native gateway does not pass through the generic dispatch admission.
+/// The native gateway also retains the ordinary dispatch admission and final guard.
 pub(super) async fn write_attachment_to_created_parent(
     db: &Database,
     gateway: &dyn CmaGateway,
@@ -647,6 +728,121 @@ mod tests {
     use crate::models::downstream_service::ProxyOperationRule;
 
     #[test]
+    fn composite_resource_cursor_preserves_the_full_upstream_budget() {
+        let connection = uuid::Uuid::new_v4().to_string();
+        for cursor in [
+            "a".repeat(1000),
+            "a".repeat(1024),
+            "\"\\".repeat(512),
+            "界".repeat(341) + "a",
+        ] {
+            let encoded = encode_resource_cursor(&connection, Some(&cursor)).unwrap();
+            assert!(encoded.len() <= MAX_RESOURCE_CURSOR_BYTES);
+            assert_eq!(
+                decode_resource_cursor(&encoded).unwrap(),
+                (connection.clone(), Some(cursor))
+            );
+        }
+        let encoded = encode_resource_cursor(&connection, None).unwrap();
+        assert_eq!(
+            decode_resource_cursor(&encoded).unwrap(),
+            (connection.clone(), None)
+        );
+        assert_eq!(
+            schema("list_cma_resources")["properties"]["cursor"]["maxLength"],
+            MAX_RESOURCE_CURSOR_BYTES
+        );
+        for invalid in [
+            "x".repeat(MAX_RESOURCE_CURSOR_BYTES + 1),
+            "[".into(),
+            serde_json::to_string(&(connection.clone(), Some("a".repeat(1025)))).unwrap(),
+            serde_json::to_string(&(connection.clone(), Some("a\nb"))).unwrap(),
+            serde_json::to_string(&(connection.clone(), Some(""))).unwrap(),
+            serde_json::to_string(&("x".repeat(257), None::<String>)).unwrap(),
+        ] {
+            assert!(decode_resource_cursor(&invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_grant_for_one_connection_does_not_authorize_another_cma_alias() {
+        use crate::services::assistant_authority_tests::{orchestrator_fixture, ordinary_key};
+        use crate::test_utils::{
+            test_auto_connected_catalog_service, test_user_endpoint, test_user_service,
+        };
+        let f = orchestrator_fixture("cma_exact_connection_grant").await;
+        let db = &f.state.db;
+        let mut catalog = test_auto_connected_catalog_service();
+        catalog.slug = "cma".into();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            "downstream_services",
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+        let mut connections = Vec::new();
+        for alias in ["cma-a", "cma-b"] {
+            let connection = uuid::Uuid::new_v4().to_string();
+            let endpoint = uuid::Uuid::new_v4().to_string();
+            db.collection::<crate::models::user_endpoint::UserEndpoint>("user_endpoints")
+                .insert_one(test_user_endpoint(
+                    &endpoint,
+                    &f.owner,
+                    alias,
+                    "https://cma.example/",
+                    None,
+                    Some(&catalog.id),
+                ))
+                .await
+                .unwrap();
+            db.collection::<crate::models::user_service::UserService>("user_services")
+                .insert_one(test_user_service(
+                    &connection,
+                    &f.owner,
+                    alias,
+                    &endpoint,
+                    Some(&catalog.id),
+                    None,
+                ))
+                .await
+                .unwrap();
+            connections.push(connection);
+        }
+        let key = ordinary_key(&f).await;
+        db.collection::<bson::Document>("api_keys").update_one(doc! {"_id":&key}, doc! {"$set":{
+            "allow_all_services":false,"allow_auto_connected_services":false,"allowed_service_ids":[&connections[0]]
+        }}).await.unwrap();
+        key_scope(
+            db,
+            &f.owner,
+            &key,
+            &connections[0],
+            &catalog.id,
+            "GET",
+            "/api/v1/agents",
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(
+            key_scope(
+                db,
+                &f.owner,
+                &key,
+                &connections[1],
+                &catalog.id,
+                "GET",
+                "/api/v1/agents",
+                None,
+                &[]
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
     fn cma_guide_is_versioned_read_only_and_has_a_closed_empty_input() {
         assert_eq!(
             guide_result(),
@@ -698,6 +894,8 @@ mod tests {
         let mut row = AssistantCmaAgent {
             id: "local-reference".into(),
             user_id: "owner".into(),
+            user_service_id: "user-service".into(),
+            execution_base_url: "https://cma.example/".into(),
             cma_service_id: "service".into(),
             cma_agent_id: "agt_test".into(),
             cma_sandbox_id: Some("sbx_test".into()),

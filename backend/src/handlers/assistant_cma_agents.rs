@@ -8,8 +8,8 @@ use crate::{
     services::{
         assistant_cma_agent_service as agents,
         assistant_cma_gateway::{
-            CatalogCmaGateway, CmaDesktopSocket, CmaGateway, MAX_CURSOR_BYTES,
-            MAX_DESKTOP_FRAME_BYTES, MAX_STREAM_SECONDS,
+            CatalogCmaGateway, CmaDesktopSocket, CmaGateway, CmaGatewayError, CmaResult,
+            MAX_CURSOR_BYTES, MAX_DESKTOP_FRAME_BYTES, MAX_RESPONSE_BYTES, MAX_STREAM_SECONDS,
         },
     },
 };
@@ -39,10 +39,14 @@ async fn reference(
     state: &AppState,
     auth: &AuthUser,
     id: &str,
-) -> AppResult<(String, AssistantCmaAgent, CatalogCmaGateway)> {
+) -> AppResult<(String, AssistantCmaAgent, CatalogCmaGateway<'static>)> {
     let owner = owner(state, auth).await?;
     let row = agents::get_owned(&state.db, &owner, id).await?;
-    let gateway = CatalogCmaGateway::for_service(state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     Ok((owner, row, gateway))
 }
 
@@ -53,7 +57,11 @@ pub async fn detail(
 ) -> AppResult<Json<agents::AgentDto>> {
     let owner = owner(&state, &auth).await?;
     let row = agents::get_owned(&state.db, &owner, &id).await?;
-    let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(&state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     Ok(Json(
         agents::detail(&state.db, &gateway, &owner, &id).await?,
     ))
@@ -106,7 +114,11 @@ pub async fn desktop(
 ) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaDesktopDescriptor>> {
     let owner = owner(&state, &auth).await?;
     let row = agents::get_owned(&state.db, &owner, &id).await?;
-    let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(&state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     Ok(Json(
         agents::desktop(&state.db, &gateway, &owner, &id).await?,
     ))
@@ -487,7 +499,7 @@ pub async fn desktop_ws(
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
     stream_authority(&state, &gateway, &owner, auth.session_id, &row, None, true).await?;
     let checked = Instant::now();
-    let upstream = gateway.open_desktop(&owner, &row.cma_agent_id).await?;
+    let upstream = open_desktop(&gateway, &owner, &row.cma_agent_id).await?;
     // CMA's open enforces one viewer per shared Sandbox before our browser
     // upgrade succeeds. Neither endpoint mints a replacement Agent.
     Ok(ws
@@ -498,11 +510,65 @@ pub async fn desktop_ws(
         }))
 }
 
+pub(crate) async fn open_desktop(
+    gateway: &CatalogCmaGateway<'_>,
+    owner_id: &str,
+    agent_id: &str,
+) -> CmaResult<CmaDesktopSocket> {
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+    let (target, identity, base) = gateway.desktop_context(owner_id, agent_id).await?;
+    let path = format!("/api/v1/agents/{agent_id}/desktop/ws");
+    let identity = identity
+        .iter()
+        .map(|(name, value)| {
+            Ok((
+                name.to_string(),
+                value
+                    .to_str()
+                    .map_err(|_| CmaGatewayError::InvalidRequest)?
+                    .to_owned(),
+            ))
+        })
+        .collect::<CmaResult<Vec<_>>>()?;
+    let url = super::proxy::build_downstream_ws_url(&target, &path, None, &[])
+        .map_err(CmaGatewayError::from)?;
+    let request =
+        super::proxy::build_downstream_ws_request(&url, &target, &[], &identity, &[], None)
+            .map_err(CmaGatewayError::from)?;
+    // No browser cookies or caller-selected Origin reach CMA. Its own
+    // owner-authenticated open is the shared Sandbox single-viewer fence.
+    let mut limits = WebSocketConfig::default();
+    limits.max_message_size = Some(MAX_DESKTOP_FRAME_BYTES);
+    limits.max_frame_size = Some(MAX_DESKTOP_FRAME_BYTES);
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio_tungstenite::connect_async_with_config(request, Some(limits), true),
+    )
+    .await
+    .map_err(|_| CmaGatewayError::Timeout)?;
+    match result {
+        Ok((socket, _)) => Ok(socket),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let body = response
+                .body()
+                .as_ref()
+                .filter(|body| body.len() <= MAX_RESPONSE_BYTES)
+                .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+            Err(crate::services::assistant_cma_gateway::map_status(
+                response.status().as_u16(),
+                body.as_ref(),
+                &base,
+            ))
+        }
+        Err(_) => Err(CmaGatewayError::Unavailable),
+    }
+}
+
 async fn desktop_relay(
     state: AppState,
     auth: AuthUser,
     row: AssistantCmaAgent,
-    gateway: CatalogCmaGateway,
+    gateway: CatalogCmaGateway<'static>,
     upstream: CmaDesktopSocket,
     socket: WebSocket,
     checked: Instant,

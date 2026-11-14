@@ -59,17 +59,19 @@ async fn assistant_cma_creation_cutover_modes_approval_retry_and_permit() {
             let body = br#"{ "name": "cutover request", "machine_included": false }"#;
             let key = "writer-cutover-approval-key";
             let initial = f.admit(&f.target, route, key, body).await.unwrap();
-            let row = initial.creation.as_ref().unwrap();
-            assert_retained_body(&f, row, body, contextual).await;
+            let row = initial.creation.as_ref().unwrap().clone();
+            drop(initial);
+            assert_retained_body(&f, &row, body, contextual).await;
             // Rolling readers accept existing rows regardless of their write setting.
             f.keys.set_contextual_record_writes(!contextual);
             let retry = f.admit(&f.target, route, key, body).await.unwrap();
-            let retried = retry.creation.as_ref().unwrap();
+            let retried = retry.creation.as_ref().unwrap().clone();
+            drop(retry);
             assert_eq!(
-                bson::to_document(retried).unwrap(),
-                bson::to_document(row).unwrap()
+                bson::to_document(&retried).unwrap(),
+                bson::to_document(&row).unwrap()
             );
-            assert_retained_body(&f, retried, body, contextual).await;
+            assert_retained_body(&f, &retried, body, contextual).await;
             f.keys.set_contextual_record_writes(contextual);
             f.assert_single_intent().await;
             assert_eq!(f.post_count().await, 0);
@@ -224,10 +226,11 @@ async fn assistant_cma_cutover_lost_receipt_replays_both_creation_kinds() {
                 .mount(&f.server)
                 .await;
             let permit = f.admit(&f.target, route, key, body).await.unwrap();
-            let row = permit.creation.as_ref().unwrap();
+            let row = permit.creation.as_ref().unwrap().clone();
             let request = f.request(route, key, body);
             permit.before_send(&request).await.unwrap();
             drop(reqwest::Client::new().execute(request).await.unwrap());
+            drop(permit);
             // Retained read-only reconciliation cannot guess the missing receipt or clear bytes.
             let before = bson::to_document(&f.saved(&row.id).await).unwrap();
             recover_owner(&f.db, &f.gateway(), &f.owner).await.unwrap();
@@ -284,11 +287,12 @@ async fn assistant_cma_cutover_cross_format_and_old_reader_fail_without_mutation
             .admit(&f.target, "/api/v1/sandboxes", "cross-format-key", body)
             .await
             .unwrap();
-        let row = permit.creation.as_ref().unwrap();
+        let row = permit.creation.as_ref().unwrap().clone();
         permit
             .before_send(&f.request("/api/v1/sandboxes", "cross-format-key", body))
             .await
             .unwrap();
+        drop(permit);
         let collection = f
             .db
             .collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME);
@@ -389,7 +393,7 @@ async fn assistant_cma_cutover_cross_format_and_old_reader_fail_without_mutation
                 .await
                 .unwrap();
         }
-        assert_retained_body(&f, row, body, contextual).await;
+        assert_retained_body(&f, &row, body, contextual).await;
         assert_eq!(
             bson::to_document(&f.saved(&row.id).await).unwrap(),
             creation
@@ -434,8 +438,9 @@ async fn assistant_cma_cutover_proven_absence_retry_replaces_ciphertext_and_mark
             .admit(&f.target, "/api/v1/agents", key, body)
             .await
             .unwrap();
-        let old = first.creation.as_ref().unwrap();
-        let absent = change_creation(&f.db, old, CreationChange::NoResource)
+        let old = first.creation.as_ref().unwrap().clone();
+        drop(first);
+        let absent = change_creation(&f.db, &old, CreationChange::NoResource)
             .await
             .unwrap();
         assert!(absent.request_ciphertext.is_none() && absent.request_context_version.is_none());
