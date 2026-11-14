@@ -390,6 +390,15 @@ export async function requestAuthenticatedResponse(path: string, options: Reques
   return response;
 }
 
+/** Raw authenticated text response for downloads that are not JSON API data. */
+export async function requestRawText(
+  path: string,
+  options: RequestOptions = {},
+): Promise<{ text: string; headers: { get(name: string): string | null } }> {
+  const response = await requestAuthenticatedResponse(path, options);
+  return { text: await response.text(), headers: response.headers };
+}
+
 export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? "GET";
   const requiresAuth = options.requiresAuth ?? true;

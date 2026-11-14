@@ -3,6 +3,9 @@ import { useEffect, useState } from "react";
 import { Switch } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChartColumn, Smartphone } from "lucide-react-native";
+import { Download } from "lucide-react-native";
+import { File, Paths } from "expo-file-system";
+import * as Sharing from "expo-sharing";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
@@ -17,7 +20,8 @@ import {
   saveAnalyticsPermission,
   type AnalyticsPermission,
 } from "../../lib/analyticsRelay";
-import { requestJson } from "../../lib/api/http";
+import { requestJson, requestRawText } from "../../lib/api/http";
+import { ApiError } from "../../lib/api/ApiError";
 
 /** Settings › Privacy: optional usage analytics for the account and this device. */
 export function PrivacySettingsScreen(
@@ -65,6 +69,45 @@ export function PrivacySettingsScreen(
         kind: "error",
       }),
   });
+  const exportData = useMutation({
+    mutationFn: async () => {
+      const accountId = deviceConsent.accountId;
+      if (!accountId) throw new Error("auth_session_missing");
+      const response = await requestRawText("/users/me/export", {
+        method: "POST",
+        expectedAccountId: accountId,
+      });
+      const file = new File(Paths.cache, `nyxid-account-export-${Date.now()}.json`);
+      file.create();
+      try {
+        file.write(response.text);
+        if (!(await Sharing.isAvailableAsync())) throw new Error("sharing_unavailable");
+        await Sharing.shareAsync(file.uri, {
+          mimeType: "application/json",
+          UTI: "public.json",
+          dialogTitle: t("Export my data"),
+        });
+      } finally {
+        try {
+          if (file.exists) file.delete();
+        } catch {
+          // Cache cleanup is best effort after the share sheet closes.
+        }
+      }
+    },
+    onSuccess: () => setToast({ message: t("Your data export is ready."), kind: "success" }),
+    onError: (error: unknown) => {
+      if (error instanceof ApiError && error.statusCode === 429) {
+        const seconds = error.retryAfterMs ? Math.ceil(error.retryAfterMs / 1000) : 0;
+        const retry = seconds ? ` ${t("Try again in {{seconds}} seconds.", { seconds })}` : "";
+        setToast({ message: `${t("Your data export is temporarily rate limited.")}${retry}`, kind: "error" });
+      } else if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 405)) {
+        setToast({ message: t("Data export is not available on this server yet."), kind: "error" });
+      } else {
+        setToast({ message: t("We couldn't create your data export. Please try again."), kind: "error" });
+      }
+    },
+  });
   // The row names the setting; the switch shows its state. Only an error
   // needs words; a load disables the switch without placeholder text.
   const accountDetail = analyticsPermission.isFetching
@@ -75,6 +118,21 @@ export function PrivacySettingsScreen(
   return (
     <>
       <SettingsPage>
+        <SettingsGroup
+          title={t("Your data")}
+          footer={t(
+            "Download a JSON copy of your account profile, services, activity, assistant and channel content, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.",
+          )}
+        >
+          <SettingsRow
+            icon={Download}
+            label={t("Export my data")}
+            detail={t("Creates a bounded JSON export. You can request one up to three times per hour.")}
+            onPress={() => exportData.mutate()}
+            disabled={exportData.isPending}
+            accessibilityState={{ disabled: exportData.isPending, busy: exportData.isPending }}
+          />
+        </SettingsGroup>
         <SettingsGroup
           title={t("Usage analytics")}
           footer={t(
