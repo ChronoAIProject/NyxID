@@ -460,3 +460,13 @@ Install the build uploader with `npm ci --prefix tools/crash-artifacts` from the
 repo root. Upload runs only with CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN, _ORG and
 _PROJECT_MOBILE together. Keep those build secrets outside Expo public config.
 The report's app version/build always comes from the installed native binary.
+
+Before distributing each TestFlight or Play build, an administrator must register
+its installed platform, marketing version and build number/versionCode in
+NyxID Admin → Crash reports → Unverified releases, or call
+`POST /api/v1/admin/crash-reports/releases` with
+`{"platform":"ios","app_version":"1.0.4","app_build":"45"}` (use `android`
+for Play; optional `artifact_id` is supported). Store binaries have no
+server-reachable manifest, so mobile registration cannot be automatic. Unknown
+builds are retained and shown separately; only registered releases count in the
+version summary. Registration later verifies existing rows without backfill.

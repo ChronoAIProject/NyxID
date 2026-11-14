@@ -932,3 +932,12 @@ only part of the required upload settings fails the build. Runtime export and
 build upload credentials are independent. Vendor projects must have retention
 ≤30 days, IP storage prevention and server-side scrubbing on, separate projects,
 and owner acceptance of local-link deletion plus vendor expiry.
+
+`CRASH_REPORTS_EXPORT_INTERVAL_SECS=0` disables crash export even with configured
+DSNs: new rows have export status `disabled`, existing pending rows are not
+worked and TTL-expire, and ingestion health displays “Export disabled”. Web
+private maps are retained only when upload is configured or
+`CRASH_ARTIFACTS_RETAIN=1`; all builds remove public maps and assert no public
+`sourceMappingURL`. The frontend image publication workflow passes optional
+GitHub secret `CRASH_ARTIFACTS_SENTRY` as BuildKit `crash_artifacts_sentry`.
+Missing/empty secrets perform no upload or uploader dependency installation.

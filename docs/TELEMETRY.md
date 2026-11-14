@@ -104,3 +104,11 @@ events expire under vendor retention; no supported per-event deletion guarantee
 is assumed. These deployed operator settings require direct verification.
 
 Withdrawing permission stops new reports and pending exports; reports NyxID has already received remain for up to 30 days unless the account is deleted, and exported vendor copies expire under vendor retention.
+
+Crash permission responses distinguish definitive denial from unknown status.
+Timeout, lookup failures and unserving readiness pause client capture without
+purging pending mobile records; 13401 also pauses. Definitive not-offered/13400,
+withdrawal, logout and account switch purge. Export interval zero stores new
+rows as disabled and never works existing pending rows. Release-version counts
+include only identities verified by `client_release_registry`; unknown store
+builds appear separately until an administrator registers them.

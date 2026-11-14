@@ -40,6 +40,13 @@ policy 1; a PUT without `policy_version` still records `1`. New clients negotiat
 field requires serving readiness, the acting person’s flag and no global kill
 switch; only then is current policy 2 advertised and diagnostic UI displayed.
 The entire display-status computation is bounded to 250 ms and fails closed.
+`diagnostics_status` distinguishes `available`, `consent_required`, definitive
+`not_offered` and `unknown`. Timeout, lookup errors and unserving readiness are
+unknown; old responses without a status also mean unknown to current clients.
+Unknown pauses capture and preserves pending records. Only definite withdrawal,
+account change or `not_offered` purges them. The default-off path caches only
+absence of enabled flag scopes, for at most five seconds; it never caches a
+positive decision.
 Web offers the updated consent
 banner and a Privacy review dialog. Mobile offers an account-bound one-time
 Review / Not now alert and a Privacy review row. Not now retains the old choice.
@@ -70,8 +77,13 @@ application tracing expose only fixed outcomes/platform/kind metadata.
 
 ## Native lifecycle, buffer and purge proofs
 
-All enabling, arming, disarming and pending-report processing starts in module
-functions called from JavaScript. There are no AppDelegate or SceneDelegate
+All enabling, arming, disarming and report conversion starts in module
+functions called from JavaScript. Module `OnCreate` additionally enforces raw-file
+retention before JS: no binding/capture authority or an age over 24 hours deletes
+the file unread. Otherwise an in-memory parse compares only customData `e`; a
+missing or mismatched epoch deletes it without retaining parser data. The same
+24-hour file-age bound applies in `collect`. `initialRawReportDecision` has
+portable tests for every branch and its age boundaries. There are no AppDelegate or SceneDelegate
 hooks, so app-delegate and UIScene lifecycles use the same path.
 
 After auth restoration and device-choice hydration, a fresh permission read
@@ -84,7 +96,7 @@ process. On iOS it also converts any matching capture-time raw report locally
 and purges the raw file through `collect`; only bounded sanitized records survive
 an offline launch. A later successful refresh can re-arm the same revision and drain
 retained records within the existing bounds. Explicit denial still purges. Logout, account switch, withdrawal, remote
-denial, kill switch or unavailable diagnostics disarms and purges. A→B→A and
+denial or kill switch disarms and purges; transient unknown availability pauses. A→B→A and
 withdrawal/regrant cannot adopt a predecessor's records.
 
 The iOS directory is Application Support/nyx-crash, excluded from backup with
@@ -93,7 +105,8 @@ no-backup directory. Only sanitized fatal/native records enter the bounded
 buffer: at most three records, 256 KiB total, 32 KiB per record, 24 hours old.
 Writes are synchronous, atomic and fsynced before native return. JS revalidates
 both the binding and the closed record before upload. Successful sends remove
-the record; denied authority purges it. Other failed sends may survive only
+the record. HTTP 4xx refusals drop only that record, except 429 (retry later),
+13401 (pause and keep) and 13400 (disarm/purge). Other failed sends may survive only
 within that consent-bound buffer and its limits.
 Interrupted atomic-write staging files are deleted on the next buffer trim or
 disarm, including iOS temporary files and Android AtomicFile sidecars. They are
@@ -113,8 +126,13 @@ the module logs its result with `NSLog("%@", line)`. Report data, paths,
 identifiers, registers and exception text cannot enter this formatter.
 The raw file can contain crashed-thread register values inside the protected app
 sandbox until the next launch. Registers never enter the sanitized buffer,
-NyxID or Sentry. The process signal handler is enabled once; disarming clears
-custom data and binding so any later raw report is ineligible.
+NyxID or Sentry. The PLCrashReporter signal handler cannot be unregistered within a process.
+A crash after pause/disarm still writes a raw file. From that crash until the
+next launch it sits in the protected, backup-excluded app sandbox. Pause removes
+the persisted raw-capture authority marker while preserving the binding and
+sanitized records; disarm removes both. At the next launch, module initialization
+deletes such an unauthorized raw file unread. If the app is never launched again,
+the file remains on the device. Registers never leave the device.
 
 `pendingCrashDecision` is a pure function: only an equal nonempty epoch and no
 `j` marker permits native conversion. `NyxCrashReporterModule.collect` always
@@ -138,7 +156,8 @@ do not invoke RN's development rejection logging/native-exception path.
 
 Automated proofs run in `pnpm test`: `native-crash.test.js` compiles/runs the
 production Swift decision and sanitizer functions with sentinel-laden inputs on
-macOS and Linux (`swift:6.0`). `ParsedNativeCrash` contains only the values needed
+macOS and Linux (`swift:6.0`), plus the complete mobile CI command sequence on
+Ubuntu 24.04 with Swift 6.4.2, Node 22 and pnpm 10.17.1. `ParsedNativeCrash` contains only the values needed
 for mapping. `sanitizedNativeCrash` performs thread selection, image/offset
 mapping, frame/image limits, basename/UUID/signal normalization, version/OS and
 capture-time validation, then the closed `sanitizedNativeRecord` boundary.
@@ -173,7 +192,10 @@ under device/account consent headers. It returns 202 accepted/duplicate with a
 local report ID and no-store. Cluster limits apply before parsing: 5/minute and
 50/day/account, 30/minute/trusted client IP and 600/minute/global. IP is only a
 rate-window key, never a report field. Unavailable capture returns 13400/404;
-missing or stale diagnostics consent returns 13401/403. Clients purge on either.
+missing or stale diagnostics consent returns 13401/403. Unknown readiness or lookup
+failures return the existing transient 503 `security_readiness_unavailable`. Mobile
+pauses on 13401/503 and disarms only on definitive 13400. The web session stops
+only for 13400/13401; unknown/5xx permits a later refresh.
 
 `client_error_reports` has UUID IDs, a unique owner/event index, owner revision,
 closed report, derived fields, receive/expiry timestamps and fenced export state.
@@ -192,7 +214,11 @@ deadline, then persists dispatching before network I/O. 2xx settles exported;
 429/503 and proven connect failures retry with bounded backoff up to one hour
 within the deadline. Timeout or ambiguous delivery becomes unknown and is never
 resent. Expired dispatch leases become unknown. Other provider refusals become
-failed. Stale workers cannot settle successor claims. Missing platform DSN stores
+failed. A replica with no matching destination releases the lease as pending with
+a short backoff, allowing a configured replica to export it before the deadline.
+An export interval of zero disables all export work, including existing pending
+rows (which TTL-expire), and stores new rows as disabled even with a DSN.
+The admin health explicitly shows Export disabled. Stale workers cannot settle successor claims. Missing platform DSN stores
 reports with export disabled, with no backlog awaiting later configuration.
 
 ## Sentry configuration and erasure acceptance
@@ -251,8 +277,9 @@ data disclosure and a TestFlight device proof are release-operator prerequisites
 An explicit global flag override off is the kill switch, including narrower
 user/org enables. Ingestion refuses, clients purge when they observe denial,
 and export discards pending records. Disable first for binary rollback; older
-binaries ignore additive fields and new collections, which TTL-expire. No
-migration of existing analytics consent is performed.
+binaries ignore additive fields and new collections. Diagnostic reports and
+counters TTL-expire; the non-personal release registry persists. No migration
+of existing analytics consent is performed.
 
 ## Third-party components
 
@@ -280,3 +307,58 @@ and [Ubuntu 26.04](https://github.com/actions/runner-images/blob/main/images/ubu
 The [runner image label table](https://github.com/actions/runner-images#available-images)
 maps `ubuntu-latest` to the hosted Ubuntu image; both sides of the November 2026
 label transition include the Swift compiler.
+
+## Release identity registry
+
+`client_release_registry` is release metadata, not personal report data, and is
+never exported. Its unique key is platform/version/build/artifact; UUID IDs and
+BSON registration timestamps follow the model conventions. Optional
+`registered_by` is administrative attribution, not report ownership. WS5 must
+classify this collection as non-personal release metadata (the existing
+`client_error_reports` is owner-linked personal diagnostic data;
+`client_error_report_counters` is anonymous aggregate operational data).
+
+Unknown web artifacts trigger a single-flight check of `crash-build.json` at
+`FRONTEND_URL` and each `FRONTEND_URL_ALIASES` origin only. Report fields never
+form URLs. Production requires HTTPS; configured development HTTP is allowed.
+Requests disable redirects and carry no account data, authorization or cookies,
+with a three-second timeout, 4 KiB response cap and closed JSON schema. A
+matching version/build/artifact is registered from `frontend_manifest`; failed
+checks have a sixty-second negative cache per artifact.
+
+An administrator registers each TestFlight/Play build using the Unverified
+releases action in `/admin/crash-reports`, or admin-only first-party-human
+`POST /api/v1/admin/crash-reports/releases` with
+`{platform, app_version, app_build, artifact_id?}`. Operators can inspect unverified
+counts but cannot register. Registration is metadata-audited. Mobile cannot
+register automatically because store binaries have no server-reachable manifest.
+Verification uses a query-time registry lookup: version totals contain only
+verified records, and Unverified releases shows the others. Later registration
+needs no report backfill. Mobile verification binds platform/version/build;
+web additionally binds the artifact. Individual reports remain inspectable.
+
+Every Sentry event explicitly carries
+`sdk.settings.infer_ip = "never"`, with SDK name `nyxid.crash-export` and the
+backend package version, and has no `user` object. This avoids JavaScript/Cocoa
+legacy inference; see [Sentry SDK event payload settings](https://develop.sentry.dev/sdk/data-model/event-payloads/sdk/).
+
+## Intentional behaviour
+
+- GPC also disables client analytics, matching the server and narrowing collection.
+- NSException crashes carry only the abort stack. The exception handler is disabled for privacy.
+- Capture is unarmed during the permission round trip and after a failed fetch.
+
+## Hermes artifact validation proof
+
+The pinned `sentry-cli 3.8.2` accepts the real Release Hermes bytecode bundle
+(magic `c61fbc03`) and its composed source map with the existing upload flags.
+A local metadata-only Sentry API stub was used with the Release simulator files
+produced with `SOURCEMAP_FILE` set. The command was
+`tools/crash-artifacts/node_modules/.bin/sentry-cli sourcemaps upload /private/tmp/ws4-r5-evidence/hermes --release nyxid-ios@1.0.4+45 --dist 45 --url-prefix app:/// --validate --strict`.
+It exited 0 and reported “Found 2 files”, “Analyzing 2 sources”, “Validating
+sources”, “Bundled 2 files for upload” and a script/map pair at
+`app:///main.jsbundle` / `app:///main.jsbundle.map`. Validation executes on the
+bytecode and composed map before the stub's assembly response; it is not a
+mock of the CLI. No vendor or production project was contacted. The upload
+flags remain unchanged. See the [Sentry CLI source-map upload documentation](https://docs.sentry.io/platforms/javascript/sourcemaps/uploading/cli/)
+and [React Native Hermes source maps](https://docs.sentry.io/platforms/react-native/sourcemaps/uploading/hermes/).
