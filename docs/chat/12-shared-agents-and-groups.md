@@ -279,6 +279,20 @@ groups. Owner-paid guests also consume the owner's existing guest/channel pool
 and rate limits. Retries and continuations do not refill budgets. Keep the
 existing pool, turn duration and tool-call bounds; dedupe handoff admission.
 
+Successful reply settlement also commits its eligible handoffs into the existing
+request queue. A process can disappear before its callback without losing that
+queue. The original requester, live authority, hop budget and hourly limit stay
+unchanged. The legacy callback sees the recorded target authority and does not
+spend another hop or enqueue another turn. Request removal and turn admission
+already share a transaction; recovery never reruns an admitted execution. This
+uses the existing request format, so old readers can admit handoffs written by
+new replicas. Old settlement writers retain the former callback gap until they
+are upgraded. A disabled rollout or revoked authority still prevents new work.
+A dropped request, revoked slot or changed execution binding suppresses its
+new handoff without undoing an otherwise authorized public reply or spending
+a handoff budget. Loss of the original source or audience authority suppresses
+publication; database failures still roll back the settlement transaction.
+
 Guest busy handling follows channel behavior: give a bounded retry notice rather
 than enqueueing a guest as the owner's ordinary event work. Authorized group work
 can use the existing bounded pending-request mechanism. Multi-person groups do

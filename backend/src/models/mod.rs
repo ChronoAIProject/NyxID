@@ -168,6 +168,7 @@ pub mod assistant_platform_model;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod assistant_skill_draft_attempt;
+pub mod assistant_wake;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;

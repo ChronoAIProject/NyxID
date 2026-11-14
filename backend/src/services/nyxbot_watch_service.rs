@@ -151,6 +151,28 @@ pub async fn onboarding_context(
     db: &mongodb::Database,
     watch: &NyxbotWatch,
 ) -> crate::errors::AppResult<String> {
+    onboarding_reference(
+        db,
+        &watch.user_id,
+        &watch.conversation_id,
+        watch.source_turn_id.as_deref(),
+        watch.source_connect_link_id.as_deref(),
+        watch.connect_link_id.as_deref(),
+        watch.created_at,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn onboarding_reference(
+    db: &mongodb::Database,
+    owner: &str,
+    conversation_id: &str,
+    source_turn_id: Option<&str>,
+    source_connect_link_id: Option<&str>,
+    connect_link_id: Option<&str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> crate::errors::AppResult<String> {
     use futures::TryStreamExt;
     const GUIDANCE: &str = "Creating or linking a bot is only a transport setup step, not completed onboarding or consent to open the audience. Keep unanswered questions pending. Do not propose opening to everyone until the owner asks or configuration and a customer test support readiness; disclose the remaining gaps if the owner chooses to open now.";
     let unknown = || {
@@ -158,17 +180,15 @@ pub async fn onboarding_context(
             "{GUIDANCE} The originating onboarding context is unavailable. Recover outstanding questions from retained history; ask the owner only if needed. Do not assume setup answered them."
         )
     };
-    let Some(turn) = watch.source_turn_id.as_deref() else {
+    let Some(turn) = source_turn_id else {
         return Ok(unknown());
     };
-    if watch.source_connect_link_id.is_none()
-        || watch.source_connect_link_id != watch.connect_link_id
-    {
+    if source_connect_link_id.is_none() || source_connect_link_id != connect_link_id {
         return Ok(unknown());
     }
     let conversation = db
         .collection::<bson::Document>("assistant_conversations")
-        .find_one(doc! {"_id":&watch.conversation_id,"user_id":&watch.user_id})
+        .find_one(doc! {"_id":conversation_id,"user_id":owner})
         .projection(doc! {"context_reset_at":1})
         .await?;
     let Some(conversation) = conversation else {
@@ -176,22 +196,20 @@ pub async fn onboarding_context(
     };
     if conversation
         .get_datetime("context_reset_at")
-        .is_ok_and(|at| at.to_chrono() >= watch.created_at)
+        .is_ok_and(|at| at.to_chrono() >= created_at)
     {
         return Ok(unknown());
     }
     let messages = db.collection::<bson::Document>("assistant_messages");
     let anchor = messages
-        .find_one(
-            doc! {"conversation_id":&watch.conversation_id,"user_id":&watch.user_id,"turn_id":turn},
-        )
+        .find_one(doc! {"conversation_id":conversation_id,"user_id":owner,"turn_id":turn})
         .sort(doc! {"seq":1})
         .projection(doc! {"seq":1})
         .await?;
     let Some(seq) = anchor.and_then(|r| r.get_i64("seq").ok()) else {
         return Ok(unknown());
     };
-    let rows: Vec<bson::Document> = messages.find(doc! {"conversation_id":&watch.conversation_id,"user_id":&watch.user_id,"seq":{"$lte":seq},"role":{"$in":["user","assistant"]}})
+    let rows: Vec<bson::Document> = messages.find(doc! {"conversation_id":conversation_id,"user_id":owner,"seq":{"$lte":seq},"role":{"$in":["user","assistant"]}})
         .sort(doc! {"seq":-1}).limit(4).projection(doc! {"role":1,"text":1}).await?.try_collect().await?;
     let history: Vec<serde_json::Value> = rows
         .iter()

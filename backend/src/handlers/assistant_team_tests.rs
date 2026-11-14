@@ -5470,3 +5470,38 @@ async fn onboarding_2318_audience_card_and_full_access_report_configuration_with
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn durable_wake_recovery_obeys_hourly_budget_and_consecutive_event_guard() {
+    Box::pin(async {
+        use crate::{models::assistant_wake::WakeReference,services::{assistant_wake_service as wakes,coordination_service::RateWindowStore}};
+        let (state,calls,server)=setup("wake_existing_guards").await;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let home=nyxbot_home(&state,OWNER).await.unwrap();
+        let event=wakes::event("group_settled",WakeReference::GroupFollower {group_id:Uuid::new_v4().to_string(),since_seq:0,upper_seq:1});
+        engine::push_events(&state.db,OWNER,&home.id,vec![event.clone()]).await.unwrap();
+        for _ in 0..team::EVENT_TURNS_PER_HOUR {
+            assert!(RateWindowStore::admit(&state.db,"assistant_event_turns",OWNER,team::EVENT_TURNS_PER_HOUR,Duration::from_secs(3600)).await.unwrap().allowed);
+        }
+        wake(&state,OWNER,&home.id).await;
+        assert!(calls.lock().await.is_empty());
+        let queued=engine::get(&state.db,OWNER,&home.id).await.unwrap();
+        assert_eq!(queued.pending_events[0].id,event.id);
+        assert_eq!(queued.event_streak,0);
+        state.db.collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME).update_one(doc! {"namespace":"assistant_event_turns"},doc! {"$set":{"window_start":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::hours(1))}}).await.unwrap();
+        state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&home.id},doc! {"$set":{"event_streak":3}}).await.unwrap();
+        wake(&state,OWNER,&home.id).await;
+        assert!(calls.lock().await.is_empty());
+        assert_eq!(engine::get(&state.db,OWNER,&home.id).await.unwrap().pending_events[0].id,event.id);
+        state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&home.id},doc! {"$set":{"event_streak":0}}).await.unwrap();
+        wake(&state,OWNER,&home.id).await;
+        let row=idle_row(&state,&home.id).await;
+        assert!(row.pending_events.is_empty());
+        assert_eq!(calls.lock().await.len(),1);
+        assert_eq!(event_budget_used(&state).await,1);
+        wake(&state,OWNER,&home.id).await;
+        assert_eq!(calls.lock().await.len(),1);
+        server.abort();
+        state.db.drop().await.unwrap();
+    }).await;
+}

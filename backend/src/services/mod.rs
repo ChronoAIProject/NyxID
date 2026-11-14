@@ -336,6 +336,7 @@ pub mod assistant_steering;
 pub mod assistant_task_status;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
+pub mod assistant_wake_service;
 pub mod channel_image_audience;
 pub mod channel_image_delivery;
 pub mod channel_retry_ingress;
@@ -599,3 +600,6 @@ pub(crate) mod catalog_endpoint_service;
 pub(crate) mod channel_supplemental_delivery;
 
 pub mod shutdown;
+
+#[cfg(test)]
+pub(crate) mod durable_wake_tests;

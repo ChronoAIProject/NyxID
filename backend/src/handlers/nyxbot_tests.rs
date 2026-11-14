@@ -6111,7 +6111,7 @@ async fn replaced_hosted_watch_cannot_claim_or_settle_new_request() {
         .unwrap();
     complete_hosted_setup(&state, &old_link.id, &bot_id).await;
     channel_bot_watch(&state, &old).await.unwrap();
-    assert!(!claim(&state, &old, doc! {}).await.unwrap());
+    assert!(claim(&state, &old, doc! {}).await.unwrap().is_none());
     super::settle(&state, &old, Some("expired")).await;
     let retained = state
         .db
@@ -7520,4 +7520,133 @@ fn provider_conversation_delete_keeps_its_status_vocabulary() {
             .into_response()
             .status()
     );
+}
+
+#[tokio::test]
+async fn durable_wake_watch_survives_crash_after_source_settlement() {
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("wake_watch_crash").await;
+    let now = bson::DateTime::now();
+    let link_id = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&link_id,"user_id":&f.owner,"service_slug":"api-github",
+            "service_id":Uuid::new_v4().to_string(),"token_hash":"hash","status":"completed",
+            "created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::minutes(15))})
+        .await.unwrap();
+    watch_connect_link(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &link_id,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
+    crate::services::durable_wake_tests::drop_after("watch_settled", process_watches(&f.state))
+        .await;
+    process_watches(&f.state).await.unwrap();
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(
+        row.pending_events.len(),
+        1,
+        "a surviving watch sweep must retain the continuation"
+    );
+    process_watches(&f.state).await.unwrap();
+    assert_eq!(
+        engine::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_review_deleted_chat_still_links_bot_and_settles_once() {
+    let (state, _, server) = setup("wake_deleted_chat").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let (link, watch) = pending_creation_watch(&state, &home.id, &agent).await;
+    let bot = bot_doc("lark", "Created after chat deletion");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    complete_hosted_setup(&state, &link.id, &bot_id).await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .delete_one(doc! {"_id":&home.id})
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    let linked = active_for_bot(&state, OWNER, &bot_id).await.unwrap();
+    assert!(
+        linked.is_some(),
+        "deleted wake destination must not prevent bot linking"
+    );
+    let linked = linked.unwrap();
+    assert_eq!(linked.agent_id.as_deref(), Some(agent.id.as_str()));
+    let finished = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find_one(doc! {"_id":&watch.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, "done");
+    process_watches(&state).await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "done"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .count_documents(doc! {"channel_bot_id":&bot_id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        active_for_bot(&state, OWNER, &bot_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .link_code_hash
+            == linked.link_code_hash
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .count_documents(doc! {"pending_events.wake.watch_id":&watch.id})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
 }

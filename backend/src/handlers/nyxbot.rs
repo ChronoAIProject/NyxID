@@ -455,13 +455,7 @@ pub struct LinkInstructions {
 }
 
 fn new_link_code() -> Zeroizing<String> {
-    use rand::Rng;
-    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
-    let mut rng = rand::thread_rng();
-    let tail: String = (0..12)
-        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
-        .collect();
-    Zeroizing::new(format!("nyxlink_{tail}"))
+    crate::services::assistant_wake_service::watch::new_link_code()
 }
 
 fn link_url(row: &NyxbotChannel, code: &str) -> Option<String> {
@@ -2390,6 +2384,7 @@ pub(crate) async fn watch_connect_link(
     let now = Utc::now();
     let invocation_id = provenance.invocation_id.clone();
     let watch = NyxbotWatch {
+        wake_claim: None,
         source_connect_link_id: None,
         source_turn_id: None,
         invocation_id: provenance.invocation_id.clone(),
@@ -2419,47 +2414,43 @@ pub(crate) async fn watch_connect_link(
 }
 
 fn watch_snapshot(watch: &NyxbotWatch) -> bson::Document {
-    let mut filter = doc! {"_id":&watch.id,"user_id":&watch.user_id,"kind":&watch.kind,
-    "conversation_id":&watch.conversation_id,"platform":&watch.platform,
-    "agent_id":&watch.agent_id,"connect_link_id":&watch.connect_link_id,
-    "created_at":bson::DateTime::from_chrono(watch.created_at),
-    "expires_at":bson::DateTime::from_chrono(watch.expires_at),
-    "report_to":&watch.report_to,"report_provenance":watch.report_provenance as i32};
-    if watch.kind == "channel_bot" {
-        filter.insert("source_turn_id", watch.source_turn_id.clone());
-        filter.insert(
-            "source_connect_link_id",
-            watch.source_connect_link_id.clone(),
-        );
-    }
-    if watch.report_provenance == 0 {
-        // Pre-provenance rows deserialize as legacy version zero.
-        filter.insert("report_provenance", doc! {"$in":[0,bson::Bson::Null]});
-    }
-    filter
+    crate::services::assistant_wake_service::watch::snapshot(watch)
 }
 
-/// Claim only the captured request, including when a pending row was replaced.
-async fn claim(state: &AppState, watch: &NyxbotWatch, extra: bson::Document) -> AppResult<bool> {
-    let mut set = doc! {"status": "claimed"};
+async fn claim(
+    state: &AppState,
+    watch: &NyxbotWatch,
+    extra: bson::Document,
+) -> AppResult<Option<NyxbotWatch>> {
+    if watch.invocation_id.is_none()
+        && crate::services::assistant_wake_service::enabled(&state.db).await?
+    {
+        return crate::services::assistant_wake_service::watch::claim(&state.db, watch, extra)
+            .await;
+    }
+    let mut set = doc! {"status":"claimed"};
     set.extend(extra);
     let mut filter = watch_snapshot(watch);
     filter.insert("status", "pending");
     Ok(state
         .db
         .collection::<NyxbotWatch>(WATCHES)
-        .update_one(filter, doc! {"$set": set})
-        .await?
-        .modified_count
-        == 1)
+        .find_one_and_update(filter, doc! {"$set":set,"$unset":{"wake_claim":""}})
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?)
 }
 
 async fn settle(state: &AppState, watch: &NyxbotWatch, error: Option<&'static str>) {
+    let mut filter = watch_snapshot(watch);
+    filter.insert("status", watch.status.clone());
+    if let Some(claim) = &watch.wake_claim {
+        filter.insert("wake_claim.id", claim.id.clone());
+    }
     let _ = state
         .db
         .collection::<NyxbotWatch>(WATCHES)
         .update_one(
-            watch_snapshot(watch),
+            filter,
             doc! {"$set": {"status": if error.is_some() { "failed" } else { "done" },
             "last_error": error}},
         )
@@ -2484,8 +2475,23 @@ async fn settle_and_wake(
             ))
             .await;
         }
+    } else if watch.wake_claim.is_some() {
+        if crate::services::assistant_wake_service::watch::settle(&state.db, watch, kind, error)
+            .await?
+        {
+            #[cfg(test)]
+            crate::services::durable_wake_tests::after("watch_settled").await;
+            Box::pin(super::assistant_team::wake(
+                state,
+                &watch.user_id,
+                &watch.conversation_id,
+            ))
+            .await;
+        }
     } else {
         settle(state, watch, error).await;
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("watch_settled").await;
         // A notification can start a complete assistant turn. Box its future
         // so watch dispatch does not keep that turn's storage on its poll stack.
         Box::pin(super::assistant_team::notify(
@@ -2513,6 +2519,9 @@ pub(crate) async fn process_watches(state: &AppState) -> AppResult<()> {
         .await?
         .try_collect()
         .await?;
+    if watches.is_empty() {
+        return Ok(());
+    }
     let ids: Vec<&str> = watches.iter().map(|watch| watch.id.as_str()).collect();
     state
         .db
@@ -2683,7 +2692,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             return Ok(());
         }
         if matches!(link.status, LinkStatus::Cancelled | LinkStatus::Expired) {
-            if claim(state, watch, doc! {}).await? {
+            if let Some(watch) = claim(state, watch, doc! {}).await? {
                 let (code, text) = if link.status == LinkStatus::Cancelled {
                     (
                         "cancelled",
@@ -2697,7 +2706,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
                 };
                 settle_and_wake(
                     state,
-                    watch,
+                    &watch,
                     "channel_bot_setup_finished",
                     text.into(),
                     Some(code),
@@ -2735,20 +2744,26 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
     let Some(bot) = candidate else {
         return Ok(());
     };
-    let context =
-        crate::services::nyxbot_watch_service::onboarding_context(&state.db, watch).await?;
-    if !claim(state, watch, doc! {"channel_bot_id": &bot.id}).await? {
+    let Some(watch) = claim(state, watch, doc! {"channel_bot_id": &bot.id}).await? else {
         return Ok(());
-    }
+    };
     let outcome =
-        match crate::services::assistant_team_service::agent(&state.db, owner, agent_id).await {
-            Ok(agent) => {
-                connect_tool_inner(state, owner, &watch.conversation_id, &bot.id, &agent, false)
-                    .await
-                    .map(|(value, _)| (agent, value))
+        crate::services::assistant_wake_service::watch::during(&state.db, &watch, async {
+            match crate::services::assistant_team_service::agent(&state.db, owner, agent_id).await {
+                Ok(agent) => {
+                    connect_tool_inner(state, owner, &watch.conversation_id, &bot.id, &agent, false)
+                        .await
+                        .map(|(value, _)| (agent, value))
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        };
+        })
+        .await;
+    let context = if watch.wake_claim.is_none() {
+        crate::services::nyxbot_watch_service::onboarding_context(&state.db, &watch).await?
+    } else {
+        String::new()
+    };
     let text = match &outcome {
         // Created in Telegram through NyxID: the account that created it is
         // already the owner's, so nothing is left to verify.
@@ -2782,7 +2797,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
     };
     settle_and_wake(
         state,
-        watch,
+        &watch,
         "channel_bot_linked",
         format!("{}\n{context}", text.chars().take(1200).collect::<String>()),
         outcome.as_ref().err().map(error_code),
@@ -2818,16 +2833,14 @@ async fn connect_link_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<
         ),
         // An unused link that ran out needs no reply from anyone.
         ConnectLinkStatus::Expired => {
-            if claim(state, watch, doc! {}).await? {
-                settle(state, watch, Some("expired")).await;
-            }
+            settle(state, watch, Some("expired")).await;
             return Ok(());
         }
     };
-    if !claim(state, watch, doc! {}).await? {
+    let Some(watch) = claim(state, watch, doc! {}).await? else {
         return Ok(());
-    }
-    settle_and_wake(state, watch, "connection_finished", text, None).await?;
+    };
+    settle_and_wake(state, &watch, "connection_finished", text, None).await?;
     Ok(())
 }
 
@@ -2844,19 +2857,7 @@ fn present_gateway_error(error: AppError) -> AppError {
 }
 
 fn gateway_error_guidance(code: &str) -> &'static str {
-    match code {
-        "gateway_configuration_required" => {
-            "Ask an administrator to check the active cmaeg service and its URL."
-        }
-        "gateway_not_authenticated" => {
-            "The gateway could not authenticate NyxBot; reconnect and ask an administrator if this persists."
-        }
-        "gateway_permission_required" => {
-            "Ask an administrator to verify the actual gateway confidential client's cmaeg introspection association."
-        }
-        "gateway_unavailable" => "The gateway is temporarily unavailable; retry shortly.",
-        _ => "",
-    }
+    crate::services::assistant_wake_service::text::gateway_error_guidance(code)
 }
 
 /// Stable code for an error, never its prose.
@@ -7471,6 +7472,7 @@ pub(crate) async fn trigger_setup_link(
     let id = Uuid::new_v4().to_string();
     let invocation_id = provenance.invocation_id.clone();
     let watch = NyxbotWatch {
+        wake_claim: None,
         source_connect_link_id: None,
         source_turn_id: None,
         invocation_id: provenance.invocation_id.clone(),
@@ -7506,11 +7508,11 @@ async fn trigger_created_watch(state: &AppState, watch: &NyxbotWatch) -> AppResu
         .find_one(doc! { "user_id": &watch.user_id, "setup_watch_id": &watch.id })
         .await?;
     if let Some(trigger) = row
-        && claim(state, watch, doc! {}).await?
+        && let Some(watch) = claim(state, watch, doc! {}).await?
     {
         settle_and_wake(
             state,
-            watch,
+            &watch,
             "trigger_created",
             format!(
                 "The owner created webhook trigger {}. Its secret was shown on the \

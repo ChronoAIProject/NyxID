@@ -1199,6 +1199,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::assistant_wake_service::ensure_indexes(db).await?;
     super::collaboration_group_service::ensure_indexes(db).await?;
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
@@ -2588,6 +2589,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?
     };
+    let (events, preparing) =
+        super::assistant_wake_service::partition_in_session(db, user_id, &id, events, session)
+            .await?;
+    row.pending_events.extend(preparing);
     let events = super::execution_permission_dispatch::tasks::partition_events(
         &mut row.pending_events,
         events,
@@ -2638,6 +2643,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         return Ok(OwnerTurnAdmission::Drained);
     }
+    let mut events = events;
+    super::assistant_wake_service::materialize(db, user_id, &mut events, session).await?;
     let with_nyxbot = start.origin == TurnOrigin::Group
         && !row.shared_agent_thread
         && row.role == AgentRole::Subagent
@@ -3097,6 +3104,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
     };
     row.active_turn = Some(ActiveTurn {
+        group_reply_in_settlement: false,
         platform_model_context: None,
         automation_work: automation_work.clone(),
         artifact_watch_id: None,
@@ -3397,6 +3405,13 @@ pub(crate) async fn begin_owner_turn_in_session(
             row.reply_channel = start.reply_channel.clone();
         }
         _ => {}
+    }
+    super::assistant_wake_service::group::admit(db, &mut row, session).await?;
+    if row.group_id.is_some() {
+        Box::pin(super::assistant_wake_service::publication::bind(
+            db, &mut row, session,
+        ))
+        .await?;
     }
     row.updated_at = now;
     Box::pin(super::assistant_platform_model::bind_in_session(
@@ -3949,6 +3964,7 @@ pub async fn append_events_in_session(
                     e.source_event_ids.is_empty()
                         && e.automation_work.is_none()
                         && e.invocation_id.is_none()
+                        && e.wake.is_none()
                         && !super::async_service_operation::cma_wake_event(e)
                 })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
@@ -4653,6 +4669,9 @@ artifact_recovery_target: None,
                 }
                 if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
+                }
+                if let Some(turn) = settled_turn.as_ref().filter(|turn| turn.group_reply_in_settlement) {
+                    Box::pin(super::assistant_wake_service::publication::publish(&db,&current,turn,&message,session)).await?;
                 }
                 if message.status == "completed" && let Some(origin) = super::org_channel_service::origin(&row) {
                     match Box::pin(super::org_channel_service::validate_in_session(&db,session,origin,&row.user_id,row.agent_id.as_deref().unwrap_or_default(),true)).await {

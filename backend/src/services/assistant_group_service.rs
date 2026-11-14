@@ -1491,10 +1491,14 @@ pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
         .collection::<AssistantGroup>(GROUPS)
         .find(doc! {"collaboration": null, "$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
+        .hint(mongodb::options::Hint::Name(super::assistant_wake_service::GROUP_PENDING_INDEX.into()))
         .limit(50)
         .await?
         .try_collect()
         .await?;
+    if rows.is_empty() {
+        return Ok(rows);
+    }
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     db.collection::<AssistantGroup>(GROUPS)
         .update_many(

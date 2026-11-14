@@ -260,9 +260,10 @@ async fn advance_inner(state: &AppState, owner: &str, group_id: &str, background
                 } else {
                     None
                 };
-                run_member_with_work(state, owner, &current, &agent_id, Some(work)).await?;
+                run_member_with_work(state, owner, &current, &agent_id, Some(work), false).await?;
             }
         }
+        let durable = crate::services::assistant_wake_service::enabled(&state.db).await?;
         let now = Utc::now();
         for agent_id in &group.pending_agent_ids {
             let _claim = if background {
@@ -280,23 +281,38 @@ async fn advance_inner(state: &AppState, owner: &str, group_id: &str, background
             {
                 continue;
             }
-            if !groups::take_pending(&state.db, owner, group_id, agent_id).await? {
+            if !durable && !groups::take_pending(&state.db, owner, group_id, agent_id).await? {
                 continue;
             }
-            match run_member(state, owner, &group, agent_id).await {
+            #[cfg(test)]
+            crate::services::durable_wake_tests::after("member_taken").await;
+            match run_member_with_work(state, owner, &group, agent_id, None, durable).await {
                 Ok(()) => {}
+                Err(AppError::Conflict(reason))
+                    if durable
+                        && reason
+                            == crate::services::assistant_wake_service::group::INPUT_CHANGED => {}
                 // Gone or refused: the member is not retried.
                 Err(
                     AppError::NotFound(_)
                     | AppError::Conflict(_)
                     | AppError::ValidationError(_)
                     | AppError::Forbidden(_),
-                ) => {}
+                ) => {
+                    if durable {
+                        crate::services::assistant_wake_service::group::retire(
+                            &state.db, owner, &group, agent_id,
+                        )
+                        .await?;
+                    }
+                }
                 // Transient (storage, a concurrent first turn): try again later.
                 Err(error) => {
                     tracing::debug!(%error, "Group member turn deferred");
-                    groups::address(&state.db, owner, group_id, std::slice::from_ref(agent_id))
-                        .await?;
+                    if !durable {
+                        groups::address(&state.db, owner, group_id, std::slice::from_ref(agent_id))
+                            .await?;
+                    }
                 }
             }
         }
@@ -313,11 +329,27 @@ async fn advance_inner(state: &AppState, owner: &str, group_id: &str, background
 /// with what the members said, so NyxBot follows up without the user.
 async fn notify_followers(state: &AppState, owner: &str, group_id: &str) {
     let result: AppResult<()> = async {
+        if crate::services::assistant_wake_service::enabled(&state.db).await? {
+            let followers = crate::services::assistant_wake_service::group::followers(
+                &state.db, owner, group_id,
+            )
+            .await?;
+            if !followers.is_empty() {
+                #[cfg(test)]
+                crate::services::durable_wake_tests::after("followers_taken").await;
+            }
+            for follower in followers {
+                super::assistant_team::wake(state, owner, &follower.conversation_id).await;
+            }
+            return Ok(());
+        }
         let (followers, upper_seq) =
             groups::take_followers_if_quiet(&state.db, owner, group_id).await?;
         if followers.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("followers_taken").await;
         let group = groups::get(&state.db, owner, group_id).await?;
         for follower in followers {
             let replies =
@@ -354,13 +386,22 @@ async fn notify_followers(state: &AppState, owner: &str, group_id: &str) {
 
 /// Give a member the group messages it has not seen, as a group turn on its
 /// hidden member thread.
+#[cfg(test)]
 async fn run_member(
     state: &AppState,
     owner: &str,
     group: &AssistantGroup,
     agent_id: &str,
 ) -> AppResult<()> {
-    run_member_with_work(state, owner, group, agent_id, None).await
+    run_member_with_work(
+        state,
+        owner,
+        group,
+        agent_id,
+        None,
+        crate::services::assistant_wake_service::enabled(&state.db).await?,
+    )
+    .await
 }
 
 async fn run_member_with_work(
@@ -369,13 +410,26 @@ async fn run_member_with_work(
     group: &AssistantGroup,
     agent_id: &str,
     work: Option<crate::models::trigger_run::AutomationWork>,
+    durable: bool,
 ) -> AppResult<()> {
     if !group.member_agent_ids.iter().any(|id| id == agent_id) {
+        if durable {
+            crate::services::assistant_wake_service::group::retire(
+                &state.db, owner, group, agent_id,
+            )
+            .await?;
+        }
         return Ok(());
     }
     let agent = match team::agent(&state.db, owner, agent_id).await {
         Ok(agent) if agent.destroyed_at.is_none() => agent,
         Ok(_) | Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+            if durable {
+                crate::services::assistant_wake_service::group::retire(
+                    &state.db, owner, group, agent_id,
+                )
+                .await?;
+            }
             return refuse_member(state, owner, group, agent_id).await;
         }
         Err(error) => return Err(error),
@@ -387,6 +441,12 @@ async fn run_member_with_work(
         .iter()
         .any(|m| m.id == agent_id && m.shared && !m.available)
     {
+        if durable {
+            crate::services::assistant_wake_service::group::retire(
+                &state.db, owner, group, agent_id,
+            )
+            .await?;
+        }
         return refuse_member(state, owner, group, agent_id).await;
     }
     let thread = groups::member_thread(&state.db, owner, &group.id, agent_id).await?;
@@ -400,6 +460,12 @@ async fn run_member_with_work(
         groups::transcript_since(&state.db, owner, &group.id, since).await?
     };
     if newest <= since {
+        if durable {
+            crate::services::assistant_wake_service::group::retire(
+                &state.db, owner, group, agent_id,
+            )
+            .await?;
+        }
         return Ok(());
     }
     let start = TurnStart {
@@ -453,22 +519,44 @@ async fn run_member_with_work(
         question: None,
         reply_channel: None,
     };
+    #[cfg(test)]
+    crate::services::durable_wake_tests::after("member_prepared").await;
     let limit = team_pool_limit(state, owner).await + 1;
-    let started = match start_server_turn(state, owner, start, Pool::Team { owner, limit }).await {
+    let attempt = start_server_turn(state, owner, start, Pool::Team { owner, limit });
+    let result = if durable {
+        crate::services::assistant_wake_service::group::with_member(
+            crate::services::assistant_wake_service::group::Member {
+                group_id: group.id.clone(),
+                agent_id: agent_id.to_owned(),
+                upper_seq: newest,
+            },
+            attempt,
+        )
+        .await
+    } else {
+        attempt.await
+    };
+    let started = match result {
         Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+            if durable {
+                crate::services::assistant_wake_service::group::retire(
+                    &state.db, owner, group, agent_id,
+                )
+                .await?;
+            }
             return refuse_member(state, owner, group, agent_id).await;
         }
         result => result?,
     };
     match started {
         Started::Turn { conversation, .. } => {
-            if work.is_none() {
+            if work.is_none() && !durable {
                 groups::set_seen(&state.db, owner, &conversation.id, newest).await?;
             }
         }
         // Retried when the member settles or by the sweep.
         Started::Busy | Started::PoolFull => {
-            if work.is_none() {
+            if work.is_none() && !durable {
                 groups::address(&state.db, owner, &group.id, std::slice::from_ref(&agent.id))
                     .await?;
             }
@@ -517,6 +605,16 @@ pub(crate) async fn member_settled(
         return;
     };
     let owner = row.user_id.as_str();
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.group_reply_in_settlement)
+    {
+        // Publication, mention routing and budget spend already committed with
+        // this exact turn. A late or repeated callback only advances its queue.
+        advance_background(state, owner, group_id).await;
+        return;
+    }
     if row
         .active_turn
         .as_ref()

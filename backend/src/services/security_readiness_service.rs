@@ -110,6 +110,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::assistant_wake_service::READINESS,
     super::assistant_platform_model::READINESS,
     super::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
     super::platform_model_service::REGISTRY_READINESS,
