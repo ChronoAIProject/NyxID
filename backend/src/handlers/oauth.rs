@@ -408,7 +408,11 @@ fn oauth_error_response(err: AppError) -> Response {
         axum::Json(OAuthErrorBody {
             error: oauth_error,
             error_description: description,
-            error_code: matches!(err, AppError::MfaRequired { .. }).then_some(err.error_code()),
+            error_code: matches!(
+                err,
+                AppError::MfaRequired { .. } | AppError::OAuthAuthorityUnavailable
+            )
+            .then_some(err.error_code()),
             session_token: match &err {
                 AppError::MfaRequired { session_token } => {
                     Some(zeroize::Zeroizing::new(session_token.clone()))
@@ -2536,7 +2540,8 @@ async fn token_inner(
                 &state.db,
                 &state.config,
                 &state.jwt_keys,
-                state.broker_require_admin_capability(),
+                state.code_broker_requirements(),
+                state.refresh_code_broker_requirements(),
                 code,
                 client_id_str,
                 redirect_uri,
@@ -2549,6 +2554,7 @@ async fn token_inner(
             )
             .await
             .map_err(authorization_code_grant_error)?;
+            let broker_require_sender_constraint = exchanged.broker_require_sender_constraint;
 
             if exchanged.broker_capability_enabled {
                 let granted_scopes: Vec<String> = exchanged
@@ -2556,7 +2562,6 @@ async fn token_inner(
                     .split_whitespace()
                     .map(str::to_string)
                     .collect();
-                let broker_require_sender_constraint = state.broker_require_sender_constraint();
                 if broker_require_sender_constraint && sender_constraint.is_none() {
                     state
                         .db
@@ -2922,7 +2927,7 @@ async fn token_inner(
                 // uses is_broker_client) but not exchange them.
                 if !oauth_broker_service::is_broker_client_with_policy(
                     &client,
-                    state.broker_require_admin_capability(),
+                    state.broker_require_admin_capability().await?,
                 ) {
                     return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
                 }
@@ -2941,7 +2946,7 @@ async fn token_inner(
                     &state.http_client,
                     &state.jwt_keys,
                     &state.config,
-                    state.broker_require_sender_constraint(),
+                    state.broker_require_sender_constraint().await?,
                     client_id,
                     subject_token,
                     body.scope.as_deref(),
@@ -3792,6 +3797,7 @@ pub async fn register_client(
                 };
             tracing::info!(target: "nyxid::oauth::dcr", outcome = "rejected", reason, "Dynamic client registration");
             return DcrError {
+                authority_unavailable: false,
                 status,
                 error: "invalid_client_metadata",
                 description,
@@ -3820,6 +3826,7 @@ pub async fn register_client(
 
 #[derive(Debug)]
 struct DcrError {
+    authority_unavailable: bool,
     status: StatusCode,
     error: &'static str,
     description: &'static str,
@@ -3829,6 +3836,7 @@ struct DcrError {
 impl DcrError {
     fn metadata(reason: &'static str, description: &'static str) -> Self {
         Self {
+            authority_unavailable: false,
             status: StatusCode::BAD_REQUEST,
             error: "invalid_client_metadata",
             description,
@@ -3838,6 +3846,7 @@ impl DcrError {
 
     fn redirect() -> Self {
         Self {
+            authority_unavailable: false,
             status: StatusCode::BAD_REQUEST,
             error: "invalid_redirect_uri",
             description: "Invalid redirect URI metadata (maximum 16 URIs, 2048 bytes each)",
@@ -3847,8 +3856,18 @@ impl DcrError {
 }
 
 impl From<AppError> for DcrError {
-    fn from(_: AppError) -> Self {
+    fn from(error: AppError) -> Self {
+        if matches!(error, AppError::OAuthAuthorityUnavailable) {
+            return Self {
+                authority_unavailable: true,
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                error: "temporarily_unavailable",
+                description: "OAuth authority temporarily unavailable",
+                reason: "oauth_authority_unavailable",
+            };
+        }
         Self {
+            authority_unavailable: false,
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error: "server_error",
             description: "An internal error occurred",
@@ -3859,6 +3878,9 @@ impl From<AppError> for DcrError {
 
 impl IntoResponse for DcrError {
     fn into_response(self) -> Response {
+        if self.authority_unavailable {
+            return oauth_error_response(AppError::OAuthAuthorityUnavailable);
+        }
         (
             self.status,
             Json(serde_json::json!({
@@ -4043,10 +4065,10 @@ async fn register_client_inner(
                 "At most 64 scope tokens of 256 bytes each are allowed",
             )
         })?;
-    if state.broker_require_admin_capability()
-        && allowed_scopes
-            .split_whitespace()
-            .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
+    if allowed_scopes
+        .split_whitespace()
+        .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
+        && state.broker_require_admin_capability().await?
     {
         return Err(DcrError::metadata(
             "broker_scope_requires_admin",
@@ -4216,6 +4238,30 @@ mod wire_decoding_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn round2_broker_authority_failure_stays_retryable_in_oauth_and_dcr() {
+        for response in [
+            super::oauth_error_response(crate::errors::AppError::OAuthAuthorityUnavailable),
+            super::DcrError::from(crate::errors::AppError::OAuthAuthorityUnavailable)
+                .into_response(),
+        ] {
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["error"], "temporarily_unavailable");
+            assert_eq!(
+                json["error_code"], 12900,
+                "authority uncertainty is not a policy-denial error"
+            );
+        }
+    }
     use super::*;
     use axum::extract::Path;
     use chrono::{Duration, Utc};
@@ -5652,6 +5698,254 @@ mod tests {
             .expect("query client")
             .expect("client exists");
         assert_eq!(client.allowed_scopes, response.scope);
+    }
+
+    struct BrokerCodeFixture {
+        state: AppState,
+        control: mongodb::Database,
+        app_name: String,
+        client_id: String,
+        commands: std::sync::Arc<std::sync::Mutex<Vec<mongodb::bson::Document>>>,
+    }
+
+    impl BrokerCodeFixture {
+        async fn new(broker_scope: bool, admin_provisioned: bool) -> Self {
+            use mongodb::event::command::CommandEvent;
+            let control =
+                crate::test_utils::connect_transaction_test_database("broker_code_policy").await;
+            let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = commands.clone();
+            let db_name = control.name().to_string();
+            let app_name = format!("broker-code-{}", Uuid::new_v4());
+            let mut options = mongodb::options::ClientOptions::parse(
+                std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
+            )
+            .await
+            .unwrap();
+            options.app_name = Some(app_name.clone());
+            options.command_event_handler =
+                Some(mongodb::event::EventHandler::callback(move |event| {
+                    if let CommandEvent::Started(event) = event
+                        && event.db == db_name
+                    {
+                        seen.lock().unwrap().push(event.command);
+                    }
+                }));
+            let client = mongodb::Client::with_options(options).unwrap();
+            let state = test_app_state(client.database(control.name()));
+            let client_id = Uuid::new_v4().to_string();
+            let user_id = Uuid::new_v4().to_string();
+            let scope = if broker_scope {
+                format!("openid profile {BROKER_BINDING_SCOPE}")
+            } else {
+                "openid profile".to_string()
+            };
+            insert_person_user(&control, &user_id).await;
+            insert_public_client(&control, &client_id, &scope).await;
+            if admin_provisioned {
+                control
+                    .collection::<OauthClient>(OAUTH_CLIENTS)
+                    .update_one(
+                        doc! {"_id": &client_id},
+                        doc! {"$set": {"broker_capability_enabled": true}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            for code in ["fresh-code", "stale-code"] {
+                insert_authorization_code(&control, code, &client_id, &user_id, &scope).await;
+            }
+            Self {
+                state,
+                control,
+                app_name,
+                client_id,
+                commands,
+            }
+        }
+
+        async fn fail_policy_reads(&self) {
+            self.state.broker_policy.write().unwrap().verified_at =
+                tokio::time::Instant::now() - crate::BROKER_POLICY_MAX_AGE;
+            self.control.client().database("admin").run_command(doc! {
+                "configureFailPoint": "failCommand", "mode": "alwaysOn",
+                "data": {"failCommands": ["find"], "appName": &self.app_name,
+                    "namespace": format!("{}.platform_settings", self.control.name()), "errorCode": 13}
+            }).await.unwrap();
+            // Prove only the named policy read fails before measuring the handler.
+            assert!(
+                crate::services::platform_settings_service::load_broker_policy(
+                    &self.state.db,
+                    &self.state.config
+                )
+                .await
+                .is_err()
+            );
+            self.commands.lock().unwrap().clear();
+        }
+
+        async fn recover_policy_reads(&self) {
+            self.control
+                .client()
+                .database("admin")
+                .run_command(doc! {
+                    "configureFailPoint": "failCommand", "mode": "off"
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn exchange(&self, code: &str, sender_constrained: bool) -> Response {
+            let mut headers = HeaderMap::new();
+            if sender_constrained {
+                let (key, jwk) = crate::crypto::dpop::test_dpop_keypair();
+                let htu = crate::crypto::dpop::htu_from_base_and_path(
+                    &self.state.config.base_url,
+                    "/oauth/token",
+                )
+                .unwrap();
+                headers.insert(
+                    "dpop",
+                    sign_test_dpop_proof(&key, &jwk, &htu).parse().unwrap(),
+                );
+            }
+            let request = serde_json::from_value(serde_json::json!({
+                "grant_type": "authorization_code", "code": code,
+                "client_id": self.client_id, "redirect_uri": "http://localhost/callback"
+            }))
+            .unwrap();
+            token(
+                State(self.state.clone()),
+                TelemetryContext::default(),
+                headers,
+                Form(request),
+            )
+            .await
+        }
+
+        fn command_counts(&self) -> (usize, usize) {
+            let commands = self.commands.lock().unwrap();
+            (
+                commands.len(),
+                commands
+                    .iter()
+                    .filter(|cmd| cmd.get_str("find") == Ok("platform_settings"))
+                    .count(),
+            )
+        }
+
+        async fn assert_code_unused(&self) {
+            let row = self.control.collection::<AuthorizationCode>(AUTH_CODES).find_one(doc! {
+                "code_hash": crate::crypto::token::hash_token("stale-code"), "client_id": &self.client_id
+            }).await.unwrap().unwrap();
+            assert!(!row.used, "authority uncertainty must not consume the code");
+            assert_eq!(
+                self.control
+                    .collection::<RefreshToken>(REFRESH_TOKENS)
+                    .count_documents(doc! {"client_id": &self.client_id})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    async fn assert_broker_authority_retryable(response: Response) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "temporarily_unavailable");
+        assert_eq!(body["error_code"], 12900);
+    }
+
+    #[tokio::test]
+    async fn round3_non_broker_code_ignores_stale_policy_without_extra_commands() {
+        Box::pin(async {
+            let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
+            let fixture = BrokerCodeFixture::new(false, false).await;
+            fixture.commands.lock().unwrap().clear();
+            let fresh = fixture.exchange("fresh-code", false).await;
+            assert_eq!(fresh.status(), StatusCode::OK);
+            let fresh_counts = fixture.command_counts();
+            fixture.fail_policy_reads().await;
+            let stale = fixture.exchange("stale-code", false).await;
+            let stale_counts = fixture.command_counts();
+            fixture.recover_policy_reads().await;
+            eprintln!("non-broker code commands: fresh={fresh_counts:?}, stale={stale_counts:?} (total, policy reads)");
+            assert_eq!(stale.status(), StatusCode::OK, "non-broker sign-in cannot depend on broker policy");
+            assert_eq!(fresh_counts, stale_counts, "stale non-broker flow adds no commands");
+            assert_eq!(stale_counts.1, 0);
+            fixture.control.drop().await.unwrap();
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn round3_scope_only_broker_code_retries_after_policy_recovers() {
+        Box::pin(async {
+            let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
+            let fixture = BrokerCodeFixture::new(true, false).await;
+            fixture.fail_policy_reads().await;
+            let response = fixture.exchange("stale-code", true).await;
+            fixture.recover_policy_reads().await;
+            assert_broker_authority_retryable(response).await;
+            assert_eq!(fixture.command_counts().1, 1);
+            fixture.assert_code_unused().await;
+            assert_eq!(
+                fixture.exchange("stale-code", true).await.status(),
+                StatusCode::OK
+            );
+            fixture.control.drop().await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn round3_admin_sender_constrained_broker_code_ignores_stale_policy() {
+        Box::pin(async {
+            let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
+            let fixture = BrokerCodeFixture::new(false, true).await;
+            fixture.fail_policy_reads().await;
+            let response = fixture.exchange("stale-code", true).await;
+            let counts = fixture.command_counts();
+            fixture.recover_policy_reads().await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "a client satisfying both strict gates needs no policy read"
+            );
+            assert_eq!(counts.1, 0);
+            let body = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["token_type"], "DPoP");
+            assert!(body["binding_id"].as_str().is_some());
+            fixture.control.drop().await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn round3_unconstrained_broker_code_retries_after_policy_recovers() {
+        Box::pin(async {
+            let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
+            let fixture = BrokerCodeFixture::new(false, true).await;
+            fixture.fail_policy_reads().await;
+            let response = fixture.exchange("stale-code", false).await;
+            fixture.recover_policy_reads().await;
+            assert_broker_authority_retryable(response).await;
+            assert_eq!(fixture.command_counts().1, 1);
+            fixture.assert_code_unused().await;
+            assert_eq!(
+                fixture.exchange("stale-code", false).await.status(),
+                StatusCode::OK
+            );
+            fixture.control.drop().await.unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
