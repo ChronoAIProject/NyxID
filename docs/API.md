@@ -9731,3 +9731,9 @@ CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
 list and publish immutable effective-dated resource prices. See
 [CMA billing](CMA_BILLING.md#enablement-and-runtime-rate-configuration) for
 exact decimal payloads, validation, audit and activation semantics.
+### Account data export
+
+`POST /api/v1/users/me/export` returns the bounded `nyxid.account-export` JSON
+attachment described in [ACCOUNT_DATA_EXPORT.md](ACCOUNT_DATA_EXPORT.md). It is
+first-party human only and rate limited to three requests per account per hour.
+

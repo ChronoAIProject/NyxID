@@ -1,4 +1,4 @@
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::{Json, body::Body, extract::State, http::{HeaderMap, header}, response::Response};
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,52 @@ pub async fn save_security_preferences(
     )
     .await?;
     Ok(Json(policy.into()))
+}
+
+/// POST /api/v1/users/me/export
+pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> AppResult<Response> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let account_id = auth_user.user_id.to_string();
+    if !state.account_export_limiter.check_shared(&account_id).await? {
+        return Err(AppError::RateLimitedWithRetry { retry_after: 3600 });
+    }
+    let _permit = state
+        .account_export_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::RateLimitedWithRetry { retry_after: 1 })?;
+    let export = crate::services::account_export_service::build(&state.db, &account_id).await?;
+    let counts: Vec<serde_json::Value> = export
+        .sections
+        .iter()
+        .map(|(name, section)| serde_json::json!({"section": name, "count": section.items.len(), "total_count": section.total_count}))
+        .collect();
+    let bytes = serde_json::to_vec(&export)
+        .map_err(|_| AppError::Internal("Account export encoding failed".into()))?;
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: account_id.clone(),
+        ip_address: auth_user.ip_address.clone(),
+        user_agent: auth_user.user_agent.clone(),
+        api_key_id: None,
+        api_key_name: None,
+    };
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &actor,
+        "user.data_exported",
+        Some(serde_json::json!({"format": crate::services::account_export_service::FORMAT, "version": crate::services::account_export_service::VERSION, "sections": counts, "truncated_sections": export.truncated_sections, "byte_size": bytes.len()})),
+    )
+    .await
+    .map_err(|_| AppError::Internal("Account export audit append failed".into()))?;
+    let filename = format!("nyxid-account-export-{}.json", Utc::now().format("%Y-%m-%d"));
+    Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(Body::from(bytes))
+        .map_err(|_| AppError::Internal("Account export response failed".into()))
 }
 
 #[derive(Debug, Deserialize)]

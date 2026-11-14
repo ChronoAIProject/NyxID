@@ -687,6 +687,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/me/preferences/analytics",
             get(handlers::users::get_analytics_consent).put(handlers::users::set_analytics_consent),
         )
+        .route("/me/export", post(handlers::users::export_me))
         .route(
             "/me/security",
             put(handlers::users::save_security_preferences),

@@ -386,7 +386,7 @@ All API routes under `/api/v1`:
 - `/triggers` -- trigger CRUD plus human-only `POST /preview`, `GET /{id}/runs` (cursor-paged metadata) and `POST /{id}/run` for Automations; `/{id}/rotate-secret`, `/{id}/rotate-delivery-secret`, `/{id}/deliveries`, and `/{id}/deliveries/{event_id}/redeliver` cover inbound/outbound secret rotation, delivery history, and retained-envelope replay (JWT or agent API key; delegated, relay, and service-account tokens rejected)
 - `/webhooks/triggers/{trigger_id}` -- unauthenticated trigger ingress verified by token or raw-body HMAC (see Critical Rule 14)
 - `/auth/mfa` -- setup, confirm, verify (login), step-up (current session), disable (nested under `/auth` in `routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
-- `/users` -- get/update current user
+- `/users` -- get/update current user; `POST /users/me/export` downloads the bounded account data export
 - `/api-keys` -- CRUD + rotate; `ApiKey` scope + agent isolation fields per Critical Rules 8-9
 - `/api-keys/{id}/bindings` -- agent credential binding CRUD (`AgentServiceBinding`)
 - `/api-keys/{id}/credentials` and `/{credential_id}` -- list and revoke login credentials bound to a key

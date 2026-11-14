@@ -189,6 +189,10 @@ pub struct AppState {
     pub cluster_slot_manager: services::cluster_slot_service::RenewableSlotManager,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Self-serve account exports: three requests per person per hour.
+    pub account_export_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Bound memory and MongoDB work for concurrent export builders.
+    pub account_export_semaphore: Arc<tokio::sync::Semaphore>,
     /// Parsed per-user limit for each platform-owned downstream credential.
     pub platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy,
     /// Per-user request and in-flight limiter for direct assistant streams.
@@ -1206,6 +1210,13 @@ async fn server_run(cli: Cli) {
             db.clone(),
             "agent",
         )),
+        account_export_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,
