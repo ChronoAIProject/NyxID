@@ -2616,67 +2616,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("service_pool_health_observations", "pool_id"),
 ];
 
-/// Add only the audited owner indexes absent from the existing startup index
-/// set.  The first key check is deliberate: MongoDB rejects a same-key index
-/// under a different name, so this preserves every pre-existing definition.
-pub(crate) async fn ensure_owner_index_gaps(
-    db: &mongodb::Database,
-) -> crate::errors::AppResult<()> {
-    use futures::TryStreamExt;
-    use mongodb::{IndexModel, options::IndexOptions};
-    use std::collections::BTreeMap;
-
-    let mut fields_by_collection = BTreeMap::<&str, Vec<&str>>::new();
-    for &(collection, field) in OWNER_INDEX_GAPS {
-        fields_by_collection
-            .entry(collection)
-            .or_default()
-            .push(field);
-    }
-    for (collection, fields) in fields_by_collection {
-        let indexes: Vec<IndexModel> = match db
-            .collection::<mongodb::bson::Document>(collection)
-            .list_indexes()
-            .await
-        {
-            Ok(cursor) => cursor.try_collect().await?,
-            Err(error)
-                if matches!(
-                    error.kind.as_ref(),
-                    mongodb::error::ErrorKind::Command(command) if command.code == 26
-                ) => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
-        for field in fields {
-            if indexes.iter().any(|index| {
-                index
-                    .keys
-                    .keys()
-                    .next()
-                    .is_some_and(|first| first == field)
-            }) {
-                continue;
-            }
-            let name = format!(
-                "personal_erasure_owner_{}_{}",
-                collection.replace('.', "_"),
-                field.replace('.', "_")
-            );
-            let mut keys = mongodb::bson::Document::new();
-            keys.insert(field, 1_i32);
-            db.collection::<mongodb::bson::Document>(collection)
-                .create_index(
-                    IndexModel::builder()
-                        .keys(keys)
-                        .options(IndexOptions::builder().name(name).build())
-                        .build(),
-                )
-                .await?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

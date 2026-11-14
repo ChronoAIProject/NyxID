@@ -12,10 +12,12 @@ use crate::{
     },
 };
 use bson::{Document, doc};
+use futures::TryStreamExt;
 use mongodb::{
-    ClientSession, Database,
+    ClientSession, Database, IndexModel,
     options::{IndexOptions, ReadConcern, WriteConcern},
 };
+use std::collections::BTreeMap;
 
 pub(super) const INVENTORY_VERSION: u32 = 1;
 const DOMAINS: &[&str] = &[
@@ -62,9 +64,65 @@ async fn ensure_erasure_indexes_without_owner_gaps(db: &Database) -> AppResult<(
     Ok(())
 }
 
+/// Add only the audited owner indexes absent from the existing startup index
+/// set. The erasure service owns these predicates; the registry supplies the
+/// reviewed collection/field manifest. The first-key check preserves every
+/// pre-existing definition and avoids MongoDB name conflicts.
+async fn ensure_owner_index_gaps(db: &Database) -> AppResult<()> {
+    let mut fields_by_collection = BTreeMap::<&str, Vec<&str>>::new();
+    for &(collection, field) in super::personal_data_registry::OWNER_INDEX_GAPS {
+        fields_by_collection
+            .entry(collection)
+            .or_default()
+            .push(field);
+    }
+    for (collection, fields) in fields_by_collection {
+        let indexes: Vec<IndexModel> = match db
+            .collection::<Document>(collection)
+            .list_indexes()
+            .await
+        {
+            Ok(cursor) => cursor.try_collect().await?,
+            Err(error)
+                if matches!(
+                    error.kind.as_ref(),
+                    mongodb::error::ErrorKind::Command(command) if command.code == 26
+                ) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        for field in fields {
+            if indexes.iter().any(|index| {
+                index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|first| first == field)
+            }) {
+                continue;
+            }
+            let name = format!(
+                "personal_erasure_owner_{}_{}",
+                collection.replace('.', "_"),
+                field.replace('.', "_")
+            );
+            let mut keys = Document::new();
+            keys.insert(field, 1_i32);
+            db.collection::<Document>(collection)
+                .create_index(
+                    IndexModel::builder()
+                        .keys(keys)
+                        .options(IndexOptions::builder().name(name).build())
+                        .build(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     ensure_erasure_indexes_without_owner_gaps(db).await?;
-    super::personal_data_registry::ensure_owner_index_gaps(db).await
+    ensure_owner_index_gaps(db).await
 }
 
 /// Run the late startup index groups in the same order as the server.
