@@ -743,11 +743,13 @@ pub(crate) async fn evaluate_selected_transport(
             }
         }
     }
-    if write_fence && db.collection::<Document>(GATEWAYS).update_one(doc! {
+    if write_fence {
+        return Ok(db.collection::<Document>(GATEWAYS).update_one(doc! {
         "_id":channel_id,"profile_id":profile,"state":"active","revision":row.revision,
         "configuration":bson::to_bson(configuration).map_err(|_|refused())?,"provider_api_key_id":&row.provider_api_key_id,
         "route_api_key_id":&row.route_api_key_id,"callback_url":&row.callback_url,"binding_id":&row.binding_id},
-        doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?.matched_count!=1{return Ok(false);}
+        doc! {"$inc":{"effect_revision":1_i64}}).session(&mut *session).await?.matched_count == 1);
+    }
     Ok(true)
 }
 pub(crate) async fn fence_selected_transport(
