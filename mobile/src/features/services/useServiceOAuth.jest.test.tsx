@@ -158,7 +158,58 @@ test("success URL still needs a changed active server connection", async () => {
     recordServiceOAuthReturn("success");
   });
   await flush();
+  expect(result.current.banner).toBeUndefined();
+  await unmount();
+});
+
+test("success banners use the connection label and can be dismissed", async () => {
+  jest.mocked(WebBrowser.openAuthSessionAsync).mockResolvedValue({
+    type: "success",
+    url: "nyxid://services/oauth-return?status=success",
+  });
+  const labeledConnection = { ...connection, label: "Production GitHub" };
+  const catalog = { ...entry, name: "GitHub catalog entry" };
+  jest.mocked(servicesApi.connection).mockResolvedValue(labeledConnection);
+  const { result, unmount } = await renderHook(() =>
+    useServiceOAuth(true, changed),
+  );
+  await flush();
+  let task!: Promise<void>;
+  await act(async () => {
+    task = result.current.start(labeledConnection, catalog);
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(500);
+    await task;
+  });
+  expect(result.current.banner?.attempt.catalogName).toBe("Production GitHub");
+  await act(async () => {
+    await result.current.dismiss();
+  });
+  expect(result.current.banner).toBeUndefined();
+  await unmount();
+});
+
+test("dismissing a relabeled persisted success clears the stored attempt", async () => {
+  await saveServiceOAuth({ ...pending(), catalogName: "Old catalog name" });
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    label: "Current connection name",
+    status: "active",
+    last_authorized_at: "2026-10-15T06:00:00Z",
+  });
+  const { result, unmount } = await renderHook(() =>
+    useServiceOAuth(true, changed),
+  );
+  await flush();
+  expect(result.current.banner?.attempt.catalogName).toBe(
+    "Current connection name",
+  );
   expect(result.current.banner?.outcome).toBe("success");
+  await act(async () => {
+    await result.current.dismiss();
+  });
+  expect(await loadServiceOAuth()).toBeNull();
   await unmount();
 });
 

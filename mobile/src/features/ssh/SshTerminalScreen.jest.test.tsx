@@ -165,7 +165,7 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   });
   expect(socket.send).toHaveBeenCalled();
   expect(typeof socket.send.mock.calls[0]![0]).not.toBe("string");
-  await fireEvent.press(screen.getByLabelText("ArrowUp"));
+  await fireEvent.press(screen.getByLabelText("Up arrow"));
   expect(
     mockInject.mock.calls.every(
       ([script]) => !script.includes("SENTINEL_BEARER_TOKEN"),
@@ -187,7 +187,7 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   expect(socket.close).toHaveBeenCalledWith(1000);
 });
 
-test("background and blur close the socket and require explicit reconnect; 401 retries once", async () => {
+test("background closes the socket while inactive and blur keep it alive; 401 retries once", async () => {
   const screen = await render(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
@@ -230,6 +230,33 @@ test("background and blur close the socket and require explicit reconnect; 401 r
   await screen.unmount();
 });
 
+test("a pending approval gets a review action without closing on route blur", async () => {
+  jest.useFakeTimers();
+  const screen = await render(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await act(async () => {
+    message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(2000);
+  });
+  expect(screen.getByText("Waiting for approval or the node…")).toBeTruthy();
+  await fireEvent.press(screen.getByText("Review approvals"));
+  expect(mockNavigation.navigate).toHaveBeenCalledWith("Activity", undefined);
+  mockFocused = false;
+  await screen.rerender(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  expect(Socket.instances[0]!.close).not.toHaveBeenCalled();
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
 test("sticky Ctrl-C sends a binary interrupt once and releases the selected key", async () => {
   const screen = await render(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
@@ -238,13 +265,13 @@ test("sticky Ctrl-C sends a binary interrupt once and releases the selected key"
   await act(async () => {
     message(view, { type: "ready" });
   });
-  await fireEvent.press(screen.getByLabelText("Ctrl"));
-  expect(screen.getByLabelText("Ctrl").props.accessibilityState.selected).toBe(true);
+  await fireEvent.press(screen.getByLabelText("Control"));
+  expect(screen.getByLabelText("Control (armed)").props.accessibilityState.selected).toBe(true);
   await act(async () => {
     message(view, { type: "input", data: "c" });
   });
   expect([...Socket.instances[0]!.send.mock.calls[0]![0]]).toEqual([3]);
-  expect(screen.getByLabelText("Ctrl").props.accessibilityState.selected).toBe(false);
+  expect(screen.getByLabelText("Control").props.accessibilityState.selected).toBe(false);
   await act(async () => {
     message(view, { type: "input", data: "c" });
   });
@@ -300,8 +327,13 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
       socket.onmessage?.({
         data: JSON.stringify({ type: "error", message: detail }),
       });
+      socket.onerror?.({ status: 503 });
+      socket.onclose?.({ reason: "Unexpected server response: 503" });
     });
     expect(screen.getByText(detail)).toBeTruthy();
+    expect(
+      screen.queryByText("Couldn't open the terminal connection. Check your network and reconnect."),
+    ).toBeNull();
     expect(screen.getByText("Reconnect")).toBeTruthy();
     expect(socket.close).toHaveBeenCalledWith(1000);
     await screen.unmount();
@@ -379,7 +411,7 @@ test("several principals require selection; a clipboard read resolving after blu
     resolve("private clipboard");
   });
   expect(mockInject).toHaveBeenCalledTimes(injections);
-  expect(Socket.instances[0]!.close).toHaveBeenCalledWith(1000);
+  expect(Socket.instances[0]!.close).not.toHaveBeenCalled();
   await screen.unmount();
 });
 
@@ -409,6 +441,22 @@ test("a catalog deep link resolves the active connection, while an unknown catal
   await fireEvent.press(unknown.getByText("Open Services"));
   expect(mockNavigation.navigate).toHaveBeenCalledWith("Services");
   await unknown.unmount();
+});
+
+test("a connection load failure has an unavailable state without terminal chrome", async () => {
+  jest.mocked(servicesApi.connection).mockRejectedValueOnce(new Error("offline"));
+  const screen = await render(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  expect(screen.queryByText("Connecting…")).toBeNull();
+  expect(screen.queryByTestId("terminal-webview")).toBeNull();
+  await screen.unmount();
 });
 
 test("a disallowed deep-link principal shows the picker instead of hanging", async () => {

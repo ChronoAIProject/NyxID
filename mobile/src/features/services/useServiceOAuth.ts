@@ -33,6 +33,7 @@ import {
 export type ServiceOAuthBanner = {
   attempt: PendingServiceOAuth;
   outcome: OAuthOutcome;
+  storedAttempt?: PendingServiceOAuth;
 };
 
 export function useServiceOAuth(
@@ -72,7 +73,8 @@ export function useServiceOAuth(
           if (epoch === generation.current && accountId === getAuthAccountId())
             setBanner((previous) =>
               previous?.outcome === "pending" ||
-              previous?.outcome === "unconfirmed"
+              previous?.outcome === "unconfirmed" ||
+              previous?.outcome === "success"
                 ? undefined
                 : previous,
             );
@@ -119,7 +121,14 @@ export function useServiceOAuth(
             serviceOAuthReturnHint(),
           );
         }
-        setBanner({ attempt, outcome });
+        const displayAttempt = connection?.label
+          ? { ...attempt, catalogName: connection.label }
+          : attempt;
+        setBanner({
+          attempt: displayAttempt,
+          outcome,
+          storedAttempt: attempt,
+        });
         if (current()) await changed();
         if (current() && outcome !== "pending" && outcome !== "unconfirmed")
           await clearServiceOAuth(attempt);
@@ -177,7 +186,9 @@ export function useServiceOAuth(
       connectionId: connection.id,
       providerId: entry.provider_config_id,
       catalogSlug: entry.slug,
-      catalogName: entry.name,
+      // Keep the account's connection label in the banner. Catalog names can
+      // be shared by several connections and are not what the user authorized.
+      catalogName: connection.label,
       baselineStatus: connection.status,
       baselineAuthorizedAt: connection.last_authorized_at ?? null,
       startedAt,
@@ -240,5 +251,20 @@ export function useServiceOAuth(
     )
       await start(connection, entry, true);
   };
-  return { banner, checking, start, retry, check: () => check(true) };
+  const dismiss = async () => {
+    const current = banner;
+    setBanner(undefined);
+    if (current)
+      await clearServiceOAuth(current.storedAttempt ?? current.attempt).catch(
+        () => {},
+      );
+  };
+  return {
+    banner,
+    checking,
+    start,
+    retry,
+    dismiss,
+    check: () => check(true),
+  };
 }

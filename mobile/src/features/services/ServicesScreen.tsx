@@ -223,7 +223,13 @@ export function ServicesScreen({
       footer={t(oauthOutcomeCopy[oauthFlow.banner.outcome])}
     >
       <SettingsRow label={oauthFlow.banner.attempt.catalogName} />
-      {oauthFlow.banner.outcome !== "success" && (
+      {oauthFlow.banner.outcome === "success" ? (
+        <SettingsRow
+          label={t("Dismiss")}
+          tone="action"
+          onPress={() => void oauthFlow.dismiss()}
+        />
+      ) : (
         <>
           <SettingsRow
             label={t("Check again")}
@@ -454,7 +460,6 @@ export function ServicesScreen({
           }}
           style={styles.tabs}
         />
-        {oauthBanner}
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {managementTab !== "history" && detail.isPending && (

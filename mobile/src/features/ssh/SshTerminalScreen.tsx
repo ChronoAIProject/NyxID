@@ -71,15 +71,19 @@ export function SshTerminalScreen({
 }) {
   const { serviceId, connectionId } = route.params;
   const focused = useIsFocused();
+  const focusedRef = useRef(focused);
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const { colors } = useTheme();
   const { t } = useAppLanguage();
   const [connection, setConnection] = useState<ServiceConnection>();
   const [notConnected, setNotConnected] = useState(false);
+  const [loadUnavailable, setLoadUnavailable] = useState(false);
   const [principal, setPrincipal] = useState(route.params.principal);
+  const [principalPickerOpen, setPrincipalPickerOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const [state, setState] = useState("Connecting…");
   const [error, setError] = useState<string>();
+  const [waiting, setWaiting] = useState(false);
   const [ctrl, setCtrl] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [documentVersion, setDocumentVersion] = useState(0);
@@ -90,14 +94,12 @@ export function SshTerminalScreen({
   const resizeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+  const waitingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const html = useMemo(
-    () =>
-      terminalDocument({
-        background: colors.bg,
-        foreground: colors.textPrimary,
-        cursor: colors.primary,
-      }),
-    [colors.bg, colors.textPrimary, colors.primary],
+    () => terminalDocument(),
+    [],
   );
   const allowNavigation = useMemo(
     () => inlineTerminalNavigation(),
@@ -123,6 +125,9 @@ export function SshTerminalScreen({
   }, [html, documentVersion, output]);
 
   useEffect(() => {
+    focusedRef.current = focused;
+  }, [focused]);
+  useEffect(() => {
     navigation.setOptions({ title: t("SSH terminal") });
   }, [navigation, t]);
   useEffect(() => {
@@ -130,6 +135,9 @@ export function SshTerminalScreen({
     const account = getAuthAccountId();
     setConnection(undefined);
     setNotConnected(false);
+    setLoadUnavailable(false);
+    setError(undefined);
+    setState("Connecting…");
     const load = connectionId
       ? servicesApi.connection(connectionId)
       : servicesApi
@@ -154,19 +162,26 @@ export function SshTerminalScreen({
         if (
           route.params.principal &&
           !value.ssh_allowed_principals?.includes(route.params.principal)
-        )
+        ) {
           setPrincipal(undefined);
-        else if (
+          setPrincipalPickerOpen(true);
+        } else if (
           !route.params.principal &&
           value.ssh_allowed_principals?.length === 1
         )
           setPrincipal(value.ssh_allowed_principals[0]);
+        else if (
+          !route.params.principal &&
+          (value.ssh_allowed_principals?.length ?? 0) > 1
+        )
+          setPrincipalPickerOpen(true);
       })
       .catch(() => {
-        if (current)
-          setError(
-            "This SSH connection could not be loaded. Try reconnecting.",
-          );
+        if (current) {
+          setLoadUnavailable(true);
+          setState("Unavailable");
+          setError(undefined);
+        }
       });
     return () => {
       current = false;
@@ -182,7 +197,6 @@ export function SshTerminalScreen({
     const epoch = ++generation.current;
     const account = getAuthAccountId();
     if (
-      !focused ||
       !ready ||
       !eligible ||
       !principal ||
@@ -199,6 +213,8 @@ export function SshTerminalScreen({
       generation.current++;
       output.clear();
       clearTimeout(resizeTimer.current);
+      clearTimeout(waitingTimer.current);
+      setWaiting(false);
       const ws = socket.current;
       socket.current = null;
       if (ws) {
@@ -212,6 +228,11 @@ export function SshTerminalScreen({
     const connect = async (force = false) => {
       setState("Connecting…");
       setError(undefined);
+      setWaiting(false);
+      clearTimeout(waitingTimer.current);
+      waitingTimer.current = setTimeout(() => {
+        if (current()) setWaiting(true);
+      }, 2000);
       try {
         await refreshAccessTokenIfNeeded(force);
         const session = await loadStoredAuthSession();
@@ -240,7 +261,11 @@ export function SshTerminalScreen({
         socket.current = ws;
         ws.binaryType = "arraybuffer";
         let transportError = false;
+        let terminalSettled = false;
         const fail = (status?: number) => {
+          if (terminalSettled) return;
+          clearTimeout(waitingTimer.current);
+          setWaiting(false);
           socket.current = null;
           output.clear();
           ws.onclose = null;
@@ -263,16 +288,28 @@ export function SshTerminalScreen({
           try {
             const message = serverMessage.parse(JSON.parse(event.data));
             if (message.type === "connected") {
+              clearTimeout(waitingTimer.current);
+              setWaiting(false);
               send({ type: "reset" });
               setState("Connected");
             }
             if (message.type === "error") {
+              terminalSettled = true;
+              clearTimeout(waitingTimer.current);
+              setWaiting(false);
               setError(message.message);
               setState("Disconnected");
+              socket.current = null;
+              output.clear();
               ws.close(1000);
             }
             if (message.type === "closed") {
+              terminalSettled = true;
+              clearTimeout(waitingTimer.current);
+              setWaiting(false);
               setState("Closed by remote host");
+              socket.current = null;
+              output.clear();
               ws.close(1000);
             }
           } catch {
@@ -281,7 +318,7 @@ export function SshTerminalScreen({
           }
         };
         ws.onerror = (event) => {
-          if (!current() || socket.current !== ws) return;
+          if (terminalSettled || !current() || socket.current !== ws) return;
           const status = terminalUpgradeStatus(
             event as unknown as { message?: string; status?: number },
           );
@@ -291,7 +328,7 @@ export function SshTerminalScreen({
           if (status) fail(status);
         };
         ws.onclose = (event) => {
-          if (!current() || socket.current !== ws) return;
+          if (terminalSettled || !current() || socket.current !== ws) return;
           const status = terminalUpgradeStatus({ message: event?.reason });
           if (transportError || status) {
             fail(status);
@@ -328,7 +365,6 @@ export function SshTerminalScreen({
       accountSubscription();
     };
   }, [
-    focused,
     ready,
     eligible,
     principal,
@@ -384,6 +420,19 @@ export function SshTerminalScreen({
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, []);
   const reconnect = () => {
+    generation.current++;
+    const ws = socket.current;
+    socket.current = null;
+    if (ws) {
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onopen = null;
+      ws.close(1000);
+    }
+    output.clear();
+    clearTimeout(waitingTimer.current);
+    setWaiting(false);
     setAttempt((value) => value + 1);
   };
   const paste = async () => {
@@ -392,7 +441,7 @@ export function SshTerminalScreen({
     try {
       const text = await Clipboard.getStringAsync();
       if (
-        focused &&
+        focusedRef.current &&
         epoch === generation.current &&
         account === getAuthAccountId()
       )
@@ -402,6 +451,23 @@ export function SshTerminalScreen({
         setError("Couldn't read the clipboard. Try again.");
     }
   };
+  const principals = connection?.ssh_allowed_principals ?? [];
+  const invalidPrincipal = Boolean(
+    route.params.principal && !principal && principals.length,
+  );
+  const statusMessage = error
+    ? error
+    : waiting
+      ? "Waiting for approval or the node…"
+      : connection?.has_node_binding === false
+        ? "Bind an online credential node to this SSH service before opening a terminal."
+        : eligible && invalidPrincipal
+          ? "That SSH principal is not allowed for this service. Choose one below."
+          : eligible && !principal
+            ? principals.length
+              ? "Choose an SSH principal to connect."
+              : "No SSH principals are configured for this service."
+            : state;
   return (
     <WorkspacePage
       title={t("SSH terminal")}
@@ -409,11 +475,12 @@ export function SshTerminalScreen({
       scroll={false}
       contentStyle={styles.page}
     >
-      {error && <Notice message={t(error)} tone="error" />}
-      {notConnected ? (
+      {loadUnavailable || notConnected ? (
         <SettingsGroup
           footer={t(
-            "This SSH service is not connected to your account. Open Services to connect it first.",
+            loadUnavailable
+              ? "This SSH connection could not be loaded."
+              : "This SSH service is not connected to your account. Open Services to connect it first.",
           )}
         >
           <SettingsRow
@@ -423,58 +490,70 @@ export function SshTerminalScreen({
           />
         </SettingsGroup>
       ) : connection && !eligible ? (
-        <SettingsGroup
-          footer={t(
-            connection.ssh_auth_mode === "node_key"
-              ? "Certificate-mode services are required for the mobile terminal. Run nyxid ssh exec <service> from a computer."
-              : connection.ssh_auth_mode === "proxy_only"
-                ? "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer."
-                : "Enable this connection to open the terminal.",
-          )}
-        >
-          {null}
-        </SettingsGroup>
+        <View style={styles.unavailable}>
+          <Notice
+            message={t(
+              connection.ssh_auth_mode === "node_key"
+                ? "Certificate-mode services are required for the mobile terminal. Run nyxid ssh exec <service> from a computer."
+                : connection.ssh_auth_mode === "proxy_only"
+                  ? "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer."
+                  : "Enable this connection to open the terminal.",
+            )}
+          />
+        </View>
       ) : (
         <KeyboardAvoidingView
           style={styles.keyboardAvoiding}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
         >
-          <Text
-            accessibilityLiveRegion="polite"
-            style={[styles.status, { color: colors.textSecondary }]}
-          >
-            {t(
-              eligible &&
-              !principal &&
-              route.params.principal &&
-              !connection?.ssh_allowed_principals?.includes(
-                route.params.principal,
-              )
-                ? "That SSH principal is not allowed for this service. Choose one below."
-                : eligible && !principal
-                ? connection?.ssh_allowed_principals?.length
-                  ? "Choose an SSH principal to connect."
-                  : "No SSH principals are configured for this service."
-                : state,
+          <View style={styles.statusBar}>
+            {principals.length > 1 || invalidPrincipal ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("SSH principal")}
+                onPress={() => setPrincipalPickerOpen((value) => !value)}
+                style={[styles.principalChip, { borderColor: colors.border }]}
+              >
+                <Text style={[styles.chipText, { color: colors.textPrimary }]}>
+                  {principal ?? t("Choose principal")}
+                </Text>
+              </Pressable>
+            ) : null}
+            <Text
+              accessibilityLiveRegion="polite"
+              style={[styles.status, { color: colors.textSecondary }]}
+              numberOfLines={2}
+            >
+              {t(statusMessage)}
+            </Text>
+            {(state === "Disconnected" ||
+              state === "Closed by remote host" ||
+              Boolean(error)) && (
+              <SettingsRow
+                label={t("Reconnect")}
+                tone="action"
+                onPress={reconnect}
+              />
             )}
-          </Text>
-          {connection?.has_node_binding === false && (
-            <Notice
-              message={t(
-                "Bind an online credential node to this SSH service before opening a terminal.",
-              )}
-            />
-          )}
-          {(connection?.ssh_allowed_principals?.length ?? 0) > 1 ||
-          (Boolean(route.params.principal) && !principal &&
-            (connection?.ssh_allowed_principals?.length ?? 0) > 0) ? (
+            {waiting && (
+              <SettingsRow
+                label={t("Review approvals")}
+                tone="action"
+                onPress={() => navigation.navigate("Activity", undefined)}
+              />
+            )}
+          </View>
+          {principalPickerOpen && principals.length > 0 ? (
             <SettingsGroup title={t("SSH principal")}>
-              {connection!.ssh_allowed_principals!.map((value) => (
+              {principals.map((value) => (
                 <SettingsRow
                   key={value}
                   label={value}
                   value={principal === value ? t("Selected") : undefined}
-                  onPress={() => setPrincipal(value)}
+                  onPress={() => {
+                    setPrincipal(value);
+                    setPrincipalPickerOpen(false);
+                  }}
                 />
               ))}
             </SettingsGroup>
@@ -501,12 +580,19 @@ export function SshTerminalScreen({
               domStorageEnabled={false}
               onMessage={bridge}
               onContentProcessDidTerminate={() => {
-                socket.current?.close(1000);
+                const ws = socket.current;
+                socket.current = null;
+                if (ws) {
+                  ws.onmessage = null;
+                  ws.onclose = null;
+                  ws.onerror = null;
+                  ws.close(1000);
+                }
                 setState("Disconnected");
                 setReady(false);
                 setDocumentVersion((value) => value + 1);
               }}
-              style={{ backgroundColor: colors.bg }}
+              style={{ backgroundColor: "#0f172a" }}
             />
           </View>
           <ScrollView
@@ -515,11 +601,37 @@ export function SshTerminalScreen({
             style={styles.keys}
             contentContainerStyle={{ gap: spacing.xs }}
           >
-            {[...terminalKeys, "Ctrl", "Paste"].map((key) => (
+            {["Ctrl", ...terminalKeys, "Paste"].map((key) => (
               <Pressable
                 key={key}
                 accessibilityRole="button"
-                accessibilityLabel={t(key)}
+                accessibilityLabel={t(
+                  key === "Ctrl"
+                    ? ctrl
+                      ? "Control (armed)"
+                      : "Control"
+                    : key === "Esc"
+                      ? "Escape"
+                      : key === "Tab"
+                        ? "Tab"
+                      : key === "ArrowUp"
+                        ? "Up arrow"
+                        : key === "ArrowDown"
+                          ? "Down arrow"
+                          : key === "ArrowLeft"
+                            ? "Left arrow"
+                            : key === "ArrowRight"
+                              ? "Right arrow"
+                              : key === "|"
+                                ? "Vertical bar"
+                                : key === "~"
+                                  ? "Tilde"
+                                  : key === "/"
+                                    ? "Slash"
+                                    : key === "-"
+                                      ? "Hyphen"
+                                      : "Paste",
+                )}
                 accessibilityState={{ selected: key === "Ctrl" && ctrl }}
                 style={[
                   styles.key,
@@ -566,19 +678,28 @@ export function SshTerminalScreen({
           </ScrollView>
         </KeyboardAvoidingView>
       )}
-      {(state === "Disconnected" ||
-        state === "Closed by remote host" ||
-        error) && (
-        <SettingsRow label={t("Reconnect")} tone="action" onPress={reconnect} />
-      )}
     </WorkspacePage>
   );
 }
 const styles = StyleSheet.create({
-  page: { padding: spacing.sm, gap: spacing.sm },
-  keyboardAvoiding: { flex: 1, gap: spacing.sm },
-  terminal: { flex: 1, minHeight: 100 },
-  status: { ...typeScale.label },
+  page: { padding: spacing.sm, gap: spacing.sm, flex: 1 },
+  keyboardAvoiding: { flex: 1, gap: spacing.xs },
+  unavailable: { gap: spacing.sm },
+  statusBar: {
+    minHeight: 38,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+  },
+  principalChip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  chipText: { ...typeScale.label },
+  terminal: { flex: 1, minHeight: 100, backgroundColor: "#0f172a" },
+  status: { ...typeScale.label, flex: 1 },
   keys: { flexGrow: 0, maxHeight: 48 },
   key: {
     borderWidth: 1,

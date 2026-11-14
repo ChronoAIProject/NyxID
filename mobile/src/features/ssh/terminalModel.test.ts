@@ -112,15 +112,16 @@ test("offline WebView has no network permissions, navigation or external assets"
   });
   assert.match(
     html,
-    /default-src 'none'; connect-src 'none'; img-src 'none'; font-src 'none'/,
+    /default-src 'none'; connect-src 'none'; img-src 'none'; font-src data:/,
   );
   assert.doesNotMatch(html, /<(?:script|img|iframe)[^>]+src=|<link[^>]+href=/i);
   assert.match(html, /window\.fetch=undefined/);
   assert.match(html, /window\.WebSocket=undefined/);
   assert.match(html, /window\.open=undefined/);
-  assert.match(html, /ui-monospace, Menlo, 'Roboto Mono', monospace/);
-  assert.match(html, /textarea\.autocorrect='off'/);
-  assert.match(html, /textarea\.spellcheck=false/);
+  assert.match(html, /JetBrains Mono/);
+  assert.match(html, /fontFamily:"'JetBrains Mono', monospace"/);
+  assert.match(html, /setAttribute\('autocorrect','off'\)/);
+  assert.match(html, /setAttribute\('spellcheck','false'\)/);
   assert.match(html, /term\.paste\(message.text\)/);
   assert.match(html, /applicationCursorKeysMode/);
   assert.doesNotMatch(html, /Bearer |accessToken|Authorization:/);
@@ -227,7 +228,12 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
   const writes: number[][] = [];
   let dataListener!: (input: string) => void;
   let terminal: any;
-  const textarea = { setAttribute() {} };
+  const attributes: Record<string, string> = {};
+  const textarea = {
+    setAttribute(name: string, value: string) {
+      attributes[name] = value;
+    },
+  };
   const context = {
     window: {
       ReactNativeWebView: {
@@ -314,9 +320,28 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
   assert.deepEqual(posted.at(-1), { type: "ack", id: 1 });
   for (const api of ["fetch", "WebSocket", "XMLHttpRequest", "open"])
     assert.equal(context.window[api], undefined);
-  assert.equal((textarea as any).autocorrect, "off");
-  assert.equal((textarea as any).autocapitalize, "off");
-  assert.equal((textarea as any).spellcheck, false);
+  assert.deepEqual(attributes, {
+    autocorrect: "off",
+    autocapitalize: "off",
+    autocomplete: "off",
+    spellcheck: "false",
+  });
+});
+
+test("paste stays within the validated bridge boundary after bracketed markers", () => {
+  const text = "x".repeat(65536);
+  const parsed = terminalBridgeSchema.parse({
+    type: "input",
+    data: `\x1b[200~${text}\x1b[201~`,
+  });
+  if (parsed.type !== "input") throw new Error("expected input bridge message");
+  assert.equal(parsed.data.length, 65548);
+  assert.throws(() =>
+    terminalBridgeSchema.parse({
+      type: "input",
+      data: `\x1b[200~${text}x\x1b[201~`,
+    }),
+  );
 });
 
 test("native upgrade diagnostics survive RN's empty error event and close-reason delivery", () => {

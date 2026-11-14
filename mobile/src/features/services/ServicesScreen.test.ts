@@ -421,14 +421,16 @@ test("repair authorizes the existing organization connection and preserves its g
   assert.deepEqual(env.browsers, [
     "https://provider.example/authorize?state=bound",
   ]);
-  assert.ok(
+  assert.equal(
     elements(env.harness.flush()).some(
       (item) =>
         item.type === "SettingsGroup" &&
         item.props.footer ===
           "Authorization completed. Your connection is ready.",
     ),
+    false,
   );
+  assert.equal(env.hasButton("Reconnect"), true);
   env.harness.unmount();
 });
 
