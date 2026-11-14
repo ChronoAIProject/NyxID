@@ -115,19 +115,28 @@ export function SshTerminalScreen({
   );
   const send = (message: TerminalCommand) =>
     web.current?.injectJavaScript(terminalScript(message));
-  const endSessionDocument = (
+  const stopWaiting = () => {
+    clearTimeout(waitingTimer.current);
+    waitingRef.current = false;
+    setWaiting(false);
+  };
+  const endSession = (
     message = translateRef.current("Connection closed."),
   ) => {
     if (sessionEndedRef.current) return;
     sessionEndedRef.current = true;
     send({ type: "session-ended", message });
   };
+  const resetForAttempt = () => {
+    sessionEndedRef.current = false;
+    stopWaiting();
+  };
   const output = useMemo(
     () =>
       new TerminalOutput(
         (data, id) => send({ type: "output", data, id }),
         () => {
-          endSessionDocument();
+          endSession();
           socket.current?.close(1000);
           setError("Terminal output is too far behind. Reconnect to continue.");
           setState("Disconnected");
@@ -227,14 +236,12 @@ export function SshTerminalScreen({
     const close = (notice?: string) => {
       closed = true;
       generation.current++;
-      if (notice) endSessionDocument(notice);
+      if (notice) endSession(notice);
       output.clear();
       clearTimeout(resizeTimer.current);
-      clearTimeout(waitingTimer.current);
       clearTimeout(backgroundTimer.current);
       backgroundTimer.current = undefined;
-      setWaiting(false);
-      waitingRef.current = false;
+      stopWaiting();
       const ws = socket.current;
       socket.current = null;
       if (ws) {
@@ -248,10 +255,7 @@ export function SshTerminalScreen({
     const connect = async (force = false) => {
       setState("Connecting…");
       setError(undefined);
-      sessionEndedRef.current = false;
-      waitingRef.current = false;
-      setWaiting(false);
-      clearTimeout(waitingTimer.current);
+      resetForAttempt();
       waitingTimer.current = setTimeout(() => {
         if (current()) {
           waitingRef.current = true;
@@ -263,10 +267,8 @@ export function SshTerminalScreen({
         const session = await loadStoredAuthSession();
         if (!current()) return;
         if (!session?.accessToken) {
-          clearTimeout(waitingTimer.current);
-          waitingRef.current = false;
-          setWaiting(false);
-          endSessionDocument();
+          stopWaiting();
+          endSession();
           setError(terminalUpgradeError(401));
           setState("Disconnected");
           return;
@@ -294,10 +296,8 @@ export function SshTerminalScreen({
         const fail = (status?: number) => {
           if (terminalSettled) return;
           const waitingForApproval = waitingRef.current;
-          clearTimeout(waitingTimer.current);
-          waitingRef.current = false;
-          setWaiting(false);
-          endSessionDocument();
+          stopWaiting();
+          endSession();
           socket.current = null;
           output.clear();
           ws.onclose = null;
@@ -320,19 +320,14 @@ export function SshTerminalScreen({
           try {
             const message = serverMessage.parse(JSON.parse(event.data));
             if (message.type === "connected") {
-              clearTimeout(waitingTimer.current);
-              waitingRef.current = false;
-              setWaiting(false);
-              sessionEndedRef.current = false;
+              resetForAttempt();
               send({ type: "reset" });
               setState("Connected");
             }
             if (message.type === "error") {
               terminalSettled = true;
-              clearTimeout(waitingTimer.current);
-              waitingRef.current = false;
-              setWaiting(false);
-              endSessionDocument(message.message);
+              stopWaiting();
+              endSession(message.message);
               setError(message.message);
               setState("Disconnected");
               socket.current = null;
@@ -341,10 +336,8 @@ export function SshTerminalScreen({
             }
             if (message.type === "closed") {
               terminalSettled = true;
-              clearTimeout(waitingTimer.current);
-              waitingRef.current = false;
-              setWaiting(false);
-              endSessionDocument(
+              stopWaiting();
+              endSession(
                 translateRef.current("Session closed by remote host."),
               );
               setState("Closed by remote host");
@@ -354,10 +347,8 @@ export function SshTerminalScreen({
             }
           } catch {
             terminalSettled = true;
-            clearTimeout(waitingTimer.current);
-            waitingRef.current = false;
-            setWaiting(false);
-            endSessionDocument();
+            stopWaiting();
+            endSession();
             setError("The terminal server sent an invalid message.");
             setState("Disconnected");
             socket.current = null;
@@ -382,10 +373,8 @@ export function SshTerminalScreen({
             fail(status);
             return;
           }
-          clearTimeout(waitingTimer.current);
-          waitingRef.current = false;
-          setWaiting(false);
-          endSessionDocument();
+          stopWaiting();
+          endSession();
           socket.current = null;
           output.clear();
           setState((value) =>
@@ -394,10 +383,8 @@ export function SshTerminalScreen({
         };
       } catch {
         if (current()) {
-          clearTimeout(waitingTimer.current);
-          waitingRef.current = false;
-          setWaiting(false);
-          endSessionDocument();
+          stopWaiting();
+          endSession();
           setError(terminalUpgradeError());
           setState("Disconnected");
         }
@@ -484,7 +471,7 @@ export function SshTerminalScreen({
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, []);
   const reconnect = () => {
-    endSessionDocument();
+    endSession();
     generation.current++;
     const ws = socket.current;
     socket.current = null;
@@ -496,9 +483,7 @@ export function SshTerminalScreen({
       ws.close(1000);
     }
     output.clear();
-    clearTimeout(waitingTimer.current);
-    waitingRef.current = false;
-    setWaiting(false);
+    stopWaiting();
     setAttempt((value) => value + 1);
   };
   const paste = async () => {
