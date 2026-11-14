@@ -4,7 +4,14 @@ import Foundation
 // This raw parsing/capture cap is separate from the 256 KiB sanitized buffer.
 let crashRawReportMaxBytes = 4 * 1024 * 1024
 
-enum CrashDiscardReason: String { case oversize, unparseable }
+enum CrashDiscardReason: String, CaseIterable {
+  case oversize
+  case unparseable
+  case unauthorized
+  case epochMismatch = "epoch_mismatch"
+  case expired
+  case jsDuplicate = "js_duplicate"
+}
 enum RawCrashReportDecision: Equatable { case parse, discard(CrashDiscardReason) }
 
 func rawCrashReportDecision(byteCount: Int) -> RawCrashReportDecision {
@@ -12,20 +19,43 @@ func rawCrashReportDecision(byteCount: Int) -> RawCrashReportDecision {
   return byteCount <= crashRawReportMaxBytes ? .parse : .discard(.oversize)
 }
 
-/// Only a closed reason and a nonnegative byte count can enter the discard log.
+/// Only a closed reason and a nonnegative byte count can enter the metadata log.
 func crashDiscardLogLine(reason: CrashDiscardReason, byteCount: Int?) -> String {
   let bytes = byteCount.flatMap { $0 >= 0 ? String($0) : nil } ?? "unknown"
   return "nyx-crash: raw report discarded reason=\(reason.rawValue) bytes=\(bytes)"
 }
 
+enum CrashRawNotice: String { case ageUnknown = "age_unknown" }
+
+func crashRawNoticeLogLine(reason: CrashRawNotice, byteCount: Int?) -> String {
+  let bytes = byteCount.flatMap { $0 >= 0 ? String($0) : nil } ?? "unknown"
+  return "nyx-crash: raw report age unknown bytes=\(bytes)"
+}
+
 let crashRecordMaxAgeSeconds: TimeInterval = 86400
-enum InitialRawReportDecision: Equatable { case retain, discard }
-/// Missing authority/age is never permission to retain raw crash material.
-func initialRawReportDecision(bindingEpoch: String?, reportEpoch: String?, fileAgeSeconds: TimeInterval?) -> InitialRawReportDecision {
-  guard let epoch = bindingEpoch, !epoch.isEmpty, epoch == reportEpoch,
-    let age = fileAgeSeconds, age.isFinite, age >= -300, age <= crashRecordMaxAgeSeconds
-  else { return .discard }
-  return .retain
+enum InitialRawReportDecision: Equatable { case parse, discard(CrashDiscardReason) }
+/// An authorized report with an unavailable mtime remains parseable. The
+/// parsed report customData is checked separately after the in-memory parse.
+func initialRawReportDecision(bindingEpoch: String?, authorityEpoch: String?, fileAgeSeconds: TimeInterval?) -> InitialRawReportDecision {
+  guard let epoch = bindingEpoch, !epoch.isEmpty else { return .discard(.unauthorized) }
+  guard let authorityEpoch, !authorityEpoch.isEmpty else { return .discard(.unauthorized) }
+  guard epoch == authorityEpoch else { return .discard(.epochMismatch) }
+  guard let age = fileAgeSeconds else { return .parse }
+  guard age.isFinite, age >= -300, age <= crashRecordMaxAgeSeconds else {
+    return .discard(.expired)
+  }
+  return .parse
+}
+
+enum ParsedCrashTimestampDecision: Equatable { case continueParsing, discard(CrashDiscardReason) }
+
+func parsedCrashTimestampDecision(timestamp: Date?, now: Date) -> ParsedCrashTimestampDecision {
+  guard let timestamp else { return .continueParsing }
+  let age = now.timeIntervalSince(timestamp)
+  guard age.isFinite, age >= -300, age <= crashRecordMaxAgeSeconds else {
+    return .discard(.expired)
+  }
+  return .continueParsing
 }
 struct NativeCrashImage { var uuid: String; var name: String; var size: UInt64 }
 struct NativeCrashFrame { var image: Int?; var offset: UInt64 }
@@ -52,8 +82,11 @@ struct ParsedNativeCrash {
   var timestamp: Date?
 }
 
-func sanitizedNativeCrash(_ crash: ParsedNativeCrash, eventId: String, now: Date) -> [String: Any]? {
-  guard let timestamp = crash.timestamp, let threadIndex = nativeCrashThreadIndex(
+func sanitizedNativeCrash(
+  _ crash: ParsedNativeCrash, eventId: String, now: Date, fallbackCapturedAt: Date
+) -> [String: Any]? {
+  let timestamp = crash.timestamp ?? fallbackCapturedAt
+  guard let threadIndex = nativeCrashThreadIndex(
     crash.threads.map { (crashed: $0.crashed, frameAddresses: $0.frames) },
     faultAddress: crash.faultAddress),
     timestamp.timeIntervalSince(now) >= -86400,
@@ -141,12 +174,14 @@ func purgeInterruptedCrashWrites(in directory: URL) {
 }
 
 /// Pure policy: inspect only the arming token and JS fatal marker, never exception text/registers.
-enum PendingCrashDecision: Equatable { case discard, native }
+enum PendingCrashDecision: Equatable { case discard(CrashDiscardReason), native }
 func pendingCrashDecision(bindingEpoch: String?, reportEpoch: String?, jsEventId: String?)
   -> PendingCrashDecision
 {
-  guard let bindingEpoch, !bindingEpoch.isEmpty, bindingEpoch == reportEpoch, jsEventId == nil
-  else { return .discard }
+  guard let bindingEpoch, !bindingEpoch.isEmpty else { return .discard(.unauthorized) }
+  guard let reportEpoch, !reportEpoch.isEmpty else { return .discard(.unauthorized) }
+  guard bindingEpoch == reportEpoch else { return .discard(.epochMismatch) }
+  guard jsEventId == nil else { return .discard(.jsDuplicate) }
   return .native
 }
 func crashMatches(_ value: String, _ pattern: String) -> Bool {

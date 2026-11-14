@@ -47,14 +47,14 @@ assert(!crashCaptureCanArm(reporterAvailable: true, enabled: false))
 assert(crashCaptureCanArm(reporterAvailable: true, enabled: true))
 let epoch = UUID().uuidString
 assert(pendingCrashDecision(bindingEpoch: epoch, reportEpoch: epoch, jsEventId: nil) == .native)
-assert(pendingCrashDecision(bindingEpoch: nil, reportEpoch: epoch, jsEventId: nil) == .discard)
+assert(pendingCrashDecision(bindingEpoch: nil, reportEpoch: epoch, jsEventId: nil) == .discard(.unauthorized))
 assert(
   pendingCrashDecision(bindingEpoch: epoch, reportEpoch: UUID().uuidString, jsEventId: nil)
-    == .discard)
+    == .discard(.epochMismatch))
 assert(
   pendingCrashDecision(bindingEpoch: epoch, reportEpoch: epoch, jsEventId: UUID().uuidString)
-    == .discard)
-assert(pendingCrashDecision(bindingEpoch: "", reportEpoch: "", jsEventId: nil) == .discard)
+    == .discard(.jsDuplicate))
+assert(pendingCrashDecision(bindingEpoch: "", reportEpoch: "", jsEventId: nil) == .discard(.unauthorized))
 let secret = "SECRET_SENTINEL Bearer private person@example.test /Users/private eyJhbGci.jwt"
 let containerId = "11111111-2222-4333-8444-555555555555"
 let pathSentinel = "PATH_SENTINEL_Bearer_private_person@example.test"
@@ -117,7 +117,7 @@ assert(fixtureThreads.count == 40 && fixtureThreads.allSatisfy { !$0.crashed && 
 assert(fixtureImages.count == 600)
 assert(rawFixtureData.count >= 375_000)
 assert(rawCrashReportDecision(byteCount: rawFixtureData.count) == .parse)
-let mapped = sanitizedNativeCrash(fixture, eventId: regressionEventId, now: regressionNow)!
+let mapped = sanitizedNativeCrash(fixture, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!
 assert(Set(mapped.keys) == nativeKeys)
 assert(mapped["event_id"] as? String == regressionEventId)
 assert(mapped["native_signal"] as? String == "SIGSEGV")
@@ -169,16 +169,16 @@ for image in fixtureImages {
 // Exercise mapping limits and invalid parser fields at the same portable boundary.
 var variant = fixture
 variant.threads[17].frames.append(fixtureImages[0].baseAddress + 123)
-assert((sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!["native_frames"] as! [Any]).count == 64)
+assert((sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!["native_frames"] as! [Any]).count == 64)
 variant = fixture
 variant.threads = []
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 variant = fixture
 variant.faultAddress = 0
-let firstThread = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
+let firstThread = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!
 assert(((firstThread["native_frames"] as! [[String: Any]])[0]["offset"] as! UInt64) == 0x1000)
 variant.threads[5].crashed = true
-let markedThread = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
+let markedThread = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!
 assert(((markedThread["native_frames"] as! [[String: Any]])[0]["offset"] as! UInt64) == 0x1500)
 for invalidImage in [
   ParsedNativeCrash.Image(uuid: nil, name: "NyxIDMobile", baseAddress: fixtureImages[0].baseAddress, size: 0x10_0000),
@@ -186,35 +186,35 @@ for invalidImage in [
 ] {
   variant = fixture
   variant.images[0] = invalidImage
-  let record = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
+  let record = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!
   let frame = (record["native_frames"] as! [[String: Any]])[0]
   assert(frame["image"] is NSNull && (frame["offset"] as! UInt64) == 0)
 }
 for signal in ["SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "SIGTRAP", "SIGSYS", secret] {
   variant = fixture
   variant.signalName = signal
-  let record = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
+  let record = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!
   assert(record["native_signal"] as? String == (signal == secret ? "Other" : signal))
 }
 variant = fixture
 variant.appMarketingVersion = secret
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 variant = fixture
 variant.appBuild = secret
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 variant = fixture
 variant.osVersion = secret
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
-assert(sanitizedNativeCrash(fixture, eventId: secret, now: regressionNow) == nil)
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
+assert(sanitizedNativeCrash(fixture, eventId: secret, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 variant = fixture
 variant.timestamp = regressionNow.addingTimeInterval(-86401)
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 variant.timestamp = regressionNow.addingTimeInterval(301)
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 
-let logPattern = "^nyx-crash: raw report discarded reason=(oversize|unparseable) bytes=([0-9]+|unknown)$"
+let logPattern = "^nyx-crash: raw report discarded reason=(oversize|unparseable|unauthorized|epoch_mismatch|expired|js_duplicate) bytes=([0-9]+|unknown)$"
 let logByteCounts: [Int?] = [nil, 0, rawFixtureData.count, crashRawReportMaxBytes + 1, Int.max, -1]
-for reason in [CrashDiscardReason.oversize, .unparseable] {
+for reason in CrashDiscardReason.allCases {
   for count in logByteCounts {
     let line = crashDiscardLogLine(reason: reason, byteCount: count)
     assert(crashMatches(line, logPattern))
@@ -227,6 +227,23 @@ assert(crashDiscardLogLine(reason: .oversize, byteCount: crashRawReportMaxBytes 
   == "nyx-crash: raw report discarded reason=oversize bytes=4194305")
 assert(crashDiscardLogLine(reason: .unparseable, byteCount: nil)
   == "nyx-crash: raw report discarded reason=unparseable bytes=unknown")
+assert(crashDiscardLogLine(reason: .epochMismatch, byteCount: 123)
+  == "nyx-crash: raw report discarded reason=epoch_mismatch bytes=123")
+assert(crashDiscardLogLine(reason: .jsDuplicate, byteCount: nil)
+  == "nyx-crash: raw report discarded reason=js_duplicate bytes=unknown")
+let noticePattern = "^nyx-crash: raw report age unknown bytes=([0-9]+|unknown)$"
+for count in logByteCounts {
+  let line = crashRawNoticeLogLine(reason: .ageUnknown, byteCount: count)
+  let expectedBytes = count.flatMap { $0 >= 0 ? String($0) : nil } ?? "unknown"
+  assert(line == "nyx-crash: raw report age unknown bytes=\(expectedBytes)")
+  assert(crashMatches(line, noticePattern))
+  assert(!line.contains("discarded"))
+  for value in privateSentinels { assert(!line.contains(value)) }
+}
+assert(crashRawNoticeLogLine(reason: .ageUnknown, byteCount: nil)
+  == "nyx-crash: raw report age unknown bytes=unknown")
+assert(crashRawNoticeLogLine(reason: .ageUnknown, byteCount: 415006)
+  == "nyx-crash: raw report age unknown bytes=415006")
 let formatter = ISO8601DateFormatter()
 formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 let base: [String: Any] = [
@@ -265,16 +282,41 @@ for value in [
 print("Generated native crash regression fixture: \(rawFixtureData.count) bytes (40 threads x 64 frames, 600 images)")
 print("Native crash size decision, mapping, discard log, JS fatal rejection and native allowlist proofs passed")
 
-for age: TimeInterval in [0, 86399, 86400, -300] {
-  assert(initialRawReportDecision(bindingEpoch: epoch, reportEpoch: epoch, fileAgeSeconds: age) == .retain)
+for age: TimeInterval? in [0, 86399, 86400, -300, nil] {
+  assert(initialRawReportDecision(bindingEpoch: epoch, authorityEpoch: epoch, fileAgeSeconds: age) == .parse)
 }
-for age: TimeInterval? in [nil, 86400.01, -300.01, .infinity, .nan] {
-  assert(initialRawReportDecision(bindingEpoch: epoch, reportEpoch: epoch, fileAgeSeconds: age) == .discard)
+for age: TimeInterval? in [86400.01, -300.01, .infinity, .nan] {
+  assert(initialRawReportDecision(bindingEpoch: epoch, authorityEpoch: epoch, fileAgeSeconds: age) == .discard(.expired))
 }
-for pair: (String?, String?) in [(nil, epoch), (epoch, nil), (epoch, UUID().uuidString), ("", "")] {
-  assert(initialRawReportDecision(bindingEpoch: pair.0, reportEpoch: pair.1, fileAgeSeconds: 1) == .discard)
+for pair: (String?, String?) in [(nil, epoch), (epoch, nil), ("", "")] {
+  assert(initialRawReportDecision(bindingEpoch: pair.0, authorityEpoch: pair.1, fileAgeSeconds: 1) == .discard(.unauthorized))
 }
+assert(initialRawReportDecision(bindingEpoch: epoch, authorityEpoch: UUID().uuidString, fileAgeSeconds: 1) == .discard(.epochMismatch))
+let parsedTimestampNow = Date(timeIntervalSince1970: 1_800_000_000)
+assert(parsedCrashTimestampDecision(timestamp: nil, now: parsedTimestampNow) == .continueParsing)
+assert(parsedCrashTimestampDecision(timestamp: parsedTimestampNow.addingTimeInterval(-86401), now: parsedTimestampNow) == .discard(.expired))
+assert(parsedCrashTimestampDecision(timestamp: parsedTimestampNow.addingTimeInterval(301), now: parsedTimestampNow) == .discard(.expired))
 
+let capturedFormatter = ISO8601DateFormatter()
+capturedFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 variant = fixture
 variant.timestamp = nil
-assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)
+let mtime = regressionNow.addingTimeInterval(-120)
+let mtimeRecord = sanitizedNativeCrash(
+  variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: mtime)!
+assert(mtimeRecord["captured_at"] as? String == capturedFormatter.string(from: mtime))
+let collectionRecord = sanitizedNativeCrash(
+  variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow)!
+assert(collectionRecord["captured_at"] as? String == capturedFormatter.string(from: regressionNow))
+variant.timestamp = regressionNow.addingTimeInterval(-60)
+let presentRecord = sanitizedNativeCrash(
+  variant, eventId: regressionEventId, now: regressionNow,
+  fallbackCapturedAt: regressionNow.addingTimeInterval(200))!
+assert(presentRecord["captured_at"] as? String == capturedFormatter.string(from: variant.timestamp!))
+variant.timestamp = nil
+assert(sanitizedNativeCrash(
+  variant, eventId: regressionEventId, now: regressionNow,
+  fallbackCapturedAt: regressionNow.addingTimeInterval(-86401)) == nil)
+assert(sanitizedNativeCrash(
+  variant, eventId: regressionEventId, now: regressionNow,
+  fallbackCapturedAt: regressionNow.addingTimeInterval(301)) == nil)

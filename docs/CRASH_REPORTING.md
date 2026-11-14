@@ -79,12 +79,24 @@ application tracing expose only fixed outcomes/platform/kind metadata.
 
 All enabling, arming, disarming and report conversion starts in module
 functions called from JavaScript. Module `OnCreate` additionally enforces raw-file
-retention before JS: no binding/capture authority or an age over 24 hours deletes
-the file unread. Otherwise an in-memory parse compares only customData `e`; a
-missing or mismatched epoch deletes it without retaining parser data. The same
-24-hour file-age bound applies in `collect`. `initialRawReportDecision` has
-portable tests for every branch and its age boundaries. There are no AppDelegate or SceneDelegate
-hooks, so app-delegate and UIScene lifecycles use the same path.
+retention before JS. It obtains the pending-file location from PLCrashReporter's
+public `crashReportPath()` API; no PLCrashReporter path is reconstructed by NyxID.
+Missing binding or raw authority, or an authority/epoch mismatch, deletes the
+file unread. A known mtime older than 24 hours also deletes it unread. Otherwise,
+the minimal in-memory parse checks capture-time customData `e`/`j`; a missing or
+mismatched epoch or a JS fatal duplicate is discarded without retaining parser
+data. When mtime is unavailable, the module emits the
+closed `age_unknown` metadata notice (`nyx-crash: raw report age unknown
+bytes=<n|unknown>`) and parses an authorized report; it never silently discards
+it. The parsed report timestamp is then checked: a missing timestamp continues
+safely to the sanitizer. `captured_at` uses the parsed timestamp when present,
+otherwise the pending file mtime, otherwise collection time. A timestamp or
+fallback older than 24 hours or more than five minutes in the future is discarded
+as `expired`. The same decision order and 24-hour age bound apply in `collect`.
+`initialRawReportDecision`
+and `parsedCrashTimestampDecision` have portable tests for every branch and their
+boundaries. There are no AppDelegate or SceneDelegate hooks, so app-delegate and
+UIScene lifecycles use the same path.
 
 After auth restoration and device-choice hydration, a fresh permission read
 selects a binding `{accountId, revision, epochId}`. A matching stored binding keeps
@@ -119,11 +131,16 @@ shared by capture and parsing (`crashRawReportMaxBytes`). Real Release simulator
 reports measured about 375 KB; the raw cap provides headroom and is separate
 from the sanitized buffer's 32 KiB per record / three records / 256 KiB total /
 24-hour limits. `rawCrashReportDecision` permits parsing only nonempty data up
-to the raw cap. Oversized or unreadable/unparseable raw reports emit only
-`nyx-crash: raw report discarded reason=<oversize|unparseable> bytes=<n|unknown>`.
-`crashDiscardLogLine` accepts only the reason enum and an optional integer size;
-the module logs its result with `NSLog("%@", line)`. Report data, paths,
-identifiers, registers and exception text cannot enter this formatter.
+to the raw cap. Every discard emits only
+`nyx-crash: raw report discarded reason=<oversize|unparseable|unauthorized|epoch_mismatch|expired|js_duplicate> bytes=<n|unknown>`.
+The separate closed `crashRawNoticeLogLine` emits the `age_unknown` notice while
+processing continues. `crashDiscardLogLine` accepts only the closed discard-reason
+enum and an optional integer size; the module logs its result with
+`NSLog("%@", line)`.
+Report data, paths, identifiers, registers and exception text cannot enter this
+formatter.
+When the reporter could not be created, the fallback purge logs only if it
+removed a raw file; an empty or absent directory produces no discard log.
 The raw file can contain crashed-thread register values inside the protected app
 sandbox until the next launch. Registers never enter the sanitized buffer,
 NyxID or Sentry. The PLCrashReporter signal handler cannot be unregistered within a process.
