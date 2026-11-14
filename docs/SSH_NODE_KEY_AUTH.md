@@ -150,6 +150,12 @@ nyxid node ssh-credentials show --service routeros --principal nyxid-admin
 
 ## Node WebSocket Frames
 
+When a certificate-mode service issues an SSH user certificate, it includes
+exactly the OpenSSH `permit-pty` extension. This permits PTY allocation for
+browser and mobile terminals without a target-side change beyond the existing
+CA and principal trust. Agent, TCP, X11 and user-rc forwarding extensions are
+never issued.
+
 Node-key command execution uses:
 
 - `ssh_node_exec_open` from NyxID to node with `request_id`, `service_slug`, `principal`, `command`, and `timeout_secs`.

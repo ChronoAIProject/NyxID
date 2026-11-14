@@ -400,6 +400,9 @@ pub async fn issue_certificate(
         .valid_principal(principal)
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate principal: {e}")))?;
     cert_builder
+        .extension("permit-pty", "")
+        .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate extension: {e}")))?;
+    cert_builder
         .comment(format!("NyxID SSH certificate for {user_email}"))
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate comment: {e}")))?;
     let certificate = cert_builder
@@ -678,6 +681,12 @@ mod tests {
         );
         assert!(issued.ca_public_key.starts_with("ssh-ed25519 "));
         assert!(issued.valid_before > issued.valid_after);
+        let certificate = ssh_key::Certificate::from_openssh(&issued.certificate)
+            .expect("parse issued certificate");
+        assert_eq!(
+            certificate.extensions().0,
+            std::collections::BTreeMap::from([(String::from("permit-pty"), String::new())])
+        );
     }
 
     #[test]
