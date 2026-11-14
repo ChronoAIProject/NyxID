@@ -24,6 +24,7 @@ export interface ChatMessage {
     readonly segment_id: string;
     readonly sealed: boolean;
     readonly complete: boolean;
+    readonly interrupted?: boolean;
   } | null;
   readonly voiceGroup?: readonly ChatMessage[];
   readonly anchorId?: string;

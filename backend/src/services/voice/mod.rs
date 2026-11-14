@@ -19,7 +19,8 @@ pub mod dictation;
 pub mod execution;
 pub mod grok;
 pub mod grok_runtime;
-mod links;
+mod link_handles;
+pub(crate) mod links;
 pub mod openai;
 #[cfg(test)]
 mod openai_tests;

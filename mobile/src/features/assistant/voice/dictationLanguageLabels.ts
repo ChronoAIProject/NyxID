@@ -8,7 +8,11 @@ import names from "./dictationLanguageNames.json";
 import type { Language } from "../../../i18n/language";
 
 function entry(locale: string): Names | undefined {
-  const normalized = locale.replace(/_/g, "-").toLowerCase();
+  const normalized = locale
+    .replace(/_/g, "-")
+    .replace(/^cmn(?=-|$)/i, "zh")
+    .replace(/^(zh)-(Hans|Hant)-/i, "$1-")
+    .toLowerCase();
   const values = Object.entries(names);
   return (values.find(([key]) => key.toLowerCase() === normalized) ??
     values.find(
@@ -21,7 +25,13 @@ export function languageLabel(locale: string, ui: Language = "en"): string {
   if (!row) return locale;
   const [language, region] = row[ui === "zh-CN" ? 1 : ui === "zh-TW" ? 2 : 0];
   const exact = Object.keys(names).some(
-    (key) => key.toLowerCase() === locale.replace(/_/g, "-").toLowerCase(),
+    (key) =>
+      key.toLowerCase() ===
+      locale
+        .replace(/_/g, "-")
+        .replace(/^cmn(?=-|$)/i, "zh")
+        .replace(/^(zh)-(Hans|Hant)-/i, "$1-")
+        .toLowerCase(),
   );
   if (!exact || !region) return language;
   return ui === "en" ? `${language} (${region})` : `${language}（${region}）`;

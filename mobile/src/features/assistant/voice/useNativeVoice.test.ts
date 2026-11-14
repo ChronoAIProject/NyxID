@@ -923,7 +923,7 @@ test("iOS can resolve permission while inactive and wait for the later active ev
   );
 });
 
-test("foreground handoff has a five-second bound, cleans its listener and allows explicit retry", async (context) => {
+test("iOS inactive foreground handoff waits through long overlays and still cancels on real background", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const e = setup(context);
   const permission = deferred<{ granted: boolean }>();
@@ -933,30 +933,161 @@ test("foreground handoff has a five-second bound, cleans its listener and allows
   e.appState("inactive");
   permission.resolve({ granted: true });
   await e.harness.settle();
-  context.mock.timers.tick(4999);
+  context.mock.timers.tick(60_000);
   await e.harness.settle();
   assert.equal(e.harness.value().starting, true);
+  assert.equal(e.harness.value().error, undefined);
   assert.equal(e.clients.length, 0);
-  context.mock.timers.tick(1);
+  assert.equal(e.counts().listeners, 2);
+  e.appState("background");
   await pending;
   const failed = e.harness.flush();
   assert.equal(failed.starting, false);
-  assert.match(failed.error!, /did not return to the foreground/);
+  assert.match(failed.error!, /background while it was still connecting/);
   assert.equal(e.counts().listeners, 1);
   e.appState("active");
   assert.equal(
     e.clients.length,
     0,
-    "a late active event must not revive the expired attempt",
+    "a late active event must not revive the backgrounded attempt",
   );
   e.responses.permission = async () => ({ granted: true });
   await e.start();
   assert.equal(
     e.clients.length,
     1,
-    "timeout releases the busy lock for a new explicit start",
+    "background cancellation releases the busy lock for a new explicit start",
   );
 });
+
+test("iOS permission-dismissal inactivity after a real start POST keeps the same first call", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const e = setup(context, "ios", {}, true);
+  const permission = deferred<{ granted: boolean }>();
+  const post = deferred<unknown>();
+  e.responses.permission = () => permission.promise;
+  e.responses.serverStart = () => post.promise;
+  const pending = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  assert.equal(e.counts().permissionCalls, 1);
+  permission.resolve({ granted: true });
+  await e.harness.settle();
+  assert.equal(e.startSignals.length, 1);
+  e.media[0]!.usesNativeMedia = true;
+  assert.equal(e.appState("inactive").starting, true);
+  e.appState("active");
+  await e.harness.settle();
+  assert.equal(e.realClients[0]!.isClosed, false);
+  assert.equal(e.media[0]!.closed, 0);
+  assert.deepEqual(e.controls, []);
+  assert.equal(e.harness.value().error, undefined);
+  post.resolve({ session: session(), sdp_answer: "answer" });
+  await pending;
+  assert.equal(e.realClients[0]!.isClosed, false);
+  assert.equal(e.harness.flush().error, undefined);
+  assert.equal(e.startSignals.length, 1);
+  assert.equal(e.startSignals[0]!.aborted, false);
+  assert.deepEqual(e.controls, []);
+  await e.harness.value().end();
+});
+
+for (const stage of ["options", "save", "currentPermission"] as const) {
+  test(`iOS inactivity during ${stage} waits for active before acquiring media`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup(context, "ios");
+    const gate = deferred<void>();
+    e.responses.currentPermission = async () => ({ granted: true });
+    if (stage === "options")
+      e.responses.options = async () => {
+        await gate.promise;
+        return { options: [e.available] };
+      };
+    else if (stage === "save") e.responses.save = () => gate.promise;
+    else
+      e.responses.currentPermission = async () => {
+        await gate.promise;
+        return { granted: true };
+      };
+    const pending = e.harness.value().start(preferences, "openai_live");
+    await e.harness.settle();
+    e.appState("inactive");
+    gate.resolve();
+    await e.harness.settle();
+    context.mock.timers.tick(10_000);
+    await e.harness.settle();
+    assert.equal(e.harness.value().starting, true);
+    assert.equal(e.harness.value().error, undefined);
+    assert.equal(e.media.length, 0);
+    assert.equal(e.clients.length, 0);
+    e.appState("active");
+    await pending;
+    assert.equal(e.clients.length, 1);
+    assert.equal(e.clients[0]!.starts, 1);
+    assert.equal(e.harness.flush().error, undefined);
+  });
+}
+
+for (const overlay of [
+  "Control Center",
+  "Notification Center",
+  "incoming phone call",
+  "Siri",
+  "permission alert",
+  "system alert",
+] as const) {
+  for (const native of [true, false]) {
+    for (const phase of ["connecting", "connected"] as const) {
+      test(`iOS ${overlay} inactivity keeps a ${native ? "native" : "WebView/Grok"} call while ${phase}`, async (context) => {
+        const e = setup(context, "ios");
+        const protocol = native ? "openai_live" : "xai_realtime";
+        e.available.voice.protocol = protocol;
+        await e.harness.value().start(preferences, protocol);
+        const client = e.clients[0]!;
+        e.media[0]!.usesNativeMedia = native;
+        client.options.onSnapshot(snapshot());
+        if (phase === "connected") client.options.onReady?.();
+        client.options.onInputChanged?.(true);
+        e.harness.flush();
+        if (phase === "connected") e.harness.value().hold(true);
+        const before = e.harness.flush();
+        const counts = e.counts();
+        let resyncs = 0;
+        e.responses.resync = async () => {
+          resyncs++;
+          return "ended";
+        };
+        const inactive = e.appState("inactive");
+        assert.equal(inactive.connected, before.connected);
+        assert.equal(inactive.starting, before.starting);
+        assert.equal(inactive.holding, before.holding);
+        assert.equal(inactive.error, undefined);
+        assert.equal(client.ends, 0);
+        assert.equal(e.media[0]!.closed, 0);
+        e.appState("active");
+        await e.harness.settle();
+        const after = e.harness.value();
+        assert.equal(after.connected, before.connected);
+        assert.equal(after.starting, before.starting);
+        assert.equal(after.connectedAt, before.connectedAt);
+        assert.equal(after.disconnectedAt, before.disconnectedAt);
+        assert.equal(after.snapshot, before.snapshot);
+        assert.equal(after.inputEnabled, before.inputEnabled);
+        assert.equal(after.holding, before.holding);
+        assert.equal(after.error, undefined);
+        assert.equal(after.recovery, undefined);
+        assert.equal(resyncs, 0);
+        assert.equal(e.counts().permissionChecks, counts.permissionChecks);
+        assert.equal(e.counts().permissionCalls, counts.permissionCalls);
+        assert.equal(e.clients.length, 1);
+        assert.equal(client.ends, 0);
+        assert.equal(e.media[0]!.closed, 0);
+        assert.deepEqual(e.controls, []);
+        assert.deepEqual(e.activeReads, []);
+        assert.deepEqual(e.statusReads, []);
+      });
+    }
+  }
+}
 
 for (const reason of [
   "end",
@@ -1741,6 +1872,57 @@ test("foreground resumes an owned closing call after its polling timer fired in 
   assert.match(state.error!, /background/);
   assert.equal(client.ends, 1);
   assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("iOS active after an overlay resumes paused recovery without ending the foreign call", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context, "ios");
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session(), secondThread);
+    client.closed();
+  };
+  await e.start();
+  e.responses.status = async () => {
+    throw new Error("network");
+  };
+  Object.assign(e.api, {
+    accountActive: async () => ({
+      session: session(),
+      conversation_id: secondThread,
+    }),
+  });
+  e.appState("inactive");
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 0);
+  e.appState("active");
+  context.mock.timers.tick(500);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 1);
+  assert.equal(e.harness.value().conflict?.id, firstId);
+  assert.equal(e.harness.value().conflictThread, secondThread);
+  assert.equal(e.clients.length, 1);
+  assert.equal(e.clients[0]!.ends, 0);
+  assert.deepEqual(e.controls, []);
+});
+
+test("iOS inactive overlays do not reset the owned recovery deadline", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const e = setup(context, "ios", { Date });
+  await e.connect();
+  e.clients[0]!.pendingEnd = session({ state: "closing", end_requested: true });
+  await e.harness.value().end();
+  e.harness.flush();
+  e.appState("inactive");
+  context.mock.timers.tick(46_000);
+  await e.harness.settle();
+  e.appState("active");
+  context.mock.timers.tick(5000);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 0);
+  assert.equal(e.clients.length, 1);
+  assert.equal(e.clients[0]!.ends, 1);
   assert.deepEqual(e.controls, []);
 });
 
@@ -2746,6 +2928,25 @@ test("a foreground check never automatically ends a foreign Android call", async
   assert.deepEqual(e.controls, []);
   assert.equal(e.harness.flush().conflictThread, secondThread);
 });
+test("iOS inactive alerts do not recheck denied microphone permission or clear its error", async (context) => {
+  const e = setup(context, "ios");
+  e.responses.permission = async () => ({ granted: false, canAskAgain: false });
+  await e.start();
+  const before = e.harness.value();
+  const checks = e.counts().permissionChecks;
+  e.responses.currentPermission = async () => ({ granted: true });
+  e.appState("inactive");
+  e.appState("active");
+  await e.harness.settle();
+  assert.equal(e.counts().permissionChecks, checks);
+  assert.equal(
+    e.harness.value().microphonePermission,
+    before.microphonePermission,
+  );
+  assert.equal(e.harness.value().error, before.error);
+  assert.equal(e.clients.length, 0);
+});
+
 for (const platform of ["ios", "android"] as const) {
   test(`${platform} microphone denial retains canAskAgain and Settings return enables an explicit start`, async (context) => {
     const e = setup(context, platform);
@@ -2914,4 +3115,45 @@ test("a failed late start cannot grant owned-End authority over a foreign call",
   assert.equal(e.harness.value().conflictThread, secondThread);
   await e.harness.value().start(preferences, "openai_live");
   assert.equal(e.startSignals.length, 1);
+});
+
+test("a WebView call after a closed native call ends on background and never uses native resync", async (context) => {
+  const e = setup(context);
+  await e.start();
+  e.media[0]!.usesNativeMedia = true;
+  e.clients[0]!.options.onSnapshot(snapshot());
+  e.clients[0]!.options.onReady?.();
+  e.harness.flush();
+  e.clients[0]!.closed();
+  e.harness.flush();
+  e.available.voice.protocol = "xai_realtime";
+  await e.harness.value().start(preferences, "xai_realtime");
+  const web = e.clients.at(-1)!;
+  assert.notEqual(web, e.clients[0]);
+  let resyncs = 0;
+  e.responses.resync = async () => {
+    resyncs++;
+    return "active";
+  };
+  web.options.onSnapshot(snapshot());
+  web.options.onReady?.();
+  e.harness.flush();
+  e.appState("background");
+  await e.harness.settle();
+  assert.equal(web.ends, 1);
+  assert.match(e.harness.value().error!, /background/);
+  e.appState("active");
+  await e.harness.settle();
+  assert.equal(resyncs, 0);
+});
+
+test("changing conversations clears stale microphone permission recovery", async (context) => {
+  const e = setup(context);
+  e.responses.permission = async () => ({ granted: false, canAskAgain: false });
+  await e.start();
+  assert.equal(e.harness.value().microphonePermission?.kind, "denied");
+  e.replaceScope(secondThread);
+  await e.harness.settle();
+  assert.equal(e.harness.value().microphonePermission, undefined);
+  assert.equal(e.harness.value().error, undefined);
 });

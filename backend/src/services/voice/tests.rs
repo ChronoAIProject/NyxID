@@ -613,7 +613,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
             )
             .await
             .unwrap();
-        super::super::assistant_voice::publish_completed_results(db)
+        super::super::assistant_voice::publish_completed_results(&state)
             .await
             .unwrap();
         let visible = db
@@ -872,6 +872,7 @@ pub(super) async fn pending_card(
         .unwrap();
     }
     let segment = transcript::Segment {
+        interrupted: false,
         fragments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         speaker: transcript::Speaker::User,
@@ -1381,10 +1382,10 @@ async fn cross_thread_voice_settlement_publishes_once_under_racing_publishers() 
         let request = voice::get(db, &call.user_id, &visible.id, &request.id).await.unwrap();
         assert_eq!(request.state, crate::models::assistant_voice::RequestState::Completed);
         let source = voice::result_message(db, &request).await.unwrap().unwrap();
-        let (a, b) = tokio::join!(voice::publish_result(db, &request, &source), voice::publish_result(db, &request, &source));
+        let (a, b) = tokio::join!(voice::publish_result(&state, &request, &source), voice::publish_result(&state, &request, &source));
         let id = a.unwrap().unwrap();
         assert_eq!(b.unwrap().as_deref(), Some(id.as_str()));
-        voice::publish_completed_results(db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         assert_eq!(db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
             .count_documents(doc!{"conversation_id":&visible.id,"turn_id":&request.turn_id,"role":"assistant"}).await.unwrap(), 1);
         let result = db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME).find_one(doc!{"_id":&id}).await.unwrap().unwrap();
@@ -1416,7 +1417,7 @@ async fn cross_thread_voice_expiry_without_hidden_reply_is_delivered_once() {
         let legacy = voice::enqueue(db, &call.user_id, &thread.id, &call.id, "legacy-cancel", "Another request").await.unwrap();
         db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS).update_one(doc!{"_id":&legacy.id},
             doc!{"$set":{"state":"cancelled"},"$unset":{"terminal_error_code":""}}).await.unwrap();
-        voice::publish_completed_results(db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         assert!(voice::get(db, &call.user_id, &thread.id, &legacy.id).await.unwrap().result_message_id.is_some());
         // A task thread can be allocated before admission fails. Its failure
         // receipt still has to be discoverable from another owner thread.
@@ -1480,7 +1481,7 @@ async fn cross_thread_status_correlates_voice_queue_execution_steps_and_result()
         let before_publication = status::read(db, &chat, &args).await.unwrap();
         assert!(before_publication["tasks"][0]["result_message_id"].is_null());
         assert!(before_publication["tasks"][0]["execution_result_message_id"].is_string());
-        voice::publish_completed_results(db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         let page = status::read(db, &chat, &args).await.unwrap();
         assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(page["tasks"][0]["state"], "completed");
@@ -1691,8 +1692,8 @@ async fn cross_thread_voice_legacy_visible_reply_is_adopted_without_duplicate() 
         let message=Uuid::new_v4().to_string();
         Box::pin(engine::finish_turn(db,&running,&running.credential_api_key_id,&message,
             &engine::TurnResult{text:"Calendar".into(),session_id:None,response_id:None,error:None})).await.unwrap();
-        voice::publish_completed_results(db).await.unwrap();
-        voice::publish_completed_results(db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         let saved=voice::get(db,&call.user_id,&thread.id,&request.id).await.unwrap();
         assert_eq!(saved.result_message_id.as_deref(),Some(message.as_str()));
         assert_eq!(db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
@@ -1732,7 +1733,7 @@ async fn cross_thread_voice_stop_waits_for_the_workers_final_reply() {
         voice::cancel(db, &call.user_id, &thread.id, &request.id)
             .await
             .unwrap();
-        voice::publish_completed_results(db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         assert!(
             voice::get(db, &call.user_id, &thread.id, &request.id)
                 .await
@@ -1754,7 +1755,7 @@ async fn cross_thread_voice_stop_waits_for_the_workers_final_reply() {
         ))
         .await
         .unwrap();
-        voice::publish_completed_results(db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         let saved = voice::get(db, &call.user_id, &thread.id, &request.id)
             .await
             .unwrap();
@@ -1795,7 +1796,7 @@ async fn voice_2142_failed_hidden_task_retries_visible_input_with_completed_acti
         let failed = voice::get(db,&call.user_id,&visible.id,&request.id).await.unwrap();
         assert_eq!(voice::request_outcome(&failed),Some("failed"));
         let source=voice::result_message(db,&failed).await.unwrap().unwrap();
-        let published=voice::publish_result(db,&failed,&source).await.unwrap().unwrap();
+        let published=voice::publish_result(&state,&failed,&source).await.unwrap().unwrap();
         let preview=engine::recovery_for_message(db,&call.user_id,&visible.id,&published).await.unwrap();
         assert_eq!(preview.status,"available");
         assert_eq!(preview.text.as_deref(),Some("Inspect this page"));
@@ -1884,6 +1885,7 @@ async fn execution_permission_voice_hidden_task_retains_root_and_cancellation() 
         );
         call.execution_enrolled = true;
         let segment = transcript::Segment {
+            interrupted: false,
             fragments: Vec::new(),
             id: Uuid::new_v4().to_string(),
             speaker: transcript::Speaker::User,
@@ -1995,6 +1997,7 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
     phase_b_tests::enroll(&state.db, &visible.user_id).await;
     call.execution_enrolled = true;
     let segment = transcript::Segment {
+        interrupted: false,
         fragments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         speaker: transcript::Speaker::User,
@@ -2127,4 +2130,136 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
     assert!(server.received_requests().await.unwrap().is_empty());
     server.verify().await;
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_links_publish_once_after_hangup_and_carry_durable_speech_facts() {
+    Box::pin(async {
+        use crate::models::assistant_conversation::COLLECTION_NAME as THREADS;
+        use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES};
+        use crate::services::assistant_voice as voice;
+
+        let (state, visible, call) = setup("voice_task_link_facts").await;
+        let db = &state.db;
+        db.collection::<bson::Document>(THREADS)
+            .update_one(
+                doc! {"_id": &visible.id},
+                doc! {"$set": {"reply_channel": {
+                    "nyxbot_channel_id": Uuid::new_v4().to_string(),
+                    "partition": "owner-private-chat", "platform": "telegram"
+                }}},
+            )
+            .await
+            .unwrap();
+        let request = voice::enqueue(
+            db,
+            &call.user_id,
+            &visible.id,
+            &call.id,
+            "link-task",
+            "Create a channel link",
+        )
+        .await
+        .unwrap();
+        let request = voice::ensure_task_conversation(db, &state.encryption_keys, &request)
+            .await
+            .unwrap();
+        let hidden = Box::pin(engine::begin_turn_with_voice(
+            db,
+            &call.user_id,
+            &turn(
+                request.task_conversation_id.as_deref(),
+                "Create a channel link",
+            ),
+            &state.encryption_keys,
+            Some(&request.id),
+        ))
+        .await
+        .unwrap();
+        session::close(db, &call, "user_ended", true).await.unwrap();
+        let publication = links::Publication {
+            user_id: call.user_id.clone(),
+            parent_id: visible.id.clone(),
+            conversation_id: hidden.id.clone(),
+            turn_id: hidden.active_turn.as_ref().unwrap().turn_id.clone(),
+        };
+        let url = format!("{}/connect/bot/nyx_bcl_task", state.config.frontend_url);
+        let raw = serde_json::json!({"content": [{"type": "text", "text": &url}]});
+        for _ in 0..2 {
+            let output = links::present(&state, &publication, "tool-1", raw.clone()).await;
+            assert_eq!(output["links_in_chat"], 1);
+            let context = output.to_string();
+            assert!(!context.contains("nyx_bcl_") && !context.contains("nyx_clk_"));
+            assert!(!context.contains("://"));
+        }
+        Box::pin(engine::finish_turn(
+            db,
+            &hidden,
+            &hidden.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "The link is in the chat.".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
+        .await
+        .unwrap();
+        let request = voice::get(db, &call.user_id, &visible.id, &request.id)
+            .await
+            .unwrap();
+        let source = voice::result_message(db, &request).await.unwrap().unwrap();
+        assert!(!source.text.contains("nyx_bcl_") && !source.text.contains("nyx_clk_"));
+        assert!(!source.text.contains("://"));
+        let id = voice::publish_result(&state, &request, &source)
+            .await
+            .unwrap()
+            .unwrap();
+        let messages = db.collection::<AssistantMessage>(MESSAGES);
+        let copied = messages.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+        assert!(!copied.text.contains("nyx_bcl_") && !copied.text.contains("nyx_clk_"));
+        assert!(!copied.text.contains("://"));
+        assert_eq!(
+            copied.turn_metadata.as_ref().unwrap().links_in_chat,
+            Some(1)
+        );
+        let publication = messages
+            .find_one(doc! {
+                "conversation_id": &visible.id,
+                "turn_metadata.voice_link_publication": {"$exists": true}
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(publication.text, format!("<{url}>"));
+        assert_eq!(
+            messages
+                .count_documents(doc! {
+                    "conversation_id": &visible.id,
+                    "turn_metadata.voice_link_publication": {"$exists": true}
+                })
+                .await
+                .unwrap(),
+            1
+        );
+        for collection in [
+            "channel_text_deliveries",
+            "channel_reply_deliveries",
+            "channel_messages",
+            "nyxbot_gateway_responses",
+            "nyxbot_events",
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "No channel send/outbox: {collection}"
+            );
+        }
+        state.db.drop().await.unwrap();
+    })
+    .await;
 }

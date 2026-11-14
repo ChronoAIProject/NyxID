@@ -1,3 +1,4 @@
+import androidCases from "./voice/dictation-android-cases.json";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
@@ -58,7 +59,11 @@ function expand(node: any): any {
   return { ...node, props: { ...node.props, children: expand(children) } };
 }
 
-async function setup(saved: boolean, waitForInitialHistory = false) {
+async function setup(
+  saved: boolean,
+  waitForInitialHistory = false,
+  android?: (typeof androidCases)[number],
+) {
   let appState = "active";
   let refreshing = false;
   let loadingInitial = waitForInitialHistory;
@@ -72,6 +77,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     typeof deferred<ReturnType<typeof historySchema.parse>>
   >[] = [];
   const events: string[] = [];
+  const starts: Record<string, unknown>[] = [];
   const inserted: string[] = [];
   const emit = (name: string, event?: unknown) => {
     for (const listener of [...(nativeListeners.get(name) ?? [])])
@@ -87,7 +93,11 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       events.push("permission");
       return permission.promise;
     },
-    getSupportedLocales: async () => ({ locales: ["en-US"] }),
+    isRecognitionAvailable: () => true,
+    getSupportedLocales: async () => {
+      if (android?.reject) throw new Error("Unavailable");
+      return { locales: android?.locales ?? ["en-US"] };
+    },
     supportsOnDeviceRecognition: () => true,
     addListener: (name: string, listener: Listener) => {
       const set = nativeListeners.get(name) ?? new Set();
@@ -95,7 +105,10 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       set.add(listener);
       return { remove: () => set.delete(listener) };
     },
-    start: () => events.push("start"),
+    start: (options: Record<string, unknown>) => {
+      starts.push(options);
+      events.push("start");
+    },
     stop: () => events.push("stop"),
     abort: () => {
       events.push("abort");
@@ -119,6 +132,9 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     before_seq: null,
   });
   const mocks = {
+    "../../i18n/deviceLanguages": {
+      deviceLanguages: () => android?.preferred ?? ["en-US"],
+    },
     "react/jsx-runtime": Object.fromEntries(
       ["jsx", "jsxs"].map((key) => [
         key,
@@ -128,7 +144,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     "react-native": {
       Settings: { get: () => ["en-US"] },
       useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
-      Platform: { OS: "ios" },
+      Platform: { OS: android ? "android" : "ios" },
       AppState: {
         get currentState() {
           return appState;
@@ -191,7 +207,8 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       DictationLanguagePicker: "DictationLanguagePicker",
     },
     "./voice/dictationLanguage": {
-      savedDictationLanguage: async () => "en-US",
+      savedDictationLanguage: async () => (android ? android.saved : "en-US"),
+      languageLabel: (value: string) => value,
     },
     "lucide-react-native": {
       Check: "Check",
@@ -256,6 +273,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     h,
     events,
     native,
+    starts,
     inserted,
     permission,
     feedback: () => {
@@ -507,3 +525,16 @@ test("a foreground history response with an active turn cancels pending permissi
   assert.deepEqual(x.inserted, []);
   x.h.unmount();
 });
+
+for (const scenario of androidCases) {
+  test(`Android Assistant composer: ${scenario.name}`, async () => {
+    const x = await setup(true, false, scenario);
+    x.native.permissionStatus = permissionResponse("granted");
+    await x.h.value().dictation.start();
+    await x.h.settle();
+    assert.equal(x.starts.length, scenario.hardError ? 0 : 1);
+    assert.equal(x.starts[0]?.lang, scenario.expected);
+    assert.equal(x.h.value().dictation.chooseLanguage, !!scenario.hardError);
+    x.h.unmount();
+  });
+}

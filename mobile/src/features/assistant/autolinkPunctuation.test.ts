@@ -7,6 +7,7 @@ import {
   safeAssistantLinkUrl,
 } from "./assistantMarkdown";
 import { assistantLinkTarget } from "./assistantLinkTarget";
+import { bareAutolinkBoundary } from "../../../../shared/autolinkPunctuation";
 const parser = configureAssistantMarkdown(new MarkdownIt({ linkify: true }));
 for (const fixture of fixtures)
   test(`bare autolink boundary: ${fixture.text}`, () => {
@@ -16,7 +17,7 @@ for (const fixture of fixtures)
     const links = tokens.filter((token) => token.type === "link_open");
     assert.deepEqual(
       links.map((token) => token.attrGet("href")),
-      fixture.hrefs,
+      "mobileHrefs" in fixture ? fixture.mobileHrefs : fixture.hrefs,
     );
     assert.ok(
       links.every(
@@ -68,4 +69,54 @@ test("link-open defence bounds only links with bare-autolink provenance", () => 
     safeAssistantLinkUrl(url, "https://nyxid.ai"),
     new URL(url).href,
   );
+});
+
+test("CJK suffixes preserve every fixture's link safety outcome, including schemeless literals", () => {
+  for (const fixture of fixtures) {
+    for (const suffix of [
+      "。",
+      "，",
+      "、",
+      "！",
+      "？",
+      "；",
+      "：",
+      "）",
+      "」",
+      "』",
+      "】",
+      "》",
+      "”",
+    ]) {
+      const text = fixture.text + suffix;
+      const tokens = parser
+        .parse(text, {})
+        .flatMap((token) => token.children ?? []);
+      assert.deepEqual(
+        tokens
+          .filter((token) => token.type === "link_open")
+          .map((token) => token.attrGet("href")),
+        "mobileHrefs" in fixture ? fixture.mobileHrefs : fixture.hrefs,
+        text,
+      );
+      assert.equal(
+        tokens
+          .filter((token) => token.type === "text")
+          .map((token) => token.content)
+          .join(""),
+        text,
+      );
+    }
+  }
+});
+
+test("only trailing unmatched delimiters leave a URL, never interior apostrophes, quotes or parentheses", () => {
+  for (const url of [
+    "https://en.wikipedia.org/wiki/Ender’s_Game",
+    "https://example.com/a”b",
+    "https://example.com/a)b",
+  ]) {
+    assert.equal(bareAutolinkBoundary(url), url.length);
+    assert.equal(bareAutolinkBoundary(url + "。"), url.length);
+  }
 });

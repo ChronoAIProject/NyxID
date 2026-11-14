@@ -42,6 +42,8 @@ jest.mock("react-native-safe-area-context", () => {
 function language() {
   return {
     loading: false,
+    listUnavailable: false,
+    explanation: undefined,
     value: "ja-JP",
     resolved: "ja-JP",
     label: "Japanese (Japan)",

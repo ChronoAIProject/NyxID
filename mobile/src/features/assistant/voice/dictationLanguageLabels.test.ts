@@ -72,3 +72,11 @@ for (const [locale, endonym] of [
     }
   });
 }
+
+test("Android Mandarin and Cantonese tags have bundled names in every app language", () => {
+  for (const ui of ["en", "zh-CN", "zh-TW"] as const) {
+    assert.equal(languageLabel("cmn-Hans-CN", ui), languageLabel("zh-CN", ui));
+    assert.equal(languageLabel("cmn-Hant-TW", ui), languageLabel("zh-TW", ui));
+    assert.notEqual(languageLabel("yue-Hant-HK", ui), "yue-Hant-HK");
+  }
+});

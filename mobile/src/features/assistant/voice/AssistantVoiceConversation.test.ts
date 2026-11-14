@@ -2368,6 +2368,25 @@ test("replacing another chat's call requires the explicit action and waits for c
   f.harness.unmount();
 });
 
+test("iOS inactivity preserves a queued restart until the previous call is confirmed ended", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  assert.match(f.text(), /Disconnecting previous call/);
+  f.appState("inactive");
+  f.appState("active");
+  await f.harness.settle();
+  assert.match(f.text(), /Disconnecting previous call/);
+  assert.equal(f.starts().length, 0);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 1);
+  f.harness.unmount();
+});
+
 test("a queued restart is cancelled by background, focus, network, source, voice, return-to-text, or a newly discovered call", async () => {
   for (const change of [
     "background",

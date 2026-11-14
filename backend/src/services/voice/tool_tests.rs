@@ -769,3 +769,56 @@ async fn voice_action_and_permission_requests_refuse_without_creating_cards() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn url_handles_restore_service_fetch_share_and_replay_but_dispatch_foreign_handles_literally()
+{
+    Box::pin(async {
+        let (mut state, _, call) = super::super::tests::setup("voice_url_chain").await;
+        let origin = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+            let body: Value = request.body_json().unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":body["id"],"result":{"isError":false,"content":[{"type":"text","text":"https://search.example/document"}]}}))
+        }).mount(&origin).await;
+        state.config.base_url = origin.uri();
+        let mut workers = Workers::default();
+        workers.start(&state,&call,"delegation","search",&invocation("nyx__search_tools",json!({"query":"document"}))).unwrap();
+        let found = workers.next().await.unwrap().result.unwrap();
+        let presented = workers.present_output(&state,found);
+        let handle = presented["content"][0]["text"].as_str().unwrap();
+        assert!(handle.starts_with("[link "));
+        assert!(presented.get("links_in_chat").is_none());
+        let fetch = invocation("nyx__call_tool",json!({"tool_name":"fetch__request","arguments_json":json!({"url":handle}).to_string()}));
+        workers.start(&state,&call,"delegation","fetch",&fetch).unwrap();
+        assert!(!workers.next().await.unwrap().result.unwrap().is_null());
+        let requests = origin.received_requests().await.unwrap();
+        assert_eq!(requests.len(),2);
+        let body: Value = requests[1].body_json().unwrap();
+        let arguments: Value = serde_json::from_str(body["params"]["arguments"]["arguments_json"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["url"],"https://search.example/document");
+        // The same issued handle works again, including a service share operation.
+        for (id, tool) in [("replay", "fetch__request"), ("share", "drive__share")] {
+            let input = invocation("nyx__call_tool", json!({"tool_name":tool,"arguments_json":json!({"url":handle}).to_string()}));
+            workers.start(&state,&call,"delegation",id,&input).unwrap();
+            workers.next().await.unwrap().result.unwrap();
+        }
+        let mut foreign = Workers::default();
+        foreign.start(&state,&call,"new-worker","foreign",&fetch).unwrap();
+        let output = foreign.next().await.unwrap().result.unwrap();
+        assert_eq!(output["unrecognized_link_handles"], json!([handle]));
+        assert!(output["link_handle_notice"].as_str().unwrap().contains("passed literally"));
+        let unknown = invocation("nyx__call_tool",json!({"tool_name":"fetch__request","arguments_json":json!({"url":"[link missing:1]"}).to_string()}));
+        workers.start(&state,&call,"delegation","unknown",&unknown).unwrap();
+        let output = workers.next().await.unwrap().result.unwrap();
+        assert_eq!(output["unrecognized_link_handles"], json!(["[link missing:1]"]));
+        let requests = origin.received_requests().await.unwrap();
+        assert_eq!(requests.len(),6);
+        for (index, expected) in [(2,"https://search.example/document"),(3,"https://search.example/document"),(4,handle),(5,"[link missing:1]")] {
+            let body: Value = requests[index].body_json().unwrap();
+            let arguments: Value = serde_json::from_str(body["params"]["arguments"]["arguments_json"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["url"],expected);
+        }
+        workers.close(&state).await;
+        state.db.drop().await.unwrap();
+    }).await;
+}

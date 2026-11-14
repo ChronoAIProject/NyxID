@@ -1,4 +1,8 @@
-import { groupVoiceMessages, type GroupedVoiceMessage } from "./voice/voiceMessageGroups";
+import {
+  groupVoiceMessages,
+  voiceMessageIndex,
+  type GroupedVoiceMessage,
+} from "./voice/voiceMessageGroups";
 import {
   ChatComposerDock,
   ChatIconButton as IconButton,
@@ -242,6 +246,7 @@ export function AssistantScreen({
       adoptedId.current = id;
       navigation.setParams({
         conversationId: id,
+        messageId: undefined,
         acknowledgementId: undefined,
         home: false,
         draft: false,
@@ -383,9 +388,30 @@ export function AssistantScreen({
   // Caption IDs own voice messages. Microphone energy also includes noise and
   // playback, so it must not create a separate transcription placeholder.
   const messages = useMemo(
-    () => groupVoiceMessages(mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot)),
+    () => groupVoiceMessages(
+      mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot),
+    ),
     [historyMessages, voiceSnapshot],
   );
+  const revealedMessage = useRef<string | undefined>(undefined);
+  const messageTarget = route?.params?.messageId;
+  const targetIndex = messageTarget ? voiceMessageIndex(messages, messageTarget) : -1;
+  const revealMessage = () => {
+    if (!focused || targetIndex < 0 || !messageTarget || !transcript.current) return;
+    const key = `${assistant.conversationId}:${messageTarget}`;
+    if (revealedMessage.current === key) return;
+    transcriptScroll.pause();
+    transcript.current.scrollToIndex({
+      index: targetIndex,
+      animated: false,
+      viewPosition: 0.5,
+    });
+    revealedMessage.current = key;
+  };
+  useEffect(() => {
+    if (!messageTarget) revealedMessage.current = undefined;
+    revealMessage();
+  });
   const voiceHistory = useRef(historyMessages);
   voiceHistory.current = historyMessages;
   const receiveVoiceSnapshot = useCallback(
@@ -1183,7 +1209,9 @@ export function AssistantScreen({
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
     const footer =
-      !item.voiceTransient && item.voice?.sealed !== false ? (
+      !item.voiceTransient &&
+      item.voice?.sealed !== false &&
+      item.voice?.complete !== false ? (
         <AssistantMessageFooter
           key={`${assistant.conversationId}:${item.anchorId ?? item.id}`}
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
@@ -1386,10 +1414,19 @@ export function AssistantScreen({
             onLayout={(event) => {
               transcriptScroll.listProps.onLayout(event);
               transcriptEdges.layout(event.nativeEvent.layout.height);
+              revealMessage();
             }}
             onContentSizeChange={(width, height) => {
               transcriptScroll.listProps.onContentSizeChange(width, height);
               transcriptEdges.content(height);
+              revealMessage();
+            }}
+            onScrollToIndexFailed={({ index, averageItemLength }) => {
+              revealedMessage.current = undefined;
+              transcript.current?.scrollToOffset({
+                offset: index * averageItemLength,
+                animated: false,
+              });
             }}
             onScroll={(event) => {
               transcriptOffset.current = event.nativeEvent.contentOffset.y;

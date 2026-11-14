@@ -12,9 +12,11 @@ function setup(
   locales: Promise<{ locales: string[] }> = Promise.resolve({
     locales: ["en-US", "zh-CN", "ja-JP", "fr-FR"],
   }),
+  platform = "ios",
 ) {
   const writes: (string | undefined)[] = [];
   const h = hookHarness<ReturnType<typeof useDictationLanguage>>({
+    "react-native": { Platform: { OS: platform } },
     "expo-speech-recognition": {
       ExpoSpeechRecognitionModule: { getSupportedLocales: () => locales },
     },
@@ -119,8 +121,10 @@ test("locale loading preserves the saved label and does not claim no device lang
   locales.resolve({ locales: [] });
   await h.settle();
   assert.equal(h.value().loading, false);
-  assert.equal(h.value().value, "automatic");
-  assert.equal(h.value().options[0]!.detail, "No supported device language");
+  assert.equal(h.value().value, "ja-JP");
+  assert.equal(h.value().resolved, "ja-JP");
+  assert.equal(h.value().listUnavailable, true);
+  assert.equal(h.value().options[0]!.detail, "中文（中国）");
   h.unmount();
 });
 test("automatic language does not show an unsupported warning while locales load", async () => {
@@ -134,3 +138,20 @@ test("automatic language does not show an unsupported warning while locales load
   assert.equal(h.value().resolved, "zh-CN");
   h.unmount();
 });
+
+for (const rejected of [false, true]) {
+  test(`Android discovery ${rejected ? "rejection" : "empty list"} settles with a saved language and a clear explanation`, async () => {
+    const list = deferred<{ locales: string[] }>();
+    const { h } = setup("cmn-Hans-CN", [], list.promise, "android");
+    if (rejected) list.reject(new Error("API unavailable"));
+    else list.resolve({ locales: [] });
+    await h.settle();
+    assert.equal(h.value().loading, false);
+    assert.equal(h.value().listUnavailable, true);
+    assert.equal(h.value().value, "cmn-Hans-CN");
+    assert.equal(h.value().resolved, "cmn-Hans-CN");
+    assert.equal(h.value().label, "中文（中国）");
+    assert.match(h.value().explanation!, /language list is unavailable/);
+    h.unmount();
+  });
+}

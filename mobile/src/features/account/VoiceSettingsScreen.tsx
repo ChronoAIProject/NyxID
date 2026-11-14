@@ -224,9 +224,10 @@ export function VoiceSettingsScreen({
           label={t("Language")}
           value={language.label}
           detail={
-            language.value === AUTOMATIC_DICTATION_LANGUAGE
+            language.explanation ??
+            (language.value === AUTOMATIC_DICTATION_LANGUAGE
               ? t("Device language")
-              : undefined
+              : undefined)
           }
           onPress={() => setLanguagePicker(true)}
         />

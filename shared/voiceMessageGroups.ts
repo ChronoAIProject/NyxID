@@ -10,6 +10,7 @@ export type VoiceGroupDescription = {
     segment_id: string;
     sealed: boolean;
     complete: boolean;
+    interrupted?: boolean;
   } | null;
   transient?: boolean;
 };
@@ -31,6 +32,7 @@ export function voiceMessageGroups<T>(
       previous &&
       speech(value) &&
       speech(tail) &&
+      !tail?.voice?.interrupted &&
       tail?.voice?.session_id === value.voice?.session_id
     ) {
       previous.segments.push(row);

@@ -4,6 +4,7 @@ import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import { resolveDictationLanguage } from "./voice/resolveDictationLanguage";
 import languageCases from "./voice/dictation-language-cases.json";
+import androidCases from "./voice/dictation-android-cases.json";
 import type { useComposerDictation } from "./useComposerDictation";
 
 type Listener = (event?: any) => void;
@@ -177,9 +178,15 @@ function setup({
           saved: string | undefined,
           preferred: readonly string[],
           supported: readonly string[],
+          platform?: string,
         ) => {
           locales.push([preferred[0], supported]);
-          return resolveDictationLanguage(saved, preferred, supported);
+          return resolveDictationLanguage(
+            saved,
+            preferred,
+            supported,
+            platform,
+          );
         },
       },
     },
@@ -1455,7 +1462,10 @@ test("unsupported preferred languages never start the recognizer's English defau
   await x.h.settle();
   assert.equal(x.native.options, undefined);
   assert.equal(x.h.value().chooseLanguage, true);
-  assert.match(x.h.value().error!, /xx-YY/);
+  assert.equal(
+    x.h.value().error,
+    "Dictation isn't available in your device's language. Choose a language or keep typing.",
+  );
   x.h.unmount();
 });
 test("revoked speech permission is distinct from microphone access on iOS", async () => {
@@ -1525,6 +1535,52 @@ for (const [code, message] of [
     x.native.permissionStatus = permissionResponse("granted");
     await x.h.value().retry();
     x.emit("start");
+    assert.equal(x.h.value().error, undefined);
+    x.h.unmount();
+  });
+}
+
+test("Android unavailable language list offers Retry rather than an empty picker on a native language error", async () => {
+  const x = setup({ platform: "android", supported: [] });
+  await x.begin();
+  x.emit("error", { error: "language-not-supported" });
+  assert.equal(x.h.value().chooseLanguage, false);
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.match(x.h.value().error!, /try again/i);
+  x.h.unmount();
+});
+
+for (const scenario of androidCases) {
+  test(`Android shared recognizer hook dictation: ${scenario.name}`, async () => {
+    const x = setup({
+      platform: "android",
+      supported: scenario.locales,
+      chosen: scenario.saved,
+      preferred: scenario.preferred,
+    });
+    if (scenario.reject)
+      x.native.getSupportedLocales = async () => {
+        throw new Error("Locale discovery unavailable");
+      };
+    await x.begin();
+    assert.equal(x.native.options?.lang, scenario.expected);
+    assert.equal(x.h.value().chooseLanguage, !!scenario.hardError);
+    assert.equal(x.events.includes("start"), !scenario.hardError);
+    if (!scenario.hardError) assert.equal(x.h.value().error, undefined);
+    else assert.match(x.h.value().error!, /ja-JP/);
+    x.h.unmount();
+  });
+}
+
+for (const supported of [[], undefined]) {
+  test(`iOS ${supported ? "empty" : "rejected"} locale discovery passes the first preferred language explicitly`, async () => {
+    const x = setup({ preferred: ["zh-Hans-CN", "en-US"], supported: [] });
+    if (!supported)
+      x.native.getSupportedLocales = async () => {
+        throw new Error("Unavailable");
+      };
+    await x.begin();
+    assert.equal(x.native.options?.lang, "zh-Hans-CN");
     assert.equal(x.h.value().error, undefined);
     x.h.unmount();
   });

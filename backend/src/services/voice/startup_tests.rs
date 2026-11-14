@@ -655,7 +655,7 @@ async fn detached_start_failure_is_a_499_disconnect_without_server_fault_audit()
     let trace = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let trace = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-            if trace.contains("Voice startup caller disconnected") {
+            if trace.contains("Voice startup failed after caller disconnected") {
                 break trace;
             }
             tokio::task::yield_now().await;
@@ -666,13 +666,17 @@ async fn detached_start_failure_is_a_499_disconnect_without_server_fault_audit()
     assert!(trace.contains("http_request"));
     assert!(trace.contains("status_code=499") && trace.contains("error_code=8012"));
     assert!(
+        trace.contains("WARN")
+            && trace.contains("status_code=503")
+            && trace.contains("error_code=12501")
+    );
+    assert!(
         !trace.contains("finished processing request"),
         "no HTTP response was produced"
     );
     for forbidden in [
         "ERROR",
         "Voice start failed",
-        "status_code=503",
         "assistant_voice_start_failed",
     ] {
         assert!(

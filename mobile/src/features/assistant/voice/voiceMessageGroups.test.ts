@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fixtures from "../../../../../shared/voice-message-groups.json";
-import { groupVoiceMessages } from "./voiceMessageGroups";
+import { groupVoiceMessages, voiceMessageIndex } from "./voiceMessageGroups";
 import type { VoiceTranscriptMessage } from "./voiceTranscript";
 for (const fixture of fixtures)
   test(fixture.name, () => {
@@ -35,6 +35,10 @@ for (const fixture of fixtures)
         fixture.copy,
       );
     assert.equal(rows.length, fixture.rows.length);
+    for (const [index, ids] of fixture.groups.entries()) {
+      for (const id of ids) assert.equal(voiceMessageIndex(grouped, id), index);
+    }
+    assert.equal(voiceMessageIndex(grouped, "missing-message"), -1);
   });
 
 test("transient live captions break persistent speech groups", () => {

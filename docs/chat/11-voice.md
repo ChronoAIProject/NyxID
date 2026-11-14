@@ -2066,25 +2066,58 @@ preserves this setup when native files are regenerated.
 
 ### Voice link, startup and mobile lifecycle contracts
 
-URLs and connect tokens are redacted from every model-facing context: summary
-input and context fallback in [speech.rs](../../backend/src/services/voice/speech.rs),
-initial history in [runtime.rs](../../backend/src/services/voice/runtime.rs), and
-every Responses function output in [responses.rs](../../backend/src/services/voice/responses.rs).
-Direct MCP execution in [tools.rs](../../backend/src/services/voice/tools.rs) alone
-calls [links.rs::present](../../backend/src/services/voice/links.rs) to publish
-frontend-origin links once per `(session, tool call)`. The exact URLs appear in
-one assistant message bounded as `<url>`, with `via: "voice"` and no voice segment
-metadata. Publication never enters channel delivery, even when the home thread
-has `reply_channel`. The model receives placeholders; publication failure is
-reported as not sent, so it must not claim the link reached the chat.
+Tool-produced NyxID frontend-origin links and connect tokens never enter model
+context. At [MCP tools/call](../../backend/src/handlers/mcp_transport.rs), authenticated chat
+keys carry their already-loaded `voice_parent_conversation_id`. Every result from
+such a hidden tools/task thread passes through [links.rs](../../backend/src/services/voice/links.rs):
+exact frontend-origin URLs publish once per `(hidden conversation, turn, RPC id)`
+as one `<url>`-bounded assistant row in the visible parent, with `via: "voice"`
+and no speech-segment metadata. The transaction fences the hidden live turn,
+not the voice session; tasks may finish after hangup. It never invokes channel
+or outbox delivery, including a home thread with `reply_channel`. The hidden
+model receives placeholders and explicit `links_in_chat` facts; failure says
+not sent and forbids claiming delivery or repeating the action. Publication rows
+carry a serde-defaulted `turn_metadata.voice_link_publication` marker and
+`execution_pending: true`; recap, checkpoints, initial history and tool history
+exclude them. The [task-start](../../backend/src/handlers/assistant_voice.rs) and
+[continuation](../../backend/src/services/assistant_voice.rs) input claims require
+`role: "user"` and `via: "voice"`, so a published link cannot become executable
+input. Result cleanup and recovery also restrict pending-flag writes to user
+voice inputs.
+History still presents it as completed; it neither blocks later turns nor escapes
+conversation deletion or owner erasure. Recap/checkpoint rendering also strips
+legacy connect tokens.
+The published count is read from durable publication metadata into the copied
+task result and [speech.rs](../../backend/src/services/voice/speech.rs) summary facts.
+Old readers ignore the additive marker. `execution_pending` also protects their
+ordinary recap path, but old bounded recaps/team summaries lack that exclusion;
+old voice-task writers also lack the MCP redactor. Upgrade and drain those
+readers/writers before relying on the full guarantee. Existing stored messages
+and already-cached upstream context are not migrated.
+
+Other URLs in [Responses](../../backend/src/services/voice/responses.rs) function
+outputs become stable per-call handles through [link_handles.rs](../../backend/src/services/voice/link_handles.rs).
+Up to 64 remain in memory for that call. Only exact handles inside service-operation
+`nyx__call_tool.arguments_json` values resolve before authenticated MCP invocation;
+native namespaces and discovery arguments stay literal. Unknown/foreign handles
+also pass literally and produce an explicit result fact. External tool URLs are
+not sent to chat; URLs omitted from copied task replies' speech contexts are
+already visible in those chat replies. Neither may be read aloud. One-time links
+never receive handles. Speech input/fallback and initial history still redact
+raw URLs, and every omission includes explicit presentation facts.
+Client bare-link boundaries share [autolinkPunctuation.ts](../../shared/autolinkPunctuation.ts):
+interior Unicode paths/query values and balanced brackets stay in URLs; trailing
+sentence punctuation and unmatched closing delimiters stay visible as text.
+Schemeless links retain the same allow/deny outcome as without CJK suffixes.
 
 Admission onward runs in a detached task through `runtime.rs::deliver_start`,
 including [grok_runtime.rs::prepare](../../backend/src/services/voice/grok_runtime.rs)
 and Agent Key starts. An undelivered successful start requests End through
 [session.rs::end_undelivered_start](../../backend/src/services/voice/session.rs)
 with the existing `client_lost` reason; provider closure uses `runtime.rs::drain_close`.
-Late startup failures after the caller leaves are recorded as `ClientDisconnected`
-(499/8012), never as an HTTP server fault. A replica crash between provider create
+Late startup failures after the caller leaves retain metadata-only error code/status
+diagnostics (warn for upstream 5xx), alongside `ClientDisconnected` (499/8012);
+they never produce an HTTP server-fault completion or failure audit. A replica crash between provider create
 and `provider_session_id` persistence remains an unknown provider outcome: without
 that id recovery cannot close the provider and holds the live slot until the call
 deadline to avoid double-paid sessions. Closing this crash window requires a
@@ -2102,14 +2135,68 @@ End is sent before media teardown. A dispatched start POST keeps its own deadlin
 and is never aborted by local End; `closeLateStart` ends the exact late session.
 Owned-session recovery re-sends End when needed and polls that session with
 backoff while mounted and active, bounded to 45 seconds per recovery attempt.
-Foreign conflicts require explicit takeover; recovery never auto-ends them.
+Owner-only active reads include optional `client_request_id`. If a start response
+is lost, mobile/web immediately End the matching orphan from that attempt and
+report a retryable failure; an absent field preserves old-server conflict behavior.
+Foreign conflicts require explicit takeover. If the client process disappears,
+the 30-second heartbeat lapse remains the cleanup trigger, checked each second
+in the active loop (or each three seconds during readiness), followed by the
+five-second provider-close budget. Coordinator tool cleanup has a separate
+five-second budget and a continuing-task notice may take one second; database
+and billing settlement latency is additional. An unconfirmed close still retains
+the slot until its existing 1,800-second call deadline; lease recovery uses a
+seven-second close budget.
 
 Web and mobile use [voiceMessageGroups.ts](../../shared/voiceMessageGroups.ts) to
 group consecutive same-session assistant voice segments for presentation only;
-stored rows remain unchanged. User rows, different sessions, failed/error rows,
+no existing stored row is rewritten. User rows, different sessions, failed/error rows,
 transient captions and any row without a segment id break the run, including
 receipts, system messages, cards, approvals, task results and published links.
-`turn_id`, `sealed` and `complete` do not split a run. The first segment keeps the
+`turn_id`, `sealed` and `complete` do not split a run. An explicit
+`voice.interrupted` ends the group after that segment. It defaults false and is
+omitted when false; normal continuation/disconnect seals never infer it. The
+Grok adapter sets it from explicit response cancellation. GPT-Live's transcript
+protocol currently supplies no equivalent signal; intervening user rows still
+split those groups. Existing rows are not rewritten, and old clients ignore the
+additive flag. The first segment keeps the
 row identity; one author/header and footer cover the group. Copy joins segments
 with paragraph breaks; feedback and Report target the latest segment with saved
-feedback, otherwise the last segment.
+feedback, otherwise the last segment. Mobile hides Copy/Report when the final
+segment remains unsealed or incomplete.
+Mobile navigation message targets resolve any segment id to the stable group
+row through `voiceMessageGroups.ts::voiceMessageIndex`.
+
+Android dictation tolerates missing/empty/rejected recognizer locale discovery:
+a saved choice is retained when support cannot be disproved, otherwise the
+recognizer chooses its device/cloud default with explicit `lang: ""`. iOS uses
+its saved choice or first AppleLanguages preference if discovery is unavailable;
+it never inherits the library's `en-US` default. A nonempty iOS list without a
+device match asks the user to choose a language. A nonempty list may
+reject an unsupported saved choice. Automatic matching respects device preference
+order and bounded Mandarin/Cantonese and legacy locale aliases; labels, picker
+and recognition use the same pure resolver. Unavailable lists settle explicitly
+and explain the recognizer default rather than offering an empty error picker.
+
+Voice-parent MCP results preserve JSON/SSE transport and inline tool-list change
+notifications. Identified calls publish frontend links once per hidden thread,
+live turn and RPC id; id-less calls use fresh publication identities. Without a
+live turn, URLs are removed and publication fails explicitly. Hidden task replies
+are sanitized before settlement/checkpoint and again before copying: frontend
+URLs under `/connect/`, `/cli/pair`, `/login/device`, `/login/agent-key` and
+`/login/code` become placeholders even with mangled tokens. Any URL containing
+a `nyx_<kind>_` token and exact bare `nyx_bcl_`/`nyx_clk_` token patterns are
+also removed. Other page links, including docs and AssistantPage settings links,
+remain byte-identical, as do ordinary identifiers and external URLs without
+tokens. This narrower reply rule does not change MCP publication. The exact
+tool-published row owns the private URL. Speech still omits all raw URLs and
+separately counts published links (`links_in_chat`) and URLs visible in the
+copied chat reply (`links_visible_in_chat_reply`).
+
+External URL handles use a random 12-character session namespace and a bounded
+64-entry server-only map, scoped to the call, conversation and owner. Only exact
+handles inside service-operation `nyx__call_tool.arguments_json` values resolve;
+native `nyx__*`/`nyxid__*` tools and discovery arguments never resolve handles.
+Unknown or foreign handles pass literally, with an explicit tool-result fact.
+Handles remain reusable during the call and are cleared when it closes.
+Bare-link punctuation handling trims trailing CJK punctuation/unbalanced closers,
+preserves interior Unicode and retains each client's existing ASCII parser rules.

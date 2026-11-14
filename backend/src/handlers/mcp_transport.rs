@@ -2620,6 +2620,101 @@ async fn artifacts_enabled(
         .await
         .unwrap_or(false)
 }
+/// Preserve the finite MCP transport (including inline notifications) while
+/// presenting only result envelopes. Id-less calls intentionally have no replay identity.
+async fn present_voice_tool_response(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    request: &JsonRpcRequest,
+    response: Response,
+) -> Response {
+    let publication = chat
+        .turn_id
+        .as_ref()
+        .zip(chat.voice_parent_conversation_id.as_ref())
+        .map(
+            |(turn, parent)| crate::services::voice::links::Publication {
+                user_id: chat.user_id.clone(),
+                parent_id: parent.clone(),
+                conversation_id: chat.conversation_id.clone(),
+                turn_id: turn.clone(),
+            },
+        );
+    let tool_call = request
+        .id
+        .as_ref()
+        .filter(|id| !id.is_null())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (mut parts, body) = response.into_parts();
+    let sse = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    let rewrite = async |payload: &str| -> Result<String, ()> {
+        let mut envelope: serde_json::Value = serde_json::from_str(payload).map_err(|_| ())?;
+        if let Some(result) = envelope.get_mut("result") {
+            *result = crate::services::voice::links::present_optional(
+                state,
+                publication.as_ref(),
+                &tool_call,
+                result.take(),
+            )
+            .await;
+        }
+        Ok(envelope.to_string())
+    };
+    let transformed: Result<String, ()> = async {
+        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+            .await
+            .map_err(|_| ())?;
+        let wire = std::str::from_utf8(&bytes).map_err(|_| ())?;
+        if !sse {
+            return rewrite(wire).await;
+        }
+        let mut output = String::new();
+        for event in wire.replace("\r\n", "\n").split("\n\n") {
+            if event.is_empty() {
+                continue;
+            }
+            let data = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let data = if data.is_empty() {
+                None
+            } else {
+                Some(rewrite(&data).await?)
+            };
+            for line in event.lines().filter(|line| !line.starts_with("data:")) {
+                output.push_str(line);
+                output.push('\n');
+            }
+            if let Some(data) = data {
+                output.push_str("data: ");
+                output.push_str(&data);
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+        Ok(output)
+    }
+    .await;
+    match transformed {
+        Ok(body) => {
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+            Response::from_parts(parts, axum::body::Body::from(body))
+        }
+        Err(()) => rpc_error(
+            request.id.clone(),
+            -32603,
+            "Voice tool result unavailable; do not repeat the action",
+        ),
+    }
+}
+
 async fn handle_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2668,6 +2763,15 @@ async fn handle_tools_call(
             .await
     })
     .await;
+    let response = if let Some(chat) = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.voice_parent_conversation_id.is_some())
+    {
+        present_voice_tool_response(state, chat, request, response).await
+    } else {
+        response
+    };
     operation.finish(
         if tool_succeeded(&response) {
             crate::turn_trace::Outcome::Completed
@@ -11526,6 +11630,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,

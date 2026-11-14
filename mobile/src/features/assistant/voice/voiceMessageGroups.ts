@@ -4,6 +4,17 @@ export type GroupedVoiceMessage = VoiceTranscriptMessage & {
   voiceGroup?: readonly VoiceTranscriptMessage[];
   anchorId?: string;
 };
+
+export function voiceMessageIndex(
+  rows: readonly GroupedVoiceMessage[],
+  messageId: string,
+): number {
+  return rows.findIndex(
+    (row) =>
+      row.id === messageId ||
+      row.voiceGroup?.some((segment) => segment.id === messageId),
+  );
+}
 export function groupVoiceMessages(
   rows: readonly VoiceTranscriptMessage[],
 ): GroupedVoiceMessage[] {

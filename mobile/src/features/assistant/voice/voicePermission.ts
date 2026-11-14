@@ -13,7 +13,10 @@ export function waitForVoiceForeground(
   AppState: ForegroundApp,
   signal: AbortSignal,
   valid: () => boolean,
-  options: { allowInitialBackground?: boolean } = {},
+  options: {
+    allowInitialBackground?: boolean;
+    waitWhileInactive?: boolean;
+  } = {},
 ) {
   if (signal.aborted || !valid())
     return Promise.reject(new Error("Voice start was cancelled."));
@@ -40,18 +43,23 @@ export function waitForVoiceForeground(
         !(initial && options.allowInitialBackground)
       )
         finish(new Error("Keep NyxID open to start a voice call."));
+      else if (state === "inactive" && options.waitWhileInactive) {
+        // iOS can keep an alert/overlay up indefinitely without backgrounding.
+        clearTimeout(timeout);
+        timeout = undefined;
+      } else if (!timeout)
+        timeout = setTimeout(
+          () =>
+            finish(
+              new Error(
+                "NyxID did not return to the foreground. Open the app and try voice again.",
+              ),
+            ),
+          VOICE_FOREGROUND_TIMEOUT_MS,
+        );
     };
     signal.addEventListener("abort", aborted, { once: true });
     subscription = AppState.addEventListener("change", changed);
-    timeout = setTimeout(
-      () =>
-        finish(
-          new Error(
-            "NyxID did not return to the foreground. Open the app and try voice again.",
-          ),
-        ),
-      VOICE_FOREGROUND_TIMEOUT_MS,
-    );
     // Cover a state or abort transition between the first check and subscribing.
     changed(AppState.currentState, true);
   });

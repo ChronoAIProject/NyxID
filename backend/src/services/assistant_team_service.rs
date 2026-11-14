@@ -3006,13 +3006,13 @@ async fn last_reply(
 ) -> AppResult<Option<ReplySummary>> {
     Ok(db
         .collection::<AssistantMessage>(MESSAGES)
-        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant"})
+        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant", "turn_metadata.voice_link_publication":{"$exists":false}})
         .sort(doc! {"seq": -1})
         .await?
         .map(|message| ReplySummary {
             seq: message.seq,
             status: message.status,
-            text: excerpt(&message.text, chars),
+            text: excerpt(&super::voice::links::redact_tokens(&message.text), chars),
             created_at: message.created_at,
         }))
 }

@@ -338,6 +338,7 @@ impl Grok {
                     .filter(|s| s.len() <= 4096)
                     .ok_or(AppError::VoiceProviderUnavailable)?;
                 let segment = Segment {
+                    interrupted: false,
                     fragments: Vec::new(),
                     id: input.id.clone(),
                     speaker: Speaker::User,
@@ -500,6 +501,7 @@ impl Grok {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
                 let segment = Segment {
+                    interrupted: false,
                     fragments: Vec::new(),
                     id: speech.id.clone(),
                     speaker: Speaker::Assistant,
@@ -526,6 +528,8 @@ impl Grok {
                 tokens::settle(&self.state, &meter, &event, &self.call.preferences.model).await?;
                 if let Some(speech) = self.speech.take() {
                     self.segment(Segment {
+                        interrupted: self.arbiter.cancelled.contains(id)
+                            || event["response"]["status"] == "cancelled",
                         fragments: Vec::new(),
                         id: speech.id,
                         speaker: Speaker::Assistant,

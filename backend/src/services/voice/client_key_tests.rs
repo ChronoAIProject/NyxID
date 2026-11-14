@@ -375,6 +375,7 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
                 .is_err()
         );
         let segment = super::transcript::Segment {
+            interrupted: false,
             fragments: Vec::new(),
             id: Uuid::new_v4().to_string(),
             speaker: super::transcript::Speaker::User,
@@ -1638,6 +1639,7 @@ async fn device_voice_cannot_inherit_enrolled_owner_permissions_or_task_root() {
                 // if the in-memory session hint is stale or incorrectly set.
                 call.execution_enrolled = true;
                 let segment = super::transcript::Segment {
+                    interrupted: false,
                     fragments: Vec::new(),
                     id: Uuid::new_v4().to_string(),
                     speaker: super::transcript::Speaker::User,

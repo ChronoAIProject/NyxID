@@ -658,6 +658,49 @@ function liveVoice(text: string, sealed = false) {
   });
 }
 
+test("a shielded voice link publication renders as completed without pending UI", () => {
+  const x = setup(A, false);
+  const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
+  const message = messageSchema.parse({
+    id: "published-link",
+    seq: 3,
+    turn_id: "hidden-turn",
+    role: "assistant",
+    text: `<${link}>`,
+    status: "completed",
+    execution_pending: true,
+    via: "voice",
+    error_code: null,
+    created_at: "2026-11-14T01:00:00Z",
+    activities: [],
+    attachments: [],
+  });
+  // The API field is ignored by the schema; even a retained field must not
+  // turn an assistant publication into pending execution UI.
+  Object.assign(message, { execution_pending: true });
+  x.assistant.history!.messages = [message];
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  assert.equal(list.props.data.length, 1);
+  const rendered = elements(
+    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+  );
+  const footer = rendered.find((node) => node.type === "AssistantMessageFooter");
+  assert.equal(footer?.props.text, `<${link}>`);
+  assert.equal(footer?.props.report.messageId, message.id);
+  assert.equal(
+    rendered.some((node) =>
+      ["ActivityIndicator", "AssistantTurnStatus"].includes(String(node.type)),
+    ),
+    false,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(rendered),
+    /Queued|Waiting for|Thinking|Speaking/,
+  );
+  x.harness.unmount();
+});
+
 test("persisted voice segments render one Copy/date footer and Report targets the latest feedback anchor", () => {
   for (const savedFeedback of [false, true]) {
     const x = setup(A);
@@ -723,7 +766,34 @@ test("appending voice parts keeps the mobile row key stable and Report follows i
   );
   x.harness.unmount();
 });
-test("voice footers hide unsealed speech but include sealed disconnect partial groups", () => {
+test("a navigation target for a middle voice segment reveals its stable group row", () => {
+  const x = setup(A);
+  x.assistant.history!.messages = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: "2026-11-09T01:00:00Z",
+      via: "voice",
+    }),
+  );
+  x.props.route.params.messageId = "7";
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  const scrolls: { index: number }[] = [];
+  list.props.ref.current = {
+    scrollToIndex: (target: { index: number }) => scrolls.push(target),
+  };
+  x.harness.render();
+  assert.equal(list.props.data[0].id, "6");
+  assert.deepEqual(scrolls.map((target) => target.index), [0]);
+  x.harness.render();
+  assert.equal(scrolls.length, 1);
+  x.harness.unmount();
+});
+test("voice footers hide both unsealed speech and sealed incomplete groups", () => {
   for (const sealed of [false, true]) {
     const x = setup(A);
     x.assistant.history!.messages = voiceGroupFixtures[0]!.rows
@@ -752,7 +822,7 @@ test("voice footers hide unsealed speech but include sealed disconnect partial g
     );
     assert.equal(
       rendered.filter((node) => node.type === "AssistantMessageFooter").length,
-      sealed ? 1 : 0,
+      0,
     );
     x.harness.unmount();
   }

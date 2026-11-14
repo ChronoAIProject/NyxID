@@ -1962,7 +1962,8 @@ pub(crate) async fn write_checkpoint_in_session(
     reply: &AssistantMessage,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
-    if row.guest_turn || row.collaboration.is_some() {
+    if row.guest_turn || row.collaboration.is_some() || super::voice::links::publication_row(reply)
+    {
         return Ok(());
     }
     let collection = db.collection::<AssistantCheckpoint>(CHECKPOINTS);
@@ -1977,7 +1978,7 @@ pub(crate) async fn write_checkpoint_in_session(
             .find_one(doc! {"conversation_id": &row.id, "user_id": &row.user_id, "seq": seq, "role": "user"})
             .session(&mut *session)
             .await?
-            .map(|message| excerpt(&message.text, CHECKPOINT_GOAL_CHARS))
+            .map(|message| excerpt(&super::voice::links::redact_tokens(&message.text), CHECKPOINT_GOAL_CHARS))
             .filter(|goal| !goal.is_empty()),
         _ => None,
     };
@@ -2014,7 +2015,11 @@ pub(crate) async fn write_checkpoint_in_session(
         goal,
         completed_actions,
         failed_actions,
-        output: Some(excerpt(&reply.text, CHECKPOINT_OUTPUT_CHARS)).filter(|text| !text.is_empty()),
+        output: Some(excerpt(
+            &super::voice::links::redact_tokens(&reply.text),
+            CHECKPOINT_OUTPUT_CHARS,
+        ))
+        .filter(|text| !text.is_empty()),
         last_successful_turn_id: if succeeded {
             Some(reply.turn_id.clone())
         } else {
@@ -3604,6 +3609,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                voice_link_publication: None,
+                links_in_chat: None,
                 artifact_recovery_target: row
                     .artifact_head
                     .as_ref()
@@ -4384,6 +4391,8 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                voice_link_publication: None,
+                                links_in_chat: None,
 artifact_recovery_target: None,
                                 artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
@@ -5906,7 +5915,7 @@ pub async fn recovery_previews(
             "turn_id": {"$in": &ids}, "role": "user",
             "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
             "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
-            "execution_pending": {"$ne": true},
+            "execution_pending": {"$ne": true}, "turn_metadata.voice_link_publication": {"$exists":false},
         })
         .await?
         .try_collect()
@@ -6042,7 +6051,7 @@ pub async fn retry_context_in_session(
             "turn_id": retry_of, "role": "user",
             "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
             "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
-            "execution_pending": {"$ne": true},
+            "execution_pending": {"$ne": true}, "turn_metadata.voice_link_publication": {"$exists":false},
         })
         .session(&mut *session)
         .await?;
@@ -6576,7 +6585,7 @@ pub async fn recap(
     history: &[AssistantMessage],
     excluded_turn: &str,
 ) -> AppResult<String> {
-    let mut filter = doc! {"conversation_id":&row.id,"user_id":&row.user_id,"execution_pending":{"$ne":true},"turn_id":{"$ne":excluded_turn}};
+    let mut filter = doc! {"conversation_id":&row.id,"user_id":&row.user_id,"execution_pending":{"$ne":true},"turn_metadata.voice_link_publication":{"$exists":false},"turn_id":{"$ne":excluded_turn}};
     let total = db
         .collection::<AssistantMessage>(MESSAGES)
         .count_documents(filter.clone())
@@ -6685,7 +6694,10 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
         &message.text[..end],
         if truncated { " [truncated]" } else { "" }
     );
-    RenderedRecapLine { text, truncated }
+    RenderedRecapLine {
+        text: super::voice::links::redact_tokens(&text),
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -6725,7 +6737,9 @@ fn render_recap_with_owner_total(
     for message in history
         .iter()
         .rev()
-        .filter(|message| !message.execution_pending)
+        .filter(|message| {
+            !message.execution_pending && !super::voice::links::publication_row(message)
+        })
         .take(20)
     {
         let Some(line) = recap_line(message, guest, 1000.min(4900usize.saturating_sub(bytes)))
@@ -6876,7 +6890,7 @@ pub async fn conversation_history_page(
         "conversation_id": &chat.conversation_id,
         "user_id": &chat.user_id,
         "role": "user",
-        "execution_pending": {"$ne": true},
+        "execution_pending": {"$ne": true}, "turn_metadata.voice_link_publication": {"$exists":false},
         "$or": [
             {"author": "owner"},
             {"author": bson::Bson::Null, "origin": "user"},
@@ -7021,7 +7035,12 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     const CLOSE: &str = "\nEnd prior history.";
     let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     // Newest first.
-    let window: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
+    let window: Vec<&AssistantMessage> = history
+        .iter()
+        .rev()
+        .filter(|message| !super::voice::links::publication_row(message))
+        .take(20)
+        .collect();
     let mut goal_id = None;
     let mut reserved = match window.iter().rev().find(|message| message.role == "user") {
         Some(goal) => {
@@ -7105,7 +7124,7 @@ pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint) -> String {
     if let Some(output) = checkpoint.output.as_deref() {
         line.push_str(&format!("\n- last output: {output}"));
     }
-    line
+    super::voice::links::redact_tokens(&line)
 }
 
 /// One recap line within `remaining` bytes, or absent when nothing fits.
@@ -7124,7 +7143,9 @@ fn recap_line(
             format!("{heard} [Interrupted here. Remaining generated text was not confirmed heard. Completed tool effects remain completed; do not replay them because speech was interrupted.]")
         } else {format!("{} [Generated response; delivery/hearing is {}. Do not assume the caller heard it. Completed tool effects must not be replayed automatically.]",message.text,e.status)}
     });
-    let text = projected.as_deref().unwrap_or(&message.text);
+    let redacted =
+        super::voice::links::redact_tokens(projected.as_deref().unwrap_or(&message.text));
+    let text = redacted.as_str();
     let role = if message.author == Some(crate::models::assistant_message::MessageAuthor::Guest)
         && message.role == "user"
     {
@@ -7207,7 +7228,9 @@ fn recap_line(
             message.error_code.as_deref().unwrap_or("none")
         )
     };
-    let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
+    let mut line = super::voice::links::redact_tokens(&format!(
+        "{prefix}{body}{activities}{attachments}{error}"
+    ));
     if line.len() > remaining {
         truncate_at_boundary(&mut line, remaining);
         truncated = true;

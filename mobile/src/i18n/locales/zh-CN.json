@@ -1,4 +1,5 @@
 {
+  "Dictation isn't available in your device's language. Choose a language or keep typing.": "你设备的语言暂不支持听写。请选择一种语言，或继续输入。",
   "Account": "账号",
   "Account & security": "账号与安全",
   "Active": "已启用",
@@ -425,5 +426,7 @@
   "The call ended because NyxID went to the background. Android can't keep the microphone on in the background.": "NyxID 进入了后台，因此通话已结束。Android 无法在后台保持麦克风开启。",
   "The call ended because this voice service can't keep the microphone on in the background.": "此语音服务无法在后台保持麦克风开启，因此通话已结束。",
   "Open Settings › NyxID Mobile › Microphone to allow microphone access.": "请打开“设置 › NyxID Mobile › 麦克风”以允许麦克风访问。",
-  "Open Settings › Apps › NyxID Mobile › Permissions › Microphone to allow microphone access.": "请打开“设置 › 应用 › NyxID Mobile › 权限 › 麦克风”以允许麦克风访问。"
+  "Open Settings › Apps › NyxID Mobile › Permissions › Microphone to allow microphone access.": "请打开“设置 › 应用 › NyxID Mobile › 权限 › 麦克风”以允许麦克风访问。",
+  "The language list is unavailable. Dictation uses your saved language or your device’s speech recognition default.": "语言列表暂不可用。听写会使用已保存的语言或设备语音识别的默认语言。",
+  "Dictation uses your device’s speech recognition default.": "听写使用设备语音识别的默认语言。"
 }

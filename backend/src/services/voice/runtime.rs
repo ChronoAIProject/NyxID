@@ -42,6 +42,7 @@ pub(super) async fn deliver_start(
         async move {
             let result = work.await;
             let call = result.as_ref().ok().map(|started| started.session.clone());
+            let failure = result.as_ref().err().map(|error| (error.status_code().as_u16(), error.error_code()));
             if result_tx.send(result).is_ok() && ack_rx.await.is_ok() {
                 return;
             }
@@ -53,6 +54,13 @@ pub(super) async fn deliver_start(
                 error_code = disconnected.error_code(),
                 "Voice startup caller disconnected"
             );
+            if let Some((status_code, error_code)) = failure {
+                if status_code >= 500 {
+                    tracing::warn!(status_code, error_code, "Voice startup failed after caller disconnected");
+                } else {
+                    tracing::info!(status_code, error_code, "Voice startup failed after caller disconnected");
+                }
+            }
             if let Some(call) = call {
                 match session::end_undelivered_start(&state.db, &call).await {
                     Ok(Some(call))
@@ -467,7 +475,7 @@ pub(super) async fn initial_context(
     let load_history = async {
         let rows: Vec<AssistantMessage> = db
             .collection(MESSAGES)
-            .find(doc! {"user_id":&call.user_id,"conversation_id":&call.conversation_id})
+            .find(doc! {"user_id":&call.user_id,"conversation_id":&call.conversation_id,"turn_metadata.voice_link_publication":{"$exists":false}})
             .sort(doc! {"seq":-1})
             .limit(8)
             .await?
@@ -1539,8 +1547,7 @@ async fn task_updates(
         {
             let message = super::super::assistant_voice::settled_result(&request, message);
             let Some(result_id) =
-                super::super::assistant_voice::publish_result(&state.db, &request, &message)
-                    .await?
+                super::super::assistant_voice::publish_result(state, &request, &message).await?
             else {
                 continue;
             };

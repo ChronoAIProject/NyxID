@@ -328,8 +328,9 @@ export class AssistantVoiceClient {
       requested = true;
       this.startInFlight = true;
       step = "server";
+      this.startRequestId = this.randomId();
       const raw = await this.startOnServer({
-        client_request_id: this.randomId(),
+        client_request_id: this.startRequestId,
         preferences: requestedPreferences,
         sdp_offer: protocol === "xai_realtime" ? "" : sdp,
       });
@@ -406,6 +407,8 @@ export class AssistantVoiceClient {
     }
   }
 
+  private startRequestId?: string;
+
   private async observeUncertainStart() {
     const controller = new AbortController();
     const interrupted = () => controller.abort();
@@ -424,6 +427,14 @@ export class AssistantVoiceClient {
       // A late POST response may have established exact ownership while this
       // metadata read was in flight. Its durable End owns recovery from now on.
       if (this.session) return null;
+      if (
+        active?.session.client_request_id &&
+        active.session.client_request_id === this.startRequestId
+      ) {
+        this.session = active.session;
+        await this.endRemote(active.session);
+        return null;
+      }
       if (!this.closed)
         this.options.onConflict?.(
           active?.session ?? null,
@@ -909,7 +920,10 @@ export class AssistantVoiceClient {
     if (this.endPromise) return this.endPromise;
     if (this.closed) return Promise.resolve();
     const session = this.session;
-    this.outstandingEnd = session;
+    this.outstandingEnd =
+      session && !["closed", "failed"].includes(session.state)
+        ? session
+        : undefined;
     if (!session && this.startInFlight) this.options.onCleanup?.(null, true);
     const drain =
       graceful &&

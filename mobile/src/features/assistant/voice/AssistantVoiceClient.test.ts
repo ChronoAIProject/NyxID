@@ -2119,3 +2119,31 @@ test("Android/WebView and Grok End is dispatched before media teardown", async (
     assert.deepEqual(order, ["end", "close"]);
   }
 });
+
+test("a lost start response discovers and ends only this attempt's orphan without conflict", async () => {
+  const e = setup();
+  let requestId = "";
+  e.responses.start = async () => {
+    requestId = e.starts[0]!.input.client_request_id;
+    throw new Error("lost response");
+  };
+  e.responses.active = async () => ({
+    session: requestId ? session({ client_request_id: requestId }) : null,
+  });
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.controls[0]!.id, sessionId);
+  assert.equal(e.controls[0]!.input.action, "end");
+  assert.deepEqual(
+    e.conflicts,
+    [null],
+    "terminal cleanup clears recovery without a conflict row",
+  );
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.client.isClosed, true);
+  const next = setup();
+  await next.client.start(preferences);
+  assert.equal(next.starts.length, 1);
+  await next.client.end();
+});

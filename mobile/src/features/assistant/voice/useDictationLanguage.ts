@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Platform } from "react-native";
 import { ExpoSpeechRecognitionModule as Recognizer } from "expo-speech-recognition";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { deviceLanguages } from "../../../i18n/deviceLanguages";
@@ -33,11 +34,14 @@ export function useDictationLanguage(active: boolean) {
     };
     read();
     listeners.add(read);
-    void Recognizer.getSupportedLocales({})
+    void Promise.resolve()
+      .then(() => Recognizer.getSupportedLocales({}))
       .then((result) => {
-        if (live) setSupported(result.locales);
+        if (live) setSupported(result?.locales ?? []);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (live) setSupported([]);
+      });
     return () => {
       live = false;
       listeners.delete(read);
@@ -45,20 +49,37 @@ export function useDictationLanguage(active: boolean) {
   }, [active]);
   const loading = supported === undefined;
   const locales = supported ?? [];
+  const listUnavailable = !loading && !locales.length;
   const devices = deviceLanguages();
   const preferred = devices
-    .map((value) => resolveDictationLanguage(undefined, [value], locales))
+    .map((value) =>
+      resolveDictationLanguage(undefined, [value], locales, Platform.OS),
+    )
     .filter((value): value is string => !!value);
-  const automatic = resolveDictationLanguage(undefined, devices, locales);
+  const automatic = loading
+    ? undefined
+    : resolveDictationLanguage(undefined, devices, locales, Platform.OS);
   const resolved = loading
     ? saved
-    : resolveDictationLanguage(saved, devices, locales);
-  const savedSelected = !!saved && (loading || locales.includes(saved));
-  const label = resolved
-    ? languageLabel(resolved, language)
-    : t("Your device's language");
+    : resolveDictationLanguage(saved, devices, locales, Platform.OS);
+  const savedSelected =
+    !!saved &&
+    (loading ||
+      !locales.length ||
+      Platform.OS === "android" ||
+      !!resolveDictationLanguage(saved, [], locales, "android"));
+  const label =
+    (resolved ?? (savedSelected ? saved : undefined))
+      ? languageLabel((resolved ?? saved)!, language)
+      : t("Your device's language");
   return {
     loading,
+    listUnavailable,
+    explanation: listUnavailable
+      ? t(
+          "The language list is unavailable. Dictation uses your saved language or your device’s speech recognition default.",
+        )
+      : undefined,
     value: savedSelected ? saved! : AUTOMATIC_DICTATION_LANGUAGE,
     resolved,
     label,
@@ -77,7 +98,7 @@ export function useDictationLanguage(active: boolean) {
           ? languageLabel(automatic, language)
           : loading
             ? undefined
-            : t("No supported device language"),
+            : t("Dictation uses your device’s speech recognition default."),
       },
       ...languageOptions(locales, language),
     ],

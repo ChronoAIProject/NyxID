@@ -228,5 +228,73 @@
     ],
     "groups": [["a", "b", "c"]],
     "anchors": ["b"]
+  },
+  {
+    "name": "card and approval rows separate surrounding mobile speech groups",
+    "rows": [
+      {
+        "id": "before",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "before",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "card",
+        "role": "assistant",
+        "text": "Review this card"
+      },
+      {
+        "id": "approval",
+        "role": "assistant",
+        "text": "Approval requested"
+      },
+      {
+        "id": "after",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "after",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["before"], ["card"], ["approval"], ["after"]]
+  },
+  {
+    "name": "explicitly interrupted segment closes its group without an intervening user row",
+    "rows": [
+      {
+        "id": "before",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "before",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "interrupted",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "interrupted",
+          "sealed": true,
+          "complete": false,
+          "interrupted": true
+        }
+      },
+      {
+        "id": "after",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "after",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["before", "interrupted"], ["after"]]
   }
 ]

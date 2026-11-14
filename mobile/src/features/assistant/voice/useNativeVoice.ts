@@ -233,6 +233,8 @@ export function useNativeVoice(
   stopRef.current = stopLocal;
   useEffect(() => {
     mounted.current = true;
+    setMicrophonePermission(undefined);
+    nativeConnected.current = false;
     busy.current = false;
     conflictBusy.current = false;
     setMedia(null);
@@ -271,10 +273,30 @@ export function useNativeVoice(
     setSpeakerMuted(false);
     setEndingConflict(false);
     setCheckingConflict(false);
+    let backgrounded = AppState.currentState === "background";
     const subscription = AppState.addEventListener("change", (state) => {
+      // iOS alerts and overlays report inactive without leaving the foreground.
+      if (state === "inactive") return;
       const permission = permissionAttempt.current;
       const awaitingPermission = permission?.generation === ticket.current;
       if (state === "active") {
+        if (!backgrounded) {
+          // Resume a paused recovery timer without resyncing a live call or
+          // granting a fresh recovery budget for an overlay.
+          const session = latestSnapshot.current?.session;
+          if (
+            sameScope() &&
+            (latestConflict.current.session ||
+              latestConflict.current.unknown ||
+              (!current.current &&
+                session &&
+                session.state !== "closed" &&
+                session.state !== "failed"))
+          )
+            setConflictCheckAttempt((attempt) => attempt + 1);
+          return;
+        }
+        backgrounded = false;
         if (permission?.androidBackgrounded) {
           // A subsequent background event is no longer the permission prompt.
           permission.androidBackgroundAllowed = false;
@@ -329,9 +351,10 @@ export function useNativeVoice(
         if (sameScope()) setConflictCheckAttempt((attempt) => attempt + 1);
         return;
       }
+      if (state !== "background") return;
+      backgrounded = true;
       // Android's permission activity reports background before capture starts.
       if (
-        state === "background" &&
         permission &&
         awaitingPermission &&
         permission.androidBackgroundAllowed &&
@@ -348,22 +371,20 @@ export function useNativeVoice(
         !latestSnapshot.current.session.end_requested
       )
         return;
-      if (!(state === "inactive" && awaitingPermission)) {
-        const wasConnecting =
-          busy.current || (!nativeConnected.current && !latestSnapshot.current);
-        const hadVoiceWork = busy.current || current.current !== null;
-        stopRef.current();
-        if (hadVoiceWork)
-          reportError(
-            translate.current(
-              wasConnecting
-                ? "The call ended because NyxID went to the background while it was still connecting."
-                : Platform.OS === "android"
-                  ? "The call ended because NyxID went to the background. Android can't keep the microphone on in the background."
-                  : "The call ended because this voice service can't keep the microphone on in the background.",
-            ),
-          );
-      }
+      const wasConnecting =
+        busy.current || (!nativeConnected.current && !latestSnapshot.current);
+      const hadVoiceWork = busy.current || current.current !== null;
+      stopRef.current();
+      if (hadVoiceWork)
+        reportError(
+          translate.current(
+            wasConnecting
+              ? "The call ended because NyxID went to the background while it was still connecting."
+              : Platform.OS === "android"
+                ? "The call ended because NyxID went to the background. Android can't keep the microphone on in the background."
+                : "The call ended because this voice service can't keep the microphone on in the background.",
+          ),
+        );
     });
     return () => {
       mounted.current = false;
@@ -453,6 +474,7 @@ export function useNativeVoice(
       conflictBusy.current
     )
       return false;
+    nativeConnected.current = false;
     busy.current = true;
     const generation = ++ticket.current;
     const controller = new AbortController();
@@ -548,6 +570,7 @@ export function useNativeVoice(
           }
           await waitForVoiceForeground(AppState, controller.signal, valid, {
             allowInitialBackground: attempt.androidBackgroundAllowed,
+            waitWhileInactive: Platform.OS === "ios",
           });
         } finally {
           clearTimeout(attempt.requestTimer);
@@ -557,11 +580,20 @@ export function useNativeVoice(
         }
       }
       if (!valid()) return;
+      if (Platform.OS === "ios") {
+        do {
+          await waitForVoiceForeground(AppState, controller.signal, valid, {
+            waitWhileInactive: true,
+          });
+          if (!valid()) return;
+        } while (AppState.currentState !== "active");
+      }
       if (AppState.currentState !== "active")
         throw new Error(
           translate.current("Keep NyxID open to start a voice call."),
         );
       setMicrophonePermission(undefined);
+      nativeConnected.current = false;
       const nextMedia = new NativeVoiceMedia();
       const owner = claimRecovery();
       let connectedOnce = false;
@@ -649,6 +681,7 @@ export function useNativeVoice(
         },
         onClosed: () => {
           if (!valid()) return;
+          nativeConnected.current = false;
           if (current.current === next) current.current = null;
           if (next.pendingEnd) {
             remember(

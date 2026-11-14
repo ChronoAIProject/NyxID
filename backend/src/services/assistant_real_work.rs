@@ -114,6 +114,7 @@ mod tests {
 
     fn chat() -> ChatAuthority {
         ChatAuthority {
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,

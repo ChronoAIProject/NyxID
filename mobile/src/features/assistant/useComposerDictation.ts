@@ -143,17 +143,32 @@ function release(owner: AudioOwner) {
 async function recognitionLanguage() {
   const chosen = await savedDictationLanguage();
   const preferred = deviceLanguages();
-  const { locales, installedLocales } = await Recognizer.getSupportedLocales(
-    {},
+  const discovery = await Promise.resolve()
+    .then(() => Recognizer.getSupportedLocales({}))
+    .catch(() => ({
+      locales: [] as string[],
+      installedLocales: [] as string[],
+    }));
+  const locales = discovery?.locales ?? [];
+  const installedLocales = discovery?.installedLocales ?? [];
+  const lang = resolveDictationLanguage(
+    chosen,
+    preferred,
+    locales,
+    Platform.OS,
   );
-  const lang = resolveDictationLanguage(chosen, preferred, locales);
   return {
     lang,
-    selected: chosen && locales.includes(chosen) ? chosen : preferred[0],
+    canChooseLanguage: locales.length > 0,
+    unsupported:
+      locales.length > 0 && !lang && (Platform.OS !== "android" || !!chosen),
+    selected: chosen ?? lang ?? preferred[0],
+    hasSavedChoice: !!chosen,
     // The iOS JS capability APIs only inspect the default locale. Native code
     // applies this request only if the selected recognizer supports it.
     onDevice:
-      Platform.OS === "ios" || (!!lang && installedLocales.includes(lang)),
+      Platform.OS === "ios" ||
+      (!!lang && (installedLocales ?? []).includes(lang)),
   };
 }
 
@@ -444,11 +459,15 @@ export function useComposerDictation({
       const recognition = await recognitionLanguage();
       const { lang } = recognition;
       if (!valid()) return;
-      setRecognitionLocale(lang ?? recognition.selected);
-      if (!lang) {
+      setRecognitionLocale(
+        lang ?? (recognition.unsupported ? recognition.selected : undefined),
+      );
+      if (recognition.unsupported) {
         setChooseLanguage(true);
         throw new Error(
-          "Dictation isn't available in your selected language. Choose another language or keep typing.",
+          recognition.hasSavedChoice
+            ? "Dictation isn't available in your selected language. Choose another language or keep typing."
+            : "Dictation isn't available in your device's language. Choose a language or keep typing.",
         );
       }
       await releasing;
@@ -483,9 +502,16 @@ export function useComposerDictation({
         Recognizer.addListener("error", (event) => {
           if (!valid() || recovering) return;
           if (!["service-not-allowed", "not-allowed"].includes(event.error)) {
-            const message = dictationError(event.error);
+            const message =
+              event.error === "language-not-supported" &&
+              !recognition.canChooseLanguage
+                ? START_FAILED
+                : dictationError(event.error);
             if (!message || (message === NO_SPEECH && spoken())) return;
-            if (event.error === "language-not-supported")
+            if (
+              event.error === "language-not-supported" &&
+              recognition.canChooseLanguage
+            )
               setChooseLanguage(true);
             failure = message;
             if (continuous || message !== NO_SPEECH) setError(message);
@@ -520,9 +546,16 @@ export function useComposerDictation({
               }
             }
             if (!valid()) return false;
-            const message = dictationError(event.error);
+            const message =
+              event.error === "language-not-supported" &&
+              !recognition.canChooseLanguage
+                ? START_FAILED
+                : dictationError(event.error);
             if (!message || (message === NO_SPEECH && spoken())) return false;
-            if (event.error === "language-not-supported")
+            if (
+              event.error === "language-not-supported" &&
+              recognition.canChooseLanguage
+            )
               setChooseLanguage(true);
             if (event.error === "not-allowed") setPermissionDenied(true);
             failure = message;
@@ -606,7 +639,9 @@ export function useComposerDictation({
     final: caption.final,
     interim: caption.interim,
     error: error
-      ? chooseLanguage
+      ? chooseLanguage &&
+        error !==
+          "Dictation isn't available in your device's language. Choose a language or keep typing."
         ? t(
             "Dictation isn't available in {{language}}. Choose another language or keep typing.",
             {

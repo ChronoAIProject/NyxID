@@ -37,9 +37,21 @@ export function DictationLanguagePicker({
     all.filter((row) => row.value === value),
   );
   const sections = [
-    { title: "", data: matchesLanguage(automatic, search) ? [automatic] : [] },
-    { title: t("Suggested"), data: suggested },
-    { title: t("All languages"), data: all },
+    {
+      key: "automatic",
+      title: "",
+      data: matchesLanguage(automatic, search) ? [automatic] : [],
+    },
+    {
+      key: "suggested",
+      title: t("Suggested"),
+      data: suggested.map((row) => ({ ...row, key: `suggested:${row.value}` })),
+    },
+    {
+      key: "all",
+      title: t("All languages"),
+      data: all.map((row) => ({ ...row, key: `all:${row.value}` })),
+    },
   ].filter((section) => section.data.length);
   return (
     <Modal
@@ -83,7 +95,9 @@ export function DictationLanguagePicker({
           />
           <SectionList
             sections={sections}
-            keyExtractor={(item, index) => `${item.value}:${index}`}
+            keyExtractor={(item) =>
+              "key" in item ? String(item.key) : `automatic:${item.value}`
+            }
             keyboardShouldPersistTaps="handled"
             renderSectionHeader={({ section }) =>
               section.title ? (
@@ -122,7 +136,8 @@ export function DictationLanguagePicker({
             }
             ListFooterComponent={
               <Text style={[styles.section, { color: colors.textMuted }]}>
-                {t("Changes apply to the next recording.")}
+                {language.explanation ??
+                  t("Changes apply to the next recording.")}
               </Text>
             }
           />

@@ -23,3 +23,35 @@ it("explicit Markdown and angle URLs preserve authored punctuation", () => {
     ),
   ).toEqual(["https://x.y/z。", "https://x.y/z。"]);
 });
+
+it("CJK suffixes preserve every fixture's existing link allow or deny outcome, including schemeless literals", () => {
+  for (const fixture of fixtures) {
+    for (const suffix of [
+      "。",
+      "，",
+      "、",
+      "！",
+      "？",
+      "；",
+      "：",
+      "）",
+      "」",
+      "』",
+      "】",
+      "》",
+      "”",
+    ]) {
+      const { container, unmount } = render(
+        <MarkdownContent text={fixture.text + suffix} />,
+      );
+      expect(
+        [...container.querySelectorAll("a")].map((anchor) =>
+          anchor.getAttribute("href"),
+        ),
+        fixture.text + suffix,
+      ).toEqual(fixture.hrefs);
+      expect(container.textContent).toBe(fixture.text + suffix);
+      unmount();
+    }
+  }
+});
