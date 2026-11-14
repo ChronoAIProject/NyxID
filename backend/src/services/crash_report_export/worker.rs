@@ -228,6 +228,7 @@ mod tests {
             web: Some(exporter.clone()),
             ..Default::default()
         };
+        crate::test_utils::await_responsive_majority_io(&db).await;
         let (_, report_id) =
             crash_report_service::insert(&db, &config, "test", &id, &rev, report())
                 .await
@@ -287,6 +288,7 @@ mod tests {
             (4, ExportStatus::Failed),
         ] {
             let (db, _, _, id, config, exporter) = setup("crash_worker_outcomes", outcome).await;
+            crate::test_utils::await_responsive_majority_io(&db).await;
             tick(&db, &config).await.unwrap();
             let saved = row(&db, &id).await;
             assert_eq!(saved.export.status, expected);
@@ -350,6 +352,7 @@ mod tests {
                         .unwrap();
                 }
             }
+            crate::test_utils::await_responsive_majority_io(&db).await;
             tick(&db, &config).await.unwrap();
             assert_eq!(
                 row(&db, &id).await.export.status,

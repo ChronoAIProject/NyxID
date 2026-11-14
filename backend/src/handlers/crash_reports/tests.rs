@@ -321,6 +321,7 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
         )
         .await;
         assert!(matches!(result, Err(AppError::ValidationError(_))));
+        crate::test_utils::await_responsive_majority_io(&db).await;
         ingest(
             State(state.clone()),
             test_auth_user(&id),
@@ -634,6 +635,9 @@ async fn web_manifest_runs_only_after_successful_insert_and_never_delays_ingesti
     db.run_command(bson::doc! {"collMod":COLLECTION_NAME,"validator":{}})
         .await
         .unwrap();
+    // Admission's linearizable consent gate keeps its production 200/250 ms
+    // bounds. Establish responsive majority I/O after the validator writes.
+    crate::test_utils::await_responsive_majority_io(&db).await;
     let response = tokio::time::timeout(Duration::from_secs(2), send(&revision))
         .await
         .expect("manifest I/O must not be inline")
