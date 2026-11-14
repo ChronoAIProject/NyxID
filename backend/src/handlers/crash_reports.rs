@@ -283,6 +283,7 @@ struct VersionResponse {
     app_version: String,
     app_build: String,
     artifact_id: Option<String>,
+    artifact_ids: Vec<String>,
     counts: std::collections::BTreeMap<String, i64>,
     total: i64,
     first_seen: String,
@@ -323,12 +324,23 @@ pub async fn summary(
         .into_iter()
         .map(|d| {
             let id = d.get_document("_id").cloned().unwrap_or_default();
+            let artifact_ids: Vec<String> = d
+                .get_array("artifact_ids")
+                .into_iter()
+                .flatten()
+                .filter_map(bson::Bson::as_str)
+                .map(str::to_owned)
+                .collect();
             VersionResponse {
                 platform: string(&id, "platform"),
                 environment: string(&id, "environment"),
                 app_version: string(&id, "app_version"),
                 app_build: string(&id, "app_build"),
-                artifact_id: id.get_str("artifact_id").ok().map(str::to_owned),
+                artifact_id: artifact_ids
+                    .first()
+                    .filter(|_| artifact_ids.len() == 1)
+                    .cloned(),
+                artifact_ids,
                 total: number(&d, "total"),
                 first_seen: time(&d, "first_seen"),
                 last_seen: time(&d, "last_seen"),

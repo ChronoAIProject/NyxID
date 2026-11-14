@@ -223,7 +223,9 @@ async fn admin_operator_projection_and_nonhuman_denial() {
     let state = test_app_state(db.clone());
     let auth = test_auth_user(&id);
     assert!(require_admin(&state, &auth).await.is_err());
-    let (_, report_id) = service::insert(&db, &state.crash_reports, "test", &id, &rev, report())
+    let report = report();
+    let artifact = report.artifact_id.clone().unwrap();
+    let (_, report_id) = service::insert(&db, &state.crash_reports, "test", &id, &rev, report)
         .await
         .unwrap();
     for role in [roles.admin, roles.operator] {
@@ -244,6 +246,25 @@ async fn admin_operator_projection_and_nonhuman_denial() {
                 && !text.contains(&id)
                 && !text.contains(&rev)
         );
+        let response = summary(
+            State(state.clone()),
+            auth.clone(),
+            Query(SummaryQuery {
+                window: None,
+                platform: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            response["versions"][0]["artifact_ids"],
+            serde_json::json!([artifact])
+        );
+        assert_eq!(response["versions"][0]["artifact_id"], artifact);
         for method in [
             crate::mw::auth::AuthMethod::ApiKey,
             crate::mw::auth::AuthMethod::Delegated,

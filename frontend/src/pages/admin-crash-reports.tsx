@@ -283,7 +283,7 @@ export function AdminCrashReportsPage() {
                     <dl className="mt-2 space-y-1 type-secondary">
                       {[
                         [t("Environment"), v.environment],
-                        [t("Artifact"), v.artifact_id ?? "—"],
+                        [t("Artifact"), v.artifact_ids.join(", ") || "—"],
                         [t("Reported events"), v.total],
                         [t("Reported events by kind"), reportedKinds(v.counts)],
                         [t("Last seen"), formatDateTime(v.last_seen)],
@@ -333,7 +333,7 @@ export function AdminCrashReportsPage() {
                       </TableCell>
                       <TableCell className="font-mono">{v.app_build}</TableCell>
                       <TableCell className="font-mono">
-                        {v.artifact_id ?? "—"}
+                        {v.artifact_ids.join(", ") || "—"}
                       </TableCell>
                       <TableCell>{v.total}</TableCell>
                       <TableCell>{reportedKinds(v.counts)}</TableCell>

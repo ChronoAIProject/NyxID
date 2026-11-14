@@ -9,7 +9,10 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { AdminCrashReportsPage, CrashReportView } from "./admin-crash-reports";
-import { crashReportSchema } from "@/schemas/admin-crash-reports";
+import {
+  crashReportSchema,
+  crashSummarySchema,
+} from "@/schemas/admin-crash-reports";
 import {
   useCrashSummary,
   useCrashReports,
@@ -106,94 +109,108 @@ it("admin overview renders ingestion health and localized filter labels", () => 
   expect(screen.getByText("No reports in this selection.")).toBeInTheDocument();
 });
 
-it("mobile cards and desktop tables expose the same reports and version filters", async () => {
-  const version = {
-    platform: "ios",
-    environment: "test",
-    app_version: "1.2.3",
-    app_build: "42",
-    artifact_id: "artifact",
-    counts: { native_crash: 2 },
-    total: 2,
-    first_seen: "2026-11-14T00:00:00Z",
-    last_seen: "2026-11-14T01:00:00Z",
-  };
-  vi.mocked(useCrashSummary).mockReturnValue({
-    isLoading: false,
-    error: null,
-    data: {
-      health: {
-        outcomes: { accepted: 2 },
-        export_statuses: { disabled: 2 },
-        destination_ids: [],
-        retention_days: 30,
-        flag_enabled: true,
-      },
-      versions: [version],
-    },
-  } as unknown as ReturnType<typeof useCrashSummary>);
-  vi.mocked(useCrashReports).mockReturnValue({
-    isLoading: false,
-    error: null,
-    data: {
-      reports: [
-        {
-          id: "report-42",
-          captured_at: version.last_seen,
-          platform: "ios",
-          app_version: version.app_version,
-          app_build: version.app_build,
-          kind: "native_crash",
-          export: { status: "disabled" },
+it.each([
+  { artifactIds: [] },
+  { artifactIds: ["artifact-a"] },
+  { artifactIds: ["artifact-a", "artifact-b"] },
+])(
+  "mobile cards and desktop tables show artifacts $artifactIds and preserve version filters",
+  async ({ artifactIds }) => {
+    const version = {
+      platform: "ios",
+      environment: "test",
+      app_version: "1.0.4",
+      app_build: "45",
+      artifact_id: artifactIds.length === 1 ? artifactIds[0] : null,
+      artifact_ids: artifactIds,
+      counts: { native_crash: 1, js_fatal: 1, unhandled_rejection: 1 },
+      total: 3,
+      first_seen: "2026-11-14T00:00:00Z",
+      last_seen: "2026-11-14T01:00:00Z",
+    };
+    vi.mocked(useCrashSummary).mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: crashSummarySchema.parse({
+        health: {
+          outcomes: { accepted: 3 },
+          export_statuses: { disabled: 3 },
+          destination_ids: [],
+          retention_days: 30,
+          flag_enabled: true,
         },
-      ],
-      cursor: null,
-    },
-  } as unknown as ReturnType<typeof useCrashReports>);
-  const root = createRootRoute({ component: AdminCrashReportsPage });
-  const detail = createRoute({
-    getParentRoute: () => root,
-    path: "/admin/crash-reports/$id",
-    component: () => null,
-  });
-  const router = createRouter({
-    routeTree: root.addChildren([detail]),
-    history: createMemoryHistory({ initialEntries: ["/"] }),
-  });
-  await router.load();
-  render(<RouterProvider router={router} />);
-  const cards = within(
-    await screen.findByRole("list", { name: "Reported events by version" }),
-  );
-  const table = within(
-    screen.getByRole("table", { name: "Reported events by version" }),
-  );
-  for (const view of [cards, table]) {
-    expect(view.getByText("artifact")).toBeInTheDocument();
-    expect(view.getByText("iOS native crash: 2")).toBeInTheDocument();
-    expect(
-      view.getByText(formatDateTime(version.last_seen)),
-    ).toBeInTheDocument();
-  }
-  fireEvent.click(cards.getByRole("button", { name: "iOS · 1.2.3 (42)" }));
-  expect(vi.mocked(useCrashReports)).toHaveBeenLastCalledWith({
-    platform: "ios",
-    app_version: "1.2.3",
-    app_build: "42",
-  });
-  fireEvent.click(table.getByRole("button", { name: "1.2.3" }));
-  expect(vi.mocked(useCrashReports)).toHaveBeenLastCalledWith({
-    platform: "ios",
-    app_version: "1.2.3",
-    app_build: "42",
-  });
-  for (const role of ["list", "table"] as const) {
-    const reports = within(
-      screen.getByRole(role, { name: "Individual reports" }),
+        versions: [version],
+      }),
+    } as unknown as ReturnType<typeof useCrashSummary>);
+    vi.mocked(useCrashReports).mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: {
+        reports: [
+          {
+            id: "report-45",
+            captured_at: version.last_seen,
+            platform: "ios",
+            app_version: version.app_version,
+            app_build: version.app_build,
+            kind: "native_crash",
+            export: { status: "disabled" },
+          },
+        ],
+        cursor: null,
+      },
+    } as unknown as ReturnType<typeof useCrashReports>);
+    const root = createRootRoute({ component: AdminCrashReportsPage });
+    const detail = createRoute({
+      getParentRoute: () => root,
+      path: "/admin/crash-reports/$id",
+      component: () => null,
+    });
+    const router = createRouter({
+      routeTree: root.addChildren([detail]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    await router.load();
+    render(<RouterProvider router={router} />);
+    const cards = within(
+      await screen.findByRole("list", { name: "Reported events by version" }),
     );
-    expect(
-      reports.getByRole("link", { name: formatDateTime(version.last_seen) }),
-    ).toHaveAttribute("href", "/admin/crash-reports/report-42");
-    expect(reports.getByText("Disabled")).toBeInTheDocument();
-  }
-});
+    const table = within(
+      screen.getByRole("table", { name: "Reported events by version" }),
+    );
+    expect(cards.getAllByRole("listitem")).toHaveLength(1);
+    expect(table.getAllByRole("row")).toHaveLength(2);
+    for (const view of [cards, table]) {
+      expect(view.getByText(artifactIds.join(", ") || "—")).toBeInTheDocument();
+      expect(
+        view.getByText(
+          "iOS native crash: 1, JavaScript fatal error: 1, Unhandled rejection: 1",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        view.getByText(formatDateTime(version.last_seen)),
+      ).toBeInTheDocument();
+    }
+    fireEvent.click(cards.getByRole("button", { name: "iOS · 1.0.4 (45)" }));
+    expect(vi.mocked(useCrashReports)).toHaveBeenLastCalledWith({
+      platform: "ios",
+      app_version: "1.0.4",
+      app_build: "45",
+    });
+    fireEvent.click(table.getByRole("button", { name: "1.0.4" }));
+    expect(vi.mocked(useCrashReports)).toHaveBeenLastCalledWith({
+      platform: "ios",
+      app_version: "1.0.4",
+      app_build: "45",
+    });
+    for (const role of ["list", "table"] as const) {
+      const reports = within(
+        screen.getByRole(role, { name: "Individual reports" }),
+      );
+      expect(
+        reports.getByRole("link", { name: formatDateTime(version.last_seen) }),
+      ).toHaveAttribute("href", "/admin/crash-reports/report-45");
+      expect(reports.getByText("Disabled")).toBeInTheDocument();
+    }
+  },
+);

@@ -115,7 +115,15 @@ pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryDa
     if let Some(platform) = query.platform {
         filter.insert("report.platform", platform.as_str());
     }
-    let mut group = doc! {"_id": {"platform": "$report.platform", "environment": "$environment", "app_version": "$report.app_version", "app_build": "$report.app_build", "artifact_id": "$report.artifact_id"}, "total": {"$sum": 1}, "first_seen": {"$min": "$received_at"}, "last_seen": {"$max": "$received_at"}};
+    let mut group = doc! {
+        "_id": {
+            "platform": "$report.platform", "environment": "$environment",
+            "app_version": "$report.app_version", "app_build": "$report.app_build"
+        },
+        "artifact_ids": {"$addToSet": "$report.artifact_id"},
+        "total": {"$sum": 1},
+        "first_seen": {"$min": "$received_at"}, "last_seen": {"$max": "$received_at"}
+    };
     for kind in [
         "native_crash",
         "js_fatal",
@@ -137,6 +145,16 @@ pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryDa
             doc! {"$group": group},
             doc! {"$sort": {"last_seen": -1}},
             doc! {"$limit": 200},
+            doc! {"$set": {"artifact_ids": {"$slice": [
+                {"$sortArray": {
+                    "input": {"$filter": {
+                        "input": "$artifact_ids", "as": "artifact",
+                        "cond": {"$ne": ["$$artifact", null]}
+                    }},
+                    "sortBy": 1
+                }},
+                10
+            ]}}},
         ])
         .max_time(Duration::from_secs(5))
         .await?

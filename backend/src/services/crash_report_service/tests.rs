@@ -238,9 +238,11 @@ async fn all_cluster_limits_produce_retry_after_before_json_parsing() {
 #[tokio::test]
 async fn admin_aggregation_pagination_and_window_filters_are_correct() {
     let (db, id, rev) = account("crash_summary").await;
+    let mut artifacts = Vec::new();
     for kind in [Kind::JsError, Kind::RenderError, Kind::JsError] {
         let mut r = report();
         r.kind = kind;
+        artifacts.push(r.artifact_id.clone().unwrap());
         insert(&db, &CrashConfig::default(), "test", &id, &rev, r)
             .await
             .unwrap();
@@ -254,16 +256,19 @@ async fn admin_aggregation_pagination_and_window_filters_are_correct() {
     )
     .await
     .unwrap();
-    // Each build artifact is independent, even when its version/build match.
+    artifacts.sort();
+    artifacts.dedup();
+    assert_eq!(summary.versions.len(), 1);
+    let version = &summary.versions[0];
+    assert_eq!(version.get_i32("total").unwrap(), 3);
+    assert_eq!(version.get_i32("js_error").unwrap(), 2);
+    assert_eq!(version.get_i32("render_error").unwrap(), 1);
     assert_eq!(
-        summary
-            .versions
-            .iter()
-            .map(|d| d
-                .get_i32("total")
-                .unwrap_or_else(|_| d.get_i64("total").unwrap() as i32))
-            .sum::<i32>(),
-        3
+        version.get_array("artifact_ids").unwrap(),
+        &artifacts
+            .into_iter()
+            .map(bson::Bson::String)
+            .collect::<Vec<_>>()
     );
     let query = admin::ReportQuery {
         limit: Some(2),
@@ -284,6 +289,115 @@ async fn admin_aggregation_pagination_and_window_filters_are_correct() {
     assert_eq!(second.len(), 1);
     assert!(next.is_none());
     assert!(first.iter().all(|r| r.id != second[0].id));
+}
+
+#[tokio::test]
+async fn admin_aggregation_combines_native_and_js_for_the_same_version_build() {
+    let (db, id, rev) = account("crash_mixed_artifacts").await;
+    let artifact = uuid::Uuid::new_v4().to_string();
+    for kind in [Kind::NativeCrash, Kind::JsFatal, Kind::UnhandledRejection] {
+        let mut r = report();
+        r.platform = Platform::Ios;
+        r.app_version = "1.0.4".into();
+        r.app_build = "45".into();
+        r.kind = kind;
+        r.runtime = None;
+        if kind == Kind::NativeCrash {
+            r.artifact_id = None;
+            r.native_signal = Some(NativeSignal::Segv);
+            r.js_frames.clear();
+        } else {
+            r.artifact_id = Some(artifact.clone());
+            r.js_frames[0].asset = "main.jsbundle".into();
+        }
+        insert(&db, &CrashConfig::default(), "test", &id, &rev, r)
+            .await
+            .unwrap();
+    }
+    let query = admin::SummaryQuery {
+        window: None,
+        platform: Some(Platform::Ios),
+    };
+    let summary = admin::summary(&db, &query).await.unwrap();
+    assert_eq!(summary.versions.len(), 1);
+    let version = &summary.versions[0];
+    assert_eq!(
+        version.get_document("_id").unwrap(),
+        &doc! {
+            "platform": "ios", "environment": "test", "app_version": "1.0.4", "app_build": "45"
+        }
+    );
+    assert_eq!(version.get_i32("total").unwrap(), 3);
+    for kind in ["native_crash", "js_fatal", "unhandled_rejection"] {
+        assert_eq!(version.get_i32(kind).unwrap(), 1);
+    }
+    assert_eq!(version.get_i32("js_error").unwrap(), 0);
+    assert_eq!(
+        version.get_array("artifact_ids").unwrap(),
+        &vec![bson::Bson::String(artifact)]
+    );
+    let (reports, _) = admin::list(
+        &db,
+        &admin::ReportQuery {
+            platform: Some(Platform::Ios),
+            app_version: Some("1.0.4".into()),
+            app_build: Some("45".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(reports.len(), 3);
+
+    // Mobile records without any artifact, including older absent fields, yield an empty list.
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_many(doc! {}, doc! {"$unset": {"report.artifact_id": ""}})
+        .await
+        .unwrap();
+    let summary = admin::summary(&db, &query).await.unwrap();
+    assert_eq!(summary.versions.len(), 1);
+    assert_eq!(summary.versions[0].get_i32("total").unwrap(), 3);
+    assert!(
+        summary.versions[0]
+            .get_array("artifact_ids")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn admin_version_artifact_ids_are_distinct_sorted_and_bounded() {
+    let (db, id, rev) = account("crash_artifact_bound").await;
+    let artifacts: Vec<String> = (0..12)
+        .map(|i| format!("00000000-0000-4000-8000-{i:012x}"))
+        .collect();
+    for artifact in artifacts.iter().rev().chain(artifacts.iter().take(2)) {
+        let mut r = report();
+        r.artifact_id = Some(artifact.clone());
+        insert(&db, &CrashConfig::default(), "test", &id, &rev, r)
+            .await
+            .unwrap();
+    }
+    let summary = admin::summary(
+        &db,
+        &admin::SummaryQuery {
+            window: None,
+            platform: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.versions.len(), 1);
+    assert_eq!(summary.versions[0].get_i32("total").unwrap(), 14);
+    assert_eq!(
+        summary.versions[0].get_array("artifact_ids").unwrap(),
+        &artifacts
+            .iter()
+            .take(10)
+            .cloned()
+            .map(bson::Bson::String)
+            .collect::<Vec<_>>()
+    );
 }
 use futures::TryStreamExt;
 

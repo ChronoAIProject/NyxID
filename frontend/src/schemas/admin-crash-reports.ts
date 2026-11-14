@@ -64,6 +64,7 @@ export const crashSummarySchema = z.object({
       app_version: z.string(),
       app_build: z.string(),
       artifact_id: z.string().nullable(),
+      artifact_ids: z.array(z.string()).max(10),
       counts: z.record(z.string(), z.number()),
       total: z.number(),
       first_seen: z.string(),
