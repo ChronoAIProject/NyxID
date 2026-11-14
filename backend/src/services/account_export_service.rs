@@ -1456,7 +1456,7 @@ mod tests {
             crate::test_utils::connect_transaction_test_database("account_export_sentinel").await;
         let owner = uuid::Uuid::new_v4().to_string();
         let bystander = uuid::Uuid::new_v4().to_string();
-        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
             .insert_many([
                 crate::test_utils::test_user(&owner, UserType::Person),
                 crate::test_utils::test_user(&bystander, UserType::Person),
