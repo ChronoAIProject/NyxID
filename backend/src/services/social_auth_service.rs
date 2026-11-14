@@ -880,6 +880,7 @@ mod tests {
             apns_topic: None,
             android_app_package: None,
             android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,

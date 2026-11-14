@@ -394,7 +394,7 @@ pub async fn initiate_oauth_connect(
         None => None,
     };
 
-    validate_mobile_oauth_return(&query, state.config.is_production())?;
+    validate_mobile_oauth_return(&query, &state.config.mobile_app_return_schemes)?;
 
     // Optional org-targeted flow. When set, the admin is initiating OAuth
     // on behalf of the org -- the resulting token lives under the org's
@@ -624,7 +624,7 @@ async fn generic_oauth_callback_impl(
             } else {
                 "provider_error"
             };
-            if let Some(redirect) = app_return_redirect(uri, Some(code)) {
+            if let Some(redirect) = app_return_redirect(&state.config, uri, Some(code)) {
                 return redirect;
             }
         }
@@ -656,7 +656,8 @@ async fn generic_oauth_callback_impl(
                 && let Ok(oauth_state) =
                     user_token_service::peek_oauth_state(&state.db, state_param).await
                 && let Some(uri) = oauth_state.app_return_uri.as_deref()
-                && let Some(redirect) = app_return_redirect(uri, Some("provider_error"))
+                && let Some(redirect) =
+                    app_return_redirect(&state.config, uri, Some("provider_error"))
             {
                 return redirect;
             }
@@ -775,7 +776,8 @@ async fn generic_oauth_callback_impl(
             auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
         );
         if let Some(uri) = oauth_state.app_return_uri.as_deref()
-            && let Some(redirect) = app_return_redirect(uri, Some("session_mismatch"))
+            && let Some(redirect) =
+                app_return_redirect(&state.config, uri, Some("session_mismatch"))
         {
             return redirect;
         }
@@ -881,7 +883,8 @@ async fn generic_oauth_callback_impl(
                     auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
                 );
                 if let Some(uri) = oauth_state.app_return_uri.as_deref()
-                    && let Some(redirect) = app_return_redirect(uri, Some("exchange_failed"))
+                    && let Some(redirect) =
+                        app_return_redirect(&state.config, uri, Some("exchange_failed"))
                 {
                     return redirect;
                 }
@@ -956,7 +959,7 @@ async fn generic_oauth_callback_impl(
             }
 
             if let Some(uri) = oauth_state.app_return_uri.as_deref()
-                && let Some(redirect) = app_return_redirect(uri, None)
+                && let Some(redirect) = app_return_redirect(&state.config, uri, None)
             {
                 redirect
             } else if let Some(flow) = completion_flow {
@@ -1015,7 +1018,8 @@ async fn generic_oauth_callback_impl(
             );
             // Sanitize error for user-facing redirect -- never leak internal details
             if let Some(uri) = oauth_state.app_return_uri.as_deref()
-                && let Some(redirect) = app_return_redirect(uri, Some("exchange_failed"))
+                && let Some(redirect) =
+                    app_return_redirect(&state.config, uri, Some("exchange_failed"))
             {
                 redirect
             } else if let Some(flow) = completion_flow {
@@ -1042,9 +1046,12 @@ async fn generic_oauth_callback_impl(
     }
 }
 
-fn validate_mobile_oauth_return(query: &OAuthInitiateQuery, production: bool) -> AppResult<()> {
+fn validate_mobile_oauth_return(
+    query: &OAuthInitiateQuery,
+    configured_schemes: &[String],
+) -> AppResult<()> {
     if let Some(uri) = query.app_return_uri.as_deref() {
-        super::mobile_redirect::validate_app_return_uri(uri, production)?;
+        super::mobile_redirect::validate_app_return_uri(uri, configured_schemes)?;
         if query.redirect_path.is_some() || matches!(query.flow.as_deref(), Some("cc" | "wz")) {
             return Err(AppError::ValidationError(
                 "app_return_uri cannot be combined with redirect_path or a completion-page flow"
@@ -1057,7 +1064,17 @@ fn validate_mobile_oauth_return(query: &OAuthInitiateQuery, production: bool) ->
 
 /// Only fixed result tokens cross the native return boundary. Remove caller
 /// query parameters too, so neither state nor credential material can be echoed.
-fn app_return_redirect(uri: &str, error_code: Option<&str>) -> Option<axum::response::Redirect> {
+fn app_return_redirect(
+    config: &crate::config::AppConfig,
+    uri: &str,
+    error_code: Option<&str>,
+) -> Option<axum::response::Redirect> {
+    if super::mobile_redirect::validate_app_return_uri(uri, &config.mobile_app_return_schemes)
+        .is_err()
+    {
+        tracing::warn!("stored OAuth app return URI failed validation; using frontend redirect");
+        return None;
+    }
     let Ok(mut url) = url::Url::parse(uri) else {
         tracing::warn!("stored OAuth app return URI could not be parsed; using frontend redirect");
         return None;
@@ -3930,18 +3947,18 @@ mod tests {
                 flow: Some(flow.into()),
                 ..Default::default()
             };
-            assert!(validate_mobile_oauth_return(&query, false).is_err());
+            assert!(validate_mobile_oauth_return(&query, &[]).is_err());
         }
         let query: OAuthInitiateQuery = serde_json::from_value(serde_json::json!({
             "app_return_uri": "nyxid://services/oauth-return", "future_client_option": true
         }))
         .unwrap();
-        assert!(validate_mobile_oauth_return(&query, true).is_ok());
+        assert!(validate_mobile_oauth_return(&query, &[]).is_ok());
         let query = OAuthInitiateQuery {
             redirect_path: Some("/keys".into()),
             ..query
         };
-        assert!(validate_mobile_oauth_return(&query, false).is_err());
+        assert!(validate_mobile_oauth_return(&query, &[]).is_err());
         let query: OAuthInitiateQuery =
             serde_json::from_value(serde_json::json!({ "future_client_option": "ignored" }))
                 .unwrap();
@@ -3960,42 +3977,56 @@ mod tests {
 
     #[test]
     fn corrupted_stored_app_return_uri_falls_back_to_frontend_redirect() {
-        assert!(app_return_redirect("://corrupted", Some("provider_error")).is_none());
+        assert!(
+            app_return_redirect(
+                &crate::test_utils::test_app_config(),
+                "://corrupted",
+                Some("provider_error")
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]
     async fn corrupted_stored_app_return_uri_uses_frontend_callback() {
-        let db = connect_test_database("mobile_callback_corrupted_uri")
-            .await
-            .expect("MongoDB");
-        let state = test_app_state(db.clone());
-        let state_id = Uuid::new_v4().to_string();
-        let mut oauth_state = test_oauth_state(
-            &state_id,
-            &Uuid::new_v4().to_string(),
-            &Uuid::new_v4().to_string(),
-        );
-        oauth_state.app_return_uri = Some("://corrupted".into());
-        db.collection::<OAuthState>(OAUTH_STATES)
-            .insert_one(oauth_state)
-            .await
-            .unwrap();
+        for (suffix, uri) in [
+            ("malformed", "://corrupted"),
+            ("https", "https://evil.example/x"),
+            ("exp", "exp://127.0.0.1:8081/--/services/oauth-return"),
+            ("custom", "acme-nyx://services/oauth-return"),
+        ] {
+            let db = connect_test_database(&format!("mobile_callback_corrupted_uri_{suffix}"))
+                .await
+                .expect("MongoDB");
+            let state = test_app_state(db.clone());
+            let state_id = Uuid::new_v4().to_string();
+            let mut oauth_state = test_oauth_state(
+                &state_id,
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+            );
+            oauth_state.app_return_uri = Some(uri.into());
+            db.collection::<OAuthState>(OAUTH_STATES)
+                .insert_one(oauth_state)
+                .await
+                .unwrap();
 
-        let location = redirect_location(
-            generic_oauth_callback_impl(
-                state,
-                None,
-                GenericOAuthCallbackQuery {
-                    code: None,
-                    state: Some(state_id),
-                    error: None,
-                    error_description: None,
-                },
-            )
-            .await,
-        );
-        assert!(location.starts_with("http://localhost:3000/providers/callback"));
-        assert!(!location.contains("corrupted"));
+            let location = redirect_location(
+                generic_oauth_callback_impl(
+                    state,
+                    None,
+                    GenericOAuthCallbackQuery {
+                        code: None,
+                        state: Some(state_id),
+                        error: None,
+                        error_description: None,
+                    },
+                )
+                .await,
+            );
+            assert!(location.starts_with("http://localhost:3000/providers/callback"));
+            assert!(!location.contains(uri));
+        }
     }
 
     #[tokio::test]
@@ -4060,10 +4091,7 @@ mod tests {
             let state_id = Uuid::new_v4().to_string();
             let key_id = Uuid::new_v4().to_string();
             let mut oauth_state = test_oauth_state(&state_id, &user_id, &provider_id);
-            oauth_state.app_return_uri = Some(
-                "nyxid://services/oauth-return?token=do-not-echo&nonce=private&state=private"
-                    .into(),
-            );
+            oauth_state.app_return_uri = Some("nyxid://services/oauth-return".into());
             db.collection::<OAuthState>(OAUTH_STATES)
                 .insert_one(oauth_state)
                 .await
