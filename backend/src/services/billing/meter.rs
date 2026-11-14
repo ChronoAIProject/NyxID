@@ -2643,6 +2643,8 @@ mod tests {
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),

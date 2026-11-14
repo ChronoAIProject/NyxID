@@ -133,12 +133,27 @@ objects, so Lago preserves its tax assignments.
   of rounded fees/tax components; it is not a fixed one-cent bound per period.
 - A verified empty profile is 0%. Missing/stale tax configuration fails closed
   for wallet-funded admission after one bounded refresh outside the transaction.
-  The inline provider timeout is five seconds total; a persisted failed-attempt
-  marker suppresses inline retries for 30 seconds. Provisioning, webhooks and
+  Inline provider reads share a five-second deadline; the complete refresh has
+  a six-second ceiling, including capture/publication and failure-backoff writes.
+  A persisted provider-failure marker suppresses inline retries for 30 seconds. Provisioning, webhooks and
   reconciliation bypass that backoff. Fully benefit-funded admissions succeed
   even if the best-effort profile refresh fails. Duplicate charges for one
   metric conservatively use the highest additive tax rate, with provider refresh
   reconciling any difference.
+- Tax refreshes capture a profile revision, the wallet's tax generation and a
+  plan epoch before provider I/O. Existing verified profiles on the same plan
+  publish with one conditional update; cold or changed-plan profiles use a
+  small guarded transaction. A losing refresh reuses a fresh winner; inline
+  admission alone may recapture and fetch once more within the original
+  deadline. A second loss fails closed without starting failure backoff, and
+  provider failures never retry. Sweep, webhook and post-provision refreshes
+  remain single-attempt. Invalidation advances its counter,
+  then marks profiles stale and increments their revisions; both statements
+  must finish. An interruption between them needs the source to repeat the
+  invalidation (#2467 dirty-plan recovery for explicit writers, webhook
+  redelivery for webhooks), or later events/TTL refresh. Old binaries ignore
+  these additive fields and remain unfenced; complete ordering requires all
+  writers upgraded. Rollback needs no data change.
 - Current-period subtotal, tax total and total come directly from Lago
   `current_usage`. Per-tax rows are computed from the cached configuration and
   rounded to cents; **Tax rounding** explicitly reconciles them to Lago's tax

@@ -418,8 +418,11 @@ impl BillingService {
             &self.db,
             lago,
             owner_id,
-            &self.config.lago_plan_code,
-            cap,
+            provisioning::WalletProvisioningOptions {
+                plan_code: &self.config.lago_plan_code,
+                default_overdraft_cap_credits: cap,
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+            },
         )
         .await
     }
@@ -443,12 +446,7 @@ impl BillingService {
         let subscription = lago
             .ensure_subscription(&wallet.lago_customer_id, &self.config.lago_plan_code)
             .await?;
-        self.db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
-            .update_one(bson::doc! {"_id":&wallet.id,"owner_id":&wallet.owner_id,
-                "lago_customer_id":&wallet.lago_customer_id,
-                "$or":[{"lago_subscription_id":null},{"lago_subscription_id":""}]},
-                bson::doc! {"$set":{"lago_subscription_id":subscription,"updated_at":bson::DateTime::now()}})
-            .await?;
+        taxes::repair_subscription(&self.db, wallet, &subscription).await?;
         self.get_wallet(&wallet.owner_id).await?.ok_or_else(|| {
             crate::errors::AppError::BillingNotConfigured("Billing wallet no longer exists".into())
         })
@@ -470,8 +468,11 @@ impl BillingService {
             &self.db,
             lago,
             owner_id,
-            &self.config.lago_plan_code,
-            cap,
+            provisioning::WalletProvisioningOptions {
+                plan_code: &self.config.lago_plan_code,
+                default_overdraft_cap_credits: cap,
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+            },
             amount_credits,
             idempotency_key,
         )
@@ -490,8 +491,11 @@ impl BillingService {
         provisioning::backfill_existing_owner_wallets(
             &self.db,
             lago,
-            &self.config.lago_plan_code,
-            cap,
+            provisioning::WalletProvisioningOptions {
+                plan_code: &self.config.lago_plan_code,
+                default_overdraft_cap_credits: cap,
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+            },
         )
         .await
     }
@@ -2447,6 +2451,8 @@ mod tests {
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),
