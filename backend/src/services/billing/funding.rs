@@ -1343,6 +1343,11 @@ async fn complete_allowance_lock(
     allowance_id: &str,
     lock: &AllowanceSettlementLock,
 ) -> AppResult<()> {
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AllowanceLocked,
+    )
+    .await;
     if !lock.applied {
         db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
             .update_one(
@@ -1365,6 +1370,11 @@ async fn complete_allowance_lock(
             )
             .await?;
     }
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AllowanceApplied,
+    )
+    .await;
     let allocation = AllowanceConsumptionAllocation {
         operation_id: lock.operation_id.clone(),
         allowance_id: allowance_id.to_string(),
@@ -1383,6 +1393,11 @@ async fn complete_allowance_lock(
             doc! { "$push": { "funding.allowance_consumptions": allocation_bson } },
         )
         .await?;
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AllowanceRecorded,
+    )
+    .await;
     db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
         .update_one(
             doc! {
@@ -1610,6 +1625,11 @@ async fn complete_grant_lock(
     grant_id: &str,
     lock: &CreditGrantSettlementLock,
 ) -> AppResult<()> {
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::GrantLocked,
+    )
+    .await;
     if !lock.applied {
         let now = Utc::now();
         db.collection::<CreditGrant>(CREDIT_GRANTS)
@@ -1649,6 +1669,11 @@ async fn complete_grant_lock(
             )
             .await?;
     }
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::GrantApplied,
+    )
+    .await;
     let allocation = GrantConsumptionAllocation {
         operation_id: lock.operation_id.clone(),
         grant_id: grant_id.to_string(),
@@ -1667,6 +1692,11 @@ async fn complete_grant_lock(
             doc! { "$push": { "funding.grant_consumptions": allocation_bson } },
         )
         .await?;
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::GrantRecorded,
+    )
+    .await;
     if lock.consume > Credits::ZERO {
         if let (Some(grant), Some(usage_row)) = (
             db.collection::<CreditGrant>(CREDIT_GRANTS)

@@ -73,7 +73,7 @@ Ordinary and durable public/pool/managed admission commit total/rule holds, allo
 
 `revoke_requested_at` immediately fences new holds and unreserved extra usage. Existing holds and acquired durable locks finish. Finalization requires zero reservations and no resource lock, atomically captures exact remaining value as `terminal_amount`, and confirms the existing balanced `grant-revoked:{id}` journal movement once. Release, settlement and reconciliation retry it. Reclaim never debits another allocation or wallet. Expiry uses its own terminal movement and remains distinct from reclaim. Effective `held` includes unapplied extra lock commitments; raw `reserved` fields remain unchanged, including per-rule responses.
 
-Resource lock acquisition checks durable operation history and writes the usage row under its immutable invocation claim in the same transaction. Takeover drains locks for the usage, including exhausted resources, before recomputing coverage. Allowance and grant coverage comes from recorded histories, so a competing consumer reducing an extra operation cannot reduce wallet funding incorrectly. New admissions cannot create a hold without recoverable usage intent. Historical orphan holds without durable intent are not automatically inferred or released.
+Resource lock acquisition checks durable operation history and writes the usage row under its immutable invocation claim in the same transaction. Takeover drains locks for the usage, including exhausted resources, before recomputing coverage. Allowance and grant coverage comes from recorded histories, so a competing consumer reducing an extra operation cannot reduce wallet funding incorrectly. New admissions cannot create a hold without recoverable usage intent. Never-forwarded cancellation and abandonment commit the terminal meter transition and exact tax-inclusive wallet hold release in one transaction; benefit release then resumes through its existing operation locks and history. Old binaries retain the separate-write release gap during rollout or rollback. The account runner also compares reservation counters with live meter holds; it returns a persistent, unlocked wallet excess after two unchanged scheduled observations as described below.
 
 Optional actor-scoped UUID submission keys freeze exact payloads and recipient/policy snapshots. Deterministic per-recipient IDs resume partial/concurrent retries without resetting spent, held or reclaimed state; a changed payload conflicts. Schedule periods preserve their existing deterministic identities, recipient cutoffs and frozen policies; every issuance gets fresh counters. Sparse pause/note edits do not re-resolve unchanged rules after catalog retirement.
 
@@ -157,16 +157,68 @@ Rolling HMAC verification separately checks historical postings for edits or
 deletion.
 
 A billing-enabled account-integrity runner leases its reconciliation job across replicas and checks
-up to 1,000 wallets and 1,000 grants in one bounded snapshot. It runs at the
+up to 1,000 wallets, 1,000 grants and 1,000 allowance periods in one bounded snapshot. It runs at the
 chain-verification cadence, holds the lease for the active pass, and releases it
-when the pass reaches both lexical cursors. Deployments with billing disabled or
+when the pass reaches all lexical cursors. Deployments with billing disabled or
 `CHAIN_VERIFY_INTERVAL_SECS=0` spawn no account runner; zero also disables
 automatic hash-chain verification. Durable lexical cursors make collections
-that finish early wait for the other collection. Active money locks and
+that finish early wait for the other collections. Active money locks and
 incomplete journaling defer accounts; a deferred cycle never certifies a full
 pass. Mismatches retain the cursor and report account, stored balance and journal
 balance at error level. The one-second deferred-refresh worker uses a per-request
 lease before calling Lago, so replicas cannot duplicate a provider fetch.
+
+The same snapshot pass verifies wallet holds against every unreleased meter row
+(including forwarded and finalized rows), subtracting the one applied wallet
+settlement whose row is still unreleased. Grant and allowance holds use original
+reservation allocations less recorded settlement/release operations; an applied
+resource lock accounts for the gap before its history record. Grant rule holds
+are checked too. These counters are separate from journaled asset checkpoints.
+
+`billing_hold_conservation` reports unchanged mismatches seen in consecutive
+scheduled passes and at least five minutes of stability measured with MongoDB
+time. It separates wallet excess, wallet deficit, grant and allowance counts,
+with at most five IDs and signed total differences per kind. Resources without
+a wallet use their resource key. A wallet with several affected resources counts
+once per kind; its sample shows one resource's difference, not a sum of units.
+Rapid passes retain the first unchanged timestamp. A revisit within the same
+pass preserves confirmation; hold repair waits while an asset mismatch holds
+the cursor. A balance change does not hide an unchanged hold mismatch but does
+restart repair confirmation.
+
+For unchanged financial/identity/policy/lock state, a positive wallet excess is
+returned after the second observation in a small snapshot/majority transaction
+that rechecks the live account lease, observation and holds, writes the
+`billing_wallet_hold_excess_repaired` audit event and deletes the observation.
+Deficits and benefit counters are never changed. Routine refresh/expiry clocks
+and provider/tax generations are excluded from confirmation because they can
+change without funds moving. Zero wallet shares are excluded from the live hold
+fingerprint. A clean observation also removes its diagnostic; a completed pass
+removes observations for resources no longer visited. Manual Integrity checks
+keep separate cursors and do not confirm or repair holds.
+
+Checks add no commands to admission, settlement or release. Each nonempty
+eligible page reads observations once and live-row presence once; idle resources
+need no individual read or full model decode. Only live rows, nonzero total/rule
+counters, locks or prior observations require detail. The wallet presence query
+is covered by a partial index on unreleased rows; benefit indexes include only
+rows containing the relevant reservation ID, including legacy funding without
+`settled`. Startup builds each index over existing data; old binaries neither
+depend on nor drop them. Latest journal-posting seeks are batched per snapshot.
+Each detailed query returns at most 10,001 matching rows. More than 10,000,
+malformed amounts/models or unprovable lock context produce a separate incomplete
+hold diagnostic, never repair. They do not change the asset certificate or its
+status detail; unreadable asset fields still defer that asset. Pre-cutover
+wallets need no hold query and remain deferred by the exact-accounting gate.
+
+An ordinary rolling update needs no action. An old process frozen between its
+two release writes past two account observations and at least five minutes can,
+if it then resumes after repair, subtract another live hold by at most its own
+release amount (the nonnegative-counter predicate still applies). That deficit
+is reported and never auto-changed. Rolling back restores the old release gap;
+no persisted value schema changes or rollback migration are required. The
+account cadence remains `CHAIN_VERIFY_INTERVAL_SECS` (default 3,600 seconds),
+not the separate 300-second billing-maintenance interval.
 
 The separate periodic billing maintenance pass (settlement recovery, grant and
 purchase expiry, Lago price/usage/balance refresh) uses the renewable

@@ -241,6 +241,18 @@ pub struct MachineUsageAttribution {
     pub principal_kind: String,
 }
 
+/// Projection for snapshot hold reconciliation; never inserted as a meter row.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UsageHold {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub billing_owner_id: String,
+    #[serde(default, with = "crate::models::credits::whole")]
+    pub reserved_credits: Credits,
+    #[serde(default)]
+    pub funding: Option<UsageFunding>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]

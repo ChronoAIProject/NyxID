@@ -191,6 +191,7 @@ pub async fn try_reserve_prepaid(
         .map_err(Into::into)
 }
 
+#[cfg(test)]
 pub async fn release_wallet_hold(
     db: &mongodb::Database,
     owner_id: &str,
@@ -275,7 +276,17 @@ pub async fn apply_settlement_for_row(
                 .await?;
                 return Ok(false);
             }
+            #[cfg(test)]
+            crate::billing_integration_tests::hold_release::point(
+                crate::billing_integration_tests::hold_release::Phase::WalletLocked,
+            )
+            .await;
             apply_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
+            #[cfg(test)]
+            crate::billing_integration_tests::hold_release::point(
+                crate::billing_integration_tests::hold_release::Phase::WalletApplied,
+            )
+            .await;
         }
     }
 
@@ -315,6 +326,11 @@ pub async fn apply_settlement_for_row(
         }
     }
     if let Some(wallet_id) = row.wallet_id.as_deref() {
+        #[cfg(test)]
+        crate::billing_integration_tests::hold_release::point(
+            crate::billing_integration_tests::hold_release::Phase::WalletReleased,
+        )
+        .await;
         clear_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &row.id).await?;
     }
     Ok(update.modified_count > 0)
@@ -1148,32 +1164,92 @@ async fn release_one_unforwarded_row(
         set_doc.insert("last_error", reason);
     }
 
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::BeforeTransaction,
+    )
+    .await;
+    // The released marker is also the wallet hold's receipt. Commit both or
+    // neither so an interrupted release remains discoverable by abandonment.
+    let context = (db.clone(), row.id.clone(), set_doc);
+    let claimed = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, row_id, set_doc)| {
+            Box::pin(release_wallet_in_session(db, session, row_id, set_doc))
+        },
+    )
+    .await?;
+    let Some(claimed) = claimed else {
+        return Ok(false);
+    };
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AfterCommit,
+    )
+    .await;
+    // Benefit operations retain their own durable locks/history. A crash here
+    // is picked up by funding::recover_terminal_releases.
+    super::funding::release_usage_reservations(db, &claimed).await?;
+    Ok(true)
+}
+
+async fn release_wallet_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    row_id: &str,
+    set_doc: &Document,
+) -> AppResult<Option<UsageMeterRow>> {
     let claimed = db
         .collection::<UsageMeterRow>(USAGE_METER)
         .find_one_and_update(
             doc! {
-                "_id": &row.id,
+                "_id": row_id,
                 "forwarded": false,
                 "status": "reserved",
                 "released": false,
                 "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.is_runtime_allocation()).map(BillingMetric::as_str).collect::<Vec<_>>() },
             },
-            doc! { "$set": set_doc },
+            doc! { "$set": set_doc.clone() },
         )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::Before)
-                .build(),
-        )
+        .return_document(ReturnDocument::Before)
+        .session(&mut *session)
         .await?;
-
     let Some(claimed) = claimed else {
-        return Ok(false);
+        return Ok(None);
     };
-
-    release_wallet_hold(db, &claimed.billing_owner_id, claimed.reserved_credits).await?;
-    super::funding::release_usage_reservations(db, &claimed).await?;
-    Ok(true)
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AfterMeter,
+    )
+    .await;
+    if claimed.reserved_credits > Credits::ZERO {
+        let released = db
+            .collection::<BillingWallet>(BILLING_WALLET)
+            .update_one(
+                doc! {
+                    "owner_id": &claimed.billing_owner_id,
+                    "$expr": { "$gte": ["$reserved_credits", claimed.reserved_credits] },
+                },
+                doc! {
+                    "$inc": { "reserved_credits": -claimed.reserved_credits },
+                    "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+                },
+            )
+            .session(&mut *session)
+            .await?;
+        if released.matched_count != 1 {
+            return Err(AppError::Internal(
+                "Billing reservation wallet release failed".into(),
+            ));
+        }
+    }
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AfterWallet,
+    )
+    .await;
+    Ok(Some(claimed))
 }
 
 pub(super) async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
