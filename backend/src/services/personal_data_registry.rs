@@ -2549,6 +2549,7 @@ pub fn export_sections() -> impl Iterator<Item = &'static str> {
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("assistant_group_mention_notifications", "user_id"),
     ("assistant_group_messages", "user_id"),
+    ("assistant_group_requests", "user_id"),
     ("channel_adapter_events", "user_id"),
     ("channel_delivery_receipts", "user_id"),
     ("channel_email_batches", "user_id"),
@@ -2666,11 +2667,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
     ),
     (
         "assistant_group_read_states",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
-        "assistant_group_requests",
         "user_id",
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
