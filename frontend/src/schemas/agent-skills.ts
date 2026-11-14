@@ -16,7 +16,21 @@ export const agentSkillSchema = pinSchema.extend({
   disabled: z.boolean().default(false),
 });
 export type AgentSkill = z.infer<typeof agentSkillSchema>;
+export const systemSkillStatusSchema = z.object({
+  skill_id: z.string(),
+  name: z.string(),
+  version: z.string(),
+  description: z.string(),
+  enabled: z.boolean(),
+  shadowed_by_pin: z.boolean(),
+  override: z.boolean().nullable(),
+  effective: z.boolean(),
+  source: z.enum(["agent", "nyxbot_default", "nyxbot_override", "platform", "pin"]),
+});
+export type SystemSkillStatus = z.infer<typeof systemSkillStatusSchema>;
 export const agentSkillsSchema = z.object({
+  system_skills: systemSkillStatusSchema.array().optional(),
+  system_skills_for_specialists: z.enum(["default", "override"]).optional(),
   revision: z.number(),
   skills: agentSkillSchema.array(),
   metadata: z.record(
@@ -230,6 +244,8 @@ export const agentSkillHistoryItemSchema = z.object({
   created_at: z.string(),
   revision: z.number().nullable().default(null),
   proposal_id: z.string().nullable().default(null),
+  skill_id: z.string().nullable().optional(),
+  enabled: z.boolean().nullable().optional(),
   skills: z
     .array(
       z.object({

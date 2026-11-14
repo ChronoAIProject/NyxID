@@ -2117,3 +2117,86 @@ admin's personal specialist while that admin retains live org-admin authority.
 The org owns the bot/route/route key and pays channel usage; this is distinct from
 an enrolled organization-specialist execution lane. See
 [authenticated X outcomes](../CHANNEL_ACTIVITY.md#authenticated-inbound-outcomes-and-x-chat-limits).
+
+## Built-in (system) skills
+
+Platform admins select up to eight public Ornn skills at **Admin → Built-in
+skills** (`/admin/assistant/system-skills`) or with:
+
+```bash
+nyxid admin assistant system-skills show --output json
+nyxid admin assistant system-skills set --skill nyxbot@1.0 --skill cma@2.0
+nyxid admin assistant system-skills set --clear
+```
+
+The selection is platform-wide, ordered and revision-fenced. NyxID resolves
+exact major.minor versions, SHA-256 hashes and the pinned dependency closure
+through the admin's own signed Ornn identity, verifies every package, and
+refuses roots or dependencies without confirmed public visibility. This does
+not publish skill content. The first save uses revision 0; concurrent saves
+return 409 and require a reload. Audit events contain identifiers and counts,
+never package content.
+
+When the acting person's default-off `assistant:system-skills` flag is enabled,
+NyxBot and all personal and organization specialists receive a separate stable
+built-in guidance block. Guests receive none. Skills remain untrusted guidance
+and confer no grants, approval bypass, model selection or script execution.
+Packages load on demand using `nyxid__skill_read` and the existing bound-skill
+reader, with the normal package, hash and paging checks. Its allowed set is the
+agent's enabled attached pins and their dependencies plus effective built-in
+pins for the acting person. The same live set is checked in the proxy projection
+and immediately before dispatch, including catalog-only reads. Bound package
+reads never follow redirects. Personal agents use their owner's connection;
+organization specialists use the owning org's connection and its existing
+60-second membership callback, retaining the acting person's signed identity.
+Specialists use signed identity without resource-request proofs; eligible
+personal NyxBot reads retain proof issuance. No system skill
+is automatically preloaded. A specialist does not need an Ornn service grant
+for a server-resolved exact package read. This authorizes only that package and
+retains turn fences, operation scopes, approvals and audit. Ordinary Ornn reads
+and proxy calls retain their service-grant checks.
+
+An agent's own attached pin wins by skill ID **or name**, including when that pin
+is disabled. NyxBot's built-in switches are enabled by default. In **NyxBot
+settings → Built-in skills for specialists**, the owner chooses whether those
+switches are the **default** for specialists or **override** all specialists.
+The default mode lets each specialist set its own choice or **Use NyxBot’s
+choice**. Override mode locks specialist controls, retains their saved choices,
+and applies NyxBot's choices until the owner switches back to defaults. An
+organization specialist uses the acting member's personal NyxBot choices and
+mode. No NyxBot yet means enabled by default.
+
+Owners and organization maintainers use the agent's **Skills → Built-in skills**
+section, or `PUT /api/v1/assistant/nyxagent/agents/{id}/system-skills/{skill_id}`
+with `{"enabled":false}` / `{"enabled":true}` for an explicit choice and
+`{"enabled":null}` to inherit. Clearing a stale skill ID is allowed. Writing a
+specialist choice while the acting person's mode is override returns 409:
+`Built-in skills for specialists are managed by NyxBot settings`. The toggle is
+human-only and rollout-gated, and its metadata appears in skill history.
+`nyxid__update_settings` cannot change the specialist mode; there is no native
+tool for toggles. Changing the mode requires the rollout flag; other owner
+settings stay available with the flag off. The built-in Test action is read-only. Attachment, preload,
+improve, draft and learning operate on own pins only. Requesting an effective
+built-in returns instructions to read it immediately and creates no access request.
+Settings and NyxBot choices are loaded only with the flag enabled and a nonempty
+admin set; turn preparation reuses the settings it already needs.
+
+A change in effective built-in guidance resets each affected NyxAgent session
+once on its next turn, using the normal bounded recap. An unchanged effective
+set does not reset a session. Exact package contents are fetched and verified
+against their pins on each read. Legacy sessions without an instruction fingerprint reset once
+when adopting non-empty built-in skill guidance. Authoring and preloaded skill
+guidance retain their existing legacy-session behavior. Once the rollout flag
+is known to be enabled, a database failure loading built-in configuration or
+inheritance fails preparation. If the shared rollout flag lookup fails, optional
+authoring and built-in guidance stay disabled for that turn.
+
+**Rollout:** upgrade every backend replica before enabling
+`assistant:system-skills` for any person; a mixed fleet alternates prompt
+fingerprints and repeatedly resets sessions. Configuration endpoints work with
+the flag off. To roll back, turn the flag off first (one context reset), then
+restore older binaries. The separate `assistant_system_skills` platform document
+and defaulted `AssistantAgent.system_skill_overrides` /
+`AssistantSettings.system_skills_for_specialists` fields remain inert on old
+binaries. All agent and settings writers preserve sibling fields with atomic
+field updates.

@@ -119,12 +119,17 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
     max_group_handoffs: settings.max_group_handoffs,
     max_group_handoffs_per_hour: settings.max_group_handoffs_per_hour,
     specialist_access_requests: settings.specialist_access_requests ?? "denied",
+    system_skills_for_specialists:
+      settings.system_skills_for_specialists ?? "default",
   };
 }
 
 function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
   useUiTranslation();
   const update = useUpdateNyxBotSettings();
+  const systemSkillsEnabled = useAuthStore((s) =>
+    userHasFeature(s.user, FEATURE_FLAG.SYSTEM_SKILLS),
+  );
   const form = useAppForm<NyxAgentSettingsForm>({
     resolver: zodResolver(nyxAgentSettingsFormSchema(settings)),
     defaultValues: formValues(settings),
@@ -154,6 +159,11 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
         : {}),
       ...(dirty.max_group_handoffs_per_hour
         ? { max_group_handoffs_per_hour: values.max_group_handoffs_per_hour }
+        : {}),
+      ...(dirty.system_skills_for_specialists
+        ? {
+            system_skills_for_specialists: values.system_skills_for_specialists,
+          }
         : {}),
       ...(dirty.specialist_access_requests
         ? { specialist_access_requests: values.specialist_access_requests }
@@ -292,6 +302,37 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             />
           ))}
         </GroupedList>
+        {systemSkillsEnabled && (
+        <GroupedList title={translateUi("Built-in skills")}>
+          <FormField
+            control={form.control}
+            name="system_skills_for_specialists"
+            render={({ field }) => (
+              <FormItem inline>
+                <FormLabel className="flex-1">{translateUi("Built-in skills for specialists")}</FormLabel>
+                <Select value={field.value} onValueChange={field.onChange}>
+                  <FormControl>
+                    <SelectTrigger aria-label={translateUi("Built-in skills for specialists")}>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      {translateUi("Use NyxBot’s choices as the default")} </SelectItem>
+                    <SelectItem value="override">
+                      {translateUi("Apply NyxBot’s choices to all specialists")} </SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  {field.value === "override"
+                    ? translateUi("Specialists use your NyxBot’s choices. Their saved choices are retained and apply again when you switch back to defaults.")
+                    : translateUi("Each specialist inherits your NyxBot’s choices and can have its own choice.")}
+                </FormDescription>
+              </FormItem>
+            )}
+          />
+        </GroupedList>
+        )}
         <GroupedList
           title={translateUi("Specialist access")}
           footer={
@@ -330,7 +371,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           />
         </GroupedList>
         <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [...(Object.keys(SETTINGS_LABELS) as (keyof typeof SETTINGS_LABELS)[]).map(key => ({ key, label: SETTINGS_LABELS[key] })), { key: "access_mode", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL) }, { key: "specialist_access_requests", label: "Specialist access requests", format: labelValue({ denied: "Deny requests", routed_to_nyxbot: "Route to NyxBot" }) }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [...(Object.keys(SETTINGS_LABELS) as (keyof typeof SETTINGS_LABELS)[]).map(key => ({ key, label: SETTINGS_LABELS[key] })), { key: "system_skills_for_specialists", label: "Built-in skills for specialists", format: labelValue({ default: "Use NyxBot’s choices as the default", override: "Apply NyxBot’s choices to all specialists" }) }, { key: "access_mode", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL) }, { key: "specialist_access_requests", label: "Specialist access requests", format: labelValue({ denied: "Deny requests", routed_to_nyxbot: "Route to NyxBot" }) }])}
           label={translateUi("NyxBot preferences")}
           dirty={form.formState.isDirty}
           pending={update.isPending}

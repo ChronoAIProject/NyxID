@@ -46,18 +46,20 @@ impl Prepared {
         agent: Option<&AssistantAgent>,
         history: &[AssistantMessage],
     ) -> AppResult<Self> {
-        Self::with_guidance(key, row, agent, history, "")
+        Self::with_guidance(key, row, agent, history, "", false)
     }
 
     /// `guidance` is configuration-dependent instruction text (for example a
     /// rollout-gated tool's usage rules). It is part of the stable fingerprint,
-    /// so enabling or disabling it resets the session once.
+    /// so enabling or disabling it resets a bound session once. Built-in skills
+    /// also require one reset when adopting an unbound legacy session.
     pub fn with_guidance(
         key: &[u8],
         row: &AssistantConversation,
         agent: Option<&AssistantAgent>,
         history: &[AssistantMessage],
         guidance: &str,
+        has_system_skills: bool,
     ) -> AppResult<Self> {
         let owner_guidance = if row.guest_turn {
             ""
@@ -72,7 +74,8 @@ impl Prepared {
         });
         let reset = row.nyxagent_session_id.is_some()
             && previous.map_or_else(
-                || legacy_instruction_change(row, agent, history),
+                // Built-in skills have no agent profile timestamp.
+                || has_system_skills || legacy_instruction_change(row, agent, history),
                 |binding| binding.fingerprint != fingerprint || binding.guest != row.guest_turn,
             );
         let mut prepared = Self {

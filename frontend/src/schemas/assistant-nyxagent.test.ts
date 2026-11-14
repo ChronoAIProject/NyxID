@@ -17,6 +17,7 @@ import {
   nyxAgentMessageSchema,
   nyxAgentModelSchema,
   nyxAgentSettingsFormSchema,
+  nyxAgentSettingsSchema,
 } from "./assistant-nyxagent";
 
 const orchestrator = `nyxa-${"a".repeat(32)}`;
@@ -320,6 +321,7 @@ describe("NyxBot team, settings and channel schemas", () => {
       max_group_handoffs_per_hour: 0,
       max_auto_continuations: 8,
       specialist_access_requests: "denied",
+      system_skills_for_specialists: "default",
     };
     expect(schema.safeParse(valid).success).toBe(true);
     expect(schema.safeParse({ ...valid, max_auto_continuations: 0 }).success).toBe(true);
@@ -337,7 +339,7 @@ describe("NyxBot team, settings and channel schemas", () => {
 
   it("accepts each persisted access mode", () => {
     const schema = nyxAgentSettingsFormSchema(limits);
-    const base = { specialist_access_requests: "denied" as const, max_live_subagents: 0, max_concurrent_subagent_turns: 1, max_group_handoffs: 0, max_group_handoffs_per_hour: 0, max_auto_continuations: 8 };
+    const base = { system_skills_for_specialists: "default" as const, specialist_access_requests: "denied" as const, max_live_subagents: 0, max_concurrent_subagent_turns: 1, max_group_handoffs: 0, max_group_handoffs_per_hour: 0, max_auto_continuations: 8 };
     for (const access_mode of ["autopilot", "nyxmode", "ask_every_time"] as const) {
       expect(schema.parse({ ...base, access_mode }).access_mode).toBe(access_mode);
     }
@@ -576,4 +578,34 @@ it("retains optional personal Telegram thread and turn provenance, including nul
   expect(nyxAgentMessageSchema.parse({ ...message, platform_origin: origin }).platform_origin).toEqual(origin);
   expect(nyxAgentMessageSchema.parse({ ...message, platform_origin: null }).platform_origin).toBeNull();
   expect(nyxAgentConversationSchema.parse(legacyConversation).platform_thread).toBeUndefined();
+});
+
+it("omits the built-in specialist mode when the rollout field is absent", () => {
+  const settings = {
+    skip_destructive_confirmation: false,
+    max_live_subagents: 0,
+    max_concurrent_subagent_turns: 1,
+    max_live_subagents_limit: 32,
+    max_concurrent_subagent_turns_limit: 8,
+  };
+  expect(nyxAgentSettingsSchema.parse(settings).system_skills_for_specialists).toBeUndefined();
+  expect(nyxAgentSettingsSchema.parse({ ...settings, system_skills_for_specialists: "override" }).system_skills_for_specialists).toBe("override");
+});
+
+it("retains notification preferences beside the built-in specialist mode", () => {
+  const settings = nyxAgentSettingsSchema.parse({
+    skip_destructive_confirmation: false,
+    max_live_subagents: 8,
+    max_concurrent_subagent_turns: 3,
+    max_live_subagents_limit: 32,
+    max_concurrent_subagent_turns_limit: 8,
+    notifications: { push: { automation_result: true } },
+    system_skills_for_specialists: "override",
+  });
+  expect(settings.system_skills_for_specialists).toBe("override");
+  expect(settings.notifications?.push).toMatchObject({
+    automation_result: true,
+    chat_update: false,
+    agent_update: false,
+  });
 });

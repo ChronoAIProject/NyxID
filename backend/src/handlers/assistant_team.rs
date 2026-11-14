@@ -2886,7 +2886,7 @@ async fn dispatch_settings(
             .await?;
             settings::audit(&state.db, &chat.user_id, &before, &after).await;
             (
-                serde_json::to_value(SettingsResponse::from(after))
+                serde_json::to_value(SettingsResponse::for_person(&state.db, owner, after).await?)
                     .map_err(|_| AppError::Internal("Settings response failed".into()))?,
                 false,
             )
@@ -3351,7 +3351,7 @@ pub async fn list_agents(
     Ok(Json(json!({
         "agents": agents,
         "destroyed_truncated": destroyed_truncated,
-        "limits": SettingsResponse::from(settings::get(&state.db, &owner).await?),
+        "limits": SettingsResponse::for_person(&state.db, &owner, settings::get(&state.db, &owner).await?).await?,
     })))
 }
 
@@ -3893,6 +3893,9 @@ pub async fn delete_memory(
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_skills_for_specialists:
+        Option<crate::models::assistant_settings::SystemSkillsForSpecialists>,
     voice: Option<super::assistant_voice::Preferences>,
     max_auto_continuations: i32,
     max_auto_continuations_limit: i32,
@@ -3913,8 +3916,18 @@ pub struct SettingsResponse {
     specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
     notifications: crate::models::assistant_settings::NotificationPreferences,
 }
-impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
-    fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
+impl SettingsResponse {
+    async fn for_person(
+        db: &mongodb::Database,
+        person: &str,
+        row: crate::models::assistant_settings::AssistantSettings,
+    ) -> AppResult<Self> {
+        let eligible =
+            crate::services::assistant_system_skills_service::enabled(db, person).await?;
+        Ok(Self::new(row, eligible))
+    }
+
+    fn new(row: crate::models::assistant_settings::AssistantSettings, eligible: bool) -> Self {
         Self {
             voice: row.voice.map(Into::into),
             max_auto_continuations: row.max_auto_continuations,
@@ -3937,6 +3950,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
             specialist_access_requests: row.specialist_access_requests,
             notifications: row.notifications,
+            system_skills_for_specialists: eligible.then_some(row.system_skills_for_specialists),
         }
     }
 }
@@ -3948,12 +3962,17 @@ pub async fn get_settings(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    Ok(Json(settings::get(&state.db, &owner).await?.into()))
+    Ok(Json(
+        SettingsResponse::for_person(&state.db, &owner, settings::get(&state.db, &owner).await?)
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsRequest {
+    system_skills_for_specialists:
+        Option<crate::models::assistant_settings::SystemSkillsForSpecialists>,
     #[serde(default, deserialize_with = "super::assistant_voice::preference_patch")]
     voice: Option<Option<super::assistant_voice::Preferences>>,
     max_auto_continuations: Option<i32>,
@@ -3983,6 +4002,13 @@ pub async fn update_settings(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    let system_skills_enabled =
+        crate::services::assistant_system_skills_service::enabled(&state.db, &owner).await?;
+    if body.system_skills_for_specialists.is_some() && !system_skills_enabled {
+        return Err(AppError::Forbidden(
+            "System skills are not enabled for this rollout".into(),
+        ));
+    }
     if body.voice.is_some() {
         crate::services::assistant_voice::require_enabled(&state.db, &owner).await?;
     }
@@ -4005,6 +4031,7 @@ pub async fn update_settings(
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
             specialist_access_requests: body.specialist_access_requests,
             notifications: body.notifications,
+            system_skills_for_specialists: body.system_skills_for_specialists,
         },
     )
     .await?;
@@ -4017,7 +4044,7 @@ pub async fn update_settings(
         Some(after.access_mode),
     )
     .await;
-    Ok(Json(after.into()))
+    Ok(Json(SettingsResponse::new(after, system_skills_enabled)))
 }
 
 // ---------------------------------------------------------------------------

@@ -271,4 +271,5 @@ pub mod platform_model_tariff;
 
 pub mod execution_permission_channel;
 
+pub mod assistant_system_skills;
 pub mod assistant_tool_result;

@@ -137,6 +137,7 @@ describe("feature flag catalog", () => {
       GENERATED_ARTIFACTS: "assistant:generated-artifacts",
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",
+      SYSTEM_SKILLS: "assistant:system-skills",
       SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
       SKILL_RUNS: "assistant:skill-runs",
       ORG_AGENTS: "assistant:org-agents",

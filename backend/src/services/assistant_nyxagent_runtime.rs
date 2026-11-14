@@ -1673,11 +1673,17 @@ async fn execute_turn_inner(
     );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
-    let authoring = !row.guest_model_setup
-        && !row.guest_turn
-        && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
-            .await
-            .unwrap_or(false);
+    let (authoring, system_skills_enabled) =
+        crate::services::assistant_system_skills_service::guidance_flags(
+            &state.db,
+            &row.user_id,
+            row.guest_turn || row.guest_model_setup,
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::debug!("Assistant guidance flag lookup failed; using disabled defaults");
+            (false, false)
+        });
     let guidance = if !authoring {
         ""
     } else if row.is_subagent() {
@@ -1685,7 +1691,21 @@ async fn execute_turn_inner(
     } else {
         crate::services::assistant_skill_authoring::GUIDANCE
     };
+    let settings = crate::services::assistant_settings_service::get(&state.db, &row.user_id)
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let mut guidance = guidance.to_owned();
+    let system_guidance = crate::services::assistant_system_skills_service::guidance(
+        &state.db,
+        &row.user_id,
+        row.guest_turn || row.guest_model_setup,
+        agent.as_ref(),
+        Some(&settings),
+        system_skills_enabled,
+    )
+    .await
+    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    guidance.push_str(&system_guidance);
     // NYX template outlines (`assistant:skill-runs`, default off): owner turns only.
     let outlines = !row.guest_model_setup
         && !row.guest_turn
@@ -1763,6 +1783,7 @@ async fn execute_turn_inner(
         agent.as_ref(),
         &history,
         &guidance,
+        !system_guidance.is_empty(),
     )
     .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     *instruction_context = Some(prepared);
@@ -1923,9 +1944,7 @@ async fn execute_turn_inner(
             }),
         );
     }
-    let settings = crate::services::assistant_settings_service::get(&state.db, &row.user_id)
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+
     let mut continuations =
         crate::services::assistant_continuation::Continuations::new(if row.guest_model_setup {
             0

@@ -45,6 +45,7 @@ impl Registry {
             guest_operation_scopes: Default::default(),
             guest_operation_scope_revisions: Default::default(),
             operation_scopes: Default::default(),
+            system_skill_overrides: Default::default(),
             skills: vec![SkillReference {
                 source: "ornn".into(),
                 skill_id: ID.into(),
@@ -242,6 +243,7 @@ async fn saved_preload_is_revision_fenced_and_removable_without_registry_access(
         Some(&loaded),
         &[],
         &guidance,
+        false,
     )
     .unwrap();
     assert!(prepared.instructions().contains("\"SKILL.md\":\"core\""));
@@ -261,6 +263,7 @@ async fn saved_preload_is_revision_fenced_and_removable_without_registry_access(
             Some(&loaded),
             &[],
             &guidance,
+            false,
         )
         .unwrap()
         .reset
@@ -272,6 +275,7 @@ async fn saved_preload_is_revision_fenced_and_removable_without_registry_access(
             Some(&loaded),
             &[],
             "",
+            false,
         )
         .unwrap()
         .reset

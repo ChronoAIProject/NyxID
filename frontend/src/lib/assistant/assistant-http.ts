@@ -197,6 +197,12 @@ async function mockResponse(
   init: RequestInit,
 ): Promise<Response | undefined> {
   if (!isMockMode()) return undefined;
+  // Admin skill search also uses this transport before the assistant page mounts.
+  if (import.meta.env.DEV && !globalThis.__nyxidAssistantHttpMock &&
+      new URLSearchParams(window.location.search).get("mock") === "1") {
+    const { installAssistantHttpFixtures } = await import("./assistant-http-fixtures");
+    installAssistantHttpFixtures();
+  }
   return globalThis.__nyxidAssistantHttpMock?.({ endpoint, init });
 }
 

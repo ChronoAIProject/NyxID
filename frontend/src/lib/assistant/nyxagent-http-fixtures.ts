@@ -21,7 +21,13 @@ import {
   type NyxAgentMessageRole,
 } from "@/schemas/assistant-nyxagent";
 
+import { agentSkillSchema, type AgentSkill, type SystemSkillStatus } from "@/schemas/agent-skills";
+import { MOCK_PUBLIC_SYSTEM_SKILLS, mockSystemSkillsConfig, mockSkillCatalog, mockSkillMarkdown } from "./mock-system-skills";
+
 const ROOT = "/assistant/nyxagent";
+// Stable seed IDs make the local Skills-tab preview links shareable.
+export const NYXAGENT_FIXTURE_NYXBOT_ID = "00000000-0000-4000-8000-000000000001";
+export const NYXAGENT_FIXTURE_RESEARCHER_ID = "00000000-0000-4000-8000-000000000002";
 /** A 1x1 PNG a fixture camera tool "returns". */
 const FIXTURE_PNG = Uint8Array.from(
   atob(
@@ -29,7 +35,7 @@ const FIXTURE_PNG = Uint8Array.from(
   ),
   (char) => char.charCodeAt(0),
 );
-const STORAGE = "nyxagent-http-fixture-v4";
+const STORAGE = "nyxagent-http-fixture-v5";
 export const NYXAGENT_FIXTURE_REPLY =
   "Your connected services are ready. [GitHub](/connect/nyx_clk_fixture_github)";
 /** NyxBot delegates to the seeded researcher and is woken when it reports. */
@@ -77,6 +83,9 @@ interface AgentRecord {
   home_conversation_id: string | null;
   created_at: string;
   destroyed_at: string | null;
+  skills?: AgentSkill[];
+  skills_revision?: number;
+  system_skill_overrides?: Record<string, boolean>;
 }
 
 interface Row {
@@ -110,6 +119,7 @@ interface GroupRecord {
 }
 
 interface Settings {
+  system_skills_for_specialists: "default" | "override";
   access_mode?: "autopilot" | "nyxmode" | "ask_every_time";
   skip_destructive_confirmation: boolean;
   max_live_subagents: number;
@@ -128,6 +138,7 @@ interface State {
 }
 
 const DEFAULT_SETTINGS: Settings = {
+  system_skills_for_specialists: "default",
   skip_destructive_confirmation: false,
   max_live_subagents: 8,
   max_concurrent_subagent_turns: 3,
@@ -229,6 +240,12 @@ export class NyxAgentHttpFixtures {
       this.agents = [];
     }
     if (!this.agents.length) this.seed();
+    // Like the engine selector, keep a requested preview mode across navigation.
+    const mode = new URLSearchParams(window.location.search).get("systemSkills");
+    if (mode === "default" || mode === "override") {
+      this.settings.system_skills_for_specialists = mode;
+      this.save();
+    }
   }
 
   /** NyxBot plus one specialist NyxBot created earlier, with a home thread and memory. */
@@ -236,7 +253,8 @@ export class NyxAgentHttpFixtures {
     const now = new Date().toISOString();
     this.agents = [
       {
-        id: crypto.randomUUID(),
+        id: NYXAGENT_FIXTURE_NYXBOT_ID,
+        system_skill_overrides: { [MOCK_PUBLIC_SYSTEM_SKILLS[1]!.skill_id]: false },
         kind: "nyxbot",
         name: "NyxBot",
         description: "",
@@ -250,7 +268,9 @@ export class NyxAgentHttpFixtures {
       },
     ];
     const researcher: AgentRecord = {
-      id: crypto.randomUUID(),
+      id: NYXAGENT_FIXTURE_RESEARCHER_ID,
+      system_skill_overrides: { [MOCK_PUBLIC_SYSTEM_SKILLS[1]!.skill_id]: true },
+      skills: [agentSkillSchema.parse({ source: "ornn", ...MOCK_PUBLIC_SYSTEM_SKILLS[2]!, disabled: false })],
       kind: "specialist",
       name: "researcher",
       description: "Tracks open GitHub issues and reports the most urgent ones.",
@@ -643,6 +663,91 @@ export class NyxAgentHttpFixtures {
 
   private settingsResponse() {
     return { ...this.settings, access_mode: this.settings.access_mode ?? (this.settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"), ...LIMITS };
+  }
+
+  private skillsResponse(agent: AgentRecord) {
+    const configured = mockSystemSkillsConfig().skills;
+    const skills = agent.skills ?? [];
+    const mode = this.settings.system_skills_for_specialists;
+    const statuses: SystemSkillStatus[] = configured.map((skill) => {
+      const own = agent.system_skill_overrides?.[skill.skill_id] ?? null;
+      const inherited = this.nyxbot().system_skill_overrides?.[skill.skill_id] ?? true;
+      const shadowed = skills.some((pin) => pin.skill_id === skill.skill_id || pin.name === skill.name);
+      const enabled = agent.kind === "nyxbot" ? (own ?? true)
+        : mode === "override" ? inherited : (own ?? inherited);
+      const source = shadowed ? "pin" : agent.kind === "nyxbot" ? (own === null ? "platform" : "agent")
+        : mode === "override" ? "nyxbot_override" : own === null ? "nyxbot_default" : "agent";
+      return {
+        skill_id: skill.skill_id, name: skill.name, version: skill.version, description: skill.description,
+        enabled, shadowed_by_pin: shadowed, override: own, effective: enabled && !shadowed && !agent.destroyed_at, source,
+      };
+    });
+    return {
+      agent_id: agent.id, revision: agent.skills_revision ?? 0, skills,
+      metadata: Object.fromEntries(skills.map((pin) => {
+        const catalog = MOCK_PUBLIC_SYSTEM_SKILLS.find((skill) => skill.skill_id === pin.skill_id);
+        return [pin.skill_id, { description: catalog?.description ?? "An attached skill.", size_bytes: catalog?.size_bytes ?? 1024 }];
+      })),
+      ...(configured.length ? { system_skills: statuses, system_skills_for_specialists: mode } : {}),
+    };
+  }
+
+  private skillsRoute(url: URL, method: string, body: () => Record<string, unknown>) {
+    if (url.pathname === `${ROOT}/skills/catalog` && method === "GET") {
+      const catalog = mockSkillCatalog(url.searchParams);
+      return catalog ? json(catalog) : failure(404, "Public skill version not found");
+    }
+    const match = /^\/assistant\/nyxagent\/agents\/([\w-]+)\/(skills|system-skills)(?:\/([\w-]+)(?:\/(preview|history))?)?$/.exec(url.pathname);
+    if (!match) return undefined;
+    const [, id, kind, skillId, action] = match;
+    const agent = this.agents.find((candidate) => candidate.id === id);
+    if (!agent) return failure(404, "Agent not found");
+    if (kind === "system-skills" && skillId && method === "PUT") {
+      if (agent.destroyed_at) return failure(403, "Agent is destroyed");
+      if (agent.kind === "specialist" && this.settings.system_skills_for_specialists === "override") {
+        return json({ error: "conflict", error_code: 1004, message: "Built-in skills for specialists are managed by NyxBot settings" }, 409);
+      }
+      const update = body();
+      if (Object.keys(update).length !== 1 || !("enabled" in update) || (update.enabled !== null && typeof update.enabled !== "boolean")) {
+        return failure(400, "Use enabled: true, false or null");
+      }
+      if (update.enabled !== null && !mockSystemSkillsConfig().skills.some((skill) => skill.skill_id === skillId)) {
+        return failure(400, "Skill is not a configured built-in skill");
+      }
+      agent.system_skill_overrides ??= {};
+      if (update.enabled === null) delete agent.system_skill_overrides[skillId];
+      else agent.system_skill_overrides[skillId] = update.enabled;
+      this.save();
+      return json(this.skillsResponse(agent));
+    }
+    if (kind !== "skills") return undefined;
+    if (!skillId && method === "GET") return json(this.skillsResponse(agent));
+    if (!skillId && method === "PUT") {
+      const update = body();
+      if (agent.destroyed_at) return failure(403, "Agent is destroyed");
+      if (update.expected_revision !== (agent.skills_revision ?? 0)) return failure(409, "Agent skills changed; reload the current revision");
+      const parsed = agentSkillSchema.array().max(16).safeParse(update.skills);
+      if (!parsed.success) return failure(400, "Invalid skill selection");
+      agent.skills = parsed.data;
+      agent.skills_revision = (agent.skills_revision ?? 0) + 1;
+      this.save();
+      return json(this.skillsResponse(agent));
+    }
+    if (skillId === "history" && method === "GET") return json({ items: [] });
+    if (skillId && action === "preview" && method === "GET") {
+      const attached = agent.skills?.find((pin) => pin.skill_id === skillId);
+      const status = this.skillsResponse(agent).system_skills?.find((skill) => skill.skill_id === skillId);
+      const catalog = MOCK_PUBLIC_SYSTEM_SKILLS.find((skill) => skill.skill_id === skillId);
+      if (!catalog || (!attached && !status?.effective) || agent.destroyed_at) return failure(403, "Skill is unavailable for this agent");
+      const readable = attached ? !attached.disabled : Boolean(status?.effective);
+      return json({
+        skill_id: skillId, name: attached?.name ?? catalog.name, version: attached?.version ?? catalog.version,
+        sha256: attached?.sha256 ?? catalog.sha256, disabled: !readable,
+        description: catalog.description, size_bytes: catalog.size_bytes, readable,
+        excerpt: readable ? mockSkillMarkdown(catalog.name) : "",
+      });
+    }
+    return undefined;
   }
 
   private agentsRoute(url: URL, method: string, body: () => Record<string, unknown>) {
@@ -1401,6 +1506,8 @@ export class NyxAgentHttpFixtures {
         return json({});
       }
     }
+    const skills = this.skillsRoute(url, method, body);
+    if (skills) return skills;
     const groups = this.groupsRoute(url, method, body);
     if (groups) return groups;
     const agents = this.agentsRoute(url, method, body);
@@ -1422,6 +1529,10 @@ export class NyxAgentHttpFixtures {
     if (url.pathname === `${ROOT}/settings`) {
       if (method === "PUT") {
         const update = body() as Partial<Settings>;
+        if (update.system_skills_for_specialists !== undefined &&
+            update.system_skills_for_specialists !== "default" && update.system_skills_for_specialists !== "override") {
+          return failure(400, "Invalid built-in skills mode");
+        }
         const live = update.max_live_subagents;
         const turns = update.max_concurrent_subagent_turns;
         const handoffs = update.max_group_handoffs;

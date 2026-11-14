@@ -43,6 +43,8 @@ async fn stored(db: &Database, user_id: &str) -> AppResult<(AssistantSettings, b
 
 #[derive(Clone, Debug, Default)]
 pub struct Update {
+    pub system_skills_for_specialists:
+        Option<crate::models::assistant_settings::SystemSkillsForSpecialists>,
     pub voice: Option<Option<crate::models::assistant_voice::VoicePreferences>>,
     pub max_auto_continuations: Option<i32>,
     pub timezone: Option<String>,
@@ -232,6 +234,14 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         );
         defaults.remove("notifications");
     }
+    if let Some(value) = update.system_skills_for_specialists {
+        set.insert(
+            "system_skills_for_specialists",
+            bson::to_bson(&value)
+                .map_err(|_| AppError::Internal("Settings serialization failed".into()))?,
+        );
+        defaults.remove("system_skills_for_specialists");
+    }
     let updated = db
         .collection::<AssistantSettings>(COLLECTION_NAME)
         .find_one_and_update(
@@ -291,6 +301,8 @@ pub async fn audit(
             "previous_access_mode": before.access_mode,
             "specialist_access_requests": after.specialist_access_requests,
             "previous_specialist_access_requests": before.specialist_access_requests,
+            "system_skills_for_specialists": after.system_skills_for_specialists,
+            "previous_system_skills_for_specialists": before.system_skills_for_specialists,
         })),
     )
     .await;

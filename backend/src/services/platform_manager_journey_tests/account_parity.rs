@@ -713,7 +713,10 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         j.state
             .db
             .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
-            .replace_one(doc! {"_id":&agent.id}, &agent)
+            .update_one(
+                doc! {"_id":&agent.id},
+                doc! {"$set":{"memory":bson::to_bson(&agent.memory).unwrap()}},
+            )
             .await
             .unwrap();
         let service = connected(
