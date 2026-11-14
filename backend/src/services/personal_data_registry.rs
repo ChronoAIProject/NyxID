@@ -2895,7 +2895,10 @@ mod tests {
         gather(&root, &registry, &mut files);
         let source_seen = scan_collection_calls(&files)
             .unwrap_or_else(|errors| panic!("unresolved production collection calls: {errors:?}"));
-        let registered: BTreeSet<_> = ENTRIES.iter().map(|entry| entry.collection).collect();
+        let registered: BTreeSet<String> = ENTRIES
+            .iter()
+            .map(|entry| entry.collection.to_owned())
+            .collect();
         if let Err(source_errors) = validate_scan(&files, &registered) {
             // validate_scan also checks stale entries; production inventory has
             // a separate final-sweep path, so report the exact source drift.
