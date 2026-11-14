@@ -625,6 +625,79 @@ test("several principals require selection; a clipboard read resolving after blu
   await screen.unmount();
 });
 
+test("pre-connect copy separates principal choice and keeps a persistent principal row", async () => {
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    ssh_allowed_principals: ["ops", "deploy"],
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  expect(
+    screen.getByText("Choose an SSH principal, then connect to {{connection}}."),
+  ).toBeTruthy();
+  expect(screen.getByText("SSH principal")).toBeTruthy();
+  expect(screen.getByText("Connect")).toBeTruthy();
+  await fireEvent.press(screen.getByText("deploy"));
+  expect(screen.getByText("Connect to {{connection}} as {{principal}}?")).toBeTruthy();
+  expect(screen.getByText("SSH principal")).toBeTruthy();
+  await screen.unmount();
+});
+
+test("reconnect preserves a valid principal and clears an invalid one", async () => {
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    ssh_allowed_principals: ["ops", "deploy"],
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", principal: "ops", autoConnect: true } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  expect(screen.queryByText("deploy")).toBeNull();
+  await message(screen.getByTestId("terminal-webview"), { type: "connected" });
+  await act(async () => {
+    Socket.instances[0]!.onclose?.({ code: 1000 });
+  });
+  await fireEvent.press(screen.getByText("Reconnect"));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(screen.queryByText("deploy")).toBeNull();
+  await screen.unmount();
+
+  Socket.instances = [];
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    ssh_allowed_principals: ["ops", "deploy"],
+  });
+  const invalid = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", principal: "ops", autoConnect: true } }}
+    />,
+  );
+  await message(invalid.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  await message(invalid.getByTestId("terminal-webview"), { type: "connected" });
+  await act(async () => {
+    Socket.instances[0]!.onclose?.({ code: 1000 });
+  });
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    ssh_allowed_principals: ["deploy"],
+  });
+  await fireEvent.press(invalid.getByText("Reconnect"));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(invalid.getByText("deploy")).toBeTruthy();
+  await invalid.unmount();
+});
+
 test("a catalog deep link resolves the active connection, while an unknown catalog is actionable", async () => {
   const deep = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", autoConnect: false } }} />,

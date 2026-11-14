@@ -28,6 +28,7 @@ import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useTheme } from "../../theme/ThemeContext";
 import { spacing, typeScale } from "../../theme/designTokens";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { PrimaryButton } from "../../components/PrimaryButton";
 import {
   SettingsGroup,
   SettingsRow,
@@ -88,6 +89,7 @@ export function SshTerminalScreen({
   const [notConnected, setNotConnected] = useState(false);
   const [loadUnavailable, setLoadUnavailable] = useState(false);
   const [principal, setPrincipal] = useState(route.params.principal);
+  const principalRef = useRef(principal);
   const [principalPickerOpen, setPrincipalPickerOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const [state, setState] = useState("Connecting…");
@@ -161,6 +163,9 @@ export function SshTerminalScreen({
     focusedRef.current = focused;
   }, [focused]);
   useEffect(() => {
+    principalRef.current = principal;
+  }, [principal]);
+  useEffect(() => {
     setConnectRequested(route.params.autoConnect === true);
   }, [connectionId, route.params.autoConnect, serviceId]);
   useEffect(() => {
@@ -195,22 +200,37 @@ export function SshTerminalScreen({
           return;
         }
         setConnection(value);
+        const allowedPrincipals = value.ssh_allowed_principals ?? [];
+        const requestedPrincipal = route.params.principal;
+        const selectedPrincipal = principalRef.current;
         if (
-          route.params.principal &&
-          !value.ssh_allowed_principals?.includes(route.params.principal)
+          requestedPrincipal &&
+          !allowedPrincipals.includes(requestedPrincipal)
         ) {
           setPrincipal(undefined);
           setPrincipalPickerOpen(true);
         } else if (
-          !route.params.principal &&
-          value.ssh_allowed_principals?.length === 1
-        )
-          setPrincipal(value.ssh_allowed_principals[0]);
-        else if (
-          !route.params.principal &&
-          (value.ssh_allowed_principals?.length ?? 0) > 1
-        )
+          requestedPrincipal &&
+          allowedPrincipals.includes(requestedPrincipal)
+        ) {
+          setPrincipal(requestedPrincipal);
+          setPrincipalPickerOpen(false);
+        } else if (
+          selectedPrincipal &&
+          allowedPrincipals.includes(selectedPrincipal)
+        ) {
+          setPrincipal(selectedPrincipal);
+          setPrincipalPickerOpen(false);
+        } else if (allowedPrincipals.length === 1) {
+          setPrincipal(allowedPrincipals[0]);
+          setPrincipalPickerOpen(false);
+        } else if (allowedPrincipals.length > 1) {
+          setPrincipal(undefined);
           setPrincipalPickerOpen(true);
+        } else {
+          setPrincipal(undefined);
+          setPrincipalPickerOpen(false);
+        }
       })
       .catch(() => {
         if (current) {
@@ -603,11 +623,30 @@ export function SshTerminalScreen({
       ) : connection && eligible && !connectRequested ? (
         <View style={styles.preconnect}>
           <Notice
-            message={t("Ready to open the terminal for {{connection}} as {{principal}}.", {
-              connection: connection.label,
-              principal: principal ?? t("Choose principal"),
-            })}
+            message={
+              principal
+                ? t("Connect to {{connection}} as {{principal}}?", {
+                    connection: connection.label,
+                    principal,
+                  })
+                : t("Choose an SSH principal, then connect to {{connection}}.", {
+                    connection: connection.label,
+                  })
+            }
           />
+          {principals.length > 0 ? (
+            <SettingsGroup>
+              <SettingsRow
+                label={t("SSH principal")}
+                value={principal ?? t("Choose principal")}
+                onPress={
+                  principals.length > 1
+                    ? () => setPrincipalPickerOpen((value) => !value)
+                    : undefined
+                }
+              />
+            </SettingsGroup>
+          ) : null}
           {principalPickerOpen && principals.length > 0 ? (
             <SettingsGroup title={t("SSH principal")}>
               {principals.map((value) => (
@@ -623,9 +662,9 @@ export function SshTerminalScreen({
               ))}
             </SettingsGroup>
           ) : null}
-          <SettingsRow
+          <PrimaryButton
             label={t("Connect")}
-            tone="action"
+            accessibilityLabel={t("Connect")}
             disabled={!principal}
             onPress={() => setConnectRequested(true)}
           />
