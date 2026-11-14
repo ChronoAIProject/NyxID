@@ -525,13 +525,22 @@ pub async fn update_external_api_key(
         }
     }
 
-    user_api_key_service::update_api_key(
-        &state.db,
-        &state.encryption_keys,
-        &owner_id,
-        &key_id,
-        body.label.as_deref(),
-        body.credential.as_deref(),
+    crate::services::node_credential_delivery::with_actor(
+        actor.clone(),
+        credential_push_service::ActorScope {
+            allow_all_nodes: auth_user.allow_all_nodes,
+            allowed_node_ids: auth_user.allowed_node_ids.clone(),
+            allow_all_services: auth_user.allow_all_services,
+            allowed_service_ids: auth_user.allowed_service_ids.clone(),
+        },
+        user_api_key_service::update_api_key(
+            &state.db,
+            &state.encryption_keys,
+            &owner_id,
+            &key_id,
+            body.label.as_deref(),
+            body.credential.as_deref(),
+        ),
     )
     .await?;
 

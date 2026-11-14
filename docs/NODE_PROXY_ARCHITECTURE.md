@@ -58,6 +58,89 @@ The node edits only target metadata and reloads the live credential store; file-
 
 The `node_managed_endpoint_updated` audit event contains the service ID, old/new hosts and sync status only. It contains no credential, URL path, query, or fragment. Changing the URL preserves identity-based grants but does not bypass exact execution-authority revalidation.
 
+### Ordinary credential delivery generations
+
+Ordinary `credential_update` and `credential_remove` frames include
+`credential_id` (a stable delivery-slot UUID) and `credential_generation` (a
+positive integer). The slot identifies one node and service slug, survives
+removal, and does not reset when the backing external key changes. It is
+separate from `UserApiKey.credential_epoch`: background OAuth refreshes advance
+delivery generations without changing the approval epoch. `target_url` revisions
+and encrypted pending-credential enrollment use their existing protocols.
+
+The node saves a high-water mark for each service/slot alongside its credential
+configuration, including removal tombstones. A lower generation is ignored; an
+equal generation may be reapplied. Successful acknowledgements echo the slot
+and generation now held. The atomic config save and live-store publication
+precede the acknowledgement; an error does not advance the held generation.
+For keychain storage, a separate admission fence is saved before changing the
+vault. A crash between the vault and config writes cannot admit an older frame;
+a retry at the fenced generation completes the write before acknowledging it.
+On restart, unfinished keychain entries remain unavailable while the node
+reconnects. An unversioned full update from an older server may also repair the
+entry; completed high-water marks are retained. Agent store mutations and live
+reloads are serialized. Local OAuth refresh applies its provider result onto
+fresh configuration only while that credential's authority/generation still
+matches its pre-request snapshot; it cannot restore an old whole-config copy.
+
+The `node_credential_desired` collection contains identifiers, generations and
+claim/retry metadata only. A scoped replacement suppresses any obsolete pending
+intent on an excluded slot; an older acknowledgement cannot re-enable it.
+Deleted nodes retire their pending work without recording a receipt. Material,
+key-status and routing changes advance desired generations in the same
+service-history transaction, including routine refreshes; usage touches do not.
+Delivery reads current committed material and generation in one snapshot; it
+never replays a stored frame. Request pushes remain tracked work during graceful
+drain. A five-second background pass first reads at most 64 due slots using the
+`(pending, retry_at)` index. An idle pass costs one read and no lease writes.
+Nonempty passes acquire the renewable `node:credential-delivery` lease; each
+slot has an exact claim with a 30-second expiry and rechecks its due time.
+
+Known-offline destinations are checked through cluster session ownership before
+decryption. Offline retries back off from 30 seconds to 10 minutes; other
+transient delivery failures back off from 5 seconds to 60 seconds. A new desired
+generation or reconnect resets the delay. Reconnect wakes pending and legacy
+unconfirmed/unsupported slots, without overriding a live claim or strict
+preparation. A separate scheduling revision prevents an older completion from
+erasing that reconnect wake-up. Completion scheduling is fenced by the captured
+generation and scheduling revision, and claim release by the exact claim token.
+
+States that need a source or capability change leave the timer queue:
+
+| Stored `parked_reason` | Re-armed by |
+| --- | --- |
+| `service_disabled` | A watched service write, including `is_active: true`. |
+| `key_inactive` | A watched key write, including `status: active`, or a watched service write. |
+| `sent_unconfirmed` | Reconnect or a new desired generation; `sent_unconfirmed_generation` records queue success separately from acknowledgement. |
+| `acknowledgement_unsupported` | Reconnect after an agent upgrade, or a new desired generation; an unchanged legacy node parks again without sending a removal. |
+
+The pass stops claiming when drain starts and releases its exact lease after
+the admitted unit finishes. A killed sender leaves its unacknowledged intent
+and claim expiry for a survivor.
+
+Strict `PUT /keys` delivery retains the acknowledgement-before-routing boundary.
+The early material save gates retry in its own transaction, before routing/auth
+fields are ready. A preparation then reserves a generation before sending, and
+reconciliation reads committed state after the caller finishes its writes. If the caller dies, the
+preparation expires after 120 seconds and recovery advances the generation
+before sending committed state. Speculative credential material is never saved
+in the desired record. Credentials held only on a node cannot be reconstructed
+from server metadata.
+
+Current older nodes ignore the additive fields and continue to acknowledge by
+request ID. They receive retries but cannot reject a delayed older frame. Each
+retry resolves current material; an older frame already in flight can still
+arrive late on such a node. Agents without correlated acknowledgements keep
+queue-only updates: one successful send per change or reconnect, recorded as
+sent but unconfirmed, with no timer resend. Unsupported removal is parked and
+remains an upgrade/manual-cleanup case. New nodes still apply unversioned frames from
+old servers and retain their saved high-water marks. Ordering protection
+requires upgraded writers and the socket-owning server as well as the node;
+old servers do not create durable intents and can strip additive routing
+metadata. Rolling back the server requires no data change: old code ignores
+the new collection, and retries resume when the new worker returns. Existing
+node stores without a generation map load it as empty (generation zero).
+
 ## MongoDB Models
 
 ### Node (collection: `nodes`)

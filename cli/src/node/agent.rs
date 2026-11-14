@@ -1216,6 +1216,9 @@ async fn credential_reload_loop(
     loop {
         tokio::time::sleep(interval).await;
 
+        let Ok(_store_guard) = config::credential_store_lock() else {
+            continue;
+        };
         let current_modified = match std::fs::metadata(&config_file).and_then(|m| m.modified()) {
             Ok(t) => t,
             Err(e) => {
@@ -1273,11 +1276,14 @@ async fn oauth_refresh_loop(
             Err(_) => continue,
         };
 
-        let mut config_changed = false;
-        let mut updated_config = node_config.clone();
-
         for (slug, cred) in &node_config.credentials {
-            if !cred.oauth_managed {
+            if !cred.oauth_managed
+                || node_config
+                    .credential_generation_fences
+                    .0
+                    .get(slug)
+                    .is_some_and(|fences| !fences.is_empty())
+            {
                 continue;
             }
 
@@ -1352,43 +1358,16 @@ async fn oauth_refresh_loop(
             .await
             {
                 Ok(new_token) => {
-                    tracing::info!(service = %slug, "OAuth token refreshed");
-
-                    let header_value = format!(
-                        "{} {}",
-                        new_token.token_type.as_deref().unwrap_or("Bearer"),
-                        new_token.access_token
-                    );
-
-                    if let Some(cred_mut) = updated_config.credentials.get_mut(slug) {
-                        // Update header value
-                        cred_mut.header_value_encrypted = backend
-                            .store_credential_value(slug, &header_value)
-                            .ok()
-                            .flatten();
-
-                        // Update OAuth tokens
-                        cred_mut.oauth_access_token_encrypted = backend
-                            .store_credential_value(
-                                &format!("{slug}:oauth_access"),
-                                &new_token.access_token,
-                            )
-                            .ok()
-                            .flatten();
-
-                        if let Some(ref rt) = new_token.refresh_token {
-                            cred_mut.oauth_refresh_token_encrypted = backend
-                                .store_credential_value(&format!("{slug}:oauth_refresh"), rt)
-                                .ok()
-                                .flatten();
-                        }
-
-                        cred_mut.oauth_token_expires_at = new_token.expires_in.map(|secs| {
-                            (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
-                                .to_rfc3339()
-                        });
-
-                        config_changed = true;
+                    if apply_local_oauth_refresh(
+                        &config_file,
+                        &backend,
+                        &node_config,
+                        slug,
+                        new_token,
+                    )
+                    .is_err()
+                    {
+                        tracing::warn!("Failed to persist local OAuth refresh");
                     }
                 }
                 Err(e) => {
@@ -1396,11 +1375,69 @@ async fn oauth_refresh_loop(
                 }
             }
         }
-
-        if config_changed && let Err(e) = updated_config.save(&config_file) {
-            tracing::error!(error = %e, "Failed to save config after OAuth refresh");
-        }
     }
+}
+
+/// Rebase one provider result onto the current config, never the snapshot held
+/// across network I/O. A push that superseded this local authority wins.
+pub(super) fn apply_local_oauth_refresh(
+    path: &std::path::Path,
+    backend: &SecretBackend,
+    observed: &NodeConfig,
+    slug: &str,
+    token: oauth::TokenResponse,
+) -> Result<bool> {
+    let access = zeroize::Zeroizing::new(token.access_token);
+    let refresh = token.refresh_token.map(zeroize::Zeroizing::new);
+    let _store_guard = config::credential_store_lock()?;
+    let mut current = NodeConfig::load(path)?;
+    let Some(old) = observed.credentials.get(slug) else {
+        return Ok(false);
+    };
+    let Some(credential) = current.credentials.get(slug) else {
+        return Ok(false);
+    };
+    if !credential.oauth_managed
+        || current.credential_generations.0.get(slug) != observed.credential_generations.0.get(slug)
+        || current
+            .credential_generation_fences
+            .0
+            .get(slug)
+            .is_some_and(|fences| !fences.is_empty())
+        || credential.oauth_token_url != old.oauth_token_url
+        || credential.oauth_refresh_token_encrypted != old.oauth_refresh_token_encrypted
+        || credential.oauth_access_token_encrypted != old.oauth_access_token_encrypted
+        || credential.oauth_token_expires_at != old.oauth_token_expires_at
+        || credential.oauth_client_id_encrypted != old.oauth_client_id_encrypted
+        || credential.oauth_client_secret_encrypted != old.oauth_client_secret_encrypted
+        || credential.oauth_scopes != old.oauth_scopes
+        || credential.oauth_token_endpoint_auth_method != old.oauth_token_endpoint_auth_method
+        || credential.oauth_client_id_param_name != old.oauth_client_id_param_name
+        || credential.oauth_request_options != old.oauth_request_options
+    {
+        return Ok(false);
+    }
+    backend.refresh()?;
+    let Some(credential) = current.credentials.get_mut(slug) else {
+        return Ok(false);
+    };
+    let header = zeroize::Zeroizing::new(format!(
+        "{} {}",
+        token.token_type.as_deref().unwrap_or("Bearer"),
+        access.as_str()
+    ));
+    credential.header_value_encrypted = backend.store_credential_value(slug, &header)?;
+    credential.oauth_access_token_encrypted =
+        backend.store_credential_value(&format!("{slug}:oauth_access"), &access)?;
+    if let Some(refresh) = refresh {
+        credential.oauth_refresh_token_encrypted =
+            backend.store_credential_value(&format!("{slug}:oauth_refresh"), &refresh)?;
+    }
+    credential.oauth_token_expires_at = token
+        .expires_in
+        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
+    current.save(path)?;
+    Ok(true)
 }
 
 fn api_base_url_from_node_ws_url(ws_url: &str) -> String {

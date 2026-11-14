@@ -8,6 +8,14 @@ use super::encryption::LocalEncryption;
 use super::error::{Error, Result};
 use super::secret_backend::SecretBackend;
 
+/// Serialize the agent's synchronous config/vault mutations and live reloads.
+/// Never hold this guard across provider I/O or another await.
+pub(super) fn credential_store_lock() -> Result<std::sync::MutexGuard<'static, ()>> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .map_err(|_| Error::Config("Credential store lock unavailable".into()))
+}
+
 /// Top-level configuration structure, serialized as TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -39,6 +47,24 @@ pub struct NodeConfig {
     /// Node-side pending RCI keypairs awaiting encrypted credential delivery.
     #[serde(default)]
     pub pending_crypto_keys: BTreeMap<String, PendingCryptoKeyConfig>,
+    /// Server delivery high-water marks, retained after credential removal.
+    #[serde(default)]
+    pub credential_generations: CredentialGenerations,
+    /// Admission fence for a keychain write not yet committed to this config.
+    /// Full credential setters clear the pending marker in memory; their caller
+    /// saves it with the replacement. Completed high-water marks never reset.
+    #[serde(default)]
+    pub credential_generation_fences: CredentialGenerations,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CredentialGenerations(pub BTreeMap<String, BTreeMap<String, i64>>);
+
+impl fmt::Debug for CredentialGenerations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CredentialGenerations([REDACTED])")
+    }
 }
 
 fn default_storage_backend() -> String {
@@ -170,7 +196,7 @@ pub struct CredentialConfig {
     pub oauth_request_options: OAuthRequestOptions,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthRequestEncoding {
     #[default]
@@ -183,7 +209,7 @@ fn default_supports_oauth_scopes() -> bool {
 }
 
 /// Public protocol metadata retained with node credentials for later refreshes.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct OAuthRequestOptions {
     #[serde(default)]
     pub token_request_encoding: Option<OAuthRequestEncoding>,
@@ -511,6 +537,8 @@ impl NodeConfig {
             credentials: BTreeMap::new(),
             ssh_keys: Vec::new(),
             pending_crypto_keys: BTreeMap::new(),
+            credential_generations: Default::default(),
+            credential_generation_fences: Default::default(),
         }
     }
 
@@ -688,6 +716,7 @@ impl NodeConfig {
             service_slug.to_string(),
             CredentialConfig::new_header(header_name.to_string(), encrypted, resolved_target_url),
         );
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 
@@ -709,6 +738,7 @@ impl NodeConfig {
         let mut config = CredentialConfig::new_header(String::new(), encrypted, Some(target));
         config.injection_method = ifttt::AUTH_METHOD.to_string();
         self.credentials.insert(service_slug.to_string(), config);
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 
@@ -731,6 +761,7 @@ impl NodeConfig {
                 resolved_target_url,
             ),
         );
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 
@@ -749,6 +780,7 @@ impl NodeConfig {
             service_slug.to_string(),
             CredentialConfig::new_path_prefix(prefix.to_string(), encrypted, resolved_target_url),
         );
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 
@@ -764,6 +796,7 @@ impl NodeConfig {
             )));
         }
         backend.delete_credential(service_slug)?;
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 
@@ -784,6 +817,7 @@ impl NodeConfig {
             service_slug.to_string(),
             CredentialConfig::new_aws_sigv4(encrypted, resolved_target_url),
         );
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 
@@ -813,6 +847,7 @@ impl NodeConfig {
             // but cleaning up keeps the backend tidy.
             let _ = backend.delete_credential(service_slug);
         }
+        self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
 }
@@ -936,6 +971,22 @@ mod tests {
 
         let token = loaded.decrypt_auth_token(&enc).unwrap();
         assert_eq!(token, "nyx_nauth_abc123");
+    }
+
+    #[test]
+    fn node_credential_order_2472_existing_store_without_generations_loads_as_zero() {
+        let config: NodeConfig = toml::from_str(
+            r#"
+            [server]
+            url = "ws://localhost:3001/api/v1/nodes/ws"
+            [node]
+            id = "fixture"
+            auth_token_encrypted = ""
+        "#,
+        )
+        .unwrap();
+        assert!(config.credential_generations.0.is_empty());
+        assert!(config.credential_generation_fences.0.is_empty());
     }
 
     #[test]
