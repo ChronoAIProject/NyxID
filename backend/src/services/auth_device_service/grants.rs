@@ -112,15 +112,6 @@ pub async fn approve_with_agent_key(
                     "key_was_created": created,
                     "delivery_credential_encrypted": bson::Binary {subtype: BinarySubtype::Generic, bytes: encrypted.clone()}}
             }}).session(&mut *session).await?;
-            if let Some(reservation_hmac) = row.user_code_reservation_hmac.as_deref() {
-                db.collection::<bson::Document>(RESERVATION_COLLECTION_NAME)
-                    .update_one(
-                        doc! {"user_code_hmac": reservation_hmac},
-                        doc! {"$set": {"approved_user_id": &input.user_id}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-            }
             Ok(())
         }.await;
         mutations::transaction_result(operation)

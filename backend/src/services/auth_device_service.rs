@@ -709,15 +709,6 @@ pub async fn approve(
         .return_document(ReturnDocument::After)
         .session(&mut *session)
         .await?;
-    if let Some(reservation_hmac) = row.user_code_reservation_hmac.as_deref() {
-        db.collection::<bson::Document>(RESERVATION_COLLECTION_NAME)
-            .update_one(
-                doc! {"user_code_hmac": reservation_hmac},
-                doc! {"$set": {"approved_user_id": &input.user_id}},
-            )
-            .session(&mut *session)
-            .await?;
-    }
     Ok(session_id)
     }.await;
     crate::services::api_key_mutation_service::transaction_result(operation)
@@ -2157,10 +2148,7 @@ mod tests {
             .await
             .expect("reservation query")
             .expect("reservation exists");
-        assert_eq!(
-            reservation.get_str("approved_user_id"),
-            Ok(user_id.as_str())
-        );
+        assert!(reservation.get("approved_user_id").is_none());
 
         let (access, refresh) = decrypt_tokens(
             &encryption_keys,

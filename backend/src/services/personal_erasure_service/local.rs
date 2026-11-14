@@ -127,10 +127,6 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"approved_user_id":owner},
         ),
         (
-            m::auth_device_code::RESERVATION_COLLECTION_NAME,
-            doc! {"approved_user_id":owner},
-        ),
-        (
             m::agent_key_login_request::COLLECTION_NAME,
             doc! {"approved_user_id":owner},
         ),

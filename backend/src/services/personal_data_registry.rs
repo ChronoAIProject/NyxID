@@ -627,10 +627,10 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_code_reservations",
-        owner: OwnerSelector::Fields(&["approved_user_id"]),
-        erasure: Erasure::LocalInventory,
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("transient device-code coordination with TTL"),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
-        why: "auth_device_code_reservations stores a cross-protocol user-code HMAC and, after approval, the approving person's account id; approved rows are erased with that account and pending rows expire after AUTH_DEVICE_EXPIRES_IN_SECS plus AUTH_DEVICE_TERMINAL_RETENTION_SECS.",
+        why: "auth_device_code_reservations stores only a one-way code uniqueness HMAC for transient coordination; its pending and terminal rows expire under the device-code TTL and contain no person owner field.",
     },
     Entry {
         collection: "auth_device_codes",
@@ -3171,12 +3171,6 @@ mod tests {
         assert_eq!(claims.get_str("owner_user_id"), Ok(owner));
         assert_eq!(claims.get_str("status"), Ok("redeemed"));
         assert_eq!(claims.get_bool("delivered"), Ok(true));
-        let reservations = inventory
-            .iter()
-            .find(|(collection, _)| *collection == "auth_device_code_reservations")
-            .map(|(_, filter)| filter)
-            .expect("auth-device reservation inventory");
-        assert_eq!(reservations.get_str("approved_user_id"), Ok(owner));
     }
 
     #[tokio::test]
