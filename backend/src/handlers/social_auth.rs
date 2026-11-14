@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 
+use super::mobile_redirect::is_supported_mobile_redirect_uri;
 use crate::AppState;
 use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
@@ -1308,8 +1309,6 @@ fn resolve_redirect_target(
         return_to: extract_trusted_return_to(headers, config),
     }
 }
-
-use super::mobile_redirect::is_supported_mobile_redirect_uri;
 
 fn build_success_redirect_url(
     target: &SocialRedirectTarget,

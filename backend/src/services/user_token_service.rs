@@ -775,39 +775,6 @@ pub async fn initiate_oauth_connect(
     connection_id: Option<&str>,
     connect_link_id: Option<&str>,
     flow_kind: Option<OAuthFlowKind>,
-) -> AppResult<OAuthInitiateResult> {
-    initiate_oauth_connect_with_app_return(
-        db,
-        encryption_keys,
-        base_url,
-        user_id,
-        provider_id,
-        on_behalf_of,
-        redirect_path,
-        additional_scopes,
-        scope_override,
-        connection_id,
-        connect_link_id,
-        flow_kind,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn initiate_oauth_connect_with_app_return(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    base_url: &str,
-    user_id: &str,
-    provider_id: &str,
-    on_behalf_of: Option<&str>,
-    redirect_path: Option<&str>,
-    additional_scopes: &[String],
-    scope_override: Option<&[String]>,
-    connection_id: Option<&str>,
-    connect_link_id: Option<&str>,
-    flow_kind: Option<OAuthFlowKind>,
     app_return_uri: Option<&str>,
 ) -> AppResult<OAuthInitiateResult> {
     let provider = db
@@ -4419,6 +4386,7 @@ mod tests {
                     connection,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -4547,6 +4515,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -4606,6 +4575,7 @@ mod tests {
                     &[],
                     None,
                     key.connection_id.as_deref(),
+                    None,
                     None,
                     None,
                 )
@@ -4774,6 +4744,7 @@ mod tests {
                         &["workspace:admin".into()],
                         None,
                         key.connection_id.as_deref(),
+                        None,
                         None,
                         None,
                     )
@@ -5352,6 +5323,7 @@ mod tests {
                 key.connection_id.as_deref(),
                 Some(&link),
                 chat.then_some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+                None,
             )
             .await
             .unwrap();
@@ -5481,6 +5453,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -5578,6 +5551,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -5634,6 +5608,7 @@ mod tests {
                 key.connection_id.as_deref(),
                 None,
                 Some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+                None,
             )
             .await;
             assert!(matches!(result, Err(AppError::ValidationError(_))));
@@ -5686,6 +5661,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                None,
                 None,
                 None,
                 None,
@@ -6405,6 +6381,7 @@ mod tests {
             Some(&connection_id),
             None,
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -6523,6 +6500,7 @@ mod tests {
             Some(&connection_id),
             None,
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -6614,6 +6592,7 @@ mod tests {
             &[],
             None,
             Some(&connection_id),
+            None,
             None,
             None,
         )
@@ -6712,6 +6691,7 @@ mod tests {
                     conn,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -6752,6 +6732,7 @@ mod tests {
                         conn,
                         None,
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -6778,6 +6759,7 @@ mod tests {
                         &[],
                         Some(&scopes),
                         conn,
+                        None,
                         None,
                         None,
                     )
@@ -6819,6 +6801,7 @@ mod tests {
                     additional,
                     scope_override,
                     conn,
+                    None,
                     None,
                     None,
                 )
@@ -6910,6 +6893,7 @@ mod tests {
                     &[],
                     None,
                     key.connection_id.as_deref(),
+                    None,
                     None,
                     None,
                 )
@@ -7075,6 +7059,7 @@ mod tests {
                 Some(&connection_id),
                 None,
                 None,
+                None,
             )
             .await
             .expect_err("unreviewed or excluded scopes must be rejected on the shared app");
@@ -7107,6 +7092,7 @@ mod tests {
                     additional,
                     scope_override,
                     Some(&connection_id),
+                    None,
                     None,
                     None,
                 )
