@@ -78,6 +78,7 @@ export function SshTerminalScreen({
   const [error, setError] = useState<string>();
   const [ctrl, setCtrl] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [documentVersion, setDocumentVersion] = useState(0);
   const web = useRef<WebView>(null);
   const socket = useRef<WebSocket | null>(null);
   const size = useRef({ cols: 80, rows: 24 });
@@ -94,7 +95,10 @@ export function SshTerminalScreen({
       }),
     [colors.bg, colors.textPrimary, colors.primary],
   );
-  const allowNavigation = useMemo(() => inlineTerminalNavigation(), [html]);
+  const allowNavigation = useMemo(
+    () => inlineTerminalNavigation(),
+    [html, documentVersion],
+  );
   const send = (message: TerminalCommand) =>
     web.current?.injectJavaScript(terminalScript(message));
   const output = useMemo(
@@ -112,7 +116,7 @@ export function SshTerminalScreen({
   useEffect(() => {
     setReady(false);
     output.clear();
-  }, [html, output]);
+  }, [html, documentVersion, output]);
 
   useEffect(() => {
     navigation.setOptions({ title: t("SSH terminal") });
@@ -432,6 +436,7 @@ export function SshTerminalScreen({
           )}
           <View style={styles.terminal} onLayout={() => send({ type: "fit" })}>
             <WebView
+              key={documentVersion}
               ref={web}
               source={{ html, baseUrl: "about:blank" }}
               originWhitelist={["about:blank"]}
@@ -452,7 +457,7 @@ export function SshTerminalScreen({
                 socket.current?.close(1000);
                 setState("Disconnected");
                 setReady(false);
-                web.current?.reload();
+                setDocumentVersion((value) => value + 1);
               }}
               style={{ backgroundColor: colors.bg }}
             />
