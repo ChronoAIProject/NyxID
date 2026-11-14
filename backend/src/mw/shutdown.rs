@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Request, State},
+    extract::{MatchedPath, Request, State},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -17,6 +17,17 @@ pub async fn track(State(runtime): State<Runtime>, request: Request, next: Next)
     if matches!(request.uri().path(), "/health" | "/ready") {
         return next.run(request).await;
     }
+    let route = request.extensions().get::<MatchedPath>().cloned();
+    let method = request.method().clone();
+    crate::services::shutdown::diagnostics::scope(
+        route,
+        &method,
+        track_route(runtime, request, next),
+    )
+    .await
+}
+
+async fn track_route(runtime: Runtime, request: Request, next: Next) -> Response {
     let request_work = runtime.request();
     let response = tokio::select! {
         biased;

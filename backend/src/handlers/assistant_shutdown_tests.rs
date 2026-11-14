@@ -242,11 +242,25 @@ async fn shutdown_actual_server_killed_during_drain_retains_start_audit_only() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn shutdown_actual_server_killed_after_checkpoint_retains_progress_without_finish() {
+    actual_server_process(ProcessDrain::KilledAfterProgress).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_default_actual_server_settles_stream_turn_and_held_claim_before_25_seconds() {
+    actual_server_process(ProcessDrain::DefaultDeadline).await;
+}
+
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProcessDrain {
     SlowTurn,
     IdleObservers,
     Killed,
+    KilledAfterProgress,
+    DefaultDeadline,
 }
 
 #[cfg(unix)]
@@ -263,7 +277,10 @@ async fn actual_server_process(scenario: ProcessDrain) {
             }
         }
     }
-    let delay = if scenario == ProcessDrain::Killed {
+    let delay = if matches!(
+        scenario,
+        ProcessDrain::Killed | ProcessDrain::KilledAfterProgress | ProcessDrain::DefaultDeadline
+    ) {
         600
     } else {
         3
@@ -339,6 +356,9 @@ async fn actual_server_process(scenario: ProcessDrain) {
         .env("NO_PROXY", "127.0.0.1,localhost")
         .stdout(Stdio::from(log.try_clone().unwrap()))
         .stderr(Stdio::from(log));
+    if scenario == ProcessDrain::DefaultDeadline {
+        command.env_remove("SHUTDOWN_DRAIN_TIMEOUT_SECS");
+    }
     if !idle_observers {
         command
             .env("CHAIN_VERIFY_INTERVAL_SECS", "0")
@@ -424,6 +444,42 @@ async fn actual_server_process(scenario: ProcessDrain) {
     })
     .await
     .unwrap();
+    let held_claim = if scenario == ProcessDrain::DefaultDeadline {
+        let owner = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(row) = state
+                    .db
+                    .collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+                    .find_one(doc! {"instance_name":"drain-process-test"})
+                    .await
+                    .unwrap()
+                {
+                    break row;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let claim = format!(
+            "{}default-drain-fixture",
+            crate::services::discord_gateway::SOCKET_LEASE_PREFIX
+        );
+        state.db.collection::<bson::Document>(crate::models::coordination::LEASE_COLLECTION_NAME).insert_one(doc! {
+            "_id": &claim,
+            "holder": {"instance_id":"drain-process-test", "generation_id":owner.get_str("generation_id").unwrap()},
+            "lease_id": "default-drain-fence",
+            "record_kind": "checkpoint",
+            "acquired_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::hours(1)),
+            "checkpoint": "retain-after-release",
+        }).await.unwrap();
+        Some(claim)
+    } else {
+        None
+    };
+    let signalled = tokio::time::Instant::now();
     assert!(
         Command::new("kill")
             .arg("-TERM")
@@ -432,14 +488,137 @@ async fn actual_server_process(scenario: ProcessDrain) {
             .unwrap()
             .success()
     );
-    if scenario == ProcessDrain::Killed {
+    if scenario == ProcessDrain::DefaultDeadline {
+        let start = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(row) = state
+                    .db
+                    .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                    .find_one(doc! {"event_type":"backend_shutdown_drain_started"})
+                    .await
+                    .unwrap()
+                {
+                    break row;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let data = start.get_document("event_data").unwrap();
+        assert_eq!(
+            data.get_i64("budget_secs").unwrap(),
+            25,
+            "no environment override: production default must fit Kubernetes"
+        );
+        let initial = data.get_document("in_flight_at_start").unwrap();
+        assert_eq!(initial.get_i64("streams").unwrap(), 1);
+        assert_eq!(
+            initial
+                .get_document("turns")
+                .unwrap()
+                .get_i64("user")
+                .unwrap(),
+            1
+        );
+        let (status, ()) = tokio::time::timeout_at(signalled + Duration::from_secs(25), async {
+            tokio::join!(
+                async {
+                    loop {
+                        if let Some(status) = child.0.try_wait().unwrap() {
+                            break status;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                },
+                async {
+                    while let Some(chunk) = stream.next().await {
+                        if let Ok(chunk) = chunk {
+                            bytes.extend_from_slice(&chunk);
+                        } else {
+                            break;
+                        }
+                    }
+                },
+            )
+        })
+        .await
+        .expect("default drain must settle, release, audit and exit before 25s");
+        let exit_ms = signalled.elapsed().as_millis();
+        assert!(
+            status.success(),
+            "{}",
+            std::fs::read_to_string(&output).unwrap()
+        );
+        assert!(exit_ms < 25_000);
+        let row = engine::list(&state.db, OWNER, 1, None, None)
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(row.active_turn.is_none());
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(messages[1].error_code.as_deref(), Some("turn_lost"));
+        assert_eq!(messages[1].error_detail.as_ref().unwrap().stage, "shutdown");
+        let claim = state
+            .db
+            .collection::<bson::Document>(crate::models::coordination::LEASE_COLLECTION_NAME)
+            .find_one(doc! {"_id": held_claim.unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claim.get_datetime("expires_at").unwrap().timestamp_millis(),
+            0
+        );
+        assert_eq!(claim.get_str("checkpoint").unwrap(), "retain-after-release");
+        let audit = drain_audit(&state).await;
+        assert_eq!(audit.get_str("end").unwrap(), "deadline");
+        assert_eq!(audit.get_i64("tracked_units_at_finish").unwrap(), 0);
+        assert_eq!(audit.get_array("turns_interrupted").unwrap().len(), 1);
+        assert!(
+            audit
+                .get_document("leases_released")
+                .unwrap()
+                .get_i64("cluster")
+                .unwrap()
+                >= 1
+        );
+        assert!(audit.get_i64("duration_ms").unwrap() < 25_000);
+        let progress = drain_audit_row(&state, "backend_shutdown_drain_progress").await;
+        assert_eq!(
+            progress
+                .get_document("event_data")
+                .unwrap()
+                .get_i64("checkpoint_secs")
+                .unwrap(),
+            10
+        );
+        eprintln!(
+            "default process drain: exit_ms={exit_ms} duration_ms={} cleanup_reserve_ms={} turns_interrupted=1 streams_finished=1 held_claim_released=1 progress_rows=1 finish_rows=1",
+            audit.get_i64("duration_ms").unwrap(),
+            audit.get_i64("cleanup_reserve_ms").unwrap()
+        );
+        upstream.abort();
+        return;
+    }
+    if matches!(
+        scenario,
+        ProcessDrain::Killed | ProcessDrain::KilledAfterProgress
+    ) {
         let audits = state
             .db
             .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
-        tokio::time::timeout(Duration::from_secs(10), async {
+        let event = if scenario == ProcessDrain::KilledAfterProgress {
+            "backend_shutdown_drain_progress"
+        } else {
+            "backend_shutdown_drain_started"
+        };
+        tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 if audits
-                    .find_one(doc! {"event_type": "backend_shutdown_drain_started"})
+                    .find_one(doc! {"event_type": event})
                     .await
                     .unwrap()
                     .is_some()
@@ -451,7 +630,7 @@ async fn actual_server_process(scenario: ProcessDrain) {
             }
         })
         .await
-        .expect("start audit must be visible while the turn is still in flight");
+        .expect("drain checkpoint must be visible while the turn is still in flight");
         assert!(child.0.try_wait().unwrap().is_none());
         child.0.kill().unwrap();
         use std::os::unix::process::ExitStatusExt;
@@ -478,6 +657,22 @@ async fn actual_server_process(scenario: ProcessDrain) {
                 .unwrap(),
             0
         );
+        if scenario == ProcessDrain::KilledAfterProgress {
+            let progress = drain_audit_row(&state, "backend_shutdown_drain_progress").await;
+            assert!(start.get_i64("seq").unwrap() < progress.get_i64("seq").unwrap());
+            let data = progress.get_document("event_data").unwrap();
+            assert!(data.get_i64("elapsed_secs").unwrap() >= 10);
+            let entries = data
+                .get_document("open_http")
+                .unwrap()
+                .get_array("entries")
+                .unwrap();
+            assert!(entries.iter().any(|entry| {
+                let entry = entry.as_document().unwrap();
+                entry.get_str("route") == Ok("/api/v1/assistant/nyxagent/turns")
+                    && entry.get_str("kind") == Ok("stream")
+            }));
+        }
         upstream.abort();
         return;
     }

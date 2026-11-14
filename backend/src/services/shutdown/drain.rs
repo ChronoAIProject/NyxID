@@ -13,7 +13,7 @@ use super::{Counts, Runtime};
 const CLEANUP_RESERVE_DIVISOR: u32 = 10;
 const MAX_CLEANUP_RESERVE: Duration = Duration::from_secs(5);
 // Above half the default cleanup reserve, so that half is the effective bound.
-const START_AUDIT_TIMEOUT: Duration = Duration::from_secs(3);
+const SNAPSHOT_AUDIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 type ReleaseFuture<'a> = std::pin::Pin<Box<dyn Future<Output = AppResult<u64>> + Send + 'a>>;
 
@@ -32,12 +32,62 @@ pub struct Drain {
     pub started: Instant,
     pub started_at: DateTime<Utc>,
     pub counts: Counts,
+    open_http: super::diagnostics::OpenHttp,
+    progress_stopped: tokio_util::sync::CancellationToken,
     pub signal: &'static str,
     pub timeout: Duration,
     audit_attempted: std::sync::atomic::AtomicBool,
 }
 
 impl Drain {
+    /// Polled alongside the coordinator, including listener handover and cleanup.
+    /// No work guard: diagnostics must never turn an idle drain into a busy one.
+    pub async fn progress(&self, state: &AppState) -> std::convert::Infallible {
+        let records = async {
+            for elapsed in [10, 25, 60, 300] {
+                let offset = Duration::from_secs(elapsed);
+                if offset >= self.timeout {
+                    break;
+                }
+                tokio::time::sleep_until(self.started + offset).await;
+                if Instant::now() >= self.deadline {
+                    break;
+                }
+                let metadata = serde_json::json!({
+                    "generation": state.replica_identity.generation_id,
+                    "signal": self.signal,
+                    "started_at": self.started_at,
+                    "budget_secs": self.timeout.as_secs(),
+                    "elapsed_secs": self.started.elapsed().as_secs(),
+                    "checkpoint_secs": elapsed,
+                    "in_flight": self.runtime.counts(),
+                    "node_operations": state.node_ws_manager.in_flight_operations(),
+                    "open_http": self.runtime.open_http(),
+                });
+                tracing::info!(target: "nyxid::shutdown", event = "backend_shutdown_drain_progress", metadata = %metadata, "Backend drain still running");
+                snapshot_audit(
+                    state.db.clone(),
+                    "backend_shutdown_drain_progress",
+                    metadata,
+                    self.deadline
+                        .min(Instant::now() + self.snapshot_audit_timeout()),
+                )
+                .await;
+            }
+            std::future::pending::<()>().await;
+        };
+        tokio::select! {
+            biased;
+            () = self.progress_stopped.cancelled() => {},
+            () = records => {},
+        }
+        std::future::pending().await
+    }
+
+    fn snapshot_audit_timeout(&self) -> Duration {
+        SNAPSHOT_AUDIT_TIMEOUT.min(self.cleanup_reserve() / 2)
+    }
+
     pub fn cleanup_reserve(&self) -> Duration {
         (self.timeout / CLEANUP_RESERVE_DIVISOR).min(MAX_CLEANUP_RESERVE)
     }
@@ -54,8 +104,9 @@ impl Drain {
         let runtime = &state.shutdown;
         let counts = runtime.begin_drain()?;
         let started = Instant::now();
+        let open_http = runtime.open_http();
         tracing::info!(target: "nyxid::shutdown", signal, budget_secs = timeout.as_secs(),
-            in_flight = ?counts, "Backend drain started; a second signal skips the wait and exits immediately after bounded cleanup");
+            in_flight = ?counts, open_http = ?open_http, "Backend drain started; a second signal skips the wait and exits immediately after bounded cleanup");
         let drain = Self {
             runtime: runtime.clone(),
             deadline: started
@@ -64,6 +115,8 @@ impl Drain {
             started,
             started_at: Utc::now(),
             counts,
+            open_http,
+            progress_stopped: tokio_util::sync::CancellationToken::new(),
             signal,
             timeout,
             audit_attempted: std::sync::atomic::AtomicBool::new(false),
@@ -82,27 +135,17 @@ impl Drain {
             "budget_secs": drain.timeout.as_secs(),
             "cleanup_reserve_ms": drain.cleanup_reserve().as_millis(),
             "in_flight_at_start": drain.counts,
+            "open_http_at_start": drain.open_http,
             "node_operations_at_start": state.node_ws_manager.in_flight_operations(),
         });
         // Fit the completion join even when a second signal starts cleanup immediately.
-        let audit_deadline = started + START_AUDIT_TIMEOUT.min(drain.cleanup_reserve() / 2);
-        let db = state.db.clone();
-        state.shutdown.spawn_cleanup(async move {
-            if !matches!(
-                tokio::time::timeout_at(
-                    audit_deadline,
-                    crate::services::audit_service::log_system_event(
-                        db,
-                        "backend_shutdown_drain_started",
-                        Some(metadata),
-                    ),
-                )
-                .await,
-                Ok(Ok(()))
-            ) {
-                tracing::warn!(target: "nyxid::shutdown", "Shutdown start audit unavailable or timed out");
-            }
-        });
+        let audit_deadline = started + drain.snapshot_audit_timeout();
+        state.shutdown.spawn_cleanup(snapshot_audit(
+            state.db.clone(),
+            "backend_shutdown_drain_started",
+            metadata,
+            audit_deadline,
+        ));
         Some(drain)
     }
 
@@ -147,6 +190,8 @@ impl Drain {
         mut leases_released: BTreeMap<&'static str, u64>,
         audit_deadline: Instant,
     ) {
+        // Cancel progress before recording completion.
+        self.progress_stopped.cancel();
         if self
             .audit_attempted
             .swap(true, std::sync::atomic::Ordering::AcqRel)
@@ -177,6 +222,8 @@ impl Drain {
             "work_deadline_at": chrono::Duration::from_std(self.timeout - self.cleanup_reserve()).ok().and_then(|timeout| self.started_at.checked_add_signed(timeout)),
             "cleanup_reserve_ms": self.cleanup_reserve().as_millis(),
             "in_flight_at_start": self.counts,
+            "open_http_at_start": self.open_http,
+            "open_http_at_finish": self.runtime.open_http(),
             "in_flight_at_finish": self.runtime.counts(),
             "tracked_units_at_finish": self.runtime.tracked_units(),
             "subscriptions_ended": self.runtime.subscriptions_ended(),
@@ -202,6 +249,27 @@ impl Drain {
         ) {
             tracing::warn!(target: "nyxid::shutdown", "Shutdown audit unavailable");
         }
+    }
+}
+
+/// Shared bounded chained append for start and progress. The start is joined
+/// through spawn_cleanup; progress is owned directly by the shutdown coordinator
+/// and cancelled at finish, so its IO never adds an idle/cleanup dependency.
+async fn snapshot_audit(
+    db: mongodb::Database,
+    event: &'static str,
+    metadata: serde_json::Value,
+    deadline: Instant,
+) {
+    if !matches!(
+        tokio::time::timeout_at(
+            deadline,
+            crate::services::audit_service::log_system_event(db, event, Some(metadata)),
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
+        tracing::warn!(target: "nyxid::shutdown", event, "Shutdown snapshot audit unavailable or timed out");
     }
 }
 

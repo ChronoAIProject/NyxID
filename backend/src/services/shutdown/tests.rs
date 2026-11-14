@@ -715,6 +715,24 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
     const TASKS: usize = 16;
     const PAIRS: usize = 20_000;
     let db = connect_transaction_test_database("shutdown_tracking_benchmark").await;
+    let response = Router::new()
+        .route(
+            "/benchmark/{id}",
+            get(|route: axum::extract::MatchedPath| async move { axum::Extension(route) }),
+        )
+        .oneshot(
+            Request::builder()
+                .uri("/benchmark/private-id")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let route = response
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .unwrap()
+        .clone();
     for waiter in [false, true] {
         let runtime = Runtime::default();
         let held = runtime.work();
@@ -727,16 +745,20 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
         let mut tasks = tokio::task::JoinSet::new();
         for _ in 0..TASKS {
             let runtime = runtime.clone();
+            let route = route.clone();
             tasks.spawn(async move {
                 let started = std::time::Instant::now();
                 let mut samples = Vec::new();
                 for index in 0..PAIRS {
                     let sample = (index % 100 == 0).then(std::time::Instant::now);
                     // One response handoff, including both registrations and Drops.
-                    let request = runtime.request();
-                    let stream = runtime.stream();
-                    drop(request);
-                    drop(stream);
+                    diagnostics::scope(Some(route.clone()), &axum::http::Method::GET, async {
+                        let request = runtime.request();
+                        let stream = runtime.stream();
+                        drop(request);
+                        drop(stream);
+                    })
+                    .await;
                     if let Some(sample) = sample {
                         samples.push(sample.elapsed().as_nanos());
                     }

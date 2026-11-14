@@ -178,8 +178,9 @@ requests during the wait, including new assistant turns. Background pullers stop
 acquiring work, while existing claims and their renewal loops finish. The
 internal listener remains available for peers routing to this replica's nodes.
 
-The default shutdown budget is 600 seconds, including up to five seconds of
-cleanup (10% for budgets shorter than 50 seconds). A second signal begins cleanup
+The default shutdown budget is 25 seconds, which fits Kubernetes' default
+30-second termination grace period with no setting. It includes the cleanup
+reserve: 10% of the budget, at most five seconds. A second signal begins cleanup
 immediately; `SHUTDOWN_DRAIN_TIMEOUT_SECS=0` preserves immediate shutdown. At
 handover, local execution stops before capacity or ownership is released.
 Cluster/node/slot releases are generation fenced, other claimed work retains
