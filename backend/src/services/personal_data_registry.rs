@@ -2624,8 +2624,16 @@ pub(crate) async fn ensure_owner_index_gaps(
 ) -> crate::errors::AppResult<()> {
     use futures::TryStreamExt;
     use mongodb::{IndexModel, options::IndexOptions};
+    use std::collections::BTreeMap;
 
+    let mut fields_by_collection = BTreeMap::<&str, Vec<&str>>::new();
     for &(collection, field) in OWNER_INDEX_GAPS {
+        fields_by_collection
+            .entry(collection)
+            .or_default()
+            .push(field);
+    }
+    for (collection, fields) in fields_by_collection {
         let indexes: Vec<IndexModel> = match db
             .collection::<mongodb::bson::Document>(collection)
             .list_indexes()
@@ -2639,35 +2647,31 @@ pub(crate) async fn ensure_owner_index_gaps(
                 ) => Vec::new(),
             Err(error) => return Err(error.into()),
         };
-        if indexes.iter().any(|index| {
-            index
-                .keys
-                .keys()
-                .next()
-                .is_some_and(|first| first == field)
-        }) {
-            continue;
-        }
-        let name = format!(
-            "personal_erasure_owner_{}_{}",
-            collection.replace('.', "_"),
-            field.replace('.', "_")
-        );
-        let mut keys = mongodb::bson::Document::new();
-        keys.insert(field, 1_i32);
-        if let Err(error) = db
-            .collection::<mongodb::bson::Document>(collection)
-            .create_index(
-                IndexModel::builder()
-                    .keys(keys)
-                    .options(IndexOptions::builder().name(name).build())
-                    .build(),
-            )
-            .await
-        {
-            return Err(crate::errors::AppError::Internal(format!(
-                "owner index {collection}.{field}: {error}"
-            )));
+        for field in fields {
+            if indexes.iter().any(|index| {
+                index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|first| first == field)
+            }) {
+                continue;
+            }
+            let name = format!(
+                "personal_erasure_owner_{}_{}",
+                collection.replace('.', "_"),
+                field.replace('.', "_")
+            );
+            let mut keys = mongodb::bson::Document::new();
+            keys.insert(field, 1_i32);
+            db.collection::<mongodb::bson::Document>(collection)
+                .create_index(
+                    IndexModel::builder()
+                        .keys(keys)
+                        .options(IndexOptions::builder().name(name).build())
+                        .build(),
+                )
+                .await?;
         }
     }
     Ok(())
