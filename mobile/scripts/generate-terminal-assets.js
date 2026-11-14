@@ -20,17 +20,20 @@ const output =
     )
     .join("");
 const target = path.join(root, "src/features/ssh/terminalAssets.generated.ts");
+const licenseTarget = path.join(root, "src/features/ssh/terminal-licenses.txt");
+const licenses =
+  ["@xterm/xterm", "@xterm/addon-fit"]
+    .map((name) => `${name}\n${read(`${name}/LICENSE`).trimEnd()}`)
+    .join("\n\n") + "\n";
 if (process.argv.includes("--check")) {
-  if (fs.readFileSync(target, "utf8") !== output)
+  if (
+    fs.readFileSync(target, "utf8") !== output ||
+    fs.readFileSync(licenseTarget, "utf8") !== licenses
+  )
     throw new Error(
       "Offline terminal assets are stale; run node scripts/generate-terminal-assets.js",
     );
 } else {
   fs.writeFileSync(target, output);
-  fs.writeFileSync(
-    path.join(root, "src/features/ssh/terminal-licenses.txt"),
-    ["@xterm/xterm", "@xterm/addon-fit"]
-      .map((name) => `${name}\n${read(`${name}/LICENSE`)}\n`)
-      .join("\n"),
-  );
+  fs.writeFileSync(licenseTarget, licenses);
 }
