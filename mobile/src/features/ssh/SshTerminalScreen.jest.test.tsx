@@ -655,6 +655,23 @@ test("a catalog deep link resolves the active connection, while an unknown catal
   await unknown.unmount();
 });
 
+test("a link string autoConnect value never auto-connects the terminal", async () => {
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{
+        params: {
+          serviceId: "catalog",
+          connectionId: "connection",
+          autoConnect: "true" as unknown as boolean,
+        },
+      }}
+    />,
+  );
+  expect(screen.getByText("Connect")).toBeTruthy();
+  expect(Socket.instances.length).toBe(0);
+  await screen.unmount();
+});
+
 test("a connection load failure has an unavailable state without terminal chrome", async () => {
   jest.mocked(servicesApi.connection).mockRejectedValueOnce(new Error("offline"));
   const screen = await renderTerminal(

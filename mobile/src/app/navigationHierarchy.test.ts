@@ -60,6 +60,17 @@ test("SSH links use the catalog id and preserve an optional exact connection", (
     connectionId: "connection",
     principal: "ops",
   });
+
+  const stringAutoConnect = getStateFromPath(
+    "ssh/catalog/terminal?autoConnect=true",
+    navigationLinkingConfig,
+  );
+  const linkedAutoConnect = stringAutoConnect
+    ? selected(content(hydrate(stringAutoConnect))).params as
+        | { autoConnect?: unknown }
+        | undefined
+    : undefined;
+  assert.notEqual(linkedAutoConnect?.autoConnect, true);
 });
 
 const mainEntries = [

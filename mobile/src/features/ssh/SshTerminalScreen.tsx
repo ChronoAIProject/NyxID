@@ -522,13 +522,15 @@ export function SshTerminalScreen({
     try {
       const text = await Clipboard.getStringAsync();
       const pasted = truncateTerminalPaste(text);
-      if (
+      const sent =
         focusedRef.current &&
         epoch === generation.current &&
         account === getAuthAccountId()
-      )
+      if (sent) {
         send({ type: "paste", text: pasted.text });
-      if (pasted.truncated) setError(t("Only the first 65,536 characters were pasted."));
+        if (pasted.truncated)
+          setError(t("Only the first 65,536 characters were pasted."));
+      }
     } catch {
       if (epoch === generation.current)
         setError("Couldn't read the clipboard. Try again.");
