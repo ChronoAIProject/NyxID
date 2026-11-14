@@ -1,3 +1,5 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { canAdminWrite } from "@/types/api";
 import {
   Table,
   TableHeader,
@@ -24,6 +26,7 @@ import {
   useCrashReport,
   useCrashReports,
   useCrashSummary,
+  useRegisterCrashRelease,
 } from "@/hooks/use-admin-crash-reports";
 import {
   crashKindSchema,
@@ -93,6 +96,9 @@ function LoadState({ error, loading }: { error: unknown; loading: boolean }) {
 }
 export function AdminCrashReportsPage() {
   useUiTranslation();
+  const registerRelease = useRegisterCrashRelease();
+  const canRegister = canAdminWrite(useAuthStore((s) => s.user));
+
   const [reportWindow, setReportWindow] = useState("24h");
   const [filters, setFilters] = useState<CrashFilters>({});
   const form = useAppForm({
@@ -228,14 +234,20 @@ export function AdminCrashReportsPage() {
                   days: summary.data.health.retention_days,
                 })}{" "}
                 · {t("Reporting rollout")}:{" "}
-                {summary.data.health.flag_enabled
-                  ? t("Enabled")
-                  : t("Disabled")}
+                {label(summary.data.health.rollout, {
+                  off: "Rollout off",
+                  killed: "Rollout killed",
+                  global: "Global rollout",
+                  cohort: "Cohort rollout",
+                })}
               </p>
               <p>
                 {t("Export destinations")}:{" "}
                 {summary.data.health.destination_ids.join(", ") || t("None")}
               </p>
+              {!summary.data.health.export_enabled && (
+                <p role="status">{t("Export disabled")}</p>
+              )}
               <section
                 aria-labelledby="crash-export-status"
                 className="space-y-2"
@@ -254,6 +266,73 @@ export function AdminCrashReportsPage() {
                   )}
                 </dl>
               </section>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("Unverified releases")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="type-secondary text-muted-foreground">
+                {t(
+                  "Unverified releases are excluded from version counts. Register each store build before release.",
+                )}
+              </p>
+              {registerRelease.isError && (
+                <ErrorBanner
+                  message={t("Could not register release. Try again.")}
+                />
+              )}
+              <div
+                role="list"
+                aria-label={t("Unverified releases")}
+                className="space-y-3"
+              >
+                {summary.data.unverified_releases.map((v, i) => (
+                  <div
+                    role="listitem"
+                    key={i}
+                    className="rounded-xl border border-border/50 p-4 space-y-2"
+                  >
+                    <Button
+                      variant="link"
+                      className="h-auto p-0"
+                      onClick={() => selectVersion(v)}
+                    >
+                      {label(v.platform, platformLabels)} · {v.app_version} (
+                      {v.app_build})
+                    </Button>
+                    <p className="type-secondary">
+                      {t("Reported events")}: {v.total} ·{" "}
+                      {reportedKinds(v.counts)}
+                    </p>
+                    <p className="type-secondary break-all">
+                      {t("Artifact")}: {v.artifact_ids.join(", ") || "—"}
+                    </p>
+                    {canRegister &&
+                      (v.platform === "web" ? v.artifact_ids : [undefined]).map(
+                        (artifact) => (
+                          <Button
+                            key={artifact ?? "store"}
+                            variant="outline"
+                            disabled={registerRelease.isPending}
+                            onClick={() =>
+                              registerRelease.mutate({
+                                platform: v.platform,
+                                app_version: v.app_version,
+                                app_build: v.app_build,
+                                ...(artifact ? { artifact_id: artifact } : {}),
+                              })
+                            }
+                          >
+                            {t("Register release")}
+                            {artifact ? ` · ${artifact}` : ""}
+                          </Button>
+                        ),
+                      )}
+                  </div>
+                ))}
+              </div>
             </CardContent>
           </Card>
           <Card>

@@ -49,6 +49,18 @@ export const crashListSchema = z.object({
   reports: z.array(crashReportSchema),
   cursor: z.string().nullable(),
 });
+export const crashVersionSchema = z.object({
+  platform: crashPlatformSchema,
+  environment: z.string(),
+  app_version: z.string(),
+  app_build: z.string(),
+  artifact_id: z.string().nullable(),
+  artifact_ids: z.array(z.string()).max(10),
+  counts: z.record(z.string(), z.number()),
+  total: z.number(),
+  first_seen: z.string(),
+  last_seen: z.string(),
+});
 export const crashSummarySchema = z.object({
   health: z.object({
     outcomes: z.record(z.string(), z.number()),
@@ -56,21 +68,11 @@ export const crashSummarySchema = z.object({
     destination_ids: z.array(z.string()),
     retention_days: z.number(),
     flag_enabled: z.boolean(),
+    rollout: z.enum(["off", "killed", "global", "cohort"]),
+    export_enabled: z.boolean(),
   }),
-  versions: z.array(
-    z.object({
-      platform: crashPlatformSchema,
-      environment: z.string(),
-      app_version: z.string(),
-      app_build: z.string(),
-      artifact_id: z.string().nullable(),
-      artifact_ids: z.array(z.string()).max(10),
-      counts: z.record(z.string(), z.number()),
-      total: z.number(),
-      first_seen: z.string(),
-      last_seen: z.string(),
-    }),
-  ),
+  versions: z.array(crashVersionSchema),
+  unverified_releases: z.array(crashVersionSchema),
 });
 export type CrashReportDetail = z.infer<typeof crashReportSchema>;
 export type CrashFilters = {

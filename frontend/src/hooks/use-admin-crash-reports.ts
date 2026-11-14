@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
   crashListSchema,
@@ -42,5 +42,19 @@ export function useCrashReport(id: string) {
           `/admin/crash-reports/${encodeURIComponent(id)}`,
         ),
       ),
+  });
+}
+
+export function useRegisterCrashRelease() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (release: {
+      platform: "web" | "ios" | "android";
+      app_version: string;
+      app_build: string;
+      artifact_id?: string;
+    }) => api.post("/admin/crash-reports/releases", release),
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: ["admin", "crash-summary"] }),
   });
 }

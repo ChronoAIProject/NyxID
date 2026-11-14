@@ -11,7 +11,7 @@ const s = vi.hoisted(() => ({
     account_id: "account-a",
     enabled: true,
     policy_version: "2",
-    diagnostics_available: true,
+    diagnostics_status: "available", diagnostics_available: true,
     revision: "live",
   },
   api: vi.fn(),
@@ -40,7 +40,7 @@ beforeEach(() => {
     account_id: "account-a",
     enabled: true,
     policy_version: "2",
-    diagnostics_available: true,
+    diagnostics_status: "available", diagnostics_available: true,
     revision: "live",
   };
   s.api.mockReset();
@@ -379,4 +379,16 @@ it("resource capture excludes images media third-party and non-app assets", asyn
   await vi.waitFor(() => expect(s.api).toHaveBeenCalledOnce());
   expect(JSON.stringify(s.api.mock.calls)).not.toContain("SECRET_SENTINEL");
   nodes.forEach(node=>node.remove());remove();
+});
+
+it.each(["unknown",undefined,"consent_required","not_offered"])("permission status %s pauses without permanently stopping a later available session",async(status)=>{
+  const r=await boot();
+  s.read.mockResolvedValueOnce({...s.permission,diagnostics_status:status,diagnostics_available:false});
+  await r.reportCrash(failure(401)); expect(s.api).not.toHaveBeenCalled();
+  await r.refreshCrashPermission(); await r.reportCrash(failure(402)); expect(s.api).toHaveBeenCalledOnce();
+});
+it.each([500,503,429])("HTTP %s leaves the web session retryable",async(status)=>{
+  const r=await boot(); const {ApiError}=await import("../api-error");
+  s.api.mockRejectedValueOnce(new ApiError(status,{error:"security_readiness_unavailable",error_code:12900,message:"fixed"}));
+  await r.reportCrash(failure(403)); await r.refreshCrashPermission(); await r.reportCrash(failure(404)); expect(s.api).toHaveBeenCalledTimes(2);
 });

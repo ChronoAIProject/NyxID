@@ -654,3 +654,14 @@ it("privacy hides diagnostics when not offered and orders offered rows account b
   const browser=screen.getByText("Allow on this browser");
   expect(browser.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
+
+it.each(["2",null])("account re-enable retains an acknowledged policy from account=%s or device",async(accountPolicy)=>{
+  useConsentStore.getState().setConsent(false,2);
+  transport.mockImplementation(async (_url,options)=>new Response(JSON.stringify({account_id:"owner",enabled:options?.method==="PUT",policy_version:accountPolicy,current_policy_version:"2",diagnostics_offered:true,diagnostics_status:"consent_required",diagnostics_available:false,revision:"r",changed_at:null}),{headers:{"Content-Type":"application/json"}}));
+  await open("/settings","privacy");
+  const toggle=await screen.findByRole("switch",{name:"Allow account usage analytics"});
+  await waitFor(()=>expect(toggle).not.toBeDisabled()); await userEvent.click(toggle);
+  await waitFor(()=>expect(transport.mock.calls.some(([,opts])=>opts?.method==="PUT")).toBe(true));
+  const request=transport.mock.calls.find(([,opts])=>opts?.method==="PUT")!;
+  expect(JSON.parse(String(request[1]?.body))).toMatchObject({enabled:true,policy_version:"2"});
+});

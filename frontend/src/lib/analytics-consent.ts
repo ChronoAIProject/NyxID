@@ -6,6 +6,7 @@ import { useConsentStore } from '@/stores/consent-store';
 export interface AnalyticsConsent {
   current_policy_version?: string;
   diagnostics_offered?: boolean;
+  diagnostics_status?: "available" | "consent_required" | "not_offered" | "unknown";
   diagnostics_available?: boolean;
   policy_version?: string | null;
   enabled: boolean;
@@ -35,8 +36,10 @@ export async function saveAnalyticsConsent(accountId: string, enabled: boolean, 
   guard();
   // Failed withdrawal must still stop this device immediately. Opt-in waits for
   // durable acknowledgement and cannot inherit a previous account's preference.
-  useConsentStore.getState().setConsent(false);
-  disableTelemetry();
+  if (!enabled || !useConsentStore.getState().enabled || useConsentStore.getState().accountId !== accountId || acknowledged !== 2) {
+    useConsentStore.getState().setConsent(false);
+    disableTelemetry();
+  }
   const revision = useConsentStore.getState().revision;
   const intentGuard = () => {
     guard();

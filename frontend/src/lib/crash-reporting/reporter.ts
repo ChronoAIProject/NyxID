@@ -44,6 +44,7 @@ export async function refreshCrashPermission(): Promise<void> {
       useAuthStore.getState().user?.id === actor
     )
       available =
+        permission.diagnostics_status === "available" &&
         permission.enabled &&
         permission.policy_version === "2" &&
         permission.diagnostics_available === true;
@@ -133,6 +134,7 @@ function capture(error: unknown, kind: CrashKind): Promise<void> {
     const permission = await readAnalyticsConsent(actor);
     guard();
     if (
+      permission.diagnostics_status !== "available" ||
       !permission.enabled ||
       permission.policy_version !== "2" ||
       !permission.diagnostics_available

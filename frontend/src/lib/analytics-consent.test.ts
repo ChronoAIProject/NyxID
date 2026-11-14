@@ -3,7 +3,7 @@ const state = vi.hoisted(() => ({ actor: 'account-a', enabled: false, revision: 
 vi.mock('./api-client', () => ({ apiClient: state.api }));
 vi.mock('./telemetry', () => ({ disableTelemetry: state.disable }));
 vi.mock('@/stores/auth-store', () => ({ useAuthStore: { getState: () => ({ user: { id: state.actor } }) } }));
-vi.mock('@/stores/consent-store', () => ({ useConsentStore: { getState: () => ({ revision: state.revision, setConsent: state.choose }) } }));
+vi.mock('@/stores/consent-store', () => ({ useConsentStore: { getState: () => ({ enabled:state.enabled, accountId:state.actor, revision: state.revision, setConsent: state.choose }) } }));
 import { saveAnalyticsConsent, readAnalyticsConsent } from './analytics-consent';
 const result = { account_id: 'account-a', enabled: true, revision: 'rev', changed_at: null };
 beforeEach(() => {
@@ -83,4 +83,11 @@ it('withdrawal stops immediately even when policy negotiation fails', async () =
   expect(state.enabled).toBe(false);
   expect(state.disable).toHaveBeenCalledOnce();
   await expect(pending).rejects.toThrow('offline');
+});
+
+it.each([true,false])('failed updated acknowledgement preserves the prior device choice enabled=%s',async(enabled)=>{
+  state.enabled=enabled; state.api.mockRejectedValue(new Error('offline'));
+  await expect(saveAnalyticsConsent('account-a',true,2)).rejects.toThrow('offline');
+  expect(state.enabled).toBe(enabled);
+  if(enabled) expect(state.disable).not.toHaveBeenCalled();
 });

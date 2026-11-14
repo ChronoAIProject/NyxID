@@ -21,6 +21,11 @@ vi.mock("@/hooks/use-admin-crash-reports", () => ({
   useCrashSummary: vi.fn(),
   useCrashReports: vi.fn(),
   useCrashReport: vi.fn(),
+  useRegisterCrashRelease: vi.fn(() => ({
+    isPending: false,
+    isError: false,
+    mutate: vi.fn(),
+  })),
 }));
 it("admin report details escape every server string as text", () => {
   const attack = "<img src=x onerror=alert(1)>";
@@ -76,8 +81,11 @@ it("admin overview renders ingestion health and localized filter labels", () => 
         destination_ids: [],
         retention_days: 30,
         flag_enabled: false,
+        rollout: "off",
+        export_enabled: false,
       },
       versions: [],
+      unverified_releases: [],
     },
   } as unknown as ReturnType<typeof useCrashSummary>);
   vi.mocked(useCrashReports).mockReturnValue({
@@ -138,8 +146,11 @@ it.each([
           destination_ids: [],
           retention_days: 30,
           flag_enabled: true,
+          rollout: "cohort",
+          export_enabled: false,
         },
         versions: [version],
+        unverified_releases: [],
       }),
     } as unknown as ReturnType<typeof useCrashSummary>);
     vi.mocked(useCrashReports).mockReturnValue({
@@ -212,5 +223,78 @@ it.each([
       ).toHaveAttribute("href", "/admin/crash-reports/report-45");
       expect(reports.getByText("Disabled")).toBeInTheDocument();
     }
+  },
+);
+
+it.each(["admin", "operator"])(
+  "%s sees unverified counts, and only an admin can register",
+  async (role) => {
+    const { useAuthStore } = await import("@/stores/auth-store");
+    const { useRegisterCrashRelease } =
+      await import("@/hooks/use-admin-crash-reports");
+    const previous = useAuthStore.getState().user;
+    useAuthStore.setState({
+      user: { id: "actor", role } as NonNullable<typeof previous>,
+    });
+    const mutate = vi.fn();
+    vi.mocked(useRegisterCrashRelease).mockReturnValue({
+      mutate,
+      isPending: false,
+      isError: false,
+    } as unknown as ReturnType<typeof useRegisterCrashRelease>);
+    vi.mocked(useCrashSummary).mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: crashSummarySchema.parse({
+        health: {
+          outcomes: {},
+          export_statuses: {},
+          destination_ids: [],
+          retention_days: 30,
+          flag_enabled: false,
+          rollout: "killed",
+          export_enabled: false,
+        },
+        versions: [],
+        unverified_releases: [
+          {
+            platform: "ios",
+            environment: "test",
+            app_version: "1.0.4",
+            app_build: "45",
+            artifact_id: null,
+            artifact_ids: [],
+            counts: { native_crash: 3 },
+            total: 3,
+            first_seen: "2026-11-14T00:00:00Z",
+            last_seen: "2026-11-14T00:00:00Z",
+          },
+        ],
+      }),
+    } as unknown as ReturnType<typeof useCrashSummary>);
+    vi.mocked(useCrashReports).mockReturnValue({
+      isLoading: false,
+      error: null,
+      data: { reports: [], cursor: null },
+    } as unknown as ReturnType<typeof useCrashReports>);
+    render(<AdminCrashReportsPage />);
+    const list = within(
+      screen.getByRole("list", { name: "Unverified releases" }),
+    );
+    expect(list.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText(/Rollout killed/)).toBeInTheDocument();
+    expect(screen.getByText("Export disabled")).toBeInTheDocument();
+    if (role === "admin") {
+      fireEvent.click(list.getByRole("button", { name: "Register release" }));
+      expect(mutate).toHaveBeenCalledWith({
+        platform: "ios",
+        app_version: "1.0.4",
+        app_build: "45",
+      });
+    } else
+      expect(
+        list.queryByRole("button", { name: "Register release" }),
+      ).not.toBeInTheDocument();
+    useAuthStore.setState({ user: previous });
   },
 );

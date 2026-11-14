@@ -1093,7 +1093,7 @@ function PrivacyTab() {
       await permission.refetch();
     } catch {
       toast.error(
-        translateErrorMessage("Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
+        translateErrorMessage(next && policy === 2 && consentEnabled ? "Could not save updated analytics permission." : "Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
       );
     } finally {
       setSaving(false);
@@ -1241,7 +1241,7 @@ function PrivacyTab() {
                 permission.isError ||
                 permission.isFetching
               }
-              onCheckedChange={(next) => void handleToggle(next)}
+              onCheckedChange={(next) => void handleToggle(next, permission.data?.diagnostics_offered && (permission.data?.policy_version === "2" || devicePolicy === 2) ? 2 : 1)}
               aria-label={translateUi("Allow account usage analytics")}
             />
           </>
