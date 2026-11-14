@@ -2560,7 +2560,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["billing_owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Section("billing"),
-        why: "usage_meter is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+        why: "usage_meter links billable usage and numeric stream-recovery checkpoints to billing_owner_id; financial and billing retention preserves settlement evidence, while export exposes only its explicit billing metadata allowlist.",
     },
     Entry {
         collection: "usage_rollup_daily",
@@ -4065,6 +4065,10 @@ mod tests {
         assert!(snapshot_has_prefix(
             &origin["node_credential_desired"],
             "pending"
+        ));
+        assert!(snapshot_has_prefix(
+            &origin["usage_meter"],
+            "usage_checkpoint.recover_after"
         ));
 
         // The checked-in classification is complete relative to the

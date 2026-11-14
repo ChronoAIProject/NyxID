@@ -1,6 +1,6 @@
 # Privacy registry additions from the round-10 rebase
 
-Audited base: `cdcd410c20b0cd45b37b352394b367f348d41c25`. Paths below are
+Audited base: `ba8cdb81020962aedafd793d812683f12efdc6d2`. Paths below are
 relative to `backend/src`. The production source scanner found six additions;
 the two other names in the review have only test writers. None needs a new WS5
 index, export subsection, erasure domain, or inventory revision.
@@ -169,6 +169,24 @@ erasure index calls. Upgrade snapshots now explicitly include the delivery
 queue's indexes and assert both main-owned prefixes exist before branch startup.
 The branch still adds only the accepted 17 indexes and never drops, renames, or
 rebuilds existing indexes.
+
+The remote advanced once more during verification. The second rebase adds no
+collection: `models/usage_checkpoint.rs:19` defines an embedded `UsageCheckpoint`
+on `usage_meter`, whose collection constant remains `models/usage_meter.rs:8`.
+Its persisted fields are `version`, `sequence`, `protocol`, `final_report`, numeric
+`evidence`, optional `model_charges`, `recovered`, `observed_at`, and `recover_after`.
+The enclosing row's `billing_owner_id` remains its person linkage; the checkpoint
+adds no person/name/email fields. `Recorder::record`
+(`services/billing/usage_checkpoint.rs:220`) writes that subdocument; recovery
+(`usage_checkpoint/recovery.rs:149,179`) marks it recovered and promotes meter
+quantities. Existing meter writers also retain the optional field. It has no
+independent TTL or row volume: at most one checkpoint per billable meter attempt.
+It inherits `Retained(FinancialBilling)` and the explicit `billing` export
+allowlist, which excludes the recovery subdocument. No new WS5 index or erasure
+path is needed. Main's `usage_checkpoint_recovery` partial index at `db.rs:3378`
+is now explicitly pinned in the origin/main upgrade snapshot and preserved
+byte-identically through both branch startups and the mixed-fleet restart. The
+table-driven erasure fixture verifies that the checkpoint remains unchanged.
 
 The rebased telemetry durability fixture also overrode an explicit
 `directConnection=true`, which made the driver follow an advertised member

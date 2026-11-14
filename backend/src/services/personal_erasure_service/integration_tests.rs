@@ -235,6 +235,11 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         }
     }
 
+    let retained_checkpoint = doc! {
+        "version": 1_i32, "sequence": 1_i64, "protocol": "responses",
+        "final_report": true, "evidence": {"total": 37_i64}, "recovered": false,
+        "observed_at": bson::DateTime::now(), "recover_after": bson::DateTime::now(),
+    };
     for (index, entry) in crate::services::personal_data_registry::entries()
         .iter()
         .enumerate()
@@ -254,6 +259,9 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                     row.insert(*field, &owner);
                 }
             }
+        }
+        if entry.collection == "usage_meter" {
+            row.insert("usage_checkpoint", retained_checkpoint.clone());
         }
         db.collection::<Document>(entry.collection)
             .insert_one(row)
@@ -399,14 +407,19 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         );
     }
     for (collection, id) in retained_rows {
-        assert!(
-            db.collection::<Document>(collection)
-                .find_one(doc! {"_id": id})
-                .await
-                .unwrap()
-                .is_some(),
-            "retained row disappeared from {collection}"
-        );
+        let row = db
+            .collection::<Document>(collection)
+            .find_one(doc! {"_id": id})
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("retained row disappeared from {collection}"));
+        if collection == "usage_meter" {
+            assert_eq!(
+                row.get_document("usage_checkpoint").unwrap(),
+                &retained_checkpoint,
+                "financial recovery evidence changed during erasure"
+            );
+        }
     }
     let invite = db
         .collection::<Document>("invite_codes")
