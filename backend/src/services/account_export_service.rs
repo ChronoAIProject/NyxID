@@ -748,7 +748,11 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
             let item_bytes: usize = subsection
                 .items
                 .iter()
-                .map(|item| serde_json::to_vec(item).map(|value| value.len()).unwrap_or(0))
+                .map(|item| {
+                    serde_json::to_vec(item)
+                        .map(|value| value.len())
+                        .unwrap_or(0)
+                })
                 .sum();
             current = current.saturating_add(item_bytes);
             current = current.saturating_add(subsection.items.len().saturating_sub(1));
@@ -770,7 +774,9 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
         let Some(item) = value.items.pop() else {
             break;
         };
-        let item_bytes = serde_json::to_vec(&item).map(|value| value.len()).unwrap_or(0);
+        let item_bytes = serde_json::to_vec(&item)
+            .map(|value| value.len())
+            .unwrap_or(0);
         current = current.saturating_sub(item_bytes);
         if !value.items.is_empty() {
             current = current.saturating_sub(1);
@@ -1113,9 +1119,11 @@ mod tests {
             ],
         );
         let bytes = serde_json::to_vec(&value).unwrap();
-        assert!(!bytes.windows("SECRET_SENTINEL".len()).any(|window| {
-            window == "SECRET_SENTINEL".as_bytes()
-        }));
+        assert!(
+            !bytes
+                .windows("SECRET_SENTINEL".len())
+                .any(|window| { window == "SECRET_SENTINEL".as_bytes() })
+        );
         assert!(value.get("_id").is_none());
         assert_eq!(value["content"]["nested"][0]["amount"], "12.50");
         assert_eq!(value["content"]["message"], "visible sentinel-free content");

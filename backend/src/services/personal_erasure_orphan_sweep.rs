@@ -292,10 +292,7 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
     Ok(all)
 }
 
-fn joined_child_spec(
-    collection: &str,
-    parent: &str,
-) -> Option<(&'static str, &'static str)> {
+fn joined_child_spec(collection: &str, parent: &str) -> Option<(&'static str, &'static str)> {
     match (collection, parent) {
         ("assistant_agent_learning_rejections", "assistant_agents") => {
             Some(("agent_id", "assistant_agents"))
@@ -309,9 +306,7 @@ fn joined_child_spec(
             None
         }
         ("service_history_heads", "user_services") => Some(("_id", "user_services")),
-        ("service_pool_health_observations", "service_pools") => {
-            Some(("pool_id", "service_pools"))
-        }
+        ("service_pool_health_observations", "service_pools") => Some(("pool_id", "service_pools")),
         _ => None,
     }
 }
@@ -595,7 +590,7 @@ mod tests {
             owner_id: Uuid::new_v4().to_string(),
             row_ids: vec![Bson::String("b".into()), Bson::String("a".into())],
             disposition: Erasure::LocalInventory,
-                joined_parent: None,
+            joined_parent: None,
         }];
         let mut two = one.clone();
         two[0].field = "other_owner";

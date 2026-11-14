@@ -3112,11 +3112,10 @@ mod tests {
                     gather(&path, fields);
                 } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
                     if let Ok(source) = fs::read_to_string(path) {
-                        for capture in regex::Regex::new(
-                            r"(?m)^\s*(?:pub\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*:",
-                        )
-                        .unwrap()
-                        .captures_iter(&source)
+                        for capture in
+                            regex::Regex::new(r"(?m)^\s*(?:pub\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*:")
+                                .unwrap()
+                                .captures_iter(&source)
                         {
                             fields.insert(capture[1].to_owned());
                         }
