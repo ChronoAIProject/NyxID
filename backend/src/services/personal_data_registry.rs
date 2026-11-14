@@ -620,7 +620,7 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "audit_log",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::Audit),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "audit_log is retained as Audit evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -655,7 +655,7 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "billing_account_balances",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_account_balances is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -683,14 +683,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "billing_lago_carry",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_lago_carry is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "billing_ledger",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_ledger is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -711,14 +711,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "billing_pool_recovery",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_pool_recovery is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "billing_rate_cache",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_rate_cache is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -732,14 +732,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "billing_tax_profiles",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_tax_profiles is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "billing_topup_sessions",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "billing_topup_sessions is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -774,14 +774,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "catalog_skill_operations",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "catalog_skill_operations stores shared skill publication operations; retention keeps opaque attribution while redacting human names; deletion retains this record for its documented lifecycle.",
     },
     Entry {
         collection: "catalog_skill_revisions",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "catalog_skill_revisions stores shared published skill revision history; retention keeps opaque attribution while redacting human names; deletion retains this record for its documented lifecycle.",
@@ -967,7 +967,7 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "consent_revocation_fences",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "consent_revocation_fences is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -1030,14 +1030,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "credit_schedule_periods",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "credit_schedule_periods stores frozen scheduled-grant policy and recipient snapshots; financial retention preserves other recipients; deletion retains this record for its documented lifecycle.",
     },
     Entry {
         collection: "credit_schedules",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "credit_schedules is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -1604,14 +1604,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "org_channel_guest_budgets",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "org_channel_guest_budgets stores organization-channel financial budget accounting; deletion retains this record for its documented lifecycle.",
     },
     Entry {
         collection: "org_channel_guest_holds",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "org_channel_guest_holds stores organization-channel financial reservation holds; deletion retains this record for its documented lifecycle.",
@@ -1667,7 +1667,7 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "ownership_transfers",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "ownership_transfers stores shared ownership-transfer history; retention keeps opaque account ids while redacting human names; deletion retains this record for its documented lifecycle.",
@@ -1681,21 +1681,21 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "personal_erasure_effects",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         why: "personal_erasure_effects is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "personal_erasure_jobs",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         why: "personal_erasure_jobs is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "personal_erasure_local_receipts",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         why: "personal_erasure_local_receipts is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -1709,14 +1709,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "personal_erasure_revocation_receipts",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         why: "personal_erasure_revocation_receipts is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "personal_owner_write_fences",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         why: "personal_owner_write_fences is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -2363,14 +2363,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "telemetry_erasure_jobs",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "telemetry_erasure_jobs is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "telemetry_erasure_reconciliations",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "telemetry_erasure_reconciliations is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -2419,14 +2419,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "usage_allowance_periods",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "usage_allowance_periods stores frozen allowance windows and settlement state shared by recipients; financial retention preserves accounting; deletion retains this record for its documented lifecycle.",
     },
     Entry {
         collection: "usage_allowances",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "usage_allowances is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -2440,21 +2440,21 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "usage_rollup_daily",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "usage_rollup_daily is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "usage_rollup_hourly",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "usage_rollup_hourly is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "usage_rollup_state",
-        owner: OwnerSelector::Fields(&[]),
+        owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         why: "usage_rollup_state is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
@@ -3334,6 +3334,19 @@ mod tests {
                         field
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn registry_has_no_empty_owner_selector_fields() {
+        for entry in ENTRIES {
+            if let OwnerSelector::Fields(fields) = entry.owner {
+                assert!(
+                    !fields.is_empty(),
+                    "{} must use NotPersonal or a concrete owner field",
+                    entry.collection
+                );
             }
         }
     }
