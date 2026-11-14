@@ -3362,6 +3362,7 @@ mod tests {
                 "experimental:cma-sandbox-rate-sync",
                 "experimental:remote-machines",
                 "services:monitoring",
+                "diagnostics:crash-reports",
                 "inference:platform-models",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
@@ -3374,6 +3375,12 @@ mod tests {
                 "nyxbot:gateway-aurinko",
                 "nyxbot:gateway-custom-event",
             ]
+        );
+        assert!(
+            !find_flag(CRASH_REPORTS_FLAG_KEY)
+                .expect("crash reporting flag is registered")
+                .default_enabled,
+            "crash reporting must default to off"
         );
         assert!(
             !find_flag(NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY)

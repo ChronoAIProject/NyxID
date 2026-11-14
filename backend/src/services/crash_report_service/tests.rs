@@ -207,6 +207,11 @@ async fn all_cluster_limits_produce_retry_after_before_json_parsing() {
         ("crash:account-day", "actor", 50, 86400, None),
     ] {
         let db = connect_test_database("crash_rates").await.unwrap();
+        crate::test_utils::ensure_rate_window_headroom(
+            Duration::from_secs(seconds),
+            Duration::from_secs(10),
+        )
+        .await;
         for _ in 0..limit {
             assert!(
                 super::super::coordination_service::RateWindowStore::admit(
@@ -277,3 +282,43 @@ async fn admin_aggregation_pagination_and_window_filters_are_correct() {
     assert!(first.iter().all(|r| r.id != second[0].id));
 }
 use futures::TryStreamExt;
+
+#[tokio::test]
+async fn diagnostics_gate_requires_a_policy_acknowledgement_without_changing_analytics() {
+    let (db, id, _) = account("crash_policy_gate").await;
+    let permission = consent::set(&db, &id, true, consent::PolicyVersion::V1)
+        .await
+        .unwrap();
+    assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
+    assert!(!consent::permits_diagnostics(&db, &id, &permission.revision).await);
+    db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$unset":{"profile_config.analytics.policy_version":""}},
+        )
+        .await
+        .unwrap();
+    assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
+    assert!(!consent::permits_diagnostics(&db, &id, &permission.revision).await);
+    assert!(!available(&db, &id).await);
+}
+
+#[tokio::test]
+async fn simultaneous_first_counter_writes_preserve_every_outcome() {
+    let (db, _, _) = account("crash_counters").await;
+    futures::future::join_all((0..32).map(|_| count(&db, Some(Platform::Web), "accepted"))).await;
+    let rows: Vec<Document> = db
+        .collection(COUNTERS)
+        .find(doc! {"platform": "web", "outcome": "accepted"})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.get_i64("count").unwrap())
+            .sum::<i64>(),
+        32
+    );
+}

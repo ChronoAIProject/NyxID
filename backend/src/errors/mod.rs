@@ -3585,3 +3585,29 @@ fn error_debug_redacts_challenges_and_untrusted_message_details() {
         secret
     );
 }
+
+#[cfg(test)]
+mod crash_error_contract_tests {
+    use super::*;
+    #[test]
+    fn crash_error_codes_statuses_and_keys_are_stable() {
+        for (error, status, code, key) in [
+            (
+                AppError::CrashReportingUnavailable,
+                StatusCode::NOT_FOUND,
+                13400,
+                "crash_reporting_unavailable",
+            ),
+            (
+                AppError::CrashReportConsentRequired,
+                StatusCode::FORBIDDEN,
+                13401,
+                "crash_report_consent_required",
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_code(), code);
+            assert_eq!(error.error_key(), key);
+        }
+    }
+}

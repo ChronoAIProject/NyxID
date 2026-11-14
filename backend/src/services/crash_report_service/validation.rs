@@ -76,10 +76,10 @@ pub fn validate(report: &CrashReportV1, now: DateTime<Utc>) -> AppResult<()> {
         {
             return Err(bad());
         }
-        if let Some(index) = frame.image {
-            if frame.offset >= report.native_images[usize::from(index)].size {
-                return Err(bad());
-            }
+        if let Some(index) = frame.image
+            && frame.offset >= report.native_images[usize::from(index)].size
+        {
+            return Err(bad());
         }
     }
     Ok(())

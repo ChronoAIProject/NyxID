@@ -288,7 +288,6 @@ impl std::io::Write for Capture {
 }
 #[tokio::test]
 async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
-    use tracing::instrument::WithSubscriber;
     let (db, id, rev) = account("crash_log_privacy").await;
     readiness::ready_test_replica(&db).await;
     flags::set_platform_override(&db, service::FLAG, &FlagTarget::User(id.clone()), true, &id)
@@ -303,6 +302,10 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
         .with_max_level(tracing::Level::DEBUG)
         .with_writer(move || writer.clone())
         .finish();
+    // Keep the dispatcher installed for this current-thread runtime's entire
+    // capture, including nested database futures and their production outcomes.
+    let capture_guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
     async {
         let mut raw = serde_json::json!({"account_id":id,"revision":rev,"report":report()});
         raw["report"]["message"] = serde_json::json!(
@@ -327,8 +330,8 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
         .await
         .unwrap();
     }
-    .with_subscriber(subscriber)
     .await;
+    drop(capture_guard);
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("Crash ingestion outcome"));
     for text in [

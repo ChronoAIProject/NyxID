@@ -28,12 +28,41 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
         true,
     );
     let exporter = exporter.unwrap();
+    // Contaminate fields belonging to local ownership and export bookkeeping.
+    // The transport must receive only the closed report projection.
+    use crate::models::client_error_report::{ClientErrorReport, Export, ExportStatus};
+    let private =
+        "SECRET_SENTINEL Bearer private person@example.test /Users/private eyJhbGci.token";
     let r = report();
+    let now = chrono::Utc::now();
+    let row = ClientErrorReport {
+        id: private.into(),
+        user_id: private.into(),
+        event_id: r.event_id.clone(),
+        consent_revision: private.into(),
+        report: r,
+        environment: "test".into(),
+        severity: "error".into(),
+        fingerprint: "abc".into(),
+        received_at: now,
+        expires_at: now + chrono::Duration::days(30),
+        export: Export {
+            status: ExportStatus::Dispatching,
+            destination_id: Some(private.into()),
+            attempts: 1,
+            lease_id: Some(private.into()),
+            lease_until: Some(now),
+            next_attempt_at: None,
+            deadline: now,
+            last_error_code: Some(private.into()),
+            exported_at: None,
+        },
+    };
     let safe = SanitizedReport {
-        report: &r,
-        environment: "test",
-        severity: "error",
-        fingerprint: "abc",
+        report: &row.report,
+        environment: &row.environment,
+        severity: &row.severity,
+        fingerprint: &row.fingerprint,
     };
     assert_eq!(exporter.submit(&safe).await, SubmitOutcome::Exported);
     let requests = server.received_requests().await.unwrap();
@@ -44,6 +73,8 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
         "SECRET_SENTINEL",
         "Bearer ",
         "person@example.test",
+        "/Users/private",
+        "eyJhbGci.token",
         "user_id",
         "account_id",
         "consent_revision",
@@ -58,6 +89,7 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
     ] {
         assert!(!bytes.contains(sentinel), "{sentinel}");
     }
+    assert!(!format!("{:?}", request.headers).contains("SECRET_SENTINEL"));
     for header in [
         "authorization",
         "cookie",
@@ -74,6 +106,77 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
         request.headers.get("x-sentry-auth").unwrap(),
         "Sentry sentry_version=7,sentry_key=publickey"
     );
+}
+
+#[tokio::test]
+async fn native_export_uses_image_mapping_and_relative_offsets_without_absolute_addresses() {
+    use crate::models::client_error_report::{NativeFrame, NativeImage, NativeSignal};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let exporter = SentryExporter::parse(
+        &(server.uri().replace("http://", "http://publickey@") + "/456"),
+        true,
+    )
+    .unwrap();
+    let mut r = report();
+    r.platform = Platform::Ios;
+    r.kind = Kind::NativeCrash;
+    r.native_signal = Some(NativeSignal::Abrt);
+    r.exception_class = crate::models::client_error_report::ExceptionClass::Unknown;
+    r.js_frames.clear();
+    r.runtime = None;
+    r.native_images = vec![NativeImage {
+        uuid: uuid::Uuid::new_v4().to_string(),
+        name: "NyxIDMobile".into(),
+        size: 4096,
+    }];
+    r.native_frames = vec![
+        NativeFrame {
+            image: Some(0),
+            offset: 32,
+        },
+        NativeFrame {
+            image: Some(0),
+            offset: 64,
+        },
+    ];
+    crate::services::crash_report_service::validation::validate(&r, chrono::Utc::now()).unwrap();
+    assert_eq!(
+        exporter
+            .submit(&SanitizedReport {
+                report: &r,
+                environment: "test",
+                severity: "fatal",
+                fingerprint: "abc"
+            })
+            .await,
+        SubmitOutcome::Exported
+    );
+    let requests = server.received_requests().await.unwrap();
+    let text = std::str::from_utf8(&requests[0].body).unwrap();
+    let event: serde_json::Value = serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
+    assert_eq!(
+        event["debug_meta"]["images"][0]["debug_id"],
+        r.native_images[0].uuid
+    );
+    assert_eq!(event["debug_meta"]["images"][0]["image_addr"], "0x0");
+    assert_eq!(event["debug_meta"]["images"][0]["code_file"], "NyxIDMobile");
+    assert_eq!(
+        event["exception"]["values"][0]["stacktrace"]["frames"][0]["instruction_addr"],
+        "0x40"
+    );
+    assert_eq!(
+        event["exception"]["values"][0]["stacktrace"]["frames"][0]["addr_mode"],
+        "rel:0"
+    );
+    assert_eq!(event["exception"]["values"][0]["type"], "SIGABRT");
+    assert!(event["exception"]["values"][0].get("value").is_none());
+    for field in ["user", "request", "breadcrumbs", "extra", "server_name"] {
+        assert!(event.get(field).is_none());
+    }
 }
 #[tokio::test]
 async fn retry_unknown_rejection_and_connect_outcomes_are_distinct() {
@@ -136,4 +239,31 @@ async fn retry_unknown_rejection_and_connect_outcomes_are_distinct() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn timeout_after_dispatch_is_unknown_and_never_a_connect_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(11)))
+        .mount(&server)
+        .await;
+    let exporter = SentryExporter::parse(
+        &(server.uri().replace("http://", "http://publickey@") + "/1"),
+        true,
+    )
+    .unwrap();
+    let r = report();
+    assert_eq!(
+        exporter
+            .submit(&SanitizedReport {
+                report: &r,
+                environment: "test",
+                severity: "error",
+                fingerprint: "abc"
+            })
+            .await,
+        SubmitOutcome::Unknown
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

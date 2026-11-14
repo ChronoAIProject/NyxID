@@ -77,9 +77,26 @@ pub async fn count(db: &Database, platform: Option<Platform>, outcome: &'static 
     let now = Utc::now();
     let platform = platform.map(Platform::as_str).unwrap_or("unknown");
     let bucket = now.timestamp() / 3600;
-    let result = db.collection::<Document>(COUNTERS).update_one(doc! {"bucket": bucket, "platform": platform, "outcome": outcome}, doc! {
+    let mut result = db.collection::<Document>(COUNTERS).update_one(doc! {"bucket": bucket, "platform": platform, "outcome": outcome}, doc! {
         "$inc": {"count": 1_i64}, "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "received_at": bson::DateTime::from_millis(bucket * 3600 * 1000), "expires_at": bson::DateTime::from_chrono(now + chrono::Duration::days(30))}
     }).upsert(true).await;
+    // Concurrent first writes can race the unique bucket upsert. Retry only a
+    // proven duplicate; an ambiguous transport failure must not double-count.
+    if result.as_ref().is_err_and(|e| match e.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command) => command.code == 11000,
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) => {
+            write.code == 11000
+        }
+        _ => false,
+    }) {
+        result = db
+            .collection::<Document>(COUNTERS)
+            .update_one(
+                doc! {"bucket": bucket, "platform": platform, "outcome": outcome},
+                doc! {"$inc": {"count": 1_i64}},
+            )
+            .await;
+    }
     if result.is_err() {
         tracing::warn!(outcome = "counter_unavailable", "Crash ingestion health");
     }
