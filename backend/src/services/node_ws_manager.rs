@@ -1051,8 +1051,10 @@ pub struct WsWebTerminalClosedMsg {
 /// side `credential_update_ack` before treating the push as confirmed
 /// (see `send_credential_update_and_wait`). Older node agents ignore
 /// the field; newer ones echo it back in the ack.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsCredentialUpdate {
+    #[serde(default, flatten)]
+    version: Option<CredentialVersion>,
     #[serde(rename = "type")]
     msg_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1062,11 +1064,11 @@ struct WsCredentialUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     header_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    header_value: Option<String>,
+    header_value: Option<zeroize::Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     param_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    param_value: Option<String>,
+    param_value: Option<zeroize::Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1077,8 +1079,10 @@ struct WsCredentialUpdate {
 /// given service slug. Sent when a `UserService` is reassigned from one
 /// node to another so the prior node stops holding the secret. Includes
 /// an optional `request_id` for ack-wait correlation.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsCredentialRemove {
+    #[serde(default, flatten)]
+    version: Option<CredentialVersion>,
     #[serde(rename = "type")]
     msg_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1110,6 +1114,7 @@ struct WsPendingCredentialCiphertext<'a> {
 #[derive(Debug, Clone)]
 pub enum CredentialAckOutcome {
     Ok,
+    Versioned(CredentialVersion),
     Err(String),
 }
 
@@ -1168,15 +1173,45 @@ impl fmt::Debug for PendingCredentialCiphertextParams<'_> {
     }
 }
 
+/// Delivery identity is metadata, but must never appear in Debug output.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CredentialVersion {
+    pub credential_id: String,
+    pub credential_generation: i64,
+}
+impl fmt::Debug for CredentialVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialVersion")
+            .field("generation", &self.credential_generation)
+            .finish_non_exhaustive()
+    }
+}
+impl CredentialVersion {
+    fn confirms(&self, expected: Option<&Self>) -> AppResult<()> {
+        if expected.is_none_or(|expected| {
+            self.credential_id == expected.credential_id
+                && self.credential_generation >= expected.credential_generation
+        }) {
+            Ok(())
+        } else {
+            Err(AppError::NodeOffline(
+                "Node has not persisted the requested credential generation".into(),
+            ))
+        }
+    }
+}
+
 /// Parameters for pushing a credential update to a node.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialUpdateParams {
+    #[serde(default, flatten)]
+    pub version: Option<CredentialVersion>,
     pub service_slug: String,
     pub injection_method: String,
     pub header_name: Option<String>,
-    pub header_value: Option<String>,
+    pub header_value: Option<zeroize::Zeroizing<String>>,
     pub param_name: Option<String>,
-    pub param_value: Option<String>,
+    pub param_value: Option<zeroize::Zeroizing<String>>,
     pub target_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_revision: Option<i64>,
@@ -2511,6 +2546,7 @@ impl NodeWsManager {
             ));
         }
         let msg = WsCredentialUpdate {
+            version: params.version.clone(),
             msg_type: "credential_update",
             request_id: None,
             service_slug: params.service_slug.clone(),
@@ -2563,7 +2599,7 @@ impl NodeWsManager {
     /// slug. Used when a `UserService`'s `node_id` changes so the prior
     /// node stops holding the secret.
     pub fn send_credential_remove(&self, node_id: &str, service_slug: &str) -> AppResult<()> {
-        self.send_credential_remove_for(node_id, service_slug, None)
+        self.send_credential_remove_for(node_id, service_slug, None, None)
     }
 
     pub(crate) fn send_credential_remove_if(
@@ -2571,8 +2607,9 @@ impl NodeWsManager {
         node_id: &str,
         service_slug: &str,
         connection_id: &str,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
-        self.send_credential_remove_for(node_id, service_slug, Some(connection_id))
+        self.send_credential_remove_for(node_id, service_slug, Some(connection_id), version)
     }
 
     fn send_credential_remove_for(
@@ -2580,10 +2617,12 @@ impl NodeWsManager {
         node_id: &str,
         service_slug: &str,
         expected_connection_id: Option<&str>,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
         let conn = self.connection_for(node_id, expected_connection_id)?;
 
         let msg = WsCredentialRemove {
+            version: version.cloned(),
             msg_type: "credential_remove",
             request_id: None,
             service_slug: service_slug.to_string(),
@@ -2805,6 +2844,7 @@ impl NodeWsManager {
         }
         conn.credential_acks.insert(request_id.clone(), tx_ack);
         let msg = WsCredentialUpdate {
+            version: params.version.clone(),
             msg_type: "credential_update",
             request_id: Some(request_id.clone()),
             service_slug: params.service_slug.clone(),
@@ -2831,6 +2871,7 @@ impl NodeWsManager {
 
         match tokio::time::timeout(timeout, rx_ack).await {
             Ok(Ok(CredentialAckOutcome::Ok)) => Ok(()),
+            Ok(Ok(CredentialAckOutcome::Versioned(held))) => held.confirms(params.version.as_ref()),
             Ok(Ok(CredentialAckOutcome::Err(msg))) => {
                 // A negative ack means the node's keyring / local
                 // config write failed — the request body was already
@@ -2898,7 +2939,7 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
     ) -> AppResult<()> {
-        self.send_credential_remove_and_wait_for(node_id, service_slug, timeout, None)
+        self.send_credential_remove_and_wait_for(node_id, service_slug, timeout, None, None)
             .await
     }
 
@@ -2908,12 +2949,14 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
         connection_id: &str,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
         self.send_credential_remove_and_wait_for(
             node_id,
             service_slug,
             timeout,
             Some(connection_id),
+            version,
         )
         .await
     }
@@ -2924,6 +2967,7 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
         expected_connection_id: Option<&str>,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
@@ -2931,6 +2975,7 @@ impl NodeWsManager {
         conn.credential_acks.insert(request_id.clone(), tx_ack);
 
         let msg = WsCredentialRemove {
+            version: version.cloned(),
             msg_type: "credential_remove",
             request_id: Some(request_id.clone()),
             service_slug: service_slug.to_string(),
@@ -2950,6 +2995,7 @@ impl NodeWsManager {
 
         match tokio::time::timeout(timeout, rx_ack).await {
             Ok(Ok(CredentialAckOutcome::Ok)) => Ok(()),
+            Ok(Ok(CredentialAckOutcome::Versioned(held))) => held.confirms(version),
             Ok(Ok(CredentialAckOutcome::Err(msg))) => Err(AppError::NodeOffline(format!(
                 "Node rejected credential remove: {msg}"
             ))),
@@ -2994,6 +3040,27 @@ impl NodeWsManager {
                 .await
         } else {
             self.send_credential_remove_and_wait(node_id, service_slug, timeout)
+                .await
+        }
+    }
+
+    pub async fn send_credential_remove_versioned_clustered(
+        &self,
+        node_id: &str,
+        slug: &str,
+        version: &CredentialVersion,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_credential_remove_versioned(node_id, slug, version, timeout)
+                .await
+        } else {
+            self.send_credential_remove_and_wait_for(node_id, slug, timeout, None, Some(version))
                 .await
         }
     }
@@ -6112,11 +6179,12 @@ mod tests {
     fn credential_update_fails_for_disconnected_node() {
         let mgr = NodeWsManager::new(30, 100);
         let params = CredentialUpdateParams {
+            version: None,
             target_revision: None,
             service_slug: "openai".to_string(),
             injection_method: "bearer".to_string(),
             header_name: Some("Authorization".to_string()),
-            header_value: Some("Bearer sk-test".to_string()),
+            header_value: Some(zeroize::Zeroizing::new("Bearer sk-test".to_string())),
             param_name: None,
             param_value: None,
             target_url: None,
@@ -6133,6 +6201,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         mgr.register_connection("node", tx);
         let params = CredentialUpdateParams {
+            version: None,
             service_slug: "monitor".into(),
             injection_method: "target_url".into(),
             header_name: None,

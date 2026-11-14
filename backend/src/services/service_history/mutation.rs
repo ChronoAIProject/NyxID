@@ -666,6 +666,10 @@ impl LocalCommit {
                 fence_backing_reference(&self.db, backing, id, owner, session).await?;
             }
         }
+        super::super::node_credential_delivery::record_changes(
+            &self.db, session, &self.name, &before, &after,
+        )
+        .await?;
         record_changes(
             &self.db,
             session,

@@ -120,6 +120,8 @@ Add new entries here when introducing additional vendored URN types.
 
 ### 6. Node Proxy Conventions
 
+- Ordinary node credential updates/removals use durable delivery generations independent of approval epochs; commit intent with material, retry through owner routing, and persist/compare node high-water marks before acknowledging (see `docs/NODE_PROXY_ARCHITECTURE.md`).
+
 - `NodeWsManager`: in-memory connection pool shared via `Arc` in `AppState`; `DashMap` for lock-free concurrent access
 - `Node.user_id` is the polymorphic owner field (person or org user, matching `UserService`/`UserApiKey`). Do not add a separate `org_id` to node-related models; ACL via `org_service::resolve_owner_access(actor, node.user_id)`.
 - Registration tokens carry the chosen owner and authenticated person issuer separately. Admin role is verified at issuance, not redemption. Mint and redemption transactionally fence the live owner/issuer/org lifecycle; redemption consumes the still-live exact capability. Demotion/removal/personal departure retires the issuer's pending registrations; legacy unattributed org tokens require reissuance and are conservatively cleared on admin departure. Preserve established org-owned nodes and other admins' attributed tokens. TTL defaults to 1h (`NODE_REGISTRATION_TOKEN_TTL_SECS`).

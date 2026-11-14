@@ -866,6 +866,7 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         for collection in [
             crate::models::node_pending_credential::COLLECTION_NAME,
             crate::models::node_service_binding::COLLECTION_NAME,
+            crate::models::node_credential_desired::COLLECTION_NAME,
         ] {
             if erase_page(&db, &job.user_id, collection, doc! {"node_id":id}).await? {
                 return Ok(false);

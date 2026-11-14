@@ -20,11 +20,11 @@ use crate::services::billing::route_inventory::BillingEgressPermit;
 use crate::services::internal_auth::InternalAuth;
 use crate::services::node_owner_service::{NodeOwnerFence, ReplicaIdentity};
 use crate::services::node_ws_manager::{
-    CredentialUpdateParams, NodeProxyFailure, NodeProxyRequest, NodeProxyResponse,
-    NodeRequestSignature, NodeSshExecRequest, NodeSshExecResult, NodeSshNodeKeyExecRequest,
-    NodeSshTunnelRequest, NodeWebTerminalRequest, NodeWsManager, NodeWsProxyRequest,
-    NodeWsProxySession, PendingCredentialCiphertextParams, ProxyResponseType, SshTunnelChunk,
-    StreamChunk, WebTerminalChunk, WsProxyFrame, base64_bytes, sign_proxy_request,
+    CredentialUpdateParams, CredentialVersion, NodeProxyFailure, NodeProxyRequest,
+    NodeProxyResponse, NodeRequestSignature, NodeSshExecRequest, NodeSshExecResult,
+    NodeSshNodeKeyExecRequest, NodeSshTunnelRequest, NodeWebTerminalRequest, NodeWsManager,
+    NodeWsProxyRequest, NodeWsProxySession, PendingCredentialCiphertextParams, ProxyResponseType,
+    SshTunnelChunk, StreamChunk, WebTerminalChunk, WsProxyFrame, base64_bytes, sign_proxy_request,
     sign_ssh_exec_request, sign_ssh_node_exec_request, sign_ssh_tunnel_request,
     sign_web_terminal_request, sign_ws_proxy_request,
 };
@@ -1039,6 +1039,7 @@ impl NodeDispatch {
         self.send_command(
             node_id,
             NodeCommand::CredentialRemove {
+                version: None,
                 service_slug: service_slug.to_string(),
                 timeout_ms: None,
             },
@@ -1055,7 +1056,26 @@ impl NodeDispatch {
         self.send_command(
             node_id,
             NodeCommand::CredentialRemove {
+                version: None,
                 service_slug: service_slug.to_string(),
+                timeout_ms: Some(duration_millis(timeout)?),
+            },
+        )
+        .await
+    }
+
+    pub async fn send_credential_remove_versioned(
+        &self,
+        node_id: &str,
+        slug: &str,
+        version: &CredentialVersion,
+        timeout: Duration,
+    ) -> AppResult<()> {
+        self.send_command(
+            node_id,
+            NodeCommand::CredentialRemove {
+                service_slug: slug.to_owned(),
+                version: Some(version.clone()),
                 timeout_ms: Some(duration_millis(timeout)?),
             },
         )
@@ -1258,6 +1278,8 @@ enum NodeCommand {
         timeout_ms: Option<u64>,
     },
     CredentialRemove {
+        #[serde(default, flatten)]
+        version: Option<CredentialVersion>,
         service_slug: String,
         timeout_ms: Option<u64>,
     },
@@ -2181,6 +2203,7 @@ async fn execute_local_command(
             None => manager.send_credential_update_if(node_id, &params, connection_id),
         },
         NodeCommand::CredentialRemove {
+            version,
             service_slug,
             timeout_ms,
         } => match timeout_ms {
@@ -2191,10 +2214,16 @@ async fn execute_local_command(
                         &service_slug,
                         Duration::from_millis(timeout),
                         connection_id,
+                        version.as_ref(),
                     )
                     .await
             }
-            None => manager.send_credential_remove_if(node_id, &service_slug, connection_id),
+            None => manager.send_credential_remove_if(
+                node_id,
+                &service_slug,
+                connection_id,
+                version.as_ref(),
+            ),
         },
         NodeCommand::PendingCredentialsAvailable => {
             manager.send_pending_credentials_available_if(node_id, connection_id)

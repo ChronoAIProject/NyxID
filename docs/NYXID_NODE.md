@@ -187,6 +187,23 @@ An explicit `set-url --service <slug> --url ""` is allowed. Clearing a node-mana
 
 Auth method, auth key name and node changes remain rejected without supplying a new credential to promote it to server-held storage. Do not supply `credential` when the intent is to keep the secret node-local.
 
+### Credential rotation delivery
+
+Upgrade the CLI on credential nodes to get generation checks for server-pushed
+credential updates and removals. Older agents keep working and receive retries,
+but only upgraded agents reject delayed older updates. Saved configurations
+upgrade additively; no manual migration is needed. The backend retries
+unacknowledged current credentials after reconnect and in its background
+reconciliation pass. A temporary disconnection no longer requires another
+rotation to trigger delivery. Offline retries back off to ten minutes, and a
+reconnect wakes pending delivery immediately. Very old agents without correlated
+receipts receive one successful queue send per change or reconnect; it is
+recorded as unconfirmed and is not sent again on a timer. Removal on those
+agents waits for an upgrade or manual cleanup. Disabled services and inactive
+credentials wait for a source change before retrying. Locally managed
+credentials and encrypted pending-credential enrollment retain their existing
+behavior.
+
 ### List Credentials
 
 ```bash
