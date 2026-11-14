@@ -14,6 +14,7 @@ import { onlineManager } from "@tanstack/react-query";
 import { mobileApi } from "../api/mobileApi";
 import { signalApprovalStateMayHaveChanged } from "./approvalRefreshSignal";
 import {
+  beginPushDeliveryStateHydration,
   isPushDeliverySuppressed as readPushDeliverySuppressed,
   setPushDeliverySuppressed,
 } from "./pushDeliveryState";
@@ -56,7 +57,6 @@ let pushSyncHandler: PushSyncHandler | null = null;
 let isNotificationHandlerConfigured = false;
 let isBackgroundTaskRegistered = false;
 let isBootstrapped = false;
-let pendingUnbind = false;
 let pushOperationQueue: Promise<void> = Promise.resolve();
 let lastKnownNativeToken:
   | { token: string; provider: "apns" | "fcm"; platform: "ios" | "android" }
@@ -82,7 +82,6 @@ async function readPendingUnbind(): Promise<PendingPushUnbind | null> {
   try {
     const raw = await SecureStore.getItemAsync(PUSH_PENDING_UNBIND_KEY);
     if (!raw) {
-      pendingUnbind = false;
       setPushDeliverySuppressed(false);
       return null;
     }
@@ -93,14 +92,12 @@ async function readPendingUnbind(): Promise<PendingPushUnbind | null> {
       (value.provider !== "apns" && value.provider !== "fcm") ||
       typeof value.createdAt !== "string"
     ) {
-      pendingUnbind = false;
       setPushDeliverySuppressed(false);
       return null;
     }
-    pendingUnbind = true;
+    setPushDeliverySuppressed(true);
     return value as PendingPushUnbind;
   } catch {
-    pendingUnbind = false;
     setPushDeliverySuppressed(false);
     return null;
   }
@@ -111,20 +108,18 @@ export function isPushDeliverySuppressed(): boolean {
 }
 
 async function setPendingUnbind(value: PendingPushUnbind): Promise<void> {
-  pendingUnbind = true;
   setPushDeliverySuppressed(true);
   await SecureStore.setItemAsync(PUSH_PENDING_UNBIND_KEY, JSON.stringify(value));
 }
 
 async function clearPendingUnbind(): Promise<void> {
-  pendingUnbind = false;
   setPushDeliverySuppressed(false);
   await SecureStore.deleteItemAsync(PUSH_PENDING_UNBIND_KEY);
 }
 
 // Hydrate before notification taps are wired by the app shell. The runtime
 // initializer awaits the same read before installing its listeners.
-void readPendingUnbind();
+beginPushDeliveryStateHydration(readPendingUnbind());
 
 const NOTIFICATION_DEDUPE_WINDOW_MS = 2000;
 const lastShownAtByNotificationKey = new Map<string, number>();
@@ -217,7 +212,7 @@ function configureNotificationHandler() {
     handleNotification: async (notification) => {
       const content = notification.request.content;
 
-      if (pendingUnbind || (await readPendingUnbind())) {
+      if (await readPendingUnbind()) {
         return SUPPRESS_OS_NOTIFICATION;
       }
 
@@ -271,7 +266,7 @@ function presentForegroundNotification(
   content: Notifications.NotificationContent,
   signal: PushSyncSignal | null
 ): void {
-  if (pendingUnbind || AppState.currentState !== "active") return;
+  if (readPushDeliverySuppressed() || AppState.currentState !== "active") return;
 
   const title = asNonEmptyString(content.title);
   const body = asNonEmptyString(content.body);
@@ -677,11 +672,15 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
       if (token) void syncTokenWithBackend(token, false);
     });
     appStateSubscription = AppState.addEventListener("change", (state) => {
-      if (state === "active" && pendingUnbind && getAuthAccountId())
+      if (state === "active" && readPushDeliverySuppressed() && getAuthAccountId())
         void activatePushAfterLogin({ forceRegister: true });
     });
     networkSubscription = onlineManager.subscribe(() => {
-      if (onlineManager.isOnline() && pendingUnbind && getAuthAccountId())
+      if (
+        onlineManager.isOnline() &&
+        readPushDeliverySuppressed() &&
+        getAuthAccountId()
+      )
         void activatePushAfterLogin({ forceRegister: true });
     });
   } catch (error) {
@@ -778,43 +777,11 @@ export async function activatePushAfterLogin(
   options: PushActivateOptions = {}
 ): Promise<PushActivateResult> {
   const forceRegister = options.forceRegister === true;
-  const permission = await ensureNotificationPermission();
-  if (permission !== "granted") {
-    return {
-      permission,
-      token: null,
-      registered: false,
-      mode: "none",
-      reason: "permission_denied",
-    };
-  }
-
-  let token: string | null = null;
-  try {
-    const devicePushToken = await Notifications.getDevicePushTokenAsync();
-    token = normalizeDeviceToken(devicePushToken);
-  } catch (error) {
-    if (__DEV__) console.warn("[push] native push token unavailable", error);
-    return {
-      permission,
-      token: null,
-      registered: false,
-      mode: "none",
-      reason: "token_unavailable",
-    };
-  }
-
-  if (!token) {
-    return {
-      permission,
-      token: null,
-      registered: false,
-      mode: "none",
-      reason: "token_unavailable",
-    };
-  }
-
-  return syncTokenWithBackend(token, forceRegister);
+  return enqueuePushOperation(async () => {
+    const pending = await readPendingUnbind();
+    if (pending) return rebindPendingToken(pending);
+    return activatePushAfterLoginInQueue(forceRegister);
+  });
 }
 
 async function syncTokenWithBackend(
@@ -830,89 +797,162 @@ async function syncTokenWithBackend(
     };
   }
   return enqueuePushOperation(async () => {
-    const accountId = getAuthAccountId();
-    const previousToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
     const pending = await readPendingUnbind();
-    if (!accountId || accountId !== getAuthAccountId())
-      return {
-        permission: "granted" as const,
+    if (pending) return rebindPendingToken(pending);
+    return syncTokenWithBackendInQueue(token, forceRegister);
+  });
+}
+
+async function activatePushAfterLoginInQueue(
+  forceRegister: boolean,
+  previousTokenOverride?: string,
+): Promise<PushActivateResult> {
+  const permission = await ensureNotificationPermission();
+  if (permission !== "granted") {
+    return {
+      permission,
+      token: null,
+      registered: false,
+      mode: "none",
+      reason: "permission_denied",
+    };
+  }
+  let token: string | null = null;
+  try {
+    token = normalizeDeviceToken(await Notifications.getDevicePushTokenAsync());
+  } catch (error) {
+    if (__DEV__) console.warn("[push] native push token unavailable", error);
+    return {
+      permission,
+      token: null,
+      registered: false,
+      mode: "none",
+      reason: "token_unavailable",
+    };
+  }
+  if (!token) {
+    return {
+      permission,
+      token: null,
+      registered: false,
+      mode: "none",
+      reason: "token_unavailable",
+    };
+  }
+  return syncTokenWithBackendInQueue(
+    token,
+    forceRegister,
+    previousTokenOverride,
+  );
+}
+
+async function rebindPendingToken(
+  pending: PendingPushUnbind,
+): Promise<PushActivateResult> {
+  const accountId = getAuthAccountId();
+  if (!accountId) {
+    return {
+      permission: "granted",
+      token: pending.token,
+      registered: false,
+      mode: "none",
+      reason: "register_failed",
+    };
+  }
+  try {
+    await mobileApi.registerPushToken({
+      token: pending.token,
+      provider: pending.provider,
+      platform: pending.platform,
+    });
+  } catch (error) {
+    if (__DEV__) console.warn("[push] pending token rebind failed", error);
+    return {
+      permission: "granted",
+      token: pending.token,
+      registered: false,
+      mode: "none",
+      reason: "register_failed",
+    };
+  }
+
+  await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, pending.token);
+  await clearPendingUnbind();
+  return activatePushAfterLoginInQueue(false, pending.token);
+}
+
+async function syncTokenWithBackendInQueue(
+  token: string,
+  forceRegister: boolean,
+  previousTokenOverride?: string,
+): Promise<PushActivateResult> {
+  const accountId = getAuthAccountId();
+  const previousToken =
+    previousTokenOverride ??
+    (await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY));
+  const platform = resolvePlatform();
+  if (!accountId || accountId !== getAuthAccountId())
+    return {
+      permission: "granted" as const,
+      token,
+      registered: false,
+      mode: "none" as const,
+      reason: "register_failed" as const,
+    };
+  if (platform !== "ios" && platform !== "android") {
+    return {
+      permission: "granted" as const,
+      token,
+      registered: false,
+      mode: "none" as const,
+      reason: "register_failed" as const,
+    };
+  }
+  const provider = resolveProvider(platform);
+  lastKnownNativeToken = { token, provider, platform };
+
+  try {
+    if (previousToken && previousToken !== token) {
+      await mobileApi.rotatePushToken({
         token,
-        registered: false,
-        mode: "none" as const,
-        reason: "register_failed" as const,
-      };
-    if (platform !== "ios" && platform !== "android") {
-      return {
-        permission: "granted" as const,
-        token,
-        registered: false,
-        mode: "none" as const,
-        reason: "register_failed" as const,
-      };
-    }
-    const provider = resolveProvider(platform);
-
-    try {
-      if (previousToken && previousToken !== token && !pending) {
-        await mobileApi.rotatePushToken({
-          token,
-          previous_token: previousToken,
-          provider,
-          platform,
-        });
-        if (accountId === getAuthAccountId())
-          await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
-        return {
-          permission: "granted" as const,
-          token,
-          registered: true,
-          mode: "rotated" as const,
-        };
-      }
-
-      if (!previousToken || forceRegister || pending) {
-        await mobileApi.registerPushToken({
-          token,
-          provider,
-          platform,
-        });
-        if (accountId === getAuthAccountId())
-          await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
-        if (pending) await clearPendingUnbind();
-        return {
-          permission: "granted" as const,
-          token,
-          registered: true,
-          mode: "registered" as const,
-        };
-      }
-
+        previous_token: previousToken,
+        provider,
+        platform,
+      });
+      if (accountId === getAuthAccountId())
+        await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
       return {
         permission: "granted" as const,
         token,
         registered: true,
-        mode: "unchanged" as const,
+        mode: "rotated" as const,
       };
-    } catch (error) {
-      if (pending) {
-        try {
-          if (
-            Platform.OS !== "web" &&
-            typeof Notifications.unregisterForNotificationsAsync === "function"
-          )
-            await Notifications.unregisterForNotificationsAsync();
-        } catch {
-          if (__DEV__) console.warn("[push] native unregister unavailable");
-        }
-      }
-      if (__DEV__) console.warn("[push] register token failed", error);
+    }
+    if (!previousToken || forceRegister) {
+      await mobileApi.registerPushToken({ token, provider, platform });
+      if (accountId === getAuthAccountId())
+        await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
       return {
         permission: "granted" as const,
         token,
-        registered: false,
-        mode: "none" as const,
-        reason: "register_failed" as const,
+        registered: true,
+        mode: "registered" as const,
       };
     }
-  });
+    return {
+      permission: "granted" as const,
+      token,
+      registered: true,
+      mode: "unchanged" as const,
+    };
+  } catch (error) {
+    if (__DEV__) console.warn("[push] register token failed", error);
+    return {
+      permission: "granted" as const,
+      token,
+      registered: false,
+      mode: "none" as const,
+      reason: "register_failed" as const,
+    };
+  }
 }

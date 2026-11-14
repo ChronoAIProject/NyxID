@@ -13,6 +13,7 @@ import * as config from "./navigationLinking";
 import { fixture } from "./workspaceNavigationTestHarness";
 import * as authEpoch from "../lib/auth/authEpoch";
 import * as authAccount from "../lib/auth/authAccount";
+import { setPushDeliverySuppressed } from "../lib/notifications/pushDeliveryState";
 
 import { createNotificationPushController } from "../lib/notifications/notificationPushController";
 
@@ -226,6 +227,31 @@ test("cold notification waits through sign-in and navigation readiness and is de
   ]);
   f.h.unmount();
   assert.equal(f.unsubscribed(), true);
+});
+
+test("a suppressed cold-start tap is cleared without navigation", async () => {
+  setPushDeliverySuppressed(true);
+  const f = setup();
+  f.tap(response({ conversation_id: "stale-while-unbound" }));
+  await f.h.settle();
+  assert.equal(f.actions.length, 0);
+  assert.equal(f.cleared(), 1);
+  f.h.unmount();
+  setPushDeliverySuppressed(false);
+});
+
+test("notification taps resume after pending delivery is resolved", async () => {
+  const f = setup();
+  await f.signIn();
+  setPushDeliverySuppressed(true);
+  f.tap(response({ conversation_id: "suppressed-thread" }));
+  await f.h.settle();
+  assert.equal(f.actions.length, 0);
+  setPushDeliverySuppressed(false);
+  f.tap(response({ conversation_id: "resumed-thread" }));
+  assert.equal(f.actions.length, 1);
+  assert.match(JSON.stringify(f.actions[0]), /resumed-thread/);
+  f.h.unmount();
 });
 test("warm tap and foreground Open share guards; newest destination replaces an older approval", async () => {
   const f = setup();

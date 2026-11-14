@@ -1,15 +1,18 @@
 import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
+import { AppState, type AppStateStatus } from "react-native";
 import { mobileApi } from "../api/mobileApi";
 import { setAuthAccountId } from "../auth/authAccount";
 import {
   activatePushAfterLogin,
   deactivatePushOnLogout,
+  isPushDeliverySuppressed,
   initializeNotificationRuntime,
 } from "./pushNotifications";
 const mockStore = new Map<string, string>();
 let mockRefresh: (token: unknown) => void;
 let notificationListener: ((notification: any) => void) | undefined;
+let appStateListener: ((state: AppStateStatus) => void) | undefined;
 jest.mock("../env", () => ({
   NYXID_APP_SCHEME: "nyxid",
   NYXID_TRUSTED_FRONTEND_URLS: [],
@@ -35,35 +38,46 @@ jest.mock("expo-task-manager", () => ({
   isTaskDefined: () => true,
   isTaskRegisteredAsync: async () => true,
 }));
-jest.mock("expo-notifications", () => ({
-  setNotificationHandler: jest.fn(),
-  addNotificationReceivedListener: (listener: (notification: any) => void) => {
-    notificationListener = listener;
-    return { remove() {} };
-  },
-  addPushTokenListener: (listener: typeof mockRefresh) => {
-    mockRefresh = listener;
-    return { remove() {} };
-  },
-  unregisterForNotificationsAsync: jest.fn(async () => {}),
-  dismissAllNotificationsAsync: jest.fn(async () => {}),
-  setBadgeCountAsync: jest.fn(async () => true),
-  clearLastNotificationResponseAsync: jest.fn(async () => {}),
-  getPermissionsAsync: async () => ({ granted: true, status: "granted" }),
-  getDevicePushTokenAsync: async () => ({
+jest.mock("expo-notifications", () => {
+  const getDevicePushTokenAsync = jest.fn(async () => ({
     type: "ios",
     data: "same-native-token",
-  }),
-}));
+  }));
+  return {
+    setNotificationHandler: jest.fn(),
+    addNotificationReceivedListener: (listener: (notification: any) => void) => {
+      notificationListener = listener;
+      return { remove() {} };
+    },
+    addPushTokenListener: (listener: typeof mockRefresh) => {
+      mockRefresh = listener;
+      return { remove() {} };
+    },
+    unregisterForNotificationsAsync: jest.fn(async () => {}),
+    dismissAllNotificationsAsync: jest.fn(async () => {}),
+    setBadgeCountAsync: jest.fn(async () => true),
+    clearLastNotificationResponseAsync: jest.fn(async () => {}),
+    getPermissionsAsync: async () => ({ granted: true, status: "granted" }),
+    getDevicePushTokenAsync,
+  };
+});
 beforeEach(() => {
   mockStore.clear();
   setAuthAccountId("one");
+  appStateListener = undefined;
+  jest.spyOn(AppState, "addEventListener").mockImplementation((_event, listener) => {
+    appStateListener = listener;
+    return { remove: jest.fn() };
+  });
   jest.clearAllMocks();
   jest
     .mocked(mobileApi.unregisterPushToken)
     .mockResolvedValue({ deleted: true } as never);
 });
-afterEach(() => setAuthAccountId(null));
+afterEach(() => {
+  jest.restoreAllMocks();
+  setAuthAccountId(null);
+});
 
 test("failed server unbind invalidates native delivery and always dismisses tray and badge", async () => {
   mockStore.set("nyxid.push.device_token", "same-native-token");
@@ -188,7 +202,81 @@ test("pending unbind suppresses notification presentation until a later registra
   setAuthAccountId("two");
   await activatePushAfterLogin();
   expect(mockStore.has("nyxid.push.pending_unbind")).toBe(false);
+  expect(isPushDeliverySuppressed()).toBe(false);
   stop();
+});
+
+test("pending rebind succeeds before same-token native registration and does not rotate", async () => {
+  mockStore.set(
+    "nyxid.push.pending_unbind",
+    JSON.stringify({
+      token: "same-native-token",
+      provider: "apns",
+      platform: "ios",
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  await activatePushAfterLogin();
+  expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(1);
+  expect(mobileApi.registerPushToken).toHaveBeenCalledWith(
+    expect.objectContaining({ token: "same-native-token" }),
+  );
+  expect(mobileApi.rotatePushToken).not.toHaveBeenCalled();
+  expect(Notifications.getDevicePushTokenAsync).toHaveBeenCalledTimes(1);
+  expect(mockStore.has("nyxid.push.pending_unbind")).toBe(false);
+});
+
+test("pending rebind rotates a changed native token from the stored token", async () => {
+  mockStore.set(
+    "nyxid.push.pending_unbind",
+    JSON.stringify({
+      token: "pending-token",
+      provider: "apns",
+      platform: "ios",
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  jest.mocked(Notifications.getDevicePushTokenAsync).mockResolvedValueOnce({
+    type: "ios",
+    data: "new-native-token",
+  } as never);
+  await activatePushAfterLogin();
+  expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(1);
+  expect(mobileApi.rotatePushToken).toHaveBeenCalledWith(
+    expect.objectContaining({
+      token: "new-native-token",
+      previous_token: "pending-token",
+    }),
+  );
+  expect(mockStore.get("nyxid.push.device_token")).toBe("new-native-token");
+});
+
+test("failed pending rebind never fetches a native token and active retries the record", async () => {
+  mockStore.set(
+    "nyxid.push.pending_unbind",
+    JSON.stringify({
+      token: "pending-token",
+      provider: "apns",
+      platform: "ios",
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  const warning = jest.spyOn(console, "warn").mockImplementation(() => {});
+  jest
+    .mocked(mobileApi.registerPushToken)
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce({ registered: true } as never);
+  await activatePushAfterLogin();
+  expect(Notifications.getDevicePushTokenAsync).not.toHaveBeenCalled();
+  expect(mockStore.has("nyxid.push.pending_unbind")).toBe(true);
+  const stop = await initializeNotificationRuntime();
+  expect(appStateListener).toBeDefined();
+  appStateListener!("active");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(mobileApi.registerPushToken).toHaveBeenCalledTimes(2);
+  expect(mockStore.has("nyxid.push.pending_unbind")).toBe(false);
+  stop();
+  warning.mockRestore();
 });
 test("runtime token refresh does no API work while signed out; next login registers it", async () => {
   const stop = await initializeNotificationRuntime();
