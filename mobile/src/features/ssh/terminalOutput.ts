@@ -1,3 +1,5 @@
+import { fromByteArray } from "base64-js";
+
 // One acknowledged batch at a time bounds both the JS queue and WebView work.
 export class TerminalOutput {
   private queue: Uint8Array[] = [];
@@ -46,9 +48,7 @@ export class TerminalOutput {
     this.bytes -= batch.length;
     const id = ++this.sequence;
     this.awaiting = id;
-    let binary = "";
-    for (const byte of batch) binary += String.fromCharCode(byte);
-    this.send(btoa(binary), id);
+    this.send(fromByteArray(batch), id);
   }
   clear() {
     clearTimeout(this.timer);

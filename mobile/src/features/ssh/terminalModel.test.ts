@@ -160,6 +160,22 @@ test("output batches preserve binary bytes and wait for acknowledgements; queue 
   output.clear();
 });
 
+test("native output encoding works without the browser btoa global", async () => {
+  const original = globalThis.btoa;
+  const sent: string[] = [];
+  const output = new TerminalOutput((data) => sent.push(data), () => assert.fail("unexpected overflow"));
+  try {
+    Object.defineProperty(globalThis, "btoa", { configurable: true, writable: true, value: undefined });
+    const bytes = Uint8Array.from([0, 27, 255, 195, 169]);
+    output.push(bytes.buffer);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual([...Buffer.from(sent[0]!, "base64")], [...bytes]);
+  } finally {
+    output.clear();
+    Object.defineProperty(globalThis, "btoa", { configurable: true, writable: true, value: original });
+  }
+});
+
 test("the executed offline bridge emits real escape keys, uses xterm paste, and exposes no network APIs", () => {
   const html = terminalDocument({
     background: "#000000",
