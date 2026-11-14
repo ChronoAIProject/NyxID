@@ -17,6 +17,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -447,13 +448,20 @@ export function AdminCrashReportsPage() {
                 key={r.id}
                 className="rounded-xl border border-border/50 bg-card p-4"
               >
-                <Link
-                  to="/admin/crash-reports/$id"
-                  params={{ id: r.id }}
-                  className="type-row-title underline"
-                >
-                  {formatDateTime(r.captured_at)}
-                </Link>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    to="/admin/crash-reports/$id"
+                    params={{ id: r.id }}
+                    className="type-row-title underline"
+                  >
+                    {formatDateTime(r.captured_at)}
+                  </Link>
+                  {r.release_verified === false && (
+                    <Badge variant="warning">
+                      {t("Unverified release")}
+                    </Badge>
+                  )}
+                </div>
                 <dl className="mt-2 space-y-1 type-secondary">
                   {[
                     [t("Platform"), label(r.platform, platformLabels)],
@@ -495,13 +503,20 @@ export function AdminCrashReportsPage() {
               {reports.data?.reports.map((r) => (
                 <TableRow key={r.id}>
                   <TableCell className="font-mono">
-                    <Link
-                      to="/admin/crash-reports/$id"
-                      params={{ id: r.id }}
-                      className="underline"
-                    >
-                      {formatDateTime(r.captured_at)}
-                    </Link>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link
+                        to="/admin/crash-reports/$id"
+                        params={{ id: r.id }}
+                        className="underline"
+                      >
+                        {formatDateTime(r.captured_at)}
+                      </Link>
+                      {r.release_verified === false && (
+                        <Badge variant="warning">
+                          {t("Unverified release")}
+                        </Badge>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell>{label(r.platform, platformLabels)}</TableCell>
                   <TableCell>
@@ -541,6 +556,9 @@ export function CrashReportView({ report: r }: { report: CrashReportDetail }) {
   return (
     <Card>
       <CardContent className="space-y-4 pt-6 type-body">
+        {r.release_verified === false && (
+          <Badge variant="warning">{t("Unverified release")}</Badge>
+        )}
         <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {Object.entries({
             [t("Report ID")]: r.id,

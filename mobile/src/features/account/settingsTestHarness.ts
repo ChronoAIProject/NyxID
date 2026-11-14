@@ -78,8 +78,10 @@ export function setupSettingsScreen(
     params,
     language = "en",
     diagnosticsOffered = false,
+    diagnosticsAvailable = false,
     accountPolicy,
     devicePolicy,
+    deviceEnabled = false,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
@@ -93,8 +95,10 @@ export function setupSettingsScreen(
     params?: Record<string, unknown>;
     language?: Language;
     diagnosticsOffered?: boolean;
+    diagnosticsAvailable?: boolean;
     accountPolicy?: string;
     devicePolicy?: 1|2;
+    deviceEnabled?: boolean;
   } = {},
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
@@ -222,7 +226,7 @@ export function setupSettingsScreen(
                   ? voiceEnabled
                     ? ["assistant:voice"]
                     : []
-                  : { enabled: true, policy_version:accountPolicy, diagnostics_offered: diagnosticsOffered, current_policy_version: diagnosticsOffered ? "2" : "1" },
+                  : { enabled: true, policy_version: accountPolicy, diagnostics_offered: diagnosticsOffered, diagnostics_available: diagnosticsAvailable, current_policy_version: diagnosticsOffered ? "2" : "1" },
       }),
       useMutation: (options: Record<string, any>) => {
         mutationOptions.push(options);
@@ -260,7 +264,7 @@ export function setupSettingsScreen(
     "../../lib/consent": {
       useMobileConsent: () => ({
         accountId: "account",
-        enabled: false, policy:devicePolicy,
+        enabled: deviceEnabled, policy:devicePolicy,
         setConsent: (value: boolean) => deviceChoices.push(value),
       }),
     },

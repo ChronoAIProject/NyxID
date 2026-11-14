@@ -980,6 +980,7 @@
   "Unreserved values reflect allocation eligibility, before recipient account or plan checks. Service ceilings may limit how much of the remaining total can be used. Held and pending values are included in remaining credits; expired unheld credits are excluded.": "未预留数值反映的是分配资格，尚未经过接收者账户或套餐检查。服务上限可能会限制剩余总额中可使用的部分。暂扣和待处理的数值包含在剩余额度中；已过期且未暂扣的额度不包括在内。",
   "Unsaved": "未保存",
   "Unsent uploads (hours)": "未发送的上传保留期（小时）",
+  "Unverified release": "未验证的发布版本",
   "Unverified releases": "未验证的发布版本",
   "Unverified releases are excluded from version counts. Register each store build before release.": "未验证的发布版本不计入版本统计。请在发布前登记每个应用商店构建。",
   "Up to ": "最多 ",

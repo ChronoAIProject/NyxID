@@ -40,6 +40,7 @@ it("admin report details escape every server string as text", () => {
     app_version: "1",
     app_build: "2",
     artifact_id: null,
+    release_verified: false,
     os_version: "1",
     runtime: null,
     js_frames: [{ asset: attack, line: 1, column: 2 }],
@@ -67,6 +68,7 @@ it("admin report details escape every server string as text", () => {
   ).toBeInTheDocument();
   expect(screen.getByText(/0x1000/)).toBeInTheDocument();
   expect(screen.getByText(/0x20/)).toBeInTheDocument();
+  expect(screen.getByText("Unverified release")).toBeInTheDocument();
   expect(container.innerHTML).not.toContain("user_id");
 });
 
@@ -165,6 +167,7 @@ it.each([
             app_version: version.app_version,
             app_build: version.app_build,
             kind: "native_crash",
+            release_verified: false,
             export: { status: "disabled" },
           },
         ],
@@ -222,6 +225,7 @@ it.each([
         reports.getByRole("link", { name: formatDateTime(version.last_seen) }),
       ).toHaveAttribute("href", "/admin/crash-reports/report-45");
       expect(reports.getByText("Disabled")).toBeInTheDocument();
+      expect(reports.getByText("Unverified release")).toBeInTheDocument();
     }
   },
 );

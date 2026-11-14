@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     models::user::{User, UserType},
-    test_utils::{connect_test_database, test_user},
+    test_utils::{connect_test_database, connect_test_database_with_command_handler, test_user},
 };
 use serde_json::json;
 
@@ -135,8 +135,8 @@ async fn consent_matrix_storage_duplicate_ttl_and_expired_reads() {
         (true, report_id.clone())
     );
     let row = admin::detail(&db, &report_id).await.unwrap();
-    assert_eq!(row.export.status, ExportStatus::Disabled);
-    assert_eq!((row.expires_at - row.received_at).num_days(), 30);
+    assert_eq!(row.row.export.status, ExportStatus::Disabled);
+    assert_eq!((row.row.expires_at - row.row.received_at).num_days(), 30);
     let stored = db
         .collection::<Document>(COLLECTION_NAME)
         .find_one(doc! {"_id": &report_id})
@@ -318,7 +318,7 @@ async fn admin_aggregation_pagination_and_window_filters_are_correct() {
     .unwrap();
     assert_eq!(second.len(), 1);
     assert!(next.is_none());
-    assert!(first.iter().all(|r| r.id != second[0].id));
+    assert!(first.iter().all(|r| r.row.id != second[0].row.id));
 }
 
 #[tokio::test]
@@ -389,6 +389,151 @@ async fn admin_aggregation_combines_native_and_js_for_the_same_version_build() {
     assert_eq!(summary.versions.len(), 1);
     assert_eq!(summary.versions[0].total, 3);
     assert!(summary.versions[0].artifact_ids.is_empty());
+}
+
+#[tokio::test]
+async fn admin_reports_label_verified_and_unverified_web_and_ios_releases() {
+    let (db, id, rev) = account("crash_report_verification").await;
+    let mut verified_web = report();
+    let unverified_web = report();
+    register_report_release(&db, &verified_web).await;
+    let (_, verified_web_id) = insert(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &rev,
+        verified_web.clone(),
+    )
+    .await
+    .unwrap();
+    let (_, unverified_web_id) = insert(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &rev,
+        unverified_web,
+    )
+    .await
+    .unwrap();
+
+    verified_web.platform = Platform::Ios;
+    verified_web.artifact_id = None;
+    verified_web.app_version = "2.0.0".into();
+    verified_web.app_build = "200".into();
+    verified_web.kind = Kind::NativeCrash;
+    verified_web.native_signal = Some(NativeSignal::Segv);
+    verified_web.runtime = None;
+    verified_web.js_frames.clear();
+    let mut unverified_ios = verified_web.clone();
+    unverified_ios.event_id = uuid::Uuid::new_v4().to_string();
+    unverified_ios.app_build = "201".into();
+    register_report_release(&db, &verified_web).await;
+    let (_, verified_ios_id) = insert(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &rev,
+        verified_web,
+    )
+    .await
+    .unwrap();
+    let (_, unverified_ios_id) = insert(
+        &db,
+        &CrashConfig::default(),
+        "test",
+        &id,
+        &rev,
+        unverified_ios,
+    )
+    .await
+    .unwrap();
+
+    let (rows, _) = admin::list(&db, &admin::ReportQuery::default())
+        .await
+        .unwrap();
+    let verified = rows
+        .iter()
+        .map(|row| (&row.row.id, row.release_verified))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(verified.get(&verified_web_id), Some(&true));
+    assert_eq!(verified.get(&unverified_web_id), Some(&false));
+    assert_eq!(verified.get(&verified_ios_id), Some(&true));
+    assert_eq!(verified.get(&unverified_ios_id), Some(&false));
+    assert!(
+        admin::detail(&db, &verified_web_id)
+            .await
+            .unwrap()
+            .release_verified
+    );
+    assert!(
+        !admin::detail(&db, &unverified_ios_id)
+            .await
+            .unwrap()
+            .release_verified
+    );
+}
+
+#[tokio::test]
+async fn admin_report_list_uses_one_batched_registry_query_per_page() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let release_reads = Arc::new(AtomicUsize::new(0));
+    let observed = release_reads.clone();
+    let db = connect_test_database_with_command_handler(
+        "crash_report_registry_reads",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find").ok()
+                    == Some(crate::models::client_release_registry::COLLECTION_NAME)
+            {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let mut row = report();
+    row.artifact_id = Some(uuid::Uuid::new_v4().to_string());
+    let now = Utc::now();
+    let stored = ClientErrorReport {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: uuid::Uuid::new_v4().to_string(),
+        event_id: row.event_id.clone(),
+        consent_revision: uuid::Uuid::new_v4().to_string(),
+        severity: validation::severity(row.kind).into(),
+        fingerprint: validation::fingerprint(&row),
+        report: row,
+        environment: "test".into(),
+        received_at: now,
+        expires_at: now + chrono::Duration::days(30),
+        export: Export {
+            status: ExportStatus::Disabled,
+            destination_id: None,
+            attempts: 0,
+            lease_id: None,
+            lease_until: None,
+            next_attempt_at: None,
+            deadline: now + chrono::Duration::hours(24),
+            last_error_code: None,
+            exported_at: None,
+        },
+    };
+    db.collection::<ClientErrorReport>(COLLECTION_NAME)
+        .insert_one(stored)
+        .await
+        .unwrap();
+    release_reads.store(0, Ordering::Relaxed);
+    let (rows, _) = admin::list(&db, &admin::ReportQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(release_reads.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

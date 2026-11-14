@@ -175,6 +175,7 @@ struct ReportResponse {
     app_version: String,
     app_build: String,
     artifact_id: Option<String>,
+    release_verified: bool,
     os_version: String,
     runtime: Option<RuntimeResponse>,
     js_frames: Vec<JsFrameResponse>,
@@ -196,8 +197,10 @@ struct ExportResponse {
     exported_at: Option<String>,
     provider_event_id: String,
 }
-impl From<ClientErrorReport> for ReportResponse {
-    fn from(row: ClientErrorReport) -> Self {
+impl From<service::admin::ReportData> for ReportResponse {
+    fn from(data: service::admin::ReportData) -> Self {
+        let release_verified = data.release_verified;
+        let row = data.row;
         let r = row.report;
         Self {
             id: row.id,
@@ -210,6 +213,7 @@ impl From<ClientErrorReport> for ReportResponse {
             app_version: r.app_version,
             app_build: r.app_build,
             artifact_id: r.artifact_id,
+            release_verified,
             os_version: r.os_version,
             runtime: r.runtime.map(|r| RuntimeResponse {
                 name: r.name.as_str(),

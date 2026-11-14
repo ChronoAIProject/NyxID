@@ -653,6 +653,10 @@ it("privacy hides diagnostics when not offered and orders offered rows account b
   const diagnostics=await screen.findByText("Crash diagnostics");
   const browser=screen.getByText("Allow on this browser");
   expect(browser.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Review updated analytics" })).toBeInTheDocument();
+  useConsentStore.setState({ accountId: "owner", enabled: true, asked: true, policy: 2 });
+  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,current_policy_version:"2",diagnostics_offered:true,diagnostics_available:true,revision:"live"});});
+  expect(screen.queryByRole("button", { name: "Review updated analytics" })).not.toBeInTheDocument();
 });
 
 it.each(["2",null])("account re-enable retains an acknowledged policy from account=%s or device",async(accountPolicy)=>{

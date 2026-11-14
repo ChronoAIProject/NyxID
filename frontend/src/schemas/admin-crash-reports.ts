@@ -20,6 +20,7 @@ export const crashReportSchema = z.object({
   app_version: z.string(),
   app_build: z.string(),
   artifact_id: z.string().nullable(),
+  release_verified: z.boolean().optional(),
   os_version: z.string(),
   runtime: z.object({ name: z.string(), major: z.number() }).nullable(),
   js_frames: z.array(

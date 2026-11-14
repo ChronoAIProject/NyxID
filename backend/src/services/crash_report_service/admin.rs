@@ -1,6 +1,8 @@
 use super::*;
+use crate::models::client_release_registry::{COLLECTION_NAME as RELEASES, ClientRelease};
 use futures::TryStreamExt;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,10 +24,84 @@ pub struct SummaryQuery {
 fn live() -> Document {
     doc! {"expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}}
 }
+#[derive(Clone, Debug)]
+pub struct ReportData {
+    pub row: ClientErrorReport,
+    pub release_verified: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReleaseIdentity {
+    platform: String,
+    app_version: String,
+    app_build: String,
+    artifact_id: Option<String>,
+}
+
+fn release_identity(row: &ClientErrorReport) -> ReleaseIdentity {
+    let report = &row.report;
+    ReleaseIdentity {
+        platform: report.platform.as_str().to_owned(),
+        app_version: report.app_version.clone(),
+        app_build: report.app_build.clone(),
+        artifact_id: (report.platform == Platform::Web)
+            .then(|| report.artifact_id.clone())
+            .flatten(),
+    }
+}
+
+async fn verified_release_identities(
+    db: &Database,
+    rows: &[ClientErrorReport],
+) -> AppResult<HashSet<ReleaseIdentity>> {
+    if rows.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut identities = HashSet::new();
+    let mut filters = Vec::new();
+    for row in rows {
+        let identity = release_identity(row);
+        if identities.insert(identity.clone()) {
+            let mut filter = doc! {
+                "platform": &identity.platform,
+                "app_version": &identity.app_version,
+                "app_build": &identity.app_build,
+            };
+            if identity.platform == Platform::Web.as_str() {
+                filter.insert(
+                    "artifact_id",
+                    identity
+                        .artifact_id
+                        .as_deref()
+                        .map(|artifact| bson::Bson::String(artifact.to_owned()))
+                        .unwrap_or(bson::Bson::Null),
+                );
+            }
+            filters.push(filter);
+        }
+    }
+    let mut verified = HashSet::new();
+    let mut cursor = db
+        .collection::<ClientRelease>(RELEASES)
+        .find(doc! {"$or": filters})
+        .await?;
+    while let Some(release) = cursor.try_next().await? {
+        verified.insert(ReleaseIdentity {
+            platform: release.platform.as_str().to_owned(),
+            app_version: release.app_version,
+            app_build: release.app_build,
+            artifact_id: (release.platform == Platform::Web)
+                .then_some(release.artifact_id)
+                .flatten(),
+        });
+    }
+    Ok(verified)
+}
+
 pub async fn list(
     db: &Database,
     query: &ReportQuery,
-) -> AppResult<(Vec<ClientErrorReport>, Option<String>)> {
+) -> AppResult<(Vec<ReportData>, Option<String>)> {
     let mut filter = live();
     if let Some(platform) = query.platform {
         filter.insert("report.platform", platform.as_str());
@@ -85,16 +161,31 @@ pub async fn list(
     } else {
         None
     };
-    Ok((rows, cursor))
+    let verified = verified_release_identities(db, &rows).await?;
+    Ok((
+        rows.into_iter()
+            .map(|row| ReportData {
+                release_verified: verified.contains(&release_identity(&row)),
+                row,
+            })
+            .collect(),
+        cursor,
+    ))
 }
-pub async fn detail(db: &Database, id: &str) -> AppResult<ClientErrorReport> {
+pub async fn detail(db: &Database, id: &str) -> AppResult<ReportData> {
     uuid::Uuid::parse_str(id).map_err(|_| AppError::NotFound("Crash report not found".into()))?;
     let mut filter = live();
     filter.insert("_id", id);
-    db.collection(COLLECTION_NAME)
+    let row = db
+        .collection::<ClientErrorReport>(COLLECTION_NAME)
         .find_one(filter)
         .await?
-        .ok_or_else(|| AppError::NotFound("Crash report not found".into()))
+        .ok_or_else(|| AppError::NotFound("Crash report not found".into()))?;
+    let verified = verified_release_identities(db, std::slice::from_ref(&row)).await?;
+    Ok(ReportData {
+        release_verified: verified.contains(&release_identity(&row)),
+        row,
+    })
 }
 #[derive(Clone, Debug)]
 pub struct VersionData {
