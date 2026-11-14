@@ -3631,9 +3631,10 @@ mod tests {
             .map(|(collection, _)| collection)
             .collect::<BTreeSet<_>>();
         collections.extend(JOINED_CHILD_SPECS.iter().map(|spec| spec.child));
-        // New base's delivery queue is erased by its existing domain rather
-        // than the inventory. Include its main-owned indexes in upgrade snapshots.
+        // Main-owned domain queues and retained meters fall outside the local
+        // inventory. Their indexes must still survive branch and mixed-fleet startup.
         collections.insert(crate::models::node_credential_desired::COLLECTION_NAME);
+        collections.insert(crate::models::usage_meter::COLLECTION_NAME);
         collections
     }
 
