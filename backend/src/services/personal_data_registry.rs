@@ -3535,6 +3535,7 @@ mod tests {
         crate::services::personal_erasure_service::ensure_startup_indexes(&db)
             .await
             .unwrap_or_else(|error| panic!("startup indexes: {error}"));
+        crate::db::ensure_indexes(&db).await.unwrap();
         crate::services::personal_erasure_service::ensure_startup_indexes(&db)
             .await
             .unwrap_or_else(|error| panic!("startup indexes second run: {error}"));
