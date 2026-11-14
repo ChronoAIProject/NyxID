@@ -1347,12 +1347,21 @@ fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Opti
     }
     let clauses: Vec<Document> = fields
         .iter()
+        // Attribution on another owner's resource does not grant export access.
+        // The history journal intentionally exports the person's own events.
+        .filter(|field| {
+            entry.collection == "service_change_events"
+                || personal_data_registry::attribution(entry.collection, field).is_none()
+        })
         .map(|field| {
             let mut d = Document::new();
             d.insert(*field, account_id);
             d
         })
         .collect();
+    if clauses.is_empty() {
+        return None;
+    }
     Some(if clauses.len() == 1 {
         clauses.into_iter().next().unwrap()
     } else {
@@ -1781,6 +1790,16 @@ mod tests {
     use super::*;
     use crate::models::user::UserType;
     use std::str::FromStr;
+    #[test]
+    fn shared_attribution_does_not_grant_export_ownership() {
+        for collection in ["user_services", "oauth_states"] {
+            assert_eq!(
+                owner_filter(personal_data_registry::find(collection).unwrap(), "person"),
+                Some(doc! {"user_id": "person"})
+            );
+        }
+    }
+
     #[test]
     fn recursive_values_preserve_documents_arrays_and_decimal_strings() {
         let value = bson_json(&Bson::Document(
@@ -2278,10 +2297,30 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // A person's history label on someone else's resource does not confer
+        // export ownership, even when the resource has exportable metadata.
+        for collection in ["user_services", "oauth_states"] {
+            let mut shared = doc! {
+                "_id": format!("shared-attribution-{collection}"), "user_id": &bystander,
+                "name": "EXPORT_SHARED_RESOURCE_SENTINEL", "created_at": bson::DateTime::now(),
+            };
+            for spec in personal_data_registry::ATTRIBUTIONS
+                .iter()
+                .filter(|spec| spec.collection == collection)
+            {
+                put_owner(&mut shared, spec.person_field, &owner);
+            }
+            db.collection::<Document>(collection)
+                .insert_one(shared)
+                .await
+                .unwrap();
+        }
         let export = build(&db, &owner).await.unwrap();
         let bytes = serde_json::to_vec(&export).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("EXPORT_SECRET_SENTINEL"));
         assert!(!String::from_utf8_lossy(&bytes).contains("bystander-"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("shared-attribution-"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("EXPORT_SHARED_RESOURCE_SENTINEL"));
         for entry in personal_data_registry::entries() {
             let personal_data_registry::Export::Section(section) = entry.export else {
                 continue;

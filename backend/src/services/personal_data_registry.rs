@@ -68,6 +68,61 @@ pub struct Entry {
     pub why: &'static str,
 }
 
+/// Persisted human-readable attribution, independent of resource ownership.
+/// The opaque person key is retained; these paths never authorize deletion of
+/// the containing shared resource or inclusion in an account export.
+pub struct Attribution {
+    pub collection: &'static str,
+    pub person_field: &'static str,
+    pub name_fields: &'static [&'static str],
+    pub email_fields: &'static [&'static str],
+}
+
+pub static ATTRIBUTIONS: &[Attribution] = &[
+    Attribution {
+        collection: "service_change_events",
+        person_field: "actor.person_id",
+        name_fields: &["actor.name", "actor.display_name"],
+        email_fields: &["actor.email", "actor.email_address"],
+    },
+    Attribution {
+        collection: "user_services",
+        person_field: "created_by.actor.person_id",
+        name_fields: &["created_by.actor.name", "created_by.actor.display_name"],
+        email_fields: &["created_by.actor.email", "created_by.actor.email_address"],
+    },
+    Attribution {
+        collection: "user_services",
+        person_field: "last_change.actor.person_id",
+        name_fields: &["last_change.actor.name", "last_change.actor.display_name"],
+        email_fields: &["last_change.actor.email", "last_change.actor.email_address"],
+    },
+    Attribution {
+        collection: "oauth_states",
+        person_field: "history_context.actor.person_id",
+        name_fields: &[
+            "history_context.actor.name",
+            "history_context.actor.display_name",
+        ],
+        email_fields: &[
+            "history_context.actor.email",
+            "history_context.actor.email_address",
+        ],
+    },
+    Attribution {
+        collection: "assistant_group_messages",
+        person_field: "author_user_id",
+        name_fields: &["author_display_name"],
+        email_fields: &[],
+    },
+];
+
+pub fn attribution(collection: &str, field: &str) -> Option<&'static Attribution> {
+    ATTRIBUTIONS
+        .iter()
+        .find(|spec| spec.collection == collection && spec.person_field == field)
+}
+
 /// The authoritative parent/child relationships used by the local erasure
 /// pass and by its behavioral fixtures. Keeping the child key here means a
 /// newly added joined collection cannot silently bypass the worker test.
@@ -410,10 +465,10 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "assistant_group_messages",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
+        owner: OwnerSelector::Fields(&["user_id", "author_user_id"]),
+        erasure: Erasure::Redacted,
         export: Export::Section("assistant"),
-        why: "assistant_group_messages stores the person-owned assistant group messages record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "assistant_group_messages removes person-owned transcripts through the local inventory and redacts human author labels on surviving shared transcripts while keeping opaque author ids.",
     },
     Entry {
         collection: "assistant_group_read_states",
@@ -1541,10 +1596,10 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "oauth_states",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
+        owner: OwnerSelector::Fields(&["user_id", "history_context.actor.person_id"]),
+        erasure: Erasure::Redacted,
         export: Export::Section("services"),
-        why: "oauth_states stores the person-owned oauth states record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "oauth_states removes person-owned protocol rows through the local inventory and redacts saved history actor labels on surviving flows owned by another account.",
     },
     Entry {
         collection: "openclaw_channel_mappings",
@@ -2503,10 +2558,14 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "user_services",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
+        owner: OwnerSelector::Fields(&[
+            "user_id",
+            "created_by.actor.person_id",
+            "last_change.actor.person_id",
+        ]),
+        erasure: Erasure::Redacted,
         export: Export::Section("services"),
-        why: "user_services stores the person-owned user services record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "user_services removes person-owned rows through the local inventory and redacts creator/last-change labels on surviving shared rows; actor ids remain opaque attribution.",
     },
     Entry {
         collection: "users",
@@ -2548,6 +2607,7 @@ pub fn export_sections() -> impl Iterator<Item = &'static str> {
 /// their first key covers the predicate.
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("assistant_group_mention_notifications", "user_id"),
+    ("assistant_group_messages", "author_user_id"),
     ("assistant_group_messages", "user_id"),
     ("assistant_group_requests", "user_id"),
     ("channel_adapter_events", "user_id"),
@@ -2580,6 +2640,21 @@ enum OwnerIndexBoundedReason {
 
 #[cfg(test)]
 const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
+    (
+        "user_services",
+        "created_by.actor.person_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "user_services",
+        "last_change.actor.person_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "oauth_states",
+        "history_context.actor.person_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
     (
         "assistant_wire_logs",
         "user_id",
@@ -3387,9 +3462,13 @@ mod tests {
         let filters =
             crate::services::personal_erasure_service::local::inventory_owner_fields(owner);
         for entry in ENTRIES {
-            let Erasure::LocalInventory = entry.erasure else {
+            if !matches!(entry.erasure, Erasure::LocalInventory | Erasure::Redacted) {
                 continue;
-            };
+            }
+            if matches!(entry.erasure, Erasure::Redacted) && !filters.contains_key(entry.collection)
+            {
+                continue;
+            }
             let OwnerSelector::Fields(fields) = entry.owner else {
                 panic!(
                     "local inventory entry {} has no owner selector",
@@ -3399,7 +3478,11 @@ mod tests {
             let actual = filters
                 .get(entry.collection)
                 .unwrap_or_else(|| panic!("missing inventory filter for {}", entry.collection));
-            let expected = fields.iter().map(|field| (*field).to_owned()).collect();
+            let expected = fields
+                .iter()
+                .filter(|field| attribution(entry.collection, field).is_none())
+                .map(|field| (*field).to_owned())
+                .collect();
             assert_eq!(
                 actual, &expected,
                 "owner predicate drift for {}",
@@ -3714,6 +3797,75 @@ mod tests {
                     .map(|(collection, field, _)| (*collection, *field)),
             )
             .collect()
+    }
+
+    #[test]
+    fn persisted_history_actor_shapes_and_redaction_registry_are_complete() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/models");
+        let structures = regex::Regex::new(r"(?s)pub struct (\w+)\s*\{(.*?)\n\}").unwrap();
+        let fields = regex::Regex::new(
+            r"(?m)^\s*pub\s+(\w+):[^\n]*\b(HistoryActor|HistoryContext|ServiceChangeSummary)\b",
+        )
+        .unwrap();
+        let mut persisted = BTreeSet::new();
+        for path in fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+        {
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = strip_cfg_test_modules(&fs::read_to_string(path).unwrap());
+            for record in structures.captures_iter(&source) {
+                if matches!(&record[1], "HistoryContext" | "ServiceChangeSummary") {
+                    continue;
+                }
+                for field in fields.captures_iter(&record[2]) {
+                    persisted.insert((
+                        record[1].to_owned(),
+                        field[1].to_owned(),
+                        field[2].to_owned(),
+                    ));
+                }
+            }
+        }
+        let expected: BTreeSet<_> = [
+            ("ServiceChangeEvent", "actor", "HistoryActor"),
+            ("UserService", "created_by", "ServiceChangeSummary"),
+            ("UserService", "last_change", "ServiceChangeSummary"),
+            ("OAuthState", "history_context", "HistoryContext"),
+        ]
+        .into_iter()
+        .map(|(record, field, kind)| (record.to_owned(), field.to_owned(), kind.to_owned()))
+        .collect();
+        assert_eq!(
+            persisted, expected,
+            "persisted actor schema changed: update attribution redaction and its global-scan fixtures"
+        );
+        let paths: BTreeSet<_> = ATTRIBUTIONS
+            .iter()
+            .map(|spec| (spec.collection, spec.person_field))
+            .collect();
+        assert_eq!(
+            paths,
+            BTreeSet::from([
+                ("service_change_events", "actor.person_id"),
+                ("user_services", "created_by.actor.person_id"),
+                ("user_services", "last_change.actor.person_id"),
+                ("oauth_states", "history_context.actor.person_id"),
+                ("assistant_group_messages", "author_user_id"),
+            ])
+        );
+        assert_eq!(paths.len(), ATTRIBUTIONS.len());
+        for spec in ATTRIBUTIONS {
+            let entry = find(spec.collection).unwrap();
+            assert_eq!(entry.erasure, Erasure::Redacted);
+            assert!(
+                matches!(entry.owner, OwnerSelector::Fields(fields) if fields.contains(&spec.person_field))
+            );
+            assert!(!spec.name_fields.is_empty() || !spec.email_fields.is_empty());
+            assert!(!matches!(spec.collection, "audit_log" | "billing_ledger"));
+        }
     }
 
     #[test]

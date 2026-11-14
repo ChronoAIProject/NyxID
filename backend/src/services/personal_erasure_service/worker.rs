@@ -759,14 +759,32 @@ mod tests {
                 vec![doc! {"$set": {
                     "status": "complete",
                     "completed_at": "$$NOW",
-                    "local_inventory_revision": 0_i32,
+                    "local_inventory_revision": 2_i32,
                     "domains": bson::to_bson(&accepted.domains).unwrap(),
                     "retry_at": "$$NOW",
                 }}],
             )
             .await
             .unwrap();
+        db.collection::<Document>("user_services").insert_one(doc! {
+            "_id": "reconciliation-shared-attribution", "user_id": uuid::Uuid::new_v4().to_string(),
+            "created_by": {"actor": {"person_id": &user, "name": "Old completed account", "email": "old@example.test"}},
+        }).await.unwrap();
         assert!(reconcile_completed_once(&state).await.unwrap());
+        let shared = db
+            .collection::<Document>("user_services")
+            .find_one(doc! {"_id": "reconciliation-shared-attribution"})
+            .await
+            .unwrap()
+            .unwrap();
+        let actor = shared
+            .get_document("created_by")
+            .unwrap()
+            .get_document("actor")
+            .unwrap();
+        assert_eq!(actor.get_str("name"), Ok("Deleted account"));
+        assert_eq!(actor.get_str("person_id"), Ok(user.as_str()));
+        assert!(!actor.contains_key("email"));
         assert!(
             db.collection::<Document>("assistant_wire_logs")
                 .find_one(doc! {"_id": "reconciliation-leftover"})

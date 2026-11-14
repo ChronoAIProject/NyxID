@@ -10,7 +10,7 @@ const PAGE: i64 = 32;
 
 /// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
 /// the durable domain shape and intentionally remains unchanged for old jobs.
-pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 2;
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 3;
 
 pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
@@ -547,7 +547,7 @@ async fn redact_page(
     owner: &str,
     collection: &str,
     filter: Document,
-    update: Document,
+    update: Vec<Document>,
 ) -> AppResult<bool> {
     if db
         .collection::<Document>(collection)
@@ -631,7 +631,7 @@ async fn redact_invite_usages(db: &Database, owner: &str) -> AppResult<bool> {
         }
         let mut cursor = db
             .collection::<Document>("invite_codes")
-            .find(doc! {"usages.user_id": owner})
+            .find(doc! {"usages": {"$elemMatch": {"user_id": owner, "email": {"$exists": true}}}})
             .projection(doc! {"_id": 1, "usages": 1})
             .sort(doc! {"_id": 1})
             .limit(PAGE)
@@ -685,26 +685,18 @@ async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
     if erase_page(db, owner, "service_change_events", doc! {"owner_id": owner}).await? {
         return Ok(true);
     }
-    if redact_page(
-        db,
-        owner,
-        "service_change_events",
-        doc! {
-            "actor.person_id": owner,
-            "owner_id": {"$ne": owner},
-            "actor.name": {"$ne": "Deleted account"},
-        },
-        doc! {"$set": {
-        "actor.name": "Deleted account",
-        "actor.display_name": "Deleted account",
-        }, "$unset": {
-        "actor.email": "",
-        "actor.email_address": "",
-        }},
-    )
-    .await?
-    {
-        return Ok(true);
+    for spec in super::super::personal_data_registry::ATTRIBUTIONS {
+        if redact_page(
+            db,
+            owner,
+            spec.collection,
+            super::super::personal_attribution_service::pending_filter(spec, Some(owner)),
+            super::super::personal_attribution_service::update(spec),
+        )
+        .await?
+        {
+            return Ok(true);
+        }
     }
     // Invite usage is embedded in an invite owned by another account. Keep
     // used_count/max_uses and the code itself, but remove the person's usage
@@ -1220,6 +1212,10 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]}).session(&mut tx).await?.is_some() {return Ok(false);}
         for (collection,filter) in inventory(&job.user_id) {
             if db.collection::<Document>(collection).find_one(filter).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
+        }
+        for spec in super::super::personal_data_registry::ATTRIBUTIONS {
+            let pending=super::super::personal_attribution_service::pending_filter(spec, Some(&job.user_id));
+            if db.collection::<Document>(spec.collection).find_one(pending).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
         }
         let barrier=db.collection::<Document>(super::super::erasure_admission::COLLECTION).update_one(doc! {"_id":&job.user_id,"erasure_accepted":true},doc! {"$inc":{"cleanup_revision":1_i64}}).session(&mut tx).await?;
         if barrier.matched_count!=1 {return Err(AppError::Conflict("Personal cleanup barrier is unavailable".into()));}

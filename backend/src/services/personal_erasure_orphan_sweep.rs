@@ -143,9 +143,23 @@ async fn aggregate_groups(
     field: &'static str,
     disposition: Erasure,
 ) -> AppResult<Vec<OrphanGroup>> {
+    let mut pipeline = owner_pipeline(field);
+    if let Some(spec) = personal_data_registry::attribution(collection, field) {
+        pipeline.insert(
+            0,
+            doc! {"$match": super::personal_attribution_service::pending_filter(spec, None)},
+        );
+    } else if collection == "invite_codes" && field == "usages.user_id" {
+        // Match after unwind so an already-redacted usage cannot be selected
+        // because another person's usage still carries an email.
+        pipeline.insert(
+            pipeline.len() - 1,
+            doc! {"$match": {"usages.email": {"$exists": true}}},
+        );
+    }
     let mut cursor = db
         .collection::<Document>(collection)
-        .aggregate(owner_pipeline(field))
+        .aggregate(pipeline)
         .allow_disk_use(true)
         .max_time(AGGREGATE_TIMEOUT)
         .await?;
@@ -327,7 +341,13 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
     // Only orphan owners reach this point. Stream their sorted ids after the
     // liveness filter so a live account can never create a giant group document.
     for group in &mut all {
-        let filter = if group.joined_parent.is_some() {
+        let filter = if let Some(spec) =
+            personal_data_registry::attribution(group.collection, group.field)
+        {
+            super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))
+        } else if group.collection == "invite_codes" && group.field == "usages.user_id" {
+            doc! {"usages": {"$elemMatch": {"user_id": &group.owner_id, "email": {"$exists": true}}}}
+        } else if group.joined_parent.is_some() {
             if group.collection == "channel_send_claims" && group.field == "_id" {
                 doc! {"_id": {"$regex": format!("^{}:", regex::escape(&group.owner_id))}}
             } else {
@@ -355,6 +375,7 @@ async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
         }
         group.row_count = group.row_ids.len();
     }
+    all.retain(|group| group.row_count > 0);
     all.sort_by(|left, right| {
         (&left.collection, &left.field, &left.owner_id).cmp(&(
             &right.collection,
@@ -458,10 +479,16 @@ pub async fn scan(db: &mongodb::Database) -> AppResult<OrphanSweepReport> {
     })
 }
 
-async fn redact_invite_row(db: &mongodb::Database, id: &Bson, owner: &str) -> AppResult<()> {
+async fn redact_invite_row(
+    db: &mongodb::Database,
+    id: &Bson,
+    owner: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
     let Some(mut row) = db
         .collection::<Document>("invite_codes")
-        .find_one(doc! {"_id": id, "usages.user_id": owner})
+        .find_one(doc! {"_id": id, "usages": {"$elemMatch": {"user_id": owner, "email": {"$exists": true}}}})
+        .session(&mut *tx)
         .await?
     else {
         return Ok(());
@@ -487,9 +514,10 @@ async fn redact_invite_row(db: &mongodb::Database, id: &Bson, owner: &str) -> Ap
             // Match an unredacted usage as well as the id.  A second apply
             // must not rewrite an already-redacted shared invite row.
             .replace_one(
-                doc! {"_id": id, "usages.user_id": owner, "usages.email": {"$exists": true}},
+                doc! {"_id": id, "usages": {"$elemMatch": {"user_id": owner, "email": {"$exists": true}}}},
                 row,
             )
+            .session(tx)
             .await?;
     }
     Ok(())
@@ -502,6 +530,37 @@ async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<(
         filter.insert("_id", doc! {"$in": chunk.to_vec()});
         if group.joined_parent.is_none() {
             filter.insert(group.field, group.owner_id.as_str());
+        }
+        let attribution = personal_data_registry::attribution(group.collection, group.field);
+        let invite = group.collection == "invite_codes" && group.field == "usages.user_id";
+        if attribution.is_some() || invite {
+            let mut tx = db.client().start_session().await?;
+            tx.start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .write_concern(mongodb::options::WriteConcern::majority())
+                .await?;
+            let result: AppResult<()> = async {
+                // Pre-job deletions have no job tombstone. Close the same
+                // durable admission fence before changing this bounded page.
+                for collection in [crate::models::user::COLLECTION_NAME, crate::models::service_account::COLLECTION_NAME] {
+                    if db.collection::<Document>(collection).find_one(doc! {"_id": &group.owner_id})
+                        .session(&mut tx).await?.is_some() { return Ok(()); }
+                }
+                super::erasure_admission::close_in_session(db, &group.owner_id, &mut tx).await?;
+                if let Some(spec) = attribution {
+                    db.collection::<Document>(group.collection).update_many(
+                        doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
+                        super::personal_attribution_service::update(spec),
+                    ).session(&mut tx).await?;
+                } else {
+                    for id in chunk.iter() {
+                        redact_invite_row(db, id, &group.owner_id, &mut tx).await?;
+                    }
+                }
+                Ok(())
+            }.await;
+            super::org_membership_authority::finish(tx, result).await?;
+            continue;
         }
         match group.disposition {
             Erasure::JoinedChild { .. } => {
@@ -521,38 +580,22 @@ async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<(
                     .delete_many(filter)
                     .await?;
             }
-            Erasure::Redacted
-                if group.collection == "invite_codes" && group.field == "usages.user_id" =>
-            {
-                for id in chunk.iter() {
-                    redact_invite_row(db, id, &group.owner_id).await?;
-                }
-            }
-            Erasure::Redacted
-                if group.collection == "service_change_events"
-                    && group.field == "actor.person_id" =>
-            {
-                db.collection::<Document>(group.collection)
-                    .update_many(
-                        filter,
-                        doc! {
-                            "$set": {
-                                "actor.name": "Deleted account",
-                                "actor.display_name": "Deleted account",
-                            },
-                            "$unset": {
-                                "actor.email": "",
-                                "actor.email_address": "",
-                            },
-                        },
-                    )
-                    .await?;
-            }
             Erasure::Redacted => {
-                let mut set = Document::new();
-                set.insert(group.field, Bson::Null);
+                // Hybrid entries erase only the real resource-owner predicate;
+                // attribution selectors above can only redact human labels.
+                let owned: Vec<Document> =
+                    super::personal_erasure_service::local::inventory(&group.owner_id)
+                        .into_iter()
+                        .filter(|(collection, _)| *collection == group.collection)
+                        .map(|(_, filter)| filter)
+                        .collect();
+                if owned.is_empty() {
+                    return Err(AppError::Internal(
+                        "Orphan redaction predicate is not registered".into(),
+                    ));
+                }
                 db.collection::<Document>(group.collection)
-                    .update_many(filter, doc! {"$set": set})
+                    .delete_many(doc! {"$and": [filter, {"$or": owned}]})
                     .await?;
             }
             _ => {}
@@ -722,6 +765,162 @@ mod tests {
         assert_eq!(count, OWNER_ID_REPORT_CAP + 1);
         assert_eq!(reports[0].owner_ids.len(), OWNER_ID_REPORT_CAP);
         assert!(reports[0].owner_ids_truncated);
+    }
+
+    #[tokio::test]
+    async fn sweep_redacts_all_attribution_shapes_preserves_live_actors_and_global_identity_scan_is_clean()
+     {
+        use super::super::personal_attribution_service::test_support as attribution;
+        let db = crate::test_utils::connect_transaction_test_database("orphan_attribution").await;
+        let orphan = Uuid::new_v4().to_string();
+        let person = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        let service_account = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                crate::test_utils::test_user(&person, crate::models::user::UserType::Person),
+                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::service_account::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &service_account})
+            .await
+            .unwrap();
+        let cases = attribution::seed(&db, &orphan, &org, APPLY_BATCH + 1).await;
+        db.collection::<Document>("invite_codes").insert_one(doc! {
+            "_id": "orphan-invite", "used_count": 2, "max_uses": 5,
+            "usages": [{"user_id": &orphan, "email": attribution::EMAIL}, {"user_id": &person, "email": "live@example.test"}],
+        }).await.unwrap();
+        db.collection::<Document>("assistant_agent_shares")
+            .insert_one(doc! {
+                "_id": "orphan-share", "owner_id": &org, "subject_kind": "person",
+                "subject_id": &orphan, "subject_email": attribution::EMAIL,
+            })
+            .await
+            .unwrap();
+        super::super::audit_service::log_actor_event(
+            db.clone(),
+            &super::super::audit_service::AuditActor {
+                user_id: orphan.clone(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            },
+            "attribution.test.immutable",
+            Some(serde_json::json!({"name": attribution::NAME, "email": attribution::EMAIL})),
+        )
+        .await
+        .unwrap();
+        let audit = db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type": "attribution.test.immutable"})
+            .await
+            .unwrap()
+            .unwrap();
+        let ledger = doc! {"_id": "immutable-ledger", "owner_id": &orphan, "entry_hash": "immutable-test-hash"};
+        db.collection::<Document>("billing_ledger")
+            .insert_one(ledger.clone())
+            .await
+            .unwrap();
+        assert!(cases.iter().all(|case| {
+            serde_json::to_string(&case.before)
+                .unwrap()
+                .contains(attribution::NAME)
+                || serde_json::to_string(&case.before)
+                    .unwrap()
+                    .contains(attribution::EMAIL)
+        }));
+        let mut live_rows = Vec::new();
+        for (index, spec) in personal_data_registry::ATTRIBUTIONS.iter().enumerate() {
+            for live in [&person, &org, &service_account] {
+                let id = format!("live-attribution-{index}-{live}");
+                let mut row = doc! {"_id": &id, "user_id": &org, "owner_id": &org};
+                attribution::put(&mut row, spec.person_field, live.as_str().into());
+                for field in spec.name_fields {
+                    attribution::put(&mut row, field, "Live actor".into());
+                }
+                for field in spec.email_fields {
+                    attribution::put(&mut row, field, "live@example.test".into());
+                }
+                db.collection::<Document>(spec.collection)
+                    .insert_one(row.clone())
+                    .await
+                    .unwrap();
+                live_rows.push((spec.collection, id, row));
+            }
+        }
+        let report = scan(&db).await.unwrap();
+        assert!(report.candidate_count >= cases.len());
+        apply(&db, &person, &report.digest).await.unwrap();
+        attribution::assert_cases(&db, &cases, false).await;
+        attribution::assert_no_identity_outside_audit(&db).await;
+        assert_eq!(
+            db.collection::<Document>("audit_log")
+                .find_one(doc! {"_id": audit.get("_id").unwrap()})
+                .await
+                .unwrap(),
+            Some(audit)
+        );
+        assert_eq!(
+            db.collection::<Document>("billing_ledger")
+                .find_one(doc! {"_id": "immutable-ledger"})
+                .await
+                .unwrap(),
+            Some(ledger)
+        );
+        let invite = db
+            .collection::<Document>("invite_codes")
+            .find_one(doc! {"_id": "orphan-invite"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(invite.get_i32("used_count"), Ok(2));
+        assert_eq!(invite.get_i32("max_uses"), Ok(5));
+        let usages = invite.get_array("usages").unwrap();
+        assert_eq!(
+            usages[0].as_document().unwrap().get_str("user_id"),
+            Ok(orphan.as_str())
+        );
+        assert!(!usages[0].as_document().unwrap().contains_key("email"));
+        assert_eq!(
+            usages[1].as_document().unwrap().get_str("email"),
+            Ok("live@example.test")
+        );
+        for (collection, id, expected) in live_rows {
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .find_one(doc! {"_id": id})
+                    .await
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        assert!(
+            db.collection::<Document>(super::super::erasure_admission::COLLECTION)
+                .find_one(doc! {"_id": &orphan, "erasure_accepted": true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        for live in [&person, &org, &service_account] {
+            assert!(
+                db.collection::<Document>(super::super::erasure_admission::COLLECTION)
+                    .find_one(doc! {"_id": live, "erasure_accepted": true})
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(scan(&db).await.unwrap().candidate_count, 0);
+        assert_eq!(
+            apply(&db, &person, &report.digest)
+                .await
+                .unwrap()
+                .candidate_count,
+            0
+        );
     }
 
     #[tokio::test]

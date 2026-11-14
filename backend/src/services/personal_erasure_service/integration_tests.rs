@@ -138,7 +138,11 @@ fn assert_owner_row_is_absent_or_redacted(
     owner: &str,
 ) {
     match entry.erasure {
-        crate::services::personal_data_registry::Erasure::Redacted => {
+        crate::services::personal_data_registry::Erasure::Redacted
+            if !super::local::inventory(owner)
+                .iter()
+                .any(|(name, _)| *name == entry.collection) =>
+        {
             let row = row.expect("redacted shared row must remain");
             let encoded = serde_json::to_string(&row).unwrap();
             assert!(!encoded.contains("deleted@example.test"));
@@ -784,6 +788,98 @@ async fn stuck_source_cleanup_recovers_without_repair_or_replaying_completed_dom
     assert!(detected.is_empty());
     assert_delivery_bystanders_unchanged(&db, &preserved).await;
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_erasure_redacts_every_persisted_attribution_and_global_identity_scan_is_clean() {
+    use crate::services::personal_attribution_service::test_support as attribution;
+    let (db, owner) = tests::fixture().await;
+    let org = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    db.collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id": &owner},
+            doc! {"$set": {
+                "display_name": attribution::NAME, "email": attribution::EMAIL,
+            }},
+        )
+        .await
+        .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let cases = attribution::seed(&db, &owner, &org, 35).await;
+    // Recipient labels and embedded invite usages are removed by their existing
+    // grant/invite paths. They participate in the same global identity scan.
+    db.collection::<Document>("assistant_agent_shares")
+        .insert_one(doc! {
+            "_id": "target-recipient", "owner_id": &org, "subject_kind": "person",
+            "subject_id": &owner, "subject_email": attribution::EMAIL,
+        })
+        .await
+        .unwrap();
+    db.collection::<Document>("invite_codes")
+        .insert_one(doc! {
+            "_id": "target-invite", "used_count": 1, "max_uses": 5,
+            "usages": [{"user_id": &owner, "email": attribution::EMAIL}],
+        })
+        .await
+        .unwrap();
+    super::super::audit_service::log_actor_event(
+        db.clone(),
+        &super::super::audit_service::AuditActor {
+            user_id: owner.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        "attribution.test.immutable",
+        Some(serde_json::json!({"name": attribution::NAME, "email": attribution::EMAIL})),
+    )
+    .await
+    .unwrap();
+    let audit = db
+        .collection::<Document>("audit_log")
+        .find_one(doc! {"event_type": "attribution.test.immutable"})
+        .await
+        .unwrap()
+        .unwrap();
+    let ledger =
+        doc! {"_id": "immutable-ledger", "owner_id": &owner, "entry_hash": "immutable-test-hash"};
+    db.collection::<Document>("billing_ledger")
+        .insert_one(ledger.clone())
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    until_source_removed(&state, &owner).await;
+    for _ in 0..20 {
+        if status(&db, &owner).await.unwrap().unwrap().status == ErasureStatus::Complete {
+            break;
+        }
+        step(&state).await;
+    }
+    assert_eq!(
+        status(&db, &owner).await.unwrap().unwrap().status,
+        ErasureStatus::Complete
+    );
+    attribution::assert_cases(&db, &cases, true).await;
+    attribution::assert_no_identity_outside_audit(&db).await;
+    assert_eq!(
+        db.collection::<Document>("audit_log")
+            .find_one(doc! {"_id": audit.get("_id").unwrap()})
+            .await
+            .unwrap(),
+        Some(audit)
+    );
+    assert_eq!(
+        db.collection::<Document>("billing_ledger")
+            .find_one(doc! {"_id": "immutable-ledger"})
+            .await
+            .unwrap(),
+        Some(ledger)
+    );
 }
 
 #[tokio::test]

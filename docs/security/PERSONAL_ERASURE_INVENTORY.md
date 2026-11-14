@@ -14,8 +14,9 @@ reuse any existing index whose first key is the erasure owner predicate and
 add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions. The final manifest adds 16 indexes,
-reduced from the earlier 67; the 51 other gaps add no index.
+not change retention or ownership decisions. The final manifest adds 17 indexes:
+the accepted 16 event-stream indexes plus the group-message author lookup needed
+for shared-attribution redaction. The 54 other classified gaps add no index.
 
 Each row below is a real missing prefix on a collection that grows with
 events, messages, requests, or deliveries. Without it, the owner query would
@@ -59,6 +60,7 @@ Paths in the tables below are relative to `backend/src`.
 | Collection | Key | New index name | Why this gap is kept | Startup/build behavior |
 | --- | --- | --- | --- | --- |
 | `assistant_group_messages` | `user_id` | `personal_erasure_owner_assistant_group_messages_user_id` | Per-message group inserts (`services/collaboration_group_service/requests.rs:76`, `runtime.rs:530`), with no message TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `assistant_group_messages` | `author_user_id` | `personal_erasure_owner_assistant_group_messages_author_user_id` | Participant posts and addressed requests snapshot the human author's display name (`services/collaboration_group_service/participant_posts.rs:55`, `requests.rs:191-193`); no message TTL bounds this stream. Shared-message redaction and its final-source/orphan checks otherwise scan the whole collection. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
 | `assistant_group_requests` | `user_id` | `personal_erasure_owner_assistant_group_requests_user_id` | Per-addressed-group-message inserts (`services/collaboration_group_service/requests.rs:226-261`); no TTL or completed-history cap, and local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
 | `nyxbot_events` | `user_id` | `personal_erasure_owner_nyxbot_events_user_id` | Per-inbound-event inserts (`handlers/nyxbot.rs:5275-5296`), retained for 24 hours (seven days with media, `handlers/nyxbot.rs:5665-5669`) at message volume; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
 | `trigger_deliveries` | `user_id` | `personal_erasure_owner_trigger_deliveries_user_id` | Per-delivery inserts (`services/trigger_service.rs:1006-1049`); configured TTL defaults to 72 hours, leaving a high-volume stream for local cleanup. | Awaited before listeners; a large build can delay startup, following `db.rs:2202-2236`. |
@@ -116,6 +118,8 @@ The excluded predicates are reviewed as follows (paths below are relative to
 | `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`models/channel_email.rs:10-22`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
 | `encrypted_record_migration_findings`, `encrypted_record_migration_runs` | Migration-generation diagnostics/progress (`services/encrypted_record_migration.rs:1085-1112,1289-1303`), not hot request writes. |
 | `feature_flag_overrides`, `invite_codes`, `org_invites` | Administrative targeting and invite lifecycles; embedded invite usage is bounded by the authored invite's usage policy (`models/invite_code.rs`, `services/feature_flag_service.rs`, `services/org_invite_service.rs`). |
+| `user_services.created_by.actor.person_id`, `user_services.last_change.actor.person_id` | Only the creator and latest-change summary on each service resource are replaced (`services/service_history/projection.rs:496-535`); historical events use the separately indexed journal. No per-event growth on these resource rows. |
+| `oauth_states.history_context.actor.person_id` | A saved initiation context per expiring OAuth flow (`models/oauth_state.rs:14`, `db.rs`'s `oauth_states` expiry index); no retained actor-history stream. |
 | `platform_guide_selections`, `platform_native_replies`, `platform_onboarding_binding_requests`, `platform_personal_decision_spacing`, `platform_personal_setup_selections` | Guide/setup/binding selection, reply and spacing coordination (`services/platform_guide_service.rs`, `services/platform_native_reply_service.rs`, `services/platform_personal_owner_lifecycle.rs`); low-volume setup flows. |
 | `platform_delivery_tests`, `platform_setup_steps` | Joined installation/setup lifecycle children (`models/platform_installation.rs:5-7,90-103`); bounded steps/tests per parent. |
 | `service_account_key_read_grants`, `service_pool_member_health` | Owner grant configuration (`models/service_account_key_read_grant.rs`) and one current health row per member/context, with one-hour expiry (`services/service_pool_health_service.rs:14-15,250-283`); observations remain separately indexed. |
@@ -286,6 +290,55 @@ or authority for blanket deletion.
 | Organization membership | Remove/revoke the person's memberships and pending registrations/invites with last-admin fencing. | Preserve org user, wallets, resources, role scopes and other memberships. Never dissolve an org implicitly. |
 | Billing / grants / effects | Settle outstanding operations and preserve immutable financial/effect records. Apply existing grant/wallet/account lifecycle to personally owned balances. | Billing ledger, audit chain, retained settlement/checkpoint/operation and transfer evidence remain under their existing retention rules. Personal erasure does not scrub, TTL-delete or re-sign them. |
 | Telemetry | Central consent/account fence, durable dispatch settlement and current provider-generation drain precede vendor deletion/no-data attestation. Fan out historical destinations and keep unresolved configuration actionable. | Capture acceptance does not prove provider processing is drained. Completion requires supported authenticated deletion/status evidence or a current-generation operator attestation with the same transport/drain fences. |
+
+## Shared-attribution audit and redaction
+
+The persisted model and writer audit found the following human identity
+snapshots. The registry lists the opaque person selector separately from resource
+ownership; an attribution match never grants export access or permission to
+delete another owner's resource.
+
+| Collection | Persisted snapshot and authoritative person selector | Cleanup |
+| --- | --- | --- |
+| `service_change_events` | `HistoryActor` at `actor`, keyed by `actor.person_id` | Delete the person's own journal; on surviving shared events replace existing actor names with `Deleted account` and remove email snapshots. |
+| `user_services` | `ServiceChangeSummary` at `created_by` and `last_change`, each wrapping `actor`, keyed by `created_by.actor.person_id` / `last_change.actor.person_id` | Delete personally owned resources; redact the matching creator/updater on other owners' resources, retaining every opaque actor/person/API-key/app id. Endpoint and API-key changes write their summaries here (`services/service_history/projection.rs:496-535`); those two model collections have no separate actor-summary field. |
+| `oauth_states` | `HistoryContext` at `history_context`, keyed by `history_context.actor.person_id` | Delete the person's own flows; redact saved initiation labels on another owner's surviving flow. |
+| `assistant_group_messages` | `author_display_name`, keyed by `author_user_id` | Existing lifecycle cleanup may remove the author's messages; replace labels on any surviving shared message without changing its text, resource owner or opaque author id. |
+| `invite_codes` | `usages[].email`, keyed by that element's `user_id` | Remove only that usage's email, retaining opaque ids, other usages, limits and usage counters. |
+| `assistant_agent_shares` | `subject_email`, keyed by `subject_id` with `subject_kind = person` | Existing local inventory and orphan sweep remove the deleted person's recipient grant, including a grant on another owner's agent; other grants and the shared agent remain. |
+
+The model scan covers `HistoryActor`, `HistoryContext` and
+`ServiceChangeSummary`; their only persisted containers are the four paths in
+the first three rows. `HistoryActor.id` can be an API-key id, so cleanup uses
+`person_id`, never an assumed actor-id/person-id equivalence. Current writers
+store `name`; legacy `display_name`, `email` and `email_address` aliases at those
+same actor paths are also covered. Missing or null name fields remain so.
+
+The other retained/shared attribution models carry opaque ids only:
+`downstream_services` (creator/owner), `catalog_skill_revisions` and
+`catalog_skill_operations` (actor kind/id), `ownership_transfers` (actor and
+previous/new owner), `assistant_group_transfers` (from/to user), and platform
+publication/configuration rows (publisher/creator ids). Their resource, agent,
+skill and bot names describe the resource, not a human identity snapshot.
+`channel_messages.sender_display_name` comes from a platform sender id, not a
+NyxID person id; it does not authorize person cleanup of another owner's
+transcript. Financial contact names are retained financial data, not authorship.
+`audit_log` and `billing_ledger` remain immutable and are never redaction targets.
+
+One shared redaction implementation serves the worker (32-row pages) and the
+orphan sweep (64-row pages). It matches only names not already replaced or email
+fields still present, so completed rows cannot starve later pages. Each page
+uses a majority transaction and the admission barrier; the orphan sweep also
+rechecks person/org/service-account liveness and installs the durable tombstone
+for a pre-job deletion. Local-inventory revision 3 reconciles previously
+completed jobs under their surviving tombstone; neither the domain set nor
+`INVENTORY_VERSION` changes. The final source check refuses completion while an
+unredacted snapshot remains.
+
+Global-scan tests seed the target's name/email in every listed snapshot, cross
+both page sizes, verify mixed creator/updater and live-actor bystanders exactly,
+and scan every collection after completion/apply. Only immutable `audit_log` may
+contain the sentinel name/email; both immutable-chain fixtures remain identical.
 
 ## Coverage and recovery checks
 
