@@ -98,14 +98,19 @@ async fn reconcile_completed_once(state: &crate::AppState) -> AppResult<bool> {
     }
     // The lease token is part of the stamp fence. A stale holder can never
     // advance a job after another replica has claimed the repair.
-    db.collection::<Document>(JOBS)
+    stamp_reconciled(db, &job.id, lease).await
+}
+
+async fn stamp_reconciled(db: &Database, job_id: &str, lease: &str) -> AppResult<bool> {
+    let result = db
+        .collection::<Document>(JOBS)
         .update_one(
-            doc! {"_id": &job.id, "status": "complete", "lease_token": lease, "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]}},
+            doc! {"_id": job_id, "status": "complete", "lease_token": lease, "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]}},
             vec![doc! {"$set": {"local_inventory_revision": super::local::LOCAL_INVENTORY_REVISION, "lease_token": bson::Bson::Null, "lease_expires_at": bson::Bson::Null, "updated_at": "$$NOW"}}],
         )
         .write_concern(WriteConcern::majority())
         .await?;
-    Ok(true)
+    Ok(result.matched_count == 1)
 }
 
 fn lease_filter(job: &PersonalErasureJob) -> AppResult<Document> {
@@ -739,7 +744,6 @@ mod tests {
     async fn completed_job_reconciliation_cleans_new_inventory_once_and_stamps_revision() {
         let (db, user) = super::super::tests::fixture().await;
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
-        let state = crate::test_utils::test_app_state(db.clone());
         db.collection::<Document>("assistant_wire_logs")
             .insert_one(doc! {
                 "_id": "reconciliation-leftover",
@@ -842,6 +846,44 @@ mod tests {
             .unwrap();
         assert_eq!(current.get_i32("local_inventory_revision"), Ok(0));
         assert_eq!(current.get_str("status"), Ok("complete"));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_reconciliation_lease_cannot_stamp_revision() {
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id},
+                vec![doc! {"$set": {
+                    "status": "complete",
+                    "local_inventory_revision": 0_i32,
+                    "retry_at": "$$NOW",
+                }}],
+            )
+            .await
+            .unwrap();
+        let claimed = claim_completed_reconciliation(&db).await.unwrap().unwrap();
+        let lease = claimed.lease_token.clone().unwrap();
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id, "lease_token": &lease},
+                doc! {"$set": {"lease_expires_at": bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        assert!(!stamp_reconciled(&db, &accepted.id, &lease).await.unwrap());
+        assert_eq!(
+            db.collection::<Document>(JOBS)
+                .find_one(doc! {"_id": &accepted.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i32("local_inventory_revision"),
+            Ok(0)
+        );
         db.drop().await.unwrap();
     }
 }
