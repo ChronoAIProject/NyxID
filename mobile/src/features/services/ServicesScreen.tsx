@@ -412,15 +412,12 @@ export function ServicesScreen({
           ? editable
             ? "This connection is paused. Turn on Connection enabled above before using it in Chat."
             : "This connection is paused. Ask its administrator to enable it before using it in Chat."
-          : isSavedCredential(connection) &&
-              connection.status === "active" &&
-              !connection.credential_missing &&
-              connection.credential_verification?.state !== "verified" &&
-              connection.credential_verification?.state !== "rejected"
+          : isSavedCredential(connection) && connection.status === "active" && !connection.credential_missing
+              && connection.credential_verification?.state !== "verified" && connection.credential_verification?.state !== "rejected"
             ? "You can try this saved connection in Chat. Provider authentication has not been verified, and the agent still needs permission to use it."
-            : health?.tone === "error" || health?.tone === "warning"
-              ? "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection."
-              : `Ask your agent to use ${providerName}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.`;
+          : health?.tone === "error" || health?.tone === "warning"
+            ? "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection."
+            : `Ask your agent to use ${providerName}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.`;
     return (
       <WorkspacePage
         title="Manage connection"
@@ -717,12 +714,8 @@ export function ServicesScreen({
                   value={connectionTime(connection.expires_at, "Not recorded")}
                 />
               ) : null}
-              {isSavedCredential(connection) &&
-              connection.credential_verification?.reason_code ? (
-                <SettingsRow
-                  label="Check result"
-                  value={connection.credential_verification.reason_code}
-                />
+              {isSavedCredential(connection) && connection.credential_verification?.reason_code ? (
+                <SettingsRow label="Check result" value={connection.credential_verification.reason_code} />
               ) : null}
               <SettingsRow
                 label="Refresh status"
@@ -993,9 +986,7 @@ export function ServicesScreen({
       )}
       {listed ? (
         <SettingsGroup
-          title={
-            tab === "connected" ? "Connected services" : "Available to add"
-          }
+          title={tab === "connected" ? "Connected services" : "Available to add"}
         >
           {tab === "connected"
             ? filteredConnections.map((connection) => (
@@ -1043,9 +1034,7 @@ export function ServicesScreen({
                   }
                   accessibilityLabel={`Connect ${entry.name}`}
                   onPress={() => {
-                    navigation.push("ServiceSetup", {
-                      catalogSlug: entry.slug,
-                    });
+                    navigation.push("ServiceSetup", { catalogSlug: entry.slug });
                   }}
                 />
               ))}
@@ -1331,9 +1320,7 @@ function ConnectForm({
             tone="action"
             disabled={busy || linkBusy || !focused || !foreground}
             accessory={
-              linkBusy ? (
-                <ActivityIndicator color={colors.primary} />
-              ) : undefined
+              linkBusy ? <ActivityIndicator color={colors.primary} /> : undefined
             }
             onPress={() => void openWebSetup()}
           />

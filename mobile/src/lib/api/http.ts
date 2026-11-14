@@ -47,9 +47,7 @@ const PROACTIVE_REFRESH_BUFFER_MS = 2 * 60 * 1000;
 type SessionInvalidationListener = () => void;
 let onSessionInvalidated: SessionInvalidationListener | null = null;
 
-export function setSessionInvalidationListener(
-  listener: SessionInvalidationListener | null,
-) {
+export function setSessionInvalidationListener(listener: SessionInvalidationListener | null) {
   onSessionInvalidated = listener;
 }
 
