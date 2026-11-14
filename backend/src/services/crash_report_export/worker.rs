@@ -304,6 +304,14 @@ mod tests {
             crash_report_service::insert(&db, &config, "test", &id, &rev, report())
                 .await
                 .unwrap();
+        // Backdate claims so tests are independent of client/server clock skew.
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &report_id},
+                doc! {"$set":{"export.next_attempt_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
         (db, id, rev, report_id, config, exporter)
     }
     async fn row(db: &Database, id: &str) -> ClientErrorReport {
