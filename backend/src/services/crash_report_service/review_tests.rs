@@ -40,15 +40,7 @@ async fn consent_get_warm_default_off_adds_zero_commands_and_enabled_rollout_is_
     commands.lock().unwrap().clear();
     let (_, axum::Json(off)) = get().await.unwrap();
     assert_eq!(off.diagnostics_status, DiagnosticsStatus::NotOffered);
-    let reads: Vec<_> = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|d| {
-            d.contains_key("find") || d.contains_key("aggregate") || d.contains_key("getMore")
-        })
-        .cloned()
-        .collect();
+    let reads = commands.lock().unwrap().clone();
     assert_eq!(reads.len(), 1, "{reads:?}");
     assert_eq!(
         reads[0].get_str("find").unwrap(),
@@ -61,15 +53,7 @@ async fn consent_get_warm_default_off_adds_zero_commands_and_enabled_rollout_is_
     commands.lock().unwrap().clear();
     let (_, axum::Json(on)) = get().await.unwrap();
     assert_eq!(on.diagnostics_status, DiagnosticsStatus::ConsentRequired);
-    let reads: Vec<_> = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|d| {
-            d.contains_key("find") || d.contains_key("aggregate") || d.contains_key("getMore")
-        })
-        .cloned()
-        .collect();
+    let reads = commands.lock().unwrap().clone();
     assert!(reads.len() <= 8, "bounded enabled path: {reads:?}");
     assert_eq!(
         reads
