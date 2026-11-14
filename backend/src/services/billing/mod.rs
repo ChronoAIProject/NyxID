@@ -4,6 +4,7 @@ pub mod bill;
 pub mod config;
 pub mod funding;
 pub mod grants;
+mod hold_conservation;
 pub mod lago_client;
 pub mod ledger;
 pub mod machine_runtime;
@@ -196,6 +197,7 @@ pub async fn startup_diagnostics(
         });
     }
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
+    items.extend(hold_conservation::diagnostics(db).await?);
     Ok(items)
 }
 

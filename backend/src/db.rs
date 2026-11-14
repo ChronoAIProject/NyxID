@@ -3374,6 +3374,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
 
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+    usage_meter.create_indexes(billing_hold_indexes()).await?;
     usage_meter
         .create_index(
             IndexModel::builder()
@@ -3910,6 +3911,35 @@ pub(crate) async fn backfill_service_endpoint_operation_generations(
         )
         .await?;
     Ok(())
+}
+
+pub(crate) fn billing_hold_indexes() -> Vec<IndexModel> {
+    [
+        (
+            doc! {"wallet_id":1,"released":1,"_id":1},
+            doc! {"released":false},
+        ),
+        (
+            doc! {"funding.grant_reservations.grant_id":1,"funding.settled":1,"_id":1},
+            doc! {"funding.grant_reservations.grant_id":{"$exists":true}},
+        ),
+        (
+            doc! {"funding.allowance_reservations.period_id":1,"funding.settled":1,"_id":1},
+            doc! {"funding.allowance_reservations.period_id":{"$exists":true}},
+        ),
+    ]
+    .into_iter()
+    .map(|(keys, partial)| {
+        IndexModel::builder()
+            .keys(keys)
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(partial)
+                    .build(),
+            )
+            .build()
+    })
+    .collect()
 }
 
 async fn ensure_exact_service_semantic_effect_index(

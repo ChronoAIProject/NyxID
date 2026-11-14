@@ -1,4 +1,5 @@
 mod bills;
+pub(crate) mod hold_release;
 mod operations;
 mod org_wallet;
 mod taxes;
