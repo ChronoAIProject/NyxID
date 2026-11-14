@@ -69,6 +69,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
   refreshDisabled?: boolean;
   refreshLabel?: string;
   primaryAction?: {
+    disabled?: boolean;
     label: string;
     accessibilityLabel: string;
     onPress: () => void;
@@ -272,6 +273,10 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={primaryAction.accessibilityLabel}
+                      disabled={primaryAction.disabled}
+                      accessibilityState={{
+                        disabled: Boolean(primaryAction.disabled),
+                      }}
                       onPress={() => {
                         Keyboard.dismiss();
                         primaryAction.onPress();
@@ -283,16 +288,28 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                         !(items.length > 0 || searching) &&
                           styles.primaryActionFull,
                         {
-                          backgroundColor: colors.segmentTrack,
-                          opacity: pressed ? 0.7 : 1,
+                          backgroundColor: pressed
+                            ? colors.navActive
+                            : colors.segmentTrack,
                         },
                       ]}
                     >
-                      <SquarePen size={17} color={colors.textPrimary} />
+                      <SquarePen
+                        size={17}
+                        color={
+                          primaryAction.disabled
+                            ? colors.textMuted
+                            : colors.textPrimary
+                        }
+                      />
                       <Text
                         style={[
                           styles.primaryActionLabel,
-                          { color: colors.textPrimary },
+                          {
+                            color: primaryAction.disabled
+                              ? colors.textMuted
+                              : colors.textPrimary,
+                          },
                         ]}
                       >
                         {primaryAction.label}

@@ -52,6 +52,7 @@ function GroupEditor({
   const client = useQueryClient();
   const scope = useRef({ mounted: true, epoch: live.epoch });
   const lock = useRef(false);
+  const exitConsumed = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [baseline, setBaseline] = useState<Group>();
@@ -202,13 +203,14 @@ function GroupEditor({
         : undefined,
   });
   useEffect(() => {
-    if (!exitTo || busy || !live.active) return;
+    if (!exitTo || busy || !live.active || exitConsumed.current) return;
+    exitConsumed.current = true;
     if (exitTo.kind === "saved") onSaved(exitTo.id);
     else if (exitTo.kind === "removed") (onRemoved ?? onBack)();
     else onBack();
   }, [exitTo, busy, live.active, onSaved, onRemoved, onBack]);
   async function perform(action: () => Promise<void>) {
-    if (lock.current || !live.available()) return;
+    if (lock.current || exitConsumed.current || exitTo || !live.available()) return;
     lock.current = true;
     setBusy(true);
     setError(undefined);

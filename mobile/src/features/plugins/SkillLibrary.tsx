@@ -1,3 +1,4 @@
+import { Pager } from "../../components/settings/Pager";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Keyboard, Pressable, StyleSheet, TextInput, View } from "react-native";
 import { BookOpen, Search, X } from "lucide-react-native";
@@ -222,22 +223,12 @@ export function SkillLibrary({
         />
       )}
       {catalog.known && totalPages > 1 && (
-        <SettingsGroup title={`Page ${page} / ${totalPages}`} inset={false}>
-          <SettingsRow
-            label="Previous"
-            tone="action"
-            accessibilityLabel="Previous"
-            accessibilityHint="Shows the previous page of results"
-            disabled={offline || catalog.loading || page <= 1}
-            onPress={() => onPageChange(page - 1)}
-          />
-          <SettingsRow
-            label="Next"
-            tone="action"
-            accessibilityLabel="Next"
-            accessibilityHint="Shows the next page of results"
-            disabled={offline || catalog.loading || page >= totalPages}
-            onPress={() => onPageChange(page + 1)}
+        <SettingsGroup inset={false}>
+          <Pager
+            page={page}
+            total={totalPages}
+            disabled={offline || catalog.loading}
+            onChange={onPageChange}
           />
         </SettingsGroup>
       )}

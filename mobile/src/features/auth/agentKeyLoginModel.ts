@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  classifyLoginError,
+  LoginRequestError,
+  loginErrorCopy,
+} from "./loginRequestErrors";
 import { MOBILE_MFA_STEP_UP_MESSAGE } from "../../lib/api/errorMessages";
 import type {
   AgentKeyOptions,
@@ -135,4 +140,16 @@ export function agentKeyLoginError(error: unknown): string {
       ? error.message
       : "Could not reach NyxID. Try again.")
   );
+}
+
+/** Select resolver copy for request failures and key-specific copy for local actions. */
+export function agentKeyActionErrorCopy(failure: unknown, step: string): string {
+  const response = failure as { statusCode?: number; errorCode?: number } | null;
+  const useRequestCopy =
+    step === "code" ||
+    failure instanceof LoginRequestError ||
+    ["rate_limited", "network"].includes(classifyLoginError(failure)) ||
+    (response?.statusCode !== undefined &&
+      ![11908, 11909].includes(response.errorCode ?? 0));
+  return useRequestCopy ? loginErrorCopy(failure) : agentKeyLoginError(failure);
 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeUrlInput } from "./normalizeUrlInput";
 
 function utf8Length(value: string): number {
   let length = 0;
@@ -8,6 +9,13 @@ function utf8Length(value: string): number {
   }
   return length;
 }
+
+const compatibleAvatarUrl = z
+  .string()
+  .trim()
+  .url()
+  .refine((value) => /^https?:\/\//.test(value))
+  .refine((value) => utf8Length(value) <= 2048);
 
 export const updateProfileSchema = z.object({
   display_name: z
@@ -20,13 +28,23 @@ export const updateProfileSchema = z.object({
     .optional(),
   avatar_url: z
     .string()
-    .trim()
-    .url("Enter a valid avatar URL")
-    .refine(
-      (value) => /^https?:\/\//.test(value),
-      "Avatar URL must use https:// or http://",
-    )
-    .refine((value) => utf8Length(value) <= 2048, "Avatar URL is too long")
+    .transform((input, ctx) => {
+      const value = normalizeUrlInput(input);
+      const normalized = compatibleAvatarUrl.safeParse(value);
+      if (normalized.success) return normalized.data;
+      // Preserve every URL accepted before paste normalization was introduced.
+      const original = compatibleAvatarUrl.safeParse(input);
+      if (original.success) return original.data;
+      const message = !/^https?:\/\//.test(value)
+        ? "Avatar URL must start with https:// or http://."
+        : utf8Length(value) > 2048
+          ? "Avatar URL is too long (maximum 2048 bytes)."
+          : /[\s\p{Cc}\p{Cf}]/u.test(value)
+            ? "Remove spaces or hidden characters from inside the avatar URL."
+            : "Avatar URL isn't a complete web address.";
+      ctx.addIssue({ code: "custom", message });
+      return z.NEVER;
+    })
     .optional(),
 });
 

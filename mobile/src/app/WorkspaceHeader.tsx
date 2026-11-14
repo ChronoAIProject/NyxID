@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
 import {
   WORKSPACE_CLOSE_ICON_SIZE,
   workspaceCloseControlStyle,
@@ -126,7 +127,9 @@ function WorkspaceHeaderButton({
   const focused = useIsFocused();
   const owner = useRef(Symbol("primary-header-control")).current;
   useEffect(() => () => workspaceFocus.release(owner), [owner]);
-  const { sheetOpen, primaryKey } = useWorkspaceAccessibility();
+  const { sheetOpen, primaryKey, sidebarOpen } = useWorkspaceAccessibility();
+  // A critical write can block leaving the page, but cannot trap an open menu.
+  const controlDisabled = disabled && (back || close || !sidebarOpen);
   const hidden = !focused || (sheetOpen && !sheet);
   const primaryScope = useRef(primaryKey);
   if (focused && !sheet && !sheetOpen) primaryScope.current = primaryKey;
@@ -157,12 +160,12 @@ function WorkspaceHeaderButton({
       }}
       accessibilityRole="button"
       accessibilityLabel={label}
-      accessibilityState={{ disabled }}
-      disabled={disabled}
+      accessibilityState={{ disabled: controlDisabled }}
+      disabled={controlDisabled}
       style={[
         styles.button,
         close && workspaceCloseControlStyle(colors.navActive),
-        disabled && styles.disabled,
+        controlDisabled && styles.disabled,
       ]}
     >
       {close ? (
@@ -260,6 +263,7 @@ export function useWorkspaceBack({
   /** Dirty forms guard navigation away as well as Settings surface dismissal. */
   discardOnClose?: { title: string; message: string };
 }) {
+  const { t } = useAppLanguage();
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const focused = useIsFocused();
@@ -344,12 +348,12 @@ export function useWorkspaceBack({
           discardOnClose.message,
           [
             {
-              text: "Keep editing",
+              text: t("Keep editing"),
               style: "cancel",
               onPress: () => resolve(false),
             },
             {
-              text: "Discard",
+              text: t("Discard"),
               style: "destructive",
               onPress: () =>
                 resolve(mounted.current && !current.current.disabled),
@@ -365,6 +369,7 @@ export function useWorkspaceBack({
     Boolean(discardOnClose),
     discardOnClose?.title,
     discardOnClose?.message,
+    t,
     disabled,
     focused,
   ]);
@@ -413,9 +418,9 @@ export function useWorkspaceBack({
           discardOnClose.title,
           discardOnClose.message,
           [
-            { text: "Keep editing", style: "cancel", onPress: cancel },
+            { text: t("Keep editing"), style: "cancel", onPress: cancel },
             {
-              text: "Discard",
+              text: t("Discard"),
               style: "destructive",
               onPress: () => {
                 accepted = true;
@@ -446,11 +451,17 @@ export function useWorkspaceBack({
   // Defer external approval navigation while a critical write forbids leaving.
   // Local detail Back handling remains independent from notification delivery.
   useLayoutEffect(() => {
-    if (!(focused && disabled) && !discardOnClose) return;
+    if (!sessionActive || (!(focused && disabled) && !discardOnClose)) return;
     const id = guardId.current;
-    onNavigationGuardChange(id, true, disabled);
+    onNavigationGuardChange(id, true, focused && disabled);
     return () => onNavigationGuardChange(id, false);
-  }, [disabled, Boolean(discardOnClose), focused, onNavigationGuardChange]);
+  }, [
+    sessionActive,
+    disabled,
+    Boolean(discardOnClose),
+    focused,
+    onNavigationGuardChange,
+  ]);
 
   useEffect(() => {
     if (!focused || (!active && !disabled)) return;

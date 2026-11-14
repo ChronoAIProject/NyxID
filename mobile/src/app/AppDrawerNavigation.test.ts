@@ -72,6 +72,39 @@ function shellSource() {
     true,
     ts.ScriptKind.TSX,
   );
+  const app = source.statements.find(
+    (node): node is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(node) && node.name?.text === "App",
+  );
+  assert.ok(app?.body);
+  const names = new Set([
+    "navigationGuardsRef",
+    "criticalNavigationGuards",
+    "navigationGuardRevision",
+    "onNavigationGuardChange",
+    "isNavigationBlocked",
+  ]);
+  const guardDeclarations = app.body.statements.filter(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some((declaration) =>
+        ts.isIdentifier(declaration.name)
+          ? names.has(declaration.name.text)
+          : ts.isArrayBindingPattern(declaration.name) &&
+            declaration.name.elements.some(
+              (element) =>
+                ts.isBindingElement(element) &&
+                ts.isIdentifier(element.name) &&
+                names.has(element.name.text),
+            ),
+      ),
+  );
+  assert.equal(guardDeclarations.length, names.size);
+  const guardSource = `function AppGuardState() {
+    ${guardDeclarations.map((node) => node.getText(source)).join("\n")}
+    return { onNavigationGuardChange, isNavigationBlocked };
+  }
+exports.AppGuardState = AppGuardState;`;
   return (
     ["getActiveRouteName", "ThemedAppShell"]
       .map((name) => {
@@ -81,7 +114,9 @@ function shellSource() {
         assert.ok(declaration, `Missing actual App declaration ${name}`);
         return declaration.getText(source);
       })
-      .join("\n") + "\nexports.ThemedAppShell = ThemedAppShell;"
+      .join("\n") +
+    "\nexports.ThemedAppShell = ThemedAppShell;\n" +
+    guardSource
   );
 }
 
@@ -97,7 +132,15 @@ function setup(
   let rootState = fixture();
   let authenticated = initiallyAuthenticated;
   let width = initialWidth;
-  let navigationBlocked = false;
+  const testGuard = Symbol("critical-write");
+  let appGuards!: {
+    onNavigationGuardChange: (
+      id: symbol,
+      blocked: boolean,
+      critical?: boolean,
+    ) => void;
+    isNavigationBlocked: () => boolean;
+  };
   let authEpoch = 0;
   let ready = true;
   let rootReads = 0;
@@ -145,6 +188,13 @@ function setup(
         },
       ] as const;
     },
+    useMemo: <T>(factory: () => T, dependencies: unknown[]) => {
+      const i = cursor++;
+      const previous = slots[i] as { value: T; dependencies: unknown[] } | undefined;
+      if (!previous || !same(previous.dependencies, dependencies))
+        slots[i] = { value: factory(), dependencies };
+      return (slots[i] as { value: T }).value;
+    },
     useCallback: <T>(callback: T, dependencies: unknown[]) => {
       const i = cursor++;
       const previous = slots[i] as
@@ -176,7 +226,10 @@ function setup(
           }
         : props,
   });
-  const exports: { ThemedAppShell?: (props: object) => Element } = {};
+  const exports: {
+    ThemedAppShell?: (props: object) => Element;
+    AppGuardState?: () => typeof appGuards;
+  } = {};
   const output = ts.transpileModule(shellSource(), {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -254,13 +307,15 @@ function setup(
       if (dirty) {
         dirty = false;
         cursor = 0;
+        appGuards = exports.AppGuardState!();
         rendered = component!({
           navigationRef,
           currentRouteName: "Assistant",
           setCurrentRouteName: () => {},
           flushPendingNotificationNavigation: () => {},
-          onNavigationGuardChange: () => {},
-          navigationBlocked,
+          onNavigationGuardChange: appGuards.onNavigationGuardChange,
+          navigationBlocked: appGuards.isNavigationBlocked(),
+          isNavigationBlocked: appGuards.isNavigationBlocked,
           pushToast: null,
         });
       }
@@ -321,6 +376,7 @@ function setup(
       };
     },
     shell: () => find("WorkspacePushShell"),
+    accessibilityValue: () => find("WorkspaceAccessibilityProvider").props.value,
     navigator: () => find("AppNavigator"),
     commitLast: (paint = true) => {
       rootState = apply(rootState, dispatched.at(-1)!);
@@ -371,10 +427,12 @@ function setup(
       flush();
     },
     blockNavigation: (blocked: boolean) => {
-      navigationBlocked = blocked;
-      dirty = true;
+      appGuards.onNavigationGuardChange(testGuard, blocked, true);
       flush();
     },
+    guardWithoutRender: (blocked: boolean) =>
+      appGuards.onNavigationGuardChange(testGuard, blocked, true),
+    liveGetter: () => appGuards.isNavigationBlocked,
     hasDrawer: () =>
       elements(rendered).some((item) => item.type === "WorkspaceDrawer"),
   };
@@ -1203,3 +1261,289 @@ for (const outcome of [
     assert.equal(env.shell().props.presented, false);
   });
 }
+
+
+for (const width of [390, 900, 1194]) {
+  test(`critical writes registered after opening disable the ${width}pt drawer and settle without reopening`, () => {
+    const env = setup(false, width);
+    if (width < 900) env.open();
+    assert.equal(env.drawer().props.disabled, false);
+    const getter = env.liveGetter();
+    env
+      .navigator()
+      .props.onNavigationGuardChange(Symbol.for("late-write"), true, true);
+    env.flush();
+    assert.equal(env.drawer().props.disabled, true);
+    assert.equal(env.drawer().props.visible, true);
+    assert.equal(
+      env.liveGetter(),
+      getter,
+      "getter stays stable across App renders",
+    );
+    env.drawer().props.onNavigate("Machines");
+    env.drawer().props.onQuickAction("scanner");
+    assert.equal(env.dispatched.length, 0);
+    env
+      .navigator()
+      .props.onNavigationGuardChange(Symbol.for("late-write"), false);
+    env.flush();
+    assert.equal(env.drawer().props.disabled, false);
+    assert.equal(env.drawer().props.visible, true);
+    env.drawer().props.onNavigate("Machines");
+    assert.equal(env.dispatched.length, 1);
+  });
+}
+
+test("a critical write cannot trap a compact drawer: menu toggle and exposed-sliver close remain available", () => {
+  for (const close of ["menu", "sliver"] as const) {
+    const env = setup();
+    env.open();
+    env.blockNavigation(true);
+    assert.equal(env.drawer().props.disabled, true);
+    if (close === "menu") env.navigator().props.onOpenMenu();
+    else env.shell().props.onOpenChange(false);
+    env.flush();
+    assert.equal(env.shell().props.visible, false, close);
+    env.drawer().props.onDismiss();
+    env.flush();
+    assert.equal(env.shell().props.presented, false, close);
+    assert.equal(env.dispatched.length, 0);
+  }
+});
+
+for (const action of [
+  "destination",
+  "chat",
+  "quick action",
+  "settings",
+  "search",
+  "create agent",
+  "create crew",
+] as const) {
+  test(`drawer ${action} reads the live guard when it changes between render and tap`, () => {
+    const env = setup();
+    env.open();
+    const props = env.drawer().props;
+    const invoke = (props: Element["props"]) => {
+      if (action === "destination") props.onNavigate("Machines");
+      else if (action === "chat") props.onOpenChat({ kind: "home" });
+      else if (action === "quick action") props.onQuickAction("terminal");
+      else if (action === "settings") props.onNavigate("AccountSettings");
+      else if (action === "search") props.onBrowse("WorkspaceSearch");
+      else if (action === "create agent") props.onCreateAgent();
+      else props.onCreateGroup();
+    };
+    env.guardWithoutRender(true);
+    invoke(props);
+    assert.equal(env.dispatched.length, 0);
+    env.flush();
+    assert.equal(env.drawer().props.disabled, true);
+    const blockedProps = env.drawer().props;
+    env.guardWithoutRender(false);
+    invoke(blockedProps);
+    assert.equal(
+      env.dispatched.length,
+      1,
+      "release takes effect before the next render",
+    );
+    env.flush();
+    assert.equal(env.drawer().props.disabled, false);
+  });
+}
+
+test("a guard registered during fade cancels the delayed dispatch and restores visible content", () => {
+  const env = setup(true);
+  env.open();
+  env.drawer().props.onNavigate("Machines");
+  env.guardWithoutRender(true);
+  env.finishFade();
+  env.flush();
+  assert.equal(env.dispatched.length, 0);
+  assert.equal(env.watchdogs().length, 0);
+  assert.equal(env.shell().props.visible, true);
+  assert.equal(env.sequence.at(-1), "fade in");
+  env.blockNavigation(false);
+  env.drawer().props.onNavigate("Plugins");
+  env.finishFade();
+  assert.equal(env.dispatched.length, 1);
+});
+
+test("first sign-in Home loading keeps destinations and quick actions usable", async (t) => {
+  const env = setup(false, 390, false);
+  const login = postLoginSession(env);
+  t.after(() => {
+    login.permission.resolve({ status: "denied" });
+    login.registration.resolve();
+    login.refresh.resolve(false);
+    login.h.unmount();
+  });
+  await login.h.settle();
+  void login.h.value().signInWithSession({
+    accessToken: `test.${Buffer.from(JSON.stringify({ sub: "first-login-home" })).toString("base64url")}.test`,
+  });
+  await login.h.settle();
+  assert.equal(login.h.value().isAuthenticated, true);
+  // Execute Home's actual disabled input alongside the actual App guard registry.
+  // The screen harness separately covers this input through a full Home render.
+  const filename = fileURLToPath(
+    new URL("../features/assistant/AssistantScreen.tsx", import.meta.url),
+  );
+  const source = ts.createSourceFile(
+    filename,
+    readFileSync(filename, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let disabledInput: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "useWorkspaceBack"
+    ) {
+      const input = node.arguments[0];
+      if (input && ts.isObjectLiteralExpression(input)) {
+        const property = input.properties.find(
+          (item) =>
+            ts.isPropertyAssignment(item) &&
+            item.name.getText(source) === "disabled",
+        );
+        if (property && ts.isPropertyAssignment(property))
+          disabledInput = property.initializer;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(disabledInput);
+  const disabled: unknown = runInNewContext(
+    `(${disabledInput.getText(source)})`,
+    {
+      assistant: { loading: true, sending: false, conversationId: undefined },
+      uploads: { session: { sending: false } },
+    },
+  );
+  assert.equal(disabled, false);
+  env
+    .navigator()
+    .props.onNavigationGuardChange(Symbol("Home"), disabled, disabled);
+  env.flush();
+  env.open();
+  assert.equal(env.drawer().props.disabled, false);
+  assert.equal(env.shell().props.visible, true);
+  env.drawer().props.onQuickAction("scanner");
+  env.drawer().props.onQuickAction("terminal");
+  assert.equal(env.dispatched.length, 2);
+  env.drawer().props.onNavigate("Machines");
+  assert.equal(env.dispatched.length, 3);
+  env.commitLast();
+  env.drawer().props.onDismiss();
+  env.flush();
+  env.open();
+  env.drawer().props.onNavigate("Automations");
+  assert.equal(env.dispatched.length, 4);
+});
+
+
+test("menu opening and edge reveal check live critical guards before their next render", () => {
+  for (const path of ["menu", "edge"] as const) {
+    const env = setup();
+    const reveal =
+      path === "menu"
+        ? env.navigator().props.onOpenMenu
+        : env.shell().props.onRevealStart;
+    env.guardWithoutRender(true);
+    reveal();
+    env.flush();
+    assert.equal(env.shell().props.presented, false);
+    const blockedReveal =
+      path === "menu"
+        ? env.navigator().props.onOpenMenu
+        : env.shell().props.onRevealStart;
+    env.guardWithoutRender(false);
+    blockedReveal();
+    env.flush();
+    assert.equal(env.shell().props.presented, true);
+    assert.equal(env.drawer().props.disabled, false);
+  }
+});
+
+test("real workspace guard lifecycle releases re-render App and recover drawer actions", () => {
+  type HeaderModule = {
+    useWorkspaceBack: typeof import("./WorkspaceHeader").useWorkspaceBack;
+    WorkspaceNavigationGuardContext: {
+      value: import("./WorkspaceHeader").WorkspaceNavigationGuardChange;
+    };
+    WorkspaceSessionContext: { value: boolean };
+  };
+  for (const release of ["settle", "blur", "unmount", "signout"] as const) {
+    const env = setup();
+    env.open();
+    let focused = true;
+    const props = { active: false, disabled: true, onBack() {} };
+    const page = hookHarness<void>({
+      "@react-navigation/native": {
+        useNavigation: () => ({ setOptions() {}, goBack() {}, dispatch() {} }),
+        useIsFocused: () => focused,
+        usePreventRemove() {},
+      },
+      "react-native": {
+        StyleSheet: { create: (styles: unknown) => styles },
+        BackHandler: { addEventListener: () => ({ remove() {} }) },
+      },
+      "lucide-react-native": {},
+      "../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+      "../lib/accessibility/WorkspaceInteractionSurface": {},
+      "../lib/accessibility/workspaceFocus": {},
+    });
+    const header = page.load(
+      fileURLToPath(new URL("./WorkspaceHeader.tsx", import.meta.url)),
+    ) as HeaderModule;
+    header.WorkspaceNavigationGuardContext.value =
+      env.navigator().props.onNavigationGuardChange;
+    page.mount(() => header.useWorkspaceBack(props));
+    env.flush();
+    assert.equal(env.drawer().props.disabled, true);
+    if (release === "settle") props.disabled = false;
+    else if (release === "blur") focused = false;
+    else if (release === "signout")
+      header.WorkspaceSessionContext.value = false;
+    if (release === "unmount") page.unmount();
+    else page.render();
+    env.flush();
+    assert.equal(env.drawer().props.disabled, false, release);
+    env.drawer().props.onNavigate("Machines");
+    assert.equal(env.dispatched.length, 1, release);
+    if (release !== "unmount") page.unmount();
+  }
+});
+
+
+test("workspace accessibility context keeps its identity through unrelated shell renders", () => {
+  const env = setup();
+  const initial = env.accessibilityValue();
+  env.blockNavigation(true);
+  assert.equal(
+    env.accessibilityValue(),
+    initial,
+    "guard updates do not invalidate every header",
+  );
+  env.navigator().props.onEdgeBackChange(Symbol("editor"), () => {});
+  env.flush();
+  assert.equal(env.accessibilityValue(), initial);
+  env.blockNavigation(false);
+  env.open();
+  const open = env.accessibilityValue();
+  assert.notEqual(open, initial);
+  assert.equal(open.sidebarOpen, true);
+  env.blockNavigation(true);
+  assert.equal(env.accessibilityValue(), open);
+  env.navigator().props.onOpenMenu();
+  env.flush();
+  env.drawer().props.onDismiss();
+  env.flush();
+  const closed = env.accessibilityValue();
+  assert.notEqual(closed, open);
+  assert.equal(closed.sidebarOpen, false);
+});

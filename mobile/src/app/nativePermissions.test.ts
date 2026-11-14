@@ -69,3 +69,23 @@ for (const profile of ["dev", "prod"] as const) {
     }
   });
 }
+
+test("Save Image has the Photos add-only usage description in resolved config and the tracked iOS plist", () => {
+  const description =
+    "Allow NyxID to save images you choose from chats to your photo library.";
+  for (const profile of ["dev", "prod"] as const) {
+    assert.equal(
+      appConfig(profile).ios.infoPlist.NSPhotoLibraryAddUsageDescription,
+      description,
+    );
+  }
+  const plist = readFileSync(
+    new URL("../../ios/NyxIDMobile/Info.plist", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    plist.includes(
+      `<key>NSPhotoLibraryAddUsageDescription</key>\n    <string>${description}</string>`,
+    ),
+  );
+});

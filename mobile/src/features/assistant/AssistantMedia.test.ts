@@ -285,8 +285,15 @@ function imageHarness(captionColor?: string, imageInputReason?: string) {
       "./AssistantImagePreview": { AssistantImagePreview: "ImagePreview" },
       "expo-file-system": { Directory: Dir, File, Paths: { cache: "cache" } },
       "expo-sharing": {},
+      "./saveAttachmentImage": {},
+      "./attachmentCache": {
+        ownAttachmentCache: () => () => {},
+        sweepAttachmentCaches() {},
+      },
       "lucide-react-native": {
         Download: "Download",
+        ExternalLink: "ExternalLink",
+        RotateCcw: "RotateCcw",
         FileText: "File",
         ImageIcon: "ImageIcon",
         X: "X",
