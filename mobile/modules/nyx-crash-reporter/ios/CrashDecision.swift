@@ -4,6 +4,101 @@ import Foundation
 // This raw parsing/capture cap is separate from the 256 KiB sanitized buffer.
 let crashRawReportMaxBytes = 4 * 1024 * 1024
 
+enum CrashDiscardReason: String { case oversize, unparseable }
+enum RawCrashReportDecision: Equatable { case parse, discard(CrashDiscardReason) }
+
+func rawCrashReportDecision(byteCount: Int) -> RawCrashReportDecision {
+  guard byteCount > 0 else { return .discard(.unparseable) }
+  return byteCount <= crashRawReportMaxBytes ? .parse : .discard(.oversize)
+}
+
+/// Only a closed reason and a nonnegative byte count can enter the discard log.
+func crashDiscardLogLine(reason: CrashDiscardReason, byteCount: Int?) -> String {
+  let bytes = byteCount.flatMap { $0 >= 0 ? String($0) : nil } ?? "unknown"
+  return "nyx-crash: raw report discarded reason=\(reason.rawValue) bytes=\(bytes)"
+}
+
+/// Parser-independent values only. Exception text, registers and other parser metadata have no field.
+struct ParsedNativeCrash {
+  struct Thread {
+    var crashed: Bool
+    var frames: [UInt64]
+  }
+  struct Image {
+    var uuid: String?
+    var name: String
+    var baseAddress: UInt64
+    var size: UInt64
+  }
+  var threads: [Thread]
+  var images: [Image]
+  var signalName: String?
+  var faultAddress: UInt64
+  var appMarketingVersion: String?
+  var appBuild: String?
+  var osVersion: String
+  var timestamp: Date
+}
+
+func sanitizedNativeCrash(_ crash: ParsedNativeCrash, eventId: String, now: Date) -> [String: Any]? {
+  guard let threadIndex = nativeCrashThreadIndex(
+    crash.threads.map { (crashed: $0.crashed, frameAddresses: $0.frames) },
+    faultAddress: crash.faultAddress),
+    crash.timestamp.timeIntervalSince(now) >= -86400,
+    crash.timestamp.timeIntervalSince(now) <= 300
+  else { return nil }
+  var selected: [ParsedNativeCrash.Image] = []
+  var images: [[String: Any]] = []
+  var frames: [[String: Any]] = []
+  for address in crash.threads[threadIndex].frames.prefix(64) {
+    guard let image = crash.images.first(where: {
+      address >= $0.baseAddress && address - $0.baseAddress < $0.size
+    }), let rawUuid = image.uuid
+    else {
+      frames.append(["image": NSNull(), "offset": 0])
+      continue
+    }
+    let compact = rawUuid.replacingOccurrences(of: "-", with: "")
+    guard compact.count == 32 else { continue }
+    let uuidText =
+      "\(compact.prefix(8))-\(compact.dropFirst(8).prefix(4))-\(compact.dropFirst(12).prefix(4))-\(compact.dropFirst(16).prefix(4))-\(compact.suffix(12))"
+    guard UUID(uuidString: uuidText) != nil else { continue }
+    let name = URL(fileURLWithPath: image.name).lastPathComponent
+    guard crashMatches(name, "^[A-Za-z0-9_.+-]{1,64}$") else {
+      frames.append(["image": NSNull(), "offset": 0])
+      continue
+    }
+    var index = selected.firstIndex(where: { $0.baseAddress == image.baseAddress })
+    if index == nil && selected.count < 16 {
+      index = selected.count
+      selected.append(image)
+      images.append(["uuid": uuidText.lowercased(), "name": name, "size": image.size])
+    }
+    if let index {
+      frames.append(["image": index, "offset": address - image.baseAddress])
+    } else {
+      frames.append(["image": NSNull(), "offset": 0])
+    }
+  }
+  let version = crash.appMarketingVersion ?? "0"
+  let build = crash.appBuild ?? "0"
+  guard crashMatches(version, "^[0-9A-Za-z.+-]{1,32}$"),
+    crashMatches(build, "^[0-9A-Za-z.+-]{1,64}$")
+  else { return nil }
+  let os = crash.osVersion.split(separator: ".").prefix(2).joined(separator: ".")
+  guard crashMatches(os, "^[0-9]{1,3}(\\.[0-9]{1,3})?$") else { return nil }
+  let signal = crash.signalName ?? "Other"
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return sanitizedNativeRecord([
+    "schema_version": 1, "event_id": eventId, "captured_at": formatter.string(from: crash.timestamp),
+    "platform": "ios", "kind": "native_crash", "exception_class": "Unknown",
+    "native_signal": ["SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "SIGTRAP", "SIGSYS"]
+      .contains(signal) ? signal : "Other", "app_version": version, "app_build": build,
+    "os_version": os, "js_frames": [], "native_images": images, "native_frames": frames,
+  ])
+}
+
 /// Prefer the crash marker; externally delivered signals may leave every thread unmarked.
 func nativeCrashThreadIndex(
   _ threads: [(crashed: Bool, frameAddresses: [UInt64])], faultAddress: UInt64

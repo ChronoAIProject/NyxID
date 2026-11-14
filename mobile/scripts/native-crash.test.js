@@ -4,7 +4,7 @@ const { execFileSync } = require("node:child_process");
 const { mkdtempSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
-test("Swift raw cap fits real reports, thread selection falls back, decisions drop mismatched/no binding and RN SIGABRT duplicate; sanitizers never emit private fields", () => {
+test("Swift real-size native mapping, raw-size decisions and typed discard logs preserve privacy; consent and RN duplicate proofs pass", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "nyx-crash-swift-"));
   try {
     const source = path.resolve(__dirname, "../modules/nyx-crash-reporter");
@@ -19,7 +19,9 @@ test("Swift raw cap fits real reports, thread selection falls back, decisions dr
       ],
       { stdio: "pipe" },
     );
-    assert.match(execFileSync(binary, { encoding: "utf8" }), /proofs passed/);
+    const output = execFileSync(binary, { encoding: "utf8" });
+    assert.match(output, /proofs passed/);
+    t.diagnostic(output.trim());
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

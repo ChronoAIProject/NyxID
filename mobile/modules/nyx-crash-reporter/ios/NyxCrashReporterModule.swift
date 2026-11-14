@@ -123,16 +123,18 @@ public class NyxCrashReporterModule: Module {
     trim()
   }
   private func loadPendingRaw(_ reporter: PLCrashReporter) -> PLCrashReport? {
-    guard let data = reporter.loadPendingCrashReportData() else {
-      NSLog("nyx-crash: raw report discarded (unparseable)")
+    let data = reporter.loadPendingCrashReportData()
+    switch rawCrashReportDecision(byteCount: data?.count ?? 0) {
+    case .discard(let reason):
+      let line = crashDiscardLogLine(reason: reason, byteCount: data?.count)
+      NSLog("%@", line)
       return nil
+    case .parse:
+      break
     }
-    guard data.count <= crashRawReportMaxBytes else {
-      NSLog("nyx-crash: raw report discarded (oversize)")
-      return nil
-    }
-    guard let crash = try? PLCrashReport(data: data) else {
-      NSLog("nyx-crash: raw report discarded (unparseable)")
+    guard let data, let crash = try? PLCrashReport(data: data) else {
+      let line = crashDiscardLogLine(reason: .unparseable, byteCount: data?.count)
+      NSLog("%@", line)
       return nil
     }
     return crash
@@ -175,71 +177,23 @@ public class NyxCrashReporterModule: Module {
   }
   /// Never access exceptionInfo, registers, processInfo, machineInfo or symbols.
   private func sanitize(_ crash: PLCrashReport) -> [String: Any]? {
-    let threads = (crash.threads as? [PLCrashReportThreadInfo]) ?? []
-    guard let threadIndex = nativeCrashThreadIndex(
-      threads.map { thread in
-        (crashed: thread.crashed,
-         frameAddresses: (thread.stackFrames as? [PLCrashReportStackFrameInfo] ?? [])
-          .map { $0.instructionPointer })
-      }, faultAddress: crash.signalInfo.address)
-    else { return nil }
-    let thread = threads[threadIndex]
-    let allImages = (crash.images as? [PLCrashReportBinaryImageInfo]) ?? []
-    var selected: [PLCrashReportBinaryImageInfo] = []
-    var images: [[String: Any]] = []
-    var frames: [[String: Any]] = []
-    for frame in (thread.stackFrames as? [PLCrashReportStackFrameInfo] ?? []).prefix(64) {
-      guard
-        let image = allImages.first(where: {
-          frame.instructionPointer >= $0.imageBaseAddress
-            && frame.instructionPointer - $0.imageBaseAddress < $0.imageSize
-        }),
-        let rawUuid = image.imageUUID
-      else {
-        frames.append(["image": NSNull(), "offset": 0])
-        continue
-      }
-      let compact = rawUuid.replacingOccurrences(of: "-", with: "")
-      guard compact.count == 32 else { continue }
-      let uuidText =
-        "\(compact.prefix(8))-\(compact.dropFirst(8).prefix(4))-\(compact.dropFirst(12).prefix(4))-\(compact.dropFirst(16).prefix(4))-\(compact.suffix(12))"
-      guard UUID(uuidString: uuidText) != nil else { continue }
-      let name = URL(fileURLWithPath: image.imageName).lastPathComponent
-      guard crashMatches(name, "^[A-Za-z0-9_.+-]{1,64}$") else {
-        frames.append(["image": NSNull(), "offset": 0])
-        continue
-      }
-      var index = selected.firstIndex(where: { $0.imageBaseAddress == image.imageBaseAddress })
-      if index == nil && selected.count < 16 {
-        index = selected.count
-        selected.append(image)
-        images.append(["uuid": uuidText.lowercased(), "name": name, "size": image.imageSize])
-      }
-      if let index {
-        frames.append(["image": index, "offset": frame.instructionPointer - image.imageBaseAddress])
-      } else {
-        frames.append(["image": NSNull(), "offset": 0])
-      }
-    }
-    let version = crash.applicationInfo.applicationMarketingVersion ?? "0"
-    let build = crash.applicationInfo.applicationVersion ?? "0"
-    guard crashMatches(version, "^[0-9A-Za-z.+-]{1,32}$"),
-      crashMatches(build, "^[0-9A-Za-z.+-]{1,64}$")
-    else { return nil }
-    let os = crash.systemInfo.operatingSystemVersion.split(separator: ".").prefix(2).joined(
-      separator: ".")
-    guard crashMatches(os, "^[0-9]{1,3}(\\.[0-9]{1,3})?$") else { return nil }
-    let signal = crash.signalInfo.name ?? "Other"
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return sanitizedNativeRecord([
-      "schema_version": 1, "event_id": UUID().uuidString.lowercased(),
-      "captured_at": formatter.string(from: crash.systemInfo.timestamp), "platform": "ios",
-      "kind": "native_crash", "exception_class": "Unknown",
-      "native_signal": ["SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "SIGTRAP", "SIGSYS"]
-        .contains(signal) ? signal : "Other", "app_version": version, "app_build": build,
-      "os_version": os, "js_frames": [], "native_images": images, "native_frames": frames,
-    ])
+    let parsed = ParsedNativeCrash(
+      threads: (crash.threads as? [PLCrashReportThreadInfo] ?? []).map {
+        ParsedNativeCrash.Thread(
+          crashed: $0.crashed,
+          frames: ($0.stackFrames as? [PLCrashReportStackFrameInfo] ?? []).map {
+            $0.instructionPointer
+          })
+      },
+      images: (crash.images as? [PLCrashReportBinaryImageInfo] ?? []).map {
+        ParsedNativeCrash.Image(
+          uuid: $0.imageUUID, name: $0.imageName, baseAddress: $0.imageBaseAddress, size: $0.imageSize)
+      },
+      signalName: crash.signalInfo.name, faultAddress: crash.signalInfo.address,
+      appMarketingVersion: crash.applicationInfo.applicationMarketingVersion,
+      appBuild: crash.applicationInfo.applicationVersion,
+      osVersion: crash.systemInfo.operatingSystemVersion, timestamp: crash.systemInfo.timestamp)
+    return sanitizedNativeCrash(parsed, eventId: UUID().uuidString.lowercased(), now: Date())
   }
   public func definition() -> ModuleDefinition {
     Name("NyxCrashReporter")

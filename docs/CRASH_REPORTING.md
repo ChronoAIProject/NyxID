@@ -105,9 +105,12 @@ PLCrashReporter uses a BSD signal handler, no symbolication and
 shared by capture and parsing (`crashRawReportMaxBytes`). Real Release simulator
 reports measured about 375 KB; the raw cap provides headroom and is separate
 from the sanitized buffer's 32 KiB per record / three records / 256 KiB total /
-24-hour limits. Oversized or unreadable/unparseable raw reports emit only the
-fixed log codes `nyx-crash: raw report discarded (oversize)` or
-`nyx-crash: raw report discarded (unparseable)`, without report data or identifiers.
+24-hour limits. `rawCrashReportDecision` permits parsing only nonempty data up
+to the raw cap. Oversized or unreadable/unparseable raw reports emit only
+`nyx-crash: raw report discarded reason=<oversize|unparseable> bytes=<n|unknown>`.
+`crashDiscardLogLine` accepts only the reason enum and an optional integer size;
+the module logs its result with `NSLog("%@", line)`. Report data, paths,
+identifiers, registers and exception text cannot enter this formatter.
 The raw file can contain crashed-thread register values inside the protected app
 sandbox until the next launch. Registers never enter the sanitized buffer,
 NyxID or Sentry. The process signal handler is enabled once; disarming clears
@@ -134,16 +137,34 @@ Release Hermes and fallback rejection trackers use capture-only callbacks; they
 do not invoke RN's development rejection logging/native-exception path.
 
 Automated proofs run in `pnpm test`: `native-crash.test.js` compiles/runs the
-production Swift decision and sanitizer functions with sentinel-laden inputs.
-It checks the raw cap against the observed report sizes and a 2 MiB minimum,
-tests marked/fault-address/first/empty thread selection and
-match/mismatch/no-binding/JS-duplicate decisions, rejects JS message,
-reason, registers, customData, absolute paths and extra keys, and proves native
-output is a closed allowlist. `crashReporting.test.ts` tests native-record JS
+production Swift decision and sanitizer functions with sentinel-laden inputs on
+macOS and Linux (`swift:6.0`). `ParsedNativeCrash` contains only the values needed
+for mapping. `sanitizedNativeCrash` performs thread selection, image/offset
+mapping, frame/image limits, basename/UUID/signal normalization, version/OS and
+capture-time validation, then the closed `sanitizedNativeRecord` boundary.
+The proof generates 40 unmarked threads with 64 frames each and 600 images with
+long simulator/app paths, plus raw register metadata that has no field in the
+parsed value type. It measures the serialized fixture (at least 375,000 bytes),
+passes that size through the production raw decision and maps the parsed values
+through the production sanitizer. It asserts the exact output allowlist, image
+and frame bounds, relative offsets, lowercase UUIDs and installed version/build,
+and checks serialized output for sentinel paths, container IDs, absolute
+addresses and register values. Cap-minus-one/cap/cap-plus-one/zero decisions and
+the exact metadata-only log format are also CI-proven. Existing proofs cover
+marked/fault-address/first/empty thread selection, epoch/JS-duplicate decisions,
+JS message/reason/register/customData/absolute-path rejection and the closed
+native output boundary. `crashReporting.test.ts` tests native-record JS
 revalidation, Hermes/JSC parsing, request bodies, fatal-handler ordering,
-relaunch rearming and lifecycle purges. The PM's simulator container inspection
-provides runtime raw-file deletion evidence; a Release simulator compile alone
-does not establish device signal-delivery behavior.
+relaunch rearming and lifecycle purges.
+
+CI does not exercise the Apple-only PLCrashReport parser or the PLCrashReport
+adapter itself. The adapter copies parser fields into `ParsedNativeCrash`; the
+portable proofs exercise the decision, mapping and log format after that boundary.
+Adapter behavior with an actual crash and raw-file deletion are device/simulator
+proofs. The existing explicit `collect` purge and `defer` cover over-cap and
+unparseable data as well as the other branches listed above; Linux cannot run
+those module purge calls. The PM's app-container inspection verifies deletion.
+A Release simulator compile proves integration, not crash delivery or deletion.
 
 ## Storage, admission and operations
 
