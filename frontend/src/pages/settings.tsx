@@ -1248,11 +1248,6 @@ function PrivacyTab() {
         }
       />
       <GroupedRow
-        title={translateUi("Crash diagnostics")}
-        description={translateUi(permission.data?.diagnostics_available && consentEnabled && devicePolicy === 2 ? "Crash diagnostics enabled" : "Crash diagnostics need updated permission")}
-        accessory={<Button variant="outline" size="sm" disabled={saving || permission.data?.current_policy_version !== "2"} onClick={() => setReviewDiagnostics(true)}>{translateUi("Review updated analytics")}</Button>}
-      />
-      <GroupedRow
         title={translateUi("Allow on this browser")}
         accessory={
           <Switch
@@ -1271,11 +1266,18 @@ function PrivacyTab() {
           />
         }
       />
+        {permission.data?.diagnostics_offered === true && (
+        <GroupedRow
+          title={translateUi("Crash diagnostics")}
+          description={translateUi(permission.data?.diagnostics_available && consentEnabled && devicePolicy === 2 ? "Crash diagnostics enabled" : "Crash diagnostics need updated permission")}
+          accessory={<Button variant="outline" size="sm" disabled={saving || permission.data?.current_policy_version !== "2"} onClick={() => setReviewDiagnostics(true)}>{translateUi("Review updated analytics")}</Button>}
+        />
+        )}
       </GroupedList>
-      <Dialog open={reviewDiagnostics} onOpenChange={setReviewDiagnostics}>
+      {permission.data?.diagnostics_offered === true && <Dialog open={reviewDiagnostics} onOpenChange={setReviewDiagnostics}>
         <DialogContent><DialogHeader><DialogTitle>{translateUi("Review updated analytics")}</DialogTitle><DialogDescription>{translateUi("Analytics updated: optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Allow updated analytics for this account and browser, or keep your current choice.")}</DialogDescription></DialogHeader>
         <DialogFooter><Button variant="outline" onClick={() => setReviewDiagnostics(false)}>{translateUi("Not now")}</Button><Button disabled={saving} onClick={() => { void handleToggle(true, 2); setReviewDiagnostics(false); }}>{translateUi("Allow updated analytics")}</Button></DialogFooter></DialogContent>
-      </Dialog>
+      </Dialog>}
     </>
   );
 }

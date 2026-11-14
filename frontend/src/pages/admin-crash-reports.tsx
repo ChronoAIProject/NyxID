@@ -1,3 +1,5 @@
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { formatDateTime } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
@@ -75,7 +77,7 @@ function LoadState({ error, loading }: { error: unknown; loading: boolean }) {
 }
 export function AdminCrashReportsPage() {
   useUiTranslation();
-  const [window, setWindow] = useState("24h");
+  const [reportWindow, setReportWindow] = useState("24h");
   const [filters, setFilters] = useState<CrashFilters>({});
   const form = useAppForm({
     resolver: zodResolver(filterSchema),
@@ -87,7 +89,7 @@ export function AdminCrashReportsPage() {
       fingerprint: "",
     },
   });
-  const summary = useCrashSummary(window, filters.platform ?? "");
+  const summary = useCrashSummary(reportWindow, filters.platform ?? "");
   const reports = useCrashReports(filters);
   return (
     <div className="space-y-6">
@@ -157,8 +159,8 @@ export function AdminCrashReportsPage() {
           {t("Window")}
           <NativeSelect
             aria-label={t("Window")}
-            value={window}
-            onChange={(e) => setWindow(e.target.value)}
+            value={reportWindow}
+            onChange={(e) => setReportWindow(e.target.value)}
           >
             {Object.entries(windowLabels).map(([value, label]) => (
               <option key={value} value={value}>
@@ -217,9 +219,9 @@ export function AdminCrashReportsPage() {
               <CardTitle>{t("Reported events by version")}</CardTitle>
             </CardHeader>
             <CardContent className="overflow-x-auto">
-              <table className="w-full text-left type-table-cell">
-                <thead>
-                  <tr>
+              <Table className="w-full text-left type-table-cell">
+                <TableHeader>
+                  <TableRow>
                     {[
                       "Platform",
                       "Environment",
@@ -227,23 +229,23 @@ export function AdminCrashReportsPage() {
                       "Build",
                       "Artifact",
                       "Reported events",
-                      "Kind",
+                      "Reported events by kind",
                       "Last seen",
                     ].map((h) => (
-                      <th className="p-2 type-table-header" key={h}>
+                      <TableHead className="p-2 type-table-header" key={h}>
                         {t(h)}
-                      </th>
+                      </TableHead>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                   {summary.data.versions.map((v, i) => (
-                    <tr key={i} className="border-t border-border">
-                      <td className="p-2">
+                    <TableRow key={i} className="border-t border-border">
+                      <TableCell className="p-2">
                         {label(v.platform, platformLabels)}
-                      </td>
-                      <td>{v.environment}</td>
-                      <td>
+                      </TableCell>
+                      <TableCell>{v.environment}</TableCell>
+                      <TableCell>
                         <Button
                           variant="link"
                           onClick={() => {
@@ -263,21 +265,21 @@ export function AdminCrashReportsPage() {
                         >
                           {v.app_version}
                         </Button>
-                      </td>
-                      <td className="font-mono">{v.app_build}</td>
-                      <td className="font-mono">{v.artifact_id ?? "—"}</td>
-                      <td>{v.total}</td>
-                      <td>
+                      </TableCell>
+                      <TableCell className="font-mono">{v.app_build}</TableCell>
+                      <TableCell className="font-mono">{v.artifact_id ?? "—"}</TableCell>
+                      <TableCell>{v.total}</TableCell>
+                      <TableCell>
                         {Object.entries(v.counts)
                           .filter(([, n]) => n > 0)
                           .map(([k, n]) => `${label(k, kindLabels)}: ${n}`)
                           .join(", ")}
-                      </td>
-                      <td className="font-mono">{v.last_seen}</td>
-                    </tr>
+                      </TableCell>
+                      <TableCell className="font-mono">{formatDateTime(v.last_seen)}</TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </CardContent>
           </Card>
         </>
@@ -291,9 +293,9 @@ export function AdminCrashReportsPage() {
           {reports.data?.reports.length === 0 && (
             <p>{t("No reports in this selection.")}</p>
           )}
-          <table className="w-full text-left type-table-cell">
-            <thead>
-              <tr>
+          <Table className="w-full text-left type-table-cell">
+            <TableHeader>
+              <TableRow>
                 {[
                   "Captured",
                   "Platform",
@@ -301,34 +303,34 @@ export function AdminCrashReportsPage() {
                   "Kind",
                   "Export status",
                 ].map((h) => (
-                  <th className="p-2 type-table-header" key={h}>
+                  <TableHead className="p-2 type-table-header" key={h}>
                     {t(h)}
-                  </th>
+                  </TableHead>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {reports.data?.reports.map((r) => (
-                <tr key={r.id} className="border-t border-border">
-                  <td className="p-2 font-mono">
+                <TableRow key={r.id} className="border-t border-border">
+                  <TableCell className="p-2 font-mono">
                     <Link
                       to="/admin/crash-reports/$id"
                       params={{ id: r.id }}
                       className="underline"
                     >
-                      {r.captured_at}
+                      {formatDateTime(r.captured_at)}
                     </Link>
-                  </td>
-                  <td>{label(r.platform, platformLabels)}</td>
-                  <td>
+                  </TableCell>
+                  <TableCell>{label(r.platform, platformLabels)}</TableCell>
+                  <TableCell>
                     {r.app_version} ({r.app_build})
-                  </td>
-                  <td>{label(r.kind, kindLabels)}</td>
-                  <td>{label(r.export.status, exportLabels)}</td>
-                </tr>
+                  </TableCell>
+                  <TableCell>{label(r.kind, kindLabels)}</TableCell>
+                  <TableCell>{label(r.export.status, exportLabels)}</TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
           {reports.data?.cursor && (
             <Button
               variant="outline"
@@ -373,9 +375,9 @@ export function CrashReportView({ report: r }: { report: CrashReportDetail }) {
               ? `${r.runtime.name} ${r.runtime.major}`
               : "—",
             [t("Fingerprint")]: r.fingerprint,
-            [t("Captured")]: r.captured_at,
-            [t("Received")]: r.received_at,
-            [t("Expires")]: r.expires_at,
+            [t("Captured")]: formatDateTime(r.captured_at),
+            [t("Received")]: formatDateTime(r.received_at),
+            [t("Expires")]: formatDateTime(r.expires_at),
             [t("Export status")]: label(r.export.status, exportLabels),
             [t("Export attempts")]: String(r.export.attempts),
             [t("Export result code")]: r.export.last_error_code ?? "—",
@@ -399,7 +401,7 @@ export function CrashReportView({ report: r }: { report: CrashReportDetail }) {
         <ol className="font-mono">
           {r.native_images.map((image, i) => (
             <li key={i}>
-              {i}: {image.name} · {image.uuid} · {image.size}
+              {i}: {image.name} · {image.uuid} · {`0x${image.size.toString(16)}`}
             </li>
           ))}
         </ol>
@@ -407,7 +409,7 @@ export function CrashReportView({ report: r }: { report: CrashReportDetail }) {
         <ol className="font-mono">
           {r.native_frames.map((f, i) => (
             <li key={i}>
-              {f.image ?? "—"} + {f.offset}
+              {f.image ?? "—"} + {`0x${f.offset.toString(16)}`}
             </li>
           ))}
         </ol>

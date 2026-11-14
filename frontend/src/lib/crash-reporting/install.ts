@@ -3,7 +3,17 @@ import { reportCrash } from "./reporter";
 export function installCrashReporting(): () => void {
   const error = (event: ErrorEvent | Event) => {
     if (event instanceof ErrorEvent) void reportCrash(event.error, "js_error");
-    else void reportCrash(undefined, "resource_error");
+    else {
+      const target = event.target;
+      const asset = target instanceof HTMLScriptElement ? target.src :
+        target instanceof HTMLLinkElement && (target.relList.contains("stylesheet") || target.relList.contains("modulepreload")) ? target.href : null;
+      if (!asset) return;
+      try {
+        const url = new URL(asset, window.location.origin);
+        if (url.origin === window.location.origin && url.pathname.startsWith("/assets/"))
+          void reportCrash(undefined, "resource_error");
+      } catch { /* Invalid asset locations are outside capture scope. */ }
+    }
   };
   const rejection = (event: PromiseRejectionEvent) => {
     void reportCrash(event.reason, "unhandled_rejection");

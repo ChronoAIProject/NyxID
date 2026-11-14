@@ -12,7 +12,9 @@ const keys = [
 export function readBuildSecret(filename) {
   try {
     if (!fs.existsSync(filename)) return {};
-    const value = JSON.parse(fs.readFileSync(filename, "utf8"));
+    const raw = fs.readFileSync(filename, "utf8");
+    if (!raw.trim()) return {};
+    const value = JSON.parse(raw);
     if (
       value === null ||
       typeof value !== "object" ||

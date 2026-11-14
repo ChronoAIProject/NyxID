@@ -283,6 +283,9 @@ it("observes resource errors and unhandled rejections without cancelling browser
   const { installCrashReporting } = await import("./install");
   const remove = installCrashReporting();
   const resource = new Event("error", { cancelable: true });
+  const script = document.createElement("script");
+  script.src = "/assets/app.js?SECRET_SENTINEL#private";
+  Object.defineProperty(resource, "target", {value:script});
   window.dispatchEvent(resource);
   const rejection = Object.assign(
     new Event("unhandledrejection", { cancelable: true }),
@@ -295,6 +298,7 @@ it("observes resource errors and unhandled rejections without cancelling browser
   ).toEqual(["resource_error", "unhandled_rejection"]);
   expect(resource.defaultPrevented).toBe(false);
   expect(rejection.defaultPrevented).toBe(false);
+  script.remove();
   remove();
 });
 it("stops the session after 13400 or 13401", async () => {
@@ -341,4 +345,38 @@ it("React caught-error reporting preserves the rendered fallback", async () => {
   );
   expect(target.textContent).toBe("Fallback");
   await act(async () => root.unmount());
+});
+
+it("resource capture excludes images media third-party and non-app assets", async () => {
+  await boot();
+  const {installCrashReporting} = await import("./install");
+  const remove = installCrashReporting();
+  const nodes: HTMLElement[] = [];
+  for (const [tag,url,rel] of [
+    ["img","/assets/avatar.png",""], ["video","/assets/movie.mp4",""],
+    ["audio","/assets/sound.mp3",""], ["script","https://external.test/assets/app.js",""],
+    ["script","/other/app.js",""], ["link","/assets/icon.ico","icon"],
+  ]) {
+    const node = document.createElement(tag!);
+    node.setAttribute(tag === "link" ? "href" : "src",url!);
+    if (rel) node.setAttribute("rel",rel);
+    nodes.push(node);
+    const event = new Event("error");
+    Object.defineProperty(event,"target",{value:node});
+    window.dispatchEvent(event);
+  }
+  await Promise.resolve();
+  expect(s.read).toHaveBeenCalledTimes(1);
+  expect(s.api).not.toHaveBeenCalled();
+  for (const rel of ["stylesheet","modulepreload"]) {
+    const node = document.createElement("link");
+    node.rel=rel;node.href="/assets/app.css?SECRET_SENTINEL#private";
+    nodes.push(node);
+    const event = new Event("error");
+    Object.defineProperty(event,"target",{value:node});
+    window.dispatchEvent(event);
+  }
+  await vi.waitFor(() => expect(s.api).toHaveBeenCalledOnce());
+  expect(JSON.stringify(s.api.mock.calls)).not.toContain("SECRET_SENTINEL");
+  nodes.forEach(node=>node.remove());remove();
 });

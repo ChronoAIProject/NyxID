@@ -1286,6 +1286,7 @@
   "Optional description": "選填說明",
   "Optional funding organization": "選用的資金來源組織",
   "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.": "選用的用量分析資料會連結到你的帳號。選擇「允許」會啟用帳號權限並在此瀏覽器中開啟。拒絕會在所有裝置上撤回帳號權限。其他每台裝置仍需個別選擇加入，並且「不追蹤」一律會停用資料收集。可在「設定 → 隱私」中變更。",
+  "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Optional crash diagnostics include app version and sanitized code locations, without messages or URLs; reports are kept for up to 30 days. Change this in Settings → Privacy.": "選用使用情況分析與您的帳號關聯。允許會開啟帳號權限及此瀏覽器的收集。拒絕會撤回所有裝置上的帳號權限。其他每台裝置仍需個別選擇加入，「不要追蹤」或「全域隱私控制」一律會停用收集。選用當機診斷包括應用程式版本和經過處理的程式位置，不包含訊息或網址；報告最多保留 30 天。您可以在「設定 → 隱私」中變更選擇。",
   "Or start with:": "或從以下內容開始：",
   "Org": "組織",
   "Org-owned services are shared with every admin of that organization and can be proxied by its members.": "組織服務與該組織的所有管理員共享，組織成員可透過代理使用這些服務。",

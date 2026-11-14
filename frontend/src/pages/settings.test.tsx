@@ -102,7 +102,7 @@ async function open(
   await act(() => router.load());
   await screen.findByRole("tab", { name: "Profile" });
   if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-  return { router, history };
+  return { router, history, client };
 }
 
 async function saveSettings() {
@@ -641,4 +641,15 @@ describe("MFA security settings", () => {
     await user.click(within(dialog).getByRole("button", { name: "Disable MFA" }));
     await waitFor(() => expect(mockDisable).toHaveBeenCalledWith({ code: "Ab_cd-12", ...(hasPassword ? { password: "current-password" } : {}) }));
   });
+});
+
+it("privacy hides diagnostics when not offered and orders offered rows account browser diagnostics", async () => {
+  const {client}=await open("/settings","privacy");
+  await waitFor(()=>expect(transport).toHaveBeenCalledWith("/api/v1/users/me/preferences/analytics",expect.anything()));
+  expect(screen.queryByText("Crash diagnostics")).not.toBeInTheDocument();
+  expect(screen.queryByText("Review updated analytics")).not.toBeInTheDocument();
+  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,current_policy_version:"2",diagnostics_offered:true,diagnostics_available:false,revision:"live"});});
+  const diagnostics=await screen.findByText("Crash diagnostics");
+  const browser=screen.getByText("Allow on this browser");
+  expect(browser.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

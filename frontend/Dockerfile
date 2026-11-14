@@ -31,10 +31,10 @@ ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 COPY tools/crash-artifacts/ /build/tools/crash-artifacts/
-RUN npm ci --prefix /build/tools/crash-artifacts
 # Optional JSON secret: build-only CRASH_ARTIFACTS_SENTRY_* configuration.
 RUN --mount=type=secret,id=crash_artifacts_sentry \
-    node /build/tools/crash-artifacts/build-web.mjs
+    if [ -s /run/secrets/crash_artifacts_sentry ]; then npm ci --prefix /build/tools/crash-artifacts; fi \
+    && node /build/tools/crash-artifacts/build-web.mjs
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM nginxinc/nginx-unprivileged:1.27-alpine

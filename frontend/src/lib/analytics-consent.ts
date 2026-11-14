@@ -5,6 +5,7 @@ import { useConsentStore } from '@/stores/consent-store';
 
 export interface AnalyticsConsent {
   current_policy_version?: string;
+  diagnostics_offered?: boolean;
   diagnostics_available?: boolean;
   policy_version?: string | null;
   enabled: boolean;

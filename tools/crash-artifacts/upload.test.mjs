@@ -19,6 +19,8 @@ test("BuildKit secret parsing never exposes malformed secret text in errors or p
   };
   try {
     assert.deepEqual(readBuildSecret(filename), {});
+    fs.writeFileSync(filename, "");
+    assert.deepEqual(readBuildSecret(filename), {});
     fs.writeFileSync(filename, JSON.stringify(configuration));
     assert.deepEqual(readBuildSecret(filename), configuration);
     for (const text of [
@@ -108,7 +110,7 @@ test("web, iOS and Android upload commands match the pinned CLI and keep tokens 
       const release =
         platform === "web"
           ? `nyxid-web@1.2.3+${manifest.artifact_id}`
-          : "nyxid-mobile@1.2.3+456";
+          : `nyxid-${platform}@1.2.3+456`;
       assert.deepEqual(calls[0], ["releases", "new", release]);
       assert.deepEqual(calls[1], [
         "sourcemaps",

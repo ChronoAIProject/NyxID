@@ -762,6 +762,7 @@
   "Reply details unavailable": "無法取得回覆詳細資料",
   "Report ID": "報告 ID",
   "Reported events": "已回報事件",
+  "Reported events by kind": "依類型統計的回報事件",
   "Reported events by version": "依版本統計的回報事件",
   "Reported events by version. Counts reflect consented reports, not all crashes or affected people.": "依版本顯示已回報事件。計數僅包含獲得同意的報告，並不代表所有當機或受影響人數。",
   "Reporting rollout": "回報功能啟用狀態",

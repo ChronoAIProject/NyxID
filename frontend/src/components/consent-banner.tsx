@@ -19,8 +19,9 @@ export function ConsentBanner() {
   const [dismissed, setDismissed] = useState<string | null>(null);
   const accountId = useAuthStore((s) => s.user?.id);
   const [saving, setSaving] = useState(false);
-  const permission = useQuery({ queryKey: ["analytics-consent", accountId], queryFn: () => readAnalyticsConsent(accountId!), enabled: !!accountId, staleTime: 0 });
-  const current = permission.data?.current_policy_version === "2" ? 2 : 1;
+  const permission = useQuery({ queryKey: ["analytics-consent", accountId], queryFn: () => readAnalyticsConsent(accountId!), enabled: !!accountId && (!asked || deviceEnabled), staleTime: 60_000, refetchOnWindowFocus: false });
+  const offered = permission.data?.diagnostics_offered === true;
+  const current = offered && permission.data?.current_policy_version === "2" ? 2 : 1;
   const update = asked && deviceEnabled && permission.data?.enabled && current === 2 && (permission.data.policy_version !== "2" || devicePolicy !== 2);
   const dismissalKey = `nyxid.diagnostics.dismissed.${accountId}`;
   let previouslyDismissed = false;
@@ -36,11 +37,7 @@ export function ConsentBanner() {
     catch { toast.error(translateErrorMessage('Could not save account analytics permission. This browser remains off.')); }
     finally { setSaving(false); }
   }
-  // Only fetch config if the banner could possibly render. Once the
-  // user has answered (asked=true), we never render regardless of
-  // config, so the fetch would be wasted. TanStack Query dedupes,
-  // so if another consumer (main.tsx) has already fetched, this is
-  // a free cache read.
+  // The existing first-time banner still follows public telemetry configuration.
   const { data: cfg } = usePublicConfig({ enabled: !asked });
 
   if (!accountId || (asked && (!update || previouslyDismissed || dismissed === accountId))) return null;
@@ -61,7 +58,7 @@ export function ConsentBanner() {
       className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 backdrop-blur"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-14 unthemed:text-12 text-muted-foreground">{current === 2 ? translateUi("Analytics updated: optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Allow updated analytics for this account and browser, or keep your current choice.") : translateUi("Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.")}</div>
+        <div className="text-14 unthemed:text-12 text-muted-foreground">{current === 2 ? translateUi(update ? "Analytics updated: optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Allow updated analytics for this account and browser, or keep your current choice." : "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Optional crash diagnostics include app version and sanitized code locations, without messages or URLs; reports are kept for up to 30 days. Change this in Settings → Privacy.") : translateUi("Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track always disables collection. Change this in Settings → Privacy.")}</div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
             variant="ghost"
@@ -73,7 +70,7 @@ export function ConsentBanner() {
             disabled={saving}
             onClick={() => void choose(true)}
             aria-label={translateUi("Accept telemetry")}
-          >{translateUi(current === 2 ? "Allow updated analytics" : "Allow")}</Button>
+          >{translateUi(update ? "Allow updated analytics" : "Allow")}</Button>
         </div>
       </div>
     </div>

@@ -25,7 +25,7 @@ export function upload(
   const release =
     platform === "web"
       ? `nyxid-web@${manifest.app_version}+${manifest.artifact_id}`
-      : `nyxid-mobile@${manifest.app_version}+${manifest.app_build}`;
+      : `nyxid-${platform}@${manifest.app_version}+${manifest.app_build}`;
   const binary = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "node_modules/.bin/sentry-cli",

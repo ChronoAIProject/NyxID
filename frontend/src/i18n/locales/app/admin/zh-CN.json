@@ -762,6 +762,7 @@
   "Reply details unavailable": "回复详情不可用",
   "Report ID": "报告 ID",
   "Reported events": "已报告事件",
+  "Reported events by kind": "按类型统计的报告事件",
   "Reported events by version": "按版本统计的报告事件",
   "Reported events by version. Counts reflect consented reports, not all crashes or affected people.": "按版本显示已报告事件。计数仅包含获得同意的报告，并不代表所有崩溃或受影响人数。",
   "Reporting rollout": "报告功能启用状态",

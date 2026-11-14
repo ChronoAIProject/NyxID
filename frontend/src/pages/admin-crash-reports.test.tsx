@@ -1,3 +1,4 @@
+import { formatDateTime } from "@/lib/utils";
 import { it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { AdminCrashReportsPage, CrashReportView } from "./admin-crash-reports";
@@ -16,7 +17,7 @@ it("admin report details escape every server string as text", () => {
   const report = crashReportSchema.parse({
     id: attack,
     event_id: "event",
-    captured_at: "today",
+    captured_at: "2026-11-14T00:00:00Z",
     platform: "web",
     kind: "js_error",
     exception_class: attack,
@@ -27,8 +28,8 @@ it("admin report details escape every server string as text", () => {
     os_version: "1",
     runtime: null,
     js_frames: [{ asset: attack, line: 1, column: 2 }],
-    native_images: [],
-    native_frames: [],
+    native_images: [{uuid:"image-uuid",name:attack,size:4096}],
+    native_frames: [{image:0,offset:32}],
     environment: attack,
     severity: "error",
     fingerprint: attack,
@@ -46,6 +47,9 @@ it("admin report details escape every server string as text", () => {
   const { container } = render(<CrashReportView report={report} />);
   expect(screen.getAllByText(attack).length).toBeGreaterThan(0);
   expect(container.querySelector("img")).toBeNull();
+  expect(screen.getByText(formatDateTime("2026-11-14T00:00:00Z"))).toBeInTheDocument();
+  expect(screen.getByText(/0x1000/)).toBeInTheDocument();
+  expect(screen.getByText(/0x20/)).toBeInTheDocument();
   expect(container.innerHTML).not.toContain("user_id");
 });
 
@@ -70,6 +74,7 @@ it("admin overview renders ingestion health and localized filter labels", () => 
     data: { reports: [], cursor: null },
   } as unknown as ReturnType<typeof useCrashReports>);
   render(<AdminCrashReportsPage />);
+  expect(screen.getByRole("columnheader", {name:"Reported events by kind"})).toBeInTheDocument();
   expect(screen.getByText("Ingestion health")).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "Last 24 hours" })).toHaveValue(
     "24h",

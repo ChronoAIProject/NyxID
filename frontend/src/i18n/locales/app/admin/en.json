@@ -762,6 +762,7 @@
   "Reply details unavailable": "Reply details unavailable",
   "Report ID": "Report ID",
   "Reported events": "Reported events",
+  "Reported events by kind": "Reported events by kind",
   "Reported events by version": "Reported events by version",
   "Reported events by version. Counts reflect consented reports, not all crashes or affected people.": "Reported events by version. Counts reflect consented reports, not all crashes or affected people.",
   "Reporting rollout": "Reporting rollout",
