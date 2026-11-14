@@ -8365,7 +8365,8 @@ async fn voice_parent_mcp_results_publish_once_without_channel_delivery_and_nonv
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(!text.contains("nyx_bcl_") && !text.contains("nyx_clk_"));
         assert!(!text.contains(&f.state.config.frontend_url));
-        assert!(text.contains("links_in_chat"));
+        let envelope: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(envelope["result"]["links_in_chat"], 1);
     }
     let rows: Vec<AssistantMessage> = f
         .state
@@ -8377,10 +8378,13 @@ async fn voice_parent_mcp_results_publish_once_without_channel_delivery_and_nonv
         .try_collect()
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].text.starts_with('<') && rows[0].text.ends_with('>'));
-    assert!(rows[0].voice.is_none());
-    assert!(crate::services::voice::links::publication_row(&rows[0]));
+    assert_eq!(rows.len(), 2, "two executions mint two distinct link lists");
+    assert!(rows[0].text != rows[1].text, "fresh links must be distinct");
+    for row in &rows {
+        assert!(row.text.starts_with('<') && row.text.ends_with('>'));
+        assert!(row.voice.is_none());
+        assert!(crate::services::voice::links::publication_row(row));
+    }
     for collection in [
         "channel_text_deliveries",
         "channel_reply_deliveries",
@@ -8523,5 +8527,174 @@ async fn voice_idless_tool_results_publish_independently_without_a_replay_identi
         assert!(!envelope.to_string().contains("nyx_bcl_"));
     }
     assert_eq!(f.state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME).count_documents(doc!{"conversation_id":&parent.id,"turn_metadata.voice_link_publication":{"$exists":true}}).await.unwrap(),2);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn voice_unchecked_output_withholds_content_without_changing_execution_outcome_or_digest() {
+    let f = orchestrator_fixture("voice_unchecked_output").await;
+    let mut chat = authenticate(&f).await.chat.unwrap();
+    chat.voice_parent_conversation_id = Some(f.row.id.clone());
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(7)),
+        method: "tools/call".into(),
+        params: None,
+    };
+    for (sse, wire) in [
+        (
+            false,
+            format!(
+                "{{\"result\":{{\"content\":\"{}nyx_bcl_secret\"}}}}",
+                "x".repeat(8 * 1024 * 1024)
+            ),
+        ),
+        (false, "{not json nyx_clk_secret".into()),
+        (true, "data: {not json nyx_bcl_secret\n\n".into()),
+    ] {
+        for outcome in [
+            ToolOutcome::Completed,
+            ToolOutcome::PolicyRefusal,
+            ToolOutcome::DecisionRequired,
+            ToolOutcome::Error,
+        ] {
+            let mut response = Response::new(axum::body::Body::from(wire.clone()));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                if sse {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                }
+                .parse()
+                .unwrap(),
+            );
+            response.extensions_mut().insert(outcome);
+            response
+                .extensions_mut()
+                .insert(ToolResultDigest("original-effect-digest".into()));
+            let response = present_voice_tool_response(&f.state, &chat, &request, response).await;
+            assert_eq!(response.extensions().get::<ToolOutcome>(), Some(&outcome));
+            assert_eq!(
+                response.extensions().get::<ToolResultDigest>().unwrap().0,
+                "original-effect-digest"
+            );
+            assert_eq!(tool_succeeded(&response), outcome == ToolOutcome::Completed);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(!text.contains("nyx_bcl_") && !text.contains("nyx_clk_"));
+            let json = if sse {
+                text.strip_prefix("data: ").unwrap().trim()
+            } else {
+                text
+            };
+            let envelope: Value = serde_json::from_str(json).unwrap();
+            assert!(envelope.get("error").is_none());
+            assert_eq!(envelope["id"], 7);
+            assert_eq!(envelope["result"]["isError"], outcome == ToolOutcome::Error);
+            assert_eq!(envelope["result"]["links_in_chat"], 0);
+            assert!(
+                envelope["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Do not repeat the action")
+            );
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn voice_rpc_error_envelopes_redact_links_in_json_and_sse_without_changing_failure() {
+    use crate::models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME as THREADS,
+    };
+    let f = orchestrator_fixture("voice_error_envelopes").await;
+    let mut parent = f.row.clone();
+    parent.id = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    parent.active_turn = None;
+    parent.credential_api_key_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<AssistantConversation>(THREADS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"voice_parent_conversation_id": &parent.id}},
+        )
+        .await
+        .unwrap();
+    let chat = authenticate(&f).await.chat.unwrap();
+    let url = format!(
+        "{}/login/device?user_code=ABCD",
+        f.state.config.frontend_url
+    );
+    for sse in [false, true] {
+        let mut response = rpc_error(
+            Some(json!(9)),
+            -32602,
+            &format!("Review {url} nyx_clk_secret"),
+        );
+        if sse {
+            let (mut parts, body) = response.into_parts();
+            let bytes = axum::body::to_bytes(body, 4096).await.unwrap();
+            parts.headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                "text/event-stream".parse().unwrap(),
+            );
+            response = Response::from_parts(
+                parts,
+                axum::body::Body::from(format!(
+                    "data: {}\n\n",
+                    std::str::from_utf8(&bytes).unwrap()
+                )),
+            );
+        }
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(9)),
+            method: "tools/call".into(),
+            params: None,
+        };
+        let response = present_voice_tool_response(&f.state, &chat, &request, response).await;
+        assert_eq!(
+            response.extensions().get::<ToolOutcome>(),
+            Some(&ToolOutcome::Error)
+        );
+        assert_eq!(
+            response.extensions().get::<RpcFailureCode>().unwrap().0,
+            -32602
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let wire = std::str::from_utf8(&bytes).unwrap();
+        assert!(!wire.contains(&url) && !wire.contains("nyx_clk_"));
+        let envelope: Value = serde_json::from_str(if sse {
+            wire.strip_prefix("data: ").unwrap().trim()
+        } else {
+            wire
+        })
+        .unwrap();
+        assert!(envelope.get("result").is_none());
+        assert_eq!(envelope["error"]["code"], -32602);
+        assert_eq!(envelope["error"]["links_in_chat"], 1);
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id": &parent.id})
+            .await
+            .unwrap(),
+        1
+    );
     f.state.db.drop().await.unwrap();
 }

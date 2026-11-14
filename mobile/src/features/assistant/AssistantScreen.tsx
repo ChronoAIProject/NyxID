@@ -1208,10 +1208,18 @@ export function AssistantScreen({
     );
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
+    const continuingVoice =
+      item.voice &&
+      !item.voice.complete &&
+      !item.voice.interrupted &&
+      voiceSnapshot?.session.id === item.voice.session_id &&
+      voiceSnapshot.session.state !== "closed" &&
+      voiceSnapshot.session.state !== "failed" &&
+      !voiceSnapshot.session.end_requested;
     const footer =
       !item.voiceTransient &&
       item.voice?.sealed !== false &&
-      item.voice?.complete !== false ? (
+      !continuingVoice ? (
         <AssistantMessageFooter
           key={`${assistant.conversationId}:${item.anchorId ?? item.id}`}
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}

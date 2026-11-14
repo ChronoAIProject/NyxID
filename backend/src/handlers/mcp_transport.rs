@@ -2654,14 +2654,16 @@ async fn present_voice_tool_response(
         .is_some_and(|value| value.starts_with("text/event-stream"));
     let rewrite = async |payload: &str| -> Result<String, ()> {
         let mut envelope: serde_json::Value = serde_json::from_str(payload).map_err(|_| ())?;
-        if let Some(result) = envelope.get_mut("result") {
-            *result = crate::services::voice::links::present_optional(
-                state,
-                publication.as_ref(),
-                &tool_call,
-                result.take(),
-            )
-            .await;
+        for field in ["result", "error"] {
+            if let Some(result) = envelope.get_mut(field) {
+                *result = crate::services::voice::links::present_optional(
+                    state,
+                    publication.as_ref(),
+                    &tool_call,
+                    result.take(),
+                )
+                .await;
+            }
         }
         Ok(envelope.to_string())
     };
@@ -2702,17 +2704,23 @@ async fn present_voice_tool_response(
         Ok(output)
     }
     .await;
-    match transformed {
-        Ok(body) => {
-            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
-            Response::from_parts(parts, axum::body::Body::from(body))
-        }
-        Err(()) => rpc_error(
-            request.id.clone(),
-            -32603,
-            "Voice tool result unavailable; do not repeat the action",
-        ),
-    }
+    let body = transformed.unwrap_or_else(|()| {
+        // Presentation failure is not execution failure. Preserve the original
+        // HTTP/typed outcome and receipt digest so effects cannot be replayed.
+        let notice = "Tool output withheld; links could not be checked. Do not repeat the action or claim that a link was sent.";
+        let envelope = if let Some(code) = parts.extensions.get::<RpcFailureCode>() {
+            serde_json::json!({"jsonrpc": JSONRPC_VERSION, "id": request.id,
+                "error": {"code": code.0, "message": notice}})
+        } else {
+            serde_json::json!({"jsonrpc": JSONRPC_VERSION, "id": request.id,
+                "result": {"content": [{"type": "text", "text": notice}],
+                    "isError": parts.extensions.get::<ToolOutcome>() == Some(&ToolOutcome::Error),
+                    "link_publication": "unchecked", "links_in_chat": 0}})
+        };
+        if sse { format!("data: {envelope}\n\n") } else { envelope.to_string() }
+    });
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(body))
 }
 
 async fn handle_tools_call(

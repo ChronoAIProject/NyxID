@@ -2427,6 +2427,72 @@ async fn task_link_real_pipeline_redacts_models_publishes_once_and_never_uses_re
         })
         .await
         .expect("real hidden worker must call MCP");
+        let published: Vec<AssistantMessage> = state
+            .db
+            .collection(MESSAGES)
+            .find(doc! {"conversation_id": &visible.id,
+                "turn_metadata.voice_link_publication": {"$exists": true}})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(published.len(), 2, "two executions mint two distinct links");
+        let mut exact_urls = std::collections::HashSet::new();
+        for row in &published {
+            let url = row
+                .text
+                .strip_prefix('<')
+                .and_then(|text| text.strip_suffix('>'))
+                .expect("a publication contains one bounded exact URL");
+            assert!(exact_urls.insert(url), "each execution publishes a fresh URL");
+            assert_eq!(row.text.matches(url).count(), 1, "exact URL appears once");
+            let prefix = format!("{}/connect/bot/", state.config.frontend_url);
+            let token = url.strip_prefix(&prefix).expect("frontend channel link");
+            let issued = crate::services::channel_connect_link_service::by_token(&state.db, token)
+                .await
+                .expect("published token must match an actual minted link exactly");
+            assert_eq!(issued.user_id, call.user_id);
+            assert_eq!(issued.platform, "telegram");
+            let metadata = row
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .voice_link_publication
+                .as_ref()
+                .unwrap();
+            assert_eq!(metadata.links_in_chat, 1);
+            let publication = super::super::links::Publication {
+                user_id: call.user_id.clone(),
+                parent_id: visible.id.clone(),
+                conversation_id: metadata.conversation_id.clone(),
+                turn_id: metadata.turn_id.clone(),
+            };
+            let result = json!({"url": url, "isError": false});
+            // Replay the same presented link list without executing setup again.
+            for _ in 0..2 {
+                let replay = super::super::links::present(
+                    &state,
+                    &publication,
+                    &json!("setup-link-call").to_string(),
+                    result.clone(),
+                )
+                .await;
+                assert_eq!(replay["links_in_chat"], 1, "exact replay remains delivered");
+                let wire = replay.to_string();
+                assert!(!super::super::links::contains_url(&wire), "replay URL redacted");
+                assert!(!wire.contains("nyx_bcl_") && !wire.contains("nyx_clk_"),
+                    "replay tokens redacted");
+            }
+        }
+        assert_eq!(
+            state.db.collection::<AssistantMessage>(MESSAGES)
+                .count_documents(doc! {"conversation_id": &visible.id,
+                    "turn_metadata.voice_link_publication": {"$exists": true}})
+                .await.unwrap(),
+            2,
+            "identical presentations must not add publication rows"
+        );
         session::close(&state.db, &call, "user_ended", true)
             .await
             .unwrap();
@@ -2465,10 +2531,14 @@ async fn task_link_real_pipeline_redacts_models_publishes_once_and_never_uses_re
             no_secrets(text);
             assert!(!super::super::links::contains_url(text));
         };
-        for wire in captures.lock().await.iter() {
-            no_urls(wire);
-            let envelope: Value = serde_json::from_str(wire).unwrap();
-            assert_eq!(envelope["result"]["links_in_chat"], 1, "{envelope}");
+        {
+            let wires = captures.lock().await;
+            assert_eq!(wires.len(), 2, "two real MCP executions return two results");
+            for wire in wires.iter() {
+                no_urls(wire);
+                let envelope: Value = serde_json::from_str(wire).unwrap();
+                assert_eq!(envelope["result"]["links_in_chat"], 1, "{envelope}");
+            }
         }
         for body in upstream_inputs.lock().await.iter() {
             no_urls(&body.to_string());
@@ -2486,11 +2556,12 @@ async fn task_link_real_pipeline_redacts_models_publishes_once_and_never_uses_re
             .iter()
             .filter(|row| super::super::links::publication_row(row))
             .collect();
-        assert_eq!(links.len(), 1);
-        assert!(links[0].text.starts_with(&format!(
-            "<{}/connect/bot/nyx_bcl_",
-            state.config.frontend_url
-        )));
+        assert_eq!(links.len(), 2, "both fresh URLs remain published once");
+        for row in &links {
+            assert_eq!(published.iter().filter(|first| first.id == row.id).count(), 1);
+            assert_eq!(rows.iter().filter(|message| message.text == row.text).count(), 1,
+                "each exact link occupies one visible row");
+        }
         let setup_link = state
             .db
             .collection::<crate::models::channel_connect_link::ChannelConnectLink>(
@@ -2527,14 +2598,23 @@ async fn task_link_real_pipeline_redacts_models_publishes_once_and_never_uses_re
         }
         assert_eq!(
             copied.turn_metadata.as_ref().unwrap().links_in_chat,
-            Some(1)
+            Some(2)
         );
         let hidden = request.task_conversation_id.as_deref().unwrap();
+        assert_eq!(
+            super::super::links::published_count(
+                &state.db, &call.user_id, &visible.id, hidden,
+                &published[0].turn_metadata.as_ref().unwrap()
+                    .voice_link_publication.as_ref().unwrap().turn_id,
+            ).await.unwrap(),
+            2,
+            "durable speech facts count both fresh links"
+        );
         let hidden_checkpoint = engine::checkpoint(&state.db, &call.user_id, hidden)
             .await
             .unwrap()
             .expect("hidden worker writes a checkpoint");
-        let checkpoint_text = engine::checkpoint_line(&hidden_checkpoint);
+        let checkpoint_text = engine::checkpoint_line(&hidden_checkpoint, true);
         no_secrets(&checkpoint_text);
         assert!(checkpoint_text.contains(&docs));
         assert!(checkpoint_text.contains(&settings));
@@ -2555,12 +2635,15 @@ async fn task_link_real_pipeline_redacts_models_publishes_once_and_never_uses_re
             .await
             .unwrap()
         {
-            no_secrets(&engine::checkpoint_line(&checkpoint));
+            no_secrets(&engine::checkpoint_line(&checkpoint, true));
         }
-        let summary = super::super::speech::summary_input(&copied.text, &copied.status, None, None, 1);
+        let summary = super::super::speech::summary_input(
+            &copied.text, &copied.status, None, None,
+            copied.turn_metadata.as_ref().unwrap().links_in_chat.unwrap(),
+        );
         no_urls(&summary);
         let summary: Value = serde_json::from_str(&summary).unwrap();
-        assert_eq!(summary["links_in_chat"], 1);
+        assert_eq!(summary["links_in_chat"], 2);
         assert_eq!(summary["links_omitted"], 2);
         assert_eq!(summary["links_visible_in_chat_reply"], 2);
         // The actual Responses receipt/function output also contains no private URL.

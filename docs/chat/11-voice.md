@@ -2070,8 +2070,9 @@ Tool-produced NyxID frontend-origin links and connect tokens never enter model
 context. At [MCP tools/call](../../backend/src/handlers/mcp_transport.rs), authenticated chat
 keys carry their already-loaded `voice_parent_conversation_id`. Every result from
 such a hidden tools/task thread passes through [links.rs](../../backend/src/services/voice/links.rs):
-exact frontend-origin URLs publish once per `(hidden conversation, turn, RPC id)`
-as one `<url>`-bounded assistant row in the visible parent, with `via: "voice"`
+exact frontend-origin URLs publish once per
+`(hidden conversation, turn, RPC id, link-list digest)` as one `<url>`-bounded
+assistant row in the visible parent, with `via: "voice"`
 and no speech-segment metadata. The transaction fences the hidden live turn,
 not the voice session; tasks may finish after hangup. It never invokes channel
 or outbox delivery, including a home thread with `reply_channel`. The hidden
@@ -2086,7 +2087,10 @@ input. Result cleanup and recovery also restrict pending-flag writes to user
 voice inputs.
 History still presents it as completed; it neither blocks later turns nor escapes
 conversation deletion or owner erasure. Recap/checkpoint rendering also strips
-legacy connect tokens.
+legacy connect tokens only for voice-originated rows and threads; ordinary text
+chat recap, checkpoint and last-reply bytes retain their existing behavior.
+Voice token defense removes complete token-bearing URLs before bare tokens,
+so repeated task/context sanitization cannot leave partial placeholders or URLs.
 The published count is read from durable publication metadata into the copied
 task result and [speech.rs](../../backend/src/services/voice/speech.rs) summary facts.
 Old readers ignore the additive marker. `execution_pending` also protects their
@@ -2161,8 +2165,9 @@ split those groups. Existing rows are not rewritten, and old clients ignore the
 additive flag. The first segment keeps the
 row identity; one author/header and footer cover the group. Copy joins segments
 with paragraph breaks; feedback and Report target the latest segment with saved
-feedback, otherwise the last segment. Mobile hides Copy/Report when the final
-segment remains unsealed or incomplete.
+feedback, otherwise the last segment. Mobile hides Copy/Report for transient or
+unsealed speech and an incomplete, uninterrupted continuation in the live call.
+A sealed partial after disconnection retains its timestamp, Copy and Report.
 Mobile navigation message targets resolve any segment id to the stable group
 row through `voiceMessageGroups.ts::voiceMessageIndex`.
 
@@ -2179,8 +2184,15 @@ and explain the recognizer default rather than offering an empty error picker.
 
 Voice-parent MCP results preserve JSON/SSE transport and inline tool-list change
 notifications. Identified calls publish frontend links once per hidden thread,
-live turn and RPC id; id-less calls use fresh publication identities. Without a
-live turn, URLs are removed and publication fails explicitly. Hidden task replies
+live turn, RPC id and exact link-list digest; a new link list under the same id
+publishes a new row, while exact replays dedupe. Structured URL fields take
+precedence; fallback frontend-URL extraction stops at the first character outside
+the RFC 3986 ASCII alphabet, so adjacent CJK instructions cannot enter a published
+destination. JSON-RPC
+result and error envelopes use the same link presentation. Uncheckable bodies
+withhold output with an explicit do-not-repeat fact while preserving execution
+outcome and receipt digest. Id-less calls use fresh publication identities.
+Without a live turn, URLs are removed and publication fails explicitly. Hidden task replies
 are sanitized before settlement/checkpoint and again before copying: frontend
 URLs under `/connect/`, `/cli/pair`, `/login/device`, `/login/agent-key` and
 `/login/code` become placeholders even with mangled tokens. Any URL containing

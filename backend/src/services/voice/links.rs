@@ -33,7 +33,52 @@ const SECRET_TASK_REPLY_ROUTES: &[&str] = &[
 ];
 
 pub(crate) fn redact_tokens(text: &str) -> String {
-    TOKENS.replace_all(text, PLACEHOLDER).into_owned()
+    // Redact a credential-bearing URL as a whole before replacing bare tokens.
+    // Inserting a spaced placeholder inside its path would leave URL fragments
+    // when a later URL-aware task/context sanitizer runs.
+    let without_token_urls = map_urls(text, |raw| {
+        if TOKENS.is_match(raw) {
+            PLACEHOLDER.to_owned()
+        } else {
+            raw.to_owned()
+        }
+    });
+    TOKENS
+        .replace_all(&without_token_urls, PLACEHOLDER)
+        .into_owned()
+}
+pub(crate) fn voice_row(message: &AssistantMessage) -> bool {
+    message.via.as_deref() == Some("voice") || message.voice.is_some() || publication_row(message)
+}
+
+pub(crate) fn message_text<'a>(
+    message: &AssistantMessage,
+    text: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    if voice_row(message) {
+        std::borrow::Cow::Owned(redact_tokens(text))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// Only token-bearing context needs the legacy thread lookup. Ordinary text
+/// contexts add no read and preserve their original bytes.
+pub(crate) async fn thread_text(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    hidden_voice: bool,
+    text: String,
+) -> AppResult<String> {
+    if !TOKENS.is_match(&text) {
+        return Ok(text);
+    }
+    let voice = hidden_voice || db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(doc! {"user_id": user, "conversation_id": conversation,
+            "$or": [{"via": "voice"}, {"voice": {"$ne": null}}, {"turn_metadata.voice_link_publication": {"$exists": true}}]})
+        .projection(doc! {"_id": 1}).await?.is_some();
+    Ok(if voice { redact_tokens(&text) } else { text })
 }
 pub(crate) fn publication_row(message: &AssistantMessage) -> bool {
     message
@@ -269,13 +314,15 @@ pub(crate) fn collect(value: &Value, origins: &[String], links: &mut Vec<String>
     match value {
         Value::String(text) => {
             for (start, end) in spans(text) {
-                let raw = &text[start..end];
+                let raw = ascii_url(&text[start..end]);
                 if let Ok(url) = url::Url::parse(raw)
                     && matches!(url.scheme(), "https" | "http")
                     && url.username().is_empty()
                     && url.password().is_none()
                     && origins.contains(&url.origin().ascii_serialization())
-                    && !links.iter().any(|link| link == raw)
+                    && !links.iter().any(|link| {
+                        link == raw || (link.starts_with(raw) && boundary(link) == raw.len())
+                    })
                 {
                     links.push(raw.to_owned());
                 }
@@ -285,13 +332,45 @@ pub(crate) fn collect(value: &Value, origins: &[String], links: &mut Vec<String>
             .iter()
             .for_each(|value| collect(value, origins, links)),
         Value::Object(values) => {
+            // Prefer explicit URL values over a prose rendering of the same
+            // destination. Still inspect the rest for additional destinations.
+            if let Some(url) = values.get("url") {
+                if let Some(raw) = url.as_str().filter(|raw| ascii_url(raw) == *raw) {
+                    if let Ok(url) = url::Url::parse(raw)
+                        && matches!(url.scheme(), "https" | "http")
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && origins.contains(&url.origin().ascii_serialization())
+                        && !links.iter().any(|link| link == raw)
+                    {
+                        links.push(raw.to_owned());
+                    }
+                } else {
+                    collect(url, origins, links);
+                }
+            }
             for (key, value) in values {
+                if key == "url" {
+                    continue;
+                }
                 collect(&Value::String(key.clone()), origins, links);
                 collect(value, origins, links);
             }
         }
         _ => {}
     }
+}
+
+// RFC 3986 unreserved + reserved + percent-encoding alphabet. NyxID page
+// destinations are ASCII; unencoded CJK characters belong to surrounding prose.
+fn ascii_url(raw: &str) -> &str {
+    let end = raw
+        .bytes()
+        .position(|byte| {
+            !(byte.is_ascii_alphanumeric() || b"-._~:/?#[]@!$&'()*+,;=%".contains(&byte))
+        })
+        .unwrap_or(raw.len());
+    &raw[..end]
 }
 pub(super) fn private_url(raw: &str, origins: &[String]) -> bool {
     TOKENS.is_match(raw)
@@ -341,11 +420,15 @@ pub(crate) struct Publication {
     pub turn_id: String,
 }
 
-fn publication_id(call: &Publication, tool_call: &str) -> String {
+fn publication_id(call: &Publication, tool_call: &str, links: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(links).expect("URL list serialization"),
+    ));
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!(
-            "nyxid:voice-links:{}:{}:{tool_call}",
+            "nyxid:voice-links:{}:{}:{tool_call}:{digest}",
             call.conversation_id, call.turn_id
         )
         .as_bytes(),
@@ -366,7 +449,7 @@ async fn publish(
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as THREADS},
         assistant_message::COLLECTION_NAME as MESSAGES,
     };
-    let id = publication_id(call, tool_call);
+    let id = publication_id(call, tool_call, links);
     let text = links
         .iter()
         .map(|url| format!("<{url}>"))
@@ -490,6 +573,23 @@ pub(crate) async fn present_optional(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn token_defense_redacts_complete_urls_and_is_stable_before_task_reply_sanitization() {
+        let origins = ["https://nyxid.ai".into()];
+        for url in [
+            "https://nyxid.ai/connect/nyx_clk_example",
+            "https://nyxid.ai/connect/bot/nyx_bcl_example",
+            "https://external.test/path?token=nyx_clk_example",
+        ] {
+            let text = format!("链接：{url}。 nyx_bcl_bare https://nyxid.ai/docs/cli");
+            let expected = "链接：[link omitted]。 [link omitted] https://nyxid.ai/docs/cli";
+            let redacted = redact_tokens(&text);
+            assert_eq!(redacted, expected);
+            assert_eq!(redact_tokens(&redacted), expected);
+            assert_eq!(redact_task_reply(&redacted, &origins), expected);
+        }
+    }
+
     #[test]
     fn cjk_urls_and_bare_tokens_never_enter_model_context() {
         let (text, count) = redact(
@@ -656,9 +756,16 @@ mod publication_tests {
     }
 
     fn publication_id(
+        state: &crate::AppState,
         call: &crate::models::assistant_voice_session::VoiceSession,
         tool: &str,
     ) -> String {
+        let mut links = Vec::new();
+        collect(
+            &tool_result(state),
+            &frontend_origins(&state.config),
+            &mut links,
+        );
         super::publication_id(
             &Publication {
                 user_id: call.user_id.clone(),
@@ -667,6 +774,7 @@ mod publication_tests {
                 turn_id: call.id.clone(),
             },
             tool,
+            &links,
         )
     }
     fn tool_result(state: &crate::AppState) -> Value {
@@ -727,10 +835,17 @@ mod publication_tests {
         };
         let output = super::present(&state, &publication, "published", tool_result(&state)).await;
         assert_eq!(output["links_in_chat"], 2);
+        let mut links = Vec::new();
+        collect(
+            &tool_result(&state),
+            &frontend_origins(&state.config),
+            &mut links,
+        );
+        let id = super::publication_id(&publication, "published", &links);
         let row: AssistantMessage = state
             .db
             .collection(MESSAGES)
-            .find_one(doc! {"_id": super::publication_id(&publication, "published")})
+            .find_one(doc! {"_id": id})
             .await
             .unwrap()
             .unwrap();
@@ -1154,7 +1269,7 @@ mod publication_tests {
         let rows: Vec<AssistantMessage> = state
             .db
             .collection(MESSAGES)
-            .find(doc! {"_id":publication_id(&call, "tool-call-one")})
+            .find(doc! {"_id":publication_id(&state, &call, "tool-call-one")})
             .await
             .unwrap()
             .try_collect()
@@ -1190,9 +1305,81 @@ mod publication_tests {
             "The unique publication and sequence increment commit together"
         );
         assert_ne!(
-            publication_id(&call, "tool-call-one"),
-            publication_id(&call, "tool-call-two")
+            publication_id(&state, &call, "tool-call-one"),
+            publication_id(&state, &call, "tool-call-two")
         );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reused_rpc_id_publishes_each_exact_link_list_once_with_truthful_facts() {
+        let (state, thread, call) = super::super::tests::setup("voice_link_identity_content").await;
+        let messages = state.db.collection::<AssistantMessage>(MESSAGES);
+        for suffix in ["first", "second", "first", "second"] {
+            let url = format!("{}/connect/bot/nyx_bcl_{suffix}", state.config.frontend_url);
+            let result = present(
+                &state,
+                &call,
+                "same-rpc-id",
+                serde_json::json!({
+                    "url": url, "content": [{"type":"text", "text": &url}], "isError": false
+                }),
+            )
+            .await;
+            assert_private_model_output(&result, 1);
+            assert_eq!(result["isError"], false);
+            assert_eq!(
+                messages
+                    .count_documents(doc! {"conversation_id": &thread.id,
+                    "text": format!("<{url}>")})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            messages
+                .count_documents(doc! {"conversation_id": &thread.id,
+                "turn_metadata.voice_link_publication": {"$exists": true}})
+                .await
+                .unwrap(),
+            2
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn frontend_publication_uses_structured_urls_and_never_includes_cjk_prose() {
+        let (state, _, call) = super::super::tests::setup("voice_link_url_extent").await;
+        let url = format!("{}/login/device?user_code=ABCD", state.config.frontend_url);
+        let structured = format!(
+            "{}/assistant?panel=settings&panelTab=privacy",
+            state.config.frontend_url
+        );
+        for (id, raw, expected) in [
+            (
+                "prose",
+                serde_json::json!({"text": format!("{url}，请输入")}),
+                url.clone(),
+            ),
+            (
+                "structured",
+                serde_json::json!({"url": &structured, "text": format!("打开{structured}，请输入")}),
+                structured,
+            ),
+            (
+                "structured-punctuation",
+                serde_json::json!({"url": format!("{url}!"), "text": format!("打开{url}!")}),
+                format!("{url}!"),
+            ),
+        ] {
+            let output = present(&state, &call, id, raw).await;
+            assert_private_model_output(&output, 1);
+            let row = state.db.collection::<AssistantMessage>(MESSAGES)
+                .find_one(doc! {"conversation_id": &call.conversation_id, "text": format!("<{expected}>")})
+                .await.unwrap().expect("exact URL row");
+            assert_eq!(row.text, format!("<{expected}>"));
+        }
         state.db.drop().await.unwrap();
     }
 
@@ -1206,7 +1393,7 @@ mod publication_tests {
         let row = state
             .db
             .collection::<AssistantMessage>(MESSAGES)
-            .find_one(doc! {"_id":publication_id(&call,"history")})
+            .find_one(doc! {"_id":publication_id(&state, &call,"history")})
             .await
             .unwrap()
             .unwrap();
@@ -1257,7 +1444,7 @@ mod publication_tests {
             last_successful_at: None,
             updated_at: chrono::Utc::now(),
         };
-        let context = engine::checkpoint_line(&checkpoint);
+        let context = engine::checkpoint_line(&checkpoint, true);
         assert!(!context.contains("nyx_bcl_") && !context.contains("nyx_clk_"));
         state.db.drop().await.unwrap();
     }
@@ -1295,7 +1482,7 @@ mod publication_tests {
         );
         assert!(
             messages
-                .find_one(doc! {"_id":publication_id(&call, "api-resource")})
+                .find_one(doc! {"_id":publication_id(&state, &call, "api-resource")})
                 .await
                 .unwrap()
                 .is_none()
@@ -1321,7 +1508,7 @@ mod publication_tests {
         let row = state
             .db
             .collection::<AssistantMessage>(MESSAGES)
-            .find_one(doc! {"_id":publication_id(&call,"markdown")})
+            .find_one(doc! {"conversation_id": &call.conversation_id, "turn_metadata.voice_link_publication": {"$exists": true}})
             .await
             .unwrap()
             .unwrap();
@@ -1497,7 +1684,7 @@ mod publication_tests {
             state
                 .db
                 .collection::<AssistantMessage>(MESSAGES)
-                .count_documents(doc! {"_id":publication_id(&call,"failed-publication")})
+                .count_documents(doc! {"_id":publication_id(&state, &call,"failed-publication")})
                 .await
                 .unwrap(),
             0

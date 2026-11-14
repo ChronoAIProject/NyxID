@@ -36,6 +36,7 @@ pub struct Prepared {
     pub reset: bool,
     /// The durable checkpoint a recap leads with (owner audiences only).
     checkpoint: Option<AssistantCheckpoint>,
+    voice_context: bool,
 }
 
 impl Prepared {
@@ -76,6 +77,8 @@ impl Prepared {
                 |binding| binding.fingerprint != fingerprint || binding.guest != row.guest_turn,
             );
         let mut prepared = Self {
+            voice_context: row.voice_parent_conversation_id.is_some()
+                || history.iter().any(super::voice::links::voice_row),
             stable,
             memory: if row.guest_turn {
                 String::new()
@@ -125,7 +128,7 @@ impl Prepared {
         const CLOSE: &str = "\nEnd checkpoint.";
         let mut prompt = self.instructions();
         if let Some(checkpoint) = &self.checkpoint {
-            let mut text = engine::checkpoint_line(checkpoint);
+            let mut text = engine::checkpoint_line(checkpoint, self.voice_context);
             let room = 16_384usize.saturating_sub(OPEN.len() + CLOSE.len() + recap.len());
             engine::truncate_at_boundary(&mut text, engine::RECAP_CHECKPOINT_BYTES.min(room));
             prompt.push_str(OPEN);
@@ -178,6 +181,11 @@ impl Prepared {
     }
 
     pub fn redact(&self, text: &str) -> String {
+        let text = if self.voice_context {
+            super::voice::links::redact_tokens(text)
+        } else {
+            text.to_owned()
+        };
         match &self.binding.marker {
             Some(marker) => text.replace(marker, "[redacted context marker]"),
             None => text.to_owned(),
@@ -239,7 +247,24 @@ mod tests {
             },
             reset: false,
             checkpoint: None,
+            voice_context: false,
         }
+    }
+
+    #[test]
+    fn token_redaction_preserves_text_chat_input_and_scopes_voice_context() {
+        let mut context = prepared();
+        let text = "Keep nyx_bcl_example and nyx_clk_example exactly.";
+        assert_eq!(context.redact(text), text);
+        assert_eq!(context.input_with_memory("", text, false), text);
+        assert!(context.instructions_with_recap(text).ends_with(text));
+        context.voice_context = true;
+        let expected = super::super::voice::links::redact_tokens(text);
+        assert_eq!(context.redact(text), expected);
+        assert_eq!(context.input_with_memory("", text, false), expected);
+        let instructions = context.instructions_with_recap(text);
+        assert!(instructions.ends_with(&expected));
+        assert!(!instructions.contains("nyx_bcl_") && !instructions.contains("nyx_clk_"));
     }
 
     #[tokio::test]

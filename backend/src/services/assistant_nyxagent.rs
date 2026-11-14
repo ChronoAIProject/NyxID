@@ -1978,7 +1978,7 @@ pub(crate) async fn write_checkpoint_in_session(
             .find_one(doc! {"conversation_id": &row.id, "user_id": &row.user_id, "seq": seq, "role": "user"})
             .session(&mut *session)
             .await?
-            .map(|message| excerpt(&super::voice::links::redact_tokens(&message.text), CHECKPOINT_GOAL_CHARS))
+            .map(|message| excerpt(&super::voice::links::message_text(&message, &message.text), CHECKPOINT_GOAL_CHARS))
             .filter(|goal| !goal.is_empty()),
         _ => None,
     };
@@ -2006,7 +2006,7 @@ pub(crate) async fn write_checkpoint_in_session(
     keep_newest(&mut completed_actions);
     keep_newest(&mut failed_actions);
     let succeeded = reply.status == "completed";
-    let checkpoint = AssistantCheckpoint {
+    let mut checkpoint = AssistantCheckpoint {
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: reply.turn_id.clone(),
@@ -2016,7 +2016,7 @@ pub(crate) async fn write_checkpoint_in_session(
         completed_actions,
         failed_actions,
         output: Some(excerpt(
-            &super::voice::links::redact_tokens(&reply.text),
+            &super::voice::links::message_text(reply, &reply.text),
             CHECKPOINT_OUTPUT_CHARS,
         ))
         .filter(|text| !text.is_empty()),
@@ -2034,6 +2034,19 @@ pub(crate) async fn write_checkpoint_in_session(
         },
         updated_at: now,
     };
+    for text in [&mut checkpoint.goal, &mut checkpoint.output]
+        .into_iter()
+        .flatten()
+    {
+        *text = super::voice::links::thread_text(
+            db,
+            &row.user_id,
+            &row.id,
+            row.voice_parent_conversation_id.is_some(),
+            std::mem::take(text),
+        )
+        .await?;
+    }
     collection
         .replace_one(filter, &checkpoint)
         .upsert(true)
@@ -2049,10 +2062,36 @@ pub async fn checkpoint(
     user_id: &str,
     id: &str,
 ) -> AppResult<Option<AssistantCheckpoint>> {
-    Ok(db
+    let Some(mut checkpoint) = db
         .collection::<AssistantCheckpoint>(CHECKPOINTS)
         .find_one(doc! {"_id": id, "user_id": user_id})
-        .await?)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let raw = checkpoint_line(&checkpoint, false);
+    if raw != super::voice::links::redact_tokens(&raw) {
+        let hidden = get(db, user_id, id)
+            .await?
+            .voice_parent_conversation_id
+            .is_some();
+        if raw != super::voice::links::thread_text(db, user_id, id, hidden, raw.clone()).await? {
+            checkpoint.goal = checkpoint
+                .goal
+                .map(|text| super::voice::links::redact_tokens(&text));
+            checkpoint.output = checkpoint
+                .output
+                .map(|text| super::voice::links::redact_tokens(&text));
+            for action in checkpoint
+                .completed_actions
+                .iter_mut()
+                .chain(&mut checkpoint.failed_actions)
+            {
+                action.label = super::voice::links::redact_tokens(&action.label);
+            }
+        }
+    }
+    Ok(Some(checkpoint))
 }
 
 /// What `GET …/context` shows: the durable checkpoint plus the live turn's
@@ -6655,7 +6694,14 @@ pub async fn recap(
         row.guest_turn,
         owner_total,
     );
-    Ok(recap)
+    super::voice::links::thread_text(
+        db,
+        &row.user_id,
+        &row.id,
+        row.voice_parent_conversation_id.is_some(),
+        recap,
+    )
+    .await
 }
 
 struct RenderedRecapLine {
@@ -6695,7 +6741,7 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
         if truncated { " [truncated]" } else { "" }
     );
     RenderedRecapLine {
-        text: super::voice::links::redact_tokens(&text),
+        text: super::voice::links::message_text(message, &text).into_owned(),
         truncated,
     }
 }
@@ -7068,7 +7114,12 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     if recap.is_empty() && reserved.is_empty() {
         String::new()
     } else {
-        format!("{OPEN}{reserved}{}{CLOSE}", recap.concat())
+        let text = format!("{OPEN}{reserved}{}{CLOSE}", recap.concat());
+        if history.iter().any(super::voice::links::voice_row) {
+            super::voice::links::redact_tokens(&text)
+        } else {
+            text
+        }
     }
 }
 
@@ -7084,7 +7135,7 @@ pub(crate) fn truncate_at_boundary(text: &mut String, max: usize) {
 
 /// The checkpoint block of a recap: its scope (turn and outcome), the goal,
 /// the actions since the last successful turn, and a bounded output excerpt.
-pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint) -> String {
+pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint, voice_context: bool) -> String {
     let labels = |actions: &[CheckpointAction]| {
         actions
             .iter()
@@ -7124,7 +7175,11 @@ pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint) -> String {
     if let Some(output) = checkpoint.output.as_deref() {
         line.push_str(&format!("\n- last output: {output}"));
     }
-    super::voice::links::redact_tokens(&line)
+    if voice_context {
+        super::voice::links::redact_tokens(&line)
+    } else {
+        line
+    }
 }
 
 /// One recap line within `remaining` bytes, or absent when nothing fits.
@@ -7144,8 +7199,8 @@ fn recap_line(
         } else {format!("{} [Generated response; delivery/hearing is {}. Do not assume the caller heard it. Completed tool effects must not be replayed automatically.]",message.text,e.status)}
     });
     let redacted =
-        super::voice::links::redact_tokens(projected.as_deref().unwrap_or(&message.text));
-    let text = redacted.as_str();
+        super::voice::links::message_text(message, projected.as_deref().unwrap_or(&message.text));
+    let text: &str = redacted.as_ref();
     let role = if message.author == Some(crate::models::assistant_message::MessageAuthor::Guest)
         && message.role == "user"
     {
@@ -7228,9 +7283,11 @@ fn recap_line(
             message.error_code.as_deref().unwrap_or("none")
         )
     };
-    let mut line = super::voice::links::redact_tokens(&format!(
-        "{prefix}{body}{activities}{attachments}{error}"
-    ));
+    let mut line = super::voice::links::message_text(
+        message,
+        &format!("{prefix}{body}{activities}{attachments}{error}"),
+    )
+    .into_owned();
     if line.len() > remaining {
         truncate_at_boundary(&mut line, remaining);
         truncated = true;

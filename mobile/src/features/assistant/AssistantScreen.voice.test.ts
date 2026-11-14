@@ -793,8 +793,14 @@ test("a navigation target for a middle voice segment reveals its stable group ro
   assert.equal(scrolls.length, 1);
   x.harness.unmount();
 });
-test("voice footers hide both unsealed speech and sealed incomplete groups", () => {
-  for (const sealed of [false, true]) {
+test("voice footers hide live continuations and keep sealed disconnect partial groups", async () => {
+  for (const [sealed, state, interrupted, visible] of [
+    [false, "active", false, false],
+    [true, "active", false, false],
+    [true, "closed", false, true],
+    [true, "failed", false, true],
+    [true, "active", true, true],
+  ] as const) {
     const x = setup(A);
     x.assistant.history!.messages = voiceGroupFixtures[0]!.rows
       .slice(0, 2)
@@ -811,10 +817,18 @@ test("voice footers hide both unsealed speech and sealed incomplete groups", () 
             ...row.voice,
             sealed: index === 0 || sealed,
             complete: index === 0,
+            interrupted: index !== 0 && interrupted,
           },
         }),
       );
-    x.harness.render();
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    const snapshot = liveVoice("");
+    snapshot.session.id = x.assistant.history!.messages[0]!.voice!.session_id;
+    snapshot.session.state = state;
+    snapshot.captions = [];
+    x.voice()!.props.onSnapshot(snapshot);
+    x.harness.flush();
     const list = x.all().find((node) => node.type === "FlatList")!;
     assert.equal(list.props.data.length, 1);
     const rendered = elements(
@@ -822,8 +836,14 @@ test("voice footers hide both unsealed speech and sealed incomplete groups", () 
     );
     assert.equal(
       rendered.filter((node) => node.type === "AssistantMessageFooter").length,
-      0,
+      visible ? 1 : 0,
     );
+    if (visible) {
+      const footer = rendered.find((node) => node.type === "AssistantMessageFooter")!;
+      assert.equal(footer.props.text, list.props.data[0].text);
+      assert.equal(footer.props.timestamp, "2026-11-09T01:00:00Z");
+      assert.equal(footer.props.report.messageId, "7");
+    }
     x.harness.unmount();
   }
 });

@@ -8247,3 +8247,87 @@ async fn model_approval_proposal_claim_is_once_across_concurrent_attempts() {
     assert!(observed::approval_error(&saved.active_turn.unwrap()).is_some());
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
+    let db = connect_transaction_test_database("voice_context_scope").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let text = "Keep nyx_bcl_example and nyx_clk_example exactly.";
+    for scope in ["text", "voice_parent", "voice_task"] {
+        let mut row = begin_turn(&db, &user, &request(None, text), &state.encryption_keys)
+            .await
+            .unwrap();
+        if scope == "voice_task" {
+            row.voice_parent_conversation_id = Some("parent".into());
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id": &row.id},
+                    doc! {"$set": {"voice_parent_conversation_id": "parent"}},
+                )
+                .await
+                .unwrap();
+        }
+        if scope == "voice_parent" {
+            db.collection::<bson::Document>(MESSAGES)
+                .update_many(
+                    doc! {"conversation_id": &row.id},
+                    doc! {"$set": {"via": "voice"}},
+                )
+                .await
+                .unwrap();
+        }
+        settle(&db, &state.encryption_keys, &user, &row, text, None).await;
+        let expected = if scope == "text" {
+            text.to_owned()
+        } else {
+            super::super::voice::links::redact_tokens(text)
+        };
+        let stored = db
+            .collection::<AssistantCheckpoint>(CHECKPOINTS)
+            .find_one(doc! {"_id": &row.id, "user_id": &user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.goal.as_deref(), Some(expected.as_str()), "{scope}");
+        assert_eq!(stored.output.as_deref(), Some(expected.as_str()), "{scope}");
+        let saved = checkpoint(&db, &user, &row.id).await.unwrap().unwrap();
+        assert_eq!(saved.goal.as_deref(), Some(expected.as_str()), "{scope}");
+        assert_eq!(saved.output.as_deref(), Some(expected.as_str()), "{scope}");
+        let line = checkpoint_line(&saved, scope != "text");
+        assert_eq!(
+            line,
+            format!(
+                "\nCheckpoint (turn {}, completed; last successful turn {}):\n- goal: {expected}\n- last output: {expected}",
+                saved.turn_id, saved.turn_id
+            )
+        );
+        let history = messages(&db, &user, &row.id, 20, None).await.unwrap();
+        let recap = recap(&db, &row, &history, "other-turn").await.unwrap();
+        assert!(recap.contains(&expected), "{scope}");
+        let last = super::super::assistant_team_service::last_reply(&db, &user, &row.id, 1000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(last.text, expected, "{scope}");
+        if scope == "text" {
+            assert_eq!(
+                recap_line(&history[0], false, 4096).unwrap().text,
+                format!("\nuser: {text} [error: none]")
+            );
+            assert_eq!(
+                owner_recap_line(&history[0], 4096).text,
+                format!("\nuser: {text}")
+            );
+            assert!(bounded_recap(&history).contains(text));
+        } else {
+            assert!(!recap.contains("nyx_bcl_") && !recap.contains("nyx_clk_"));
+        }
+    }
+    db.drop().await.unwrap();
+}
