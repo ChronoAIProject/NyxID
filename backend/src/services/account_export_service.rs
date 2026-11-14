@@ -81,6 +81,15 @@ fn forbidden_key(key: &str) -> bool {
         || key.contains("private")
         || key.contains("token_value")
         || key == "token"
+        || key.ends_with("_token")
+        || key.contains("access_token")
+        || key.contains("refresh_token")
+        || key.contains("raw_token")
+        || key.contains("credential")
+        || key.contains("oauth")
+        || key.contains("authorization_code")
+        || key.contains("api_key")
+        || key.contains("webhook")
         || key.contains("key_prefix")
         || key == "kid"
         || key == "key_id"
@@ -217,7 +226,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "channel_email_batches" => Some(("channels", "channel_email_batches")),
         "channel_email_receipts" => Some(("channels", "channel_email_receipts")),
         "channel_email_sends" => Some(("channels", "channel_email_sends")),
-        "channel_email_subscriptions" => Some(("channels", "channel_email_subscriptions")),
         "channel_messages" => Some(("channels", "channel_messages")),
         "channel_reply_deliveries" => Some(("channels", "channel_reply_deliveries")),
         "channel_text_deliveries" => Some(("channels", "channel_text_deliveries")),
@@ -355,6 +363,25 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "users" => Some(("account", "users")),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+struct ExplicitExportSpec {
+    section: &'static str,
+    subsection: &'static str,
+    fields: &'static [&'static str],
+}
+
+/// Resolve the section, subsection, and field allowlist together.  Keeping
+/// this as one explicit lookup means a new registry export cannot silently
+/// fall through to a broad common projection.
+fn explicit_export_spec(collection: &str) -> Option<ExplicitExportSpec> {
+    let (section, subsection) = export_spec(collection)?;
+    Some(ExplicitExportSpec {
+        section,
+        subsection,
+        fields: fields_for(collection),
+    })
 }
 const METADATA_FIELDS: &[&str] = &[
     "user_id",
@@ -661,7 +688,7 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "user_service_connections" => METADATA_FIELDS,
         "user_services" => METADATA_FIELDS,
         "users" => PROFILE_FIELDS,
-        _ => &[],
+        _ => panic!("missing explicit export field allowlist for {collection}"),
     }
 }
 fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Option<Document> {
@@ -1006,10 +1033,10 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         {
             continue;
         }
-        let Some((spec_section, subsection)) = export_spec(entry.collection) else {
+        let Some(spec) = explicit_export_spec(entry.collection) else {
             continue;
         };
-        debug_assert_eq!(section, spec_section);
+        debug_assert_eq!(section, spec.section);
         let Some(filter) = owner_filter(entry, account_id) else {
             continue;
         };
@@ -1017,14 +1044,14 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
             db,
             entry.collection,
             filter,
-            fields_for(entry.collection),
+            spec.fields,
             doc! {"created_at": -1},
         )
         .await?;
         sections
-            .entry(section.into())
+            .entry(spec.section.into())
             .or_default()
-            .insert(subsection.into(), value);
+            .insert(spec.subsection.into(), value);
     }
     let mut export = AccountExport {
         format: FORMAT,
@@ -1168,15 +1195,20 @@ mod tests {
         let mut seen = BTreeSet::new();
         for entry in personal_data_registry::entries() {
             if matches!(entry.export, personal_data_registry::Export::Section(_)) {
-                let spec = export_spec(entry.collection).expect(entry.collection);
+                let spec = explicit_export_spec(entry.collection).expect(entry.collection);
                 assert_eq!(
-                    spec.0,
+                    spec.section,
                     match entry.export {
                         personal_data_registry::Export::Section(section) => section,
                         _ => unreachable!(),
                     }
                 );
-                assert!(seen.insert(spec.1), "duplicate subsection spec");
+                assert!(
+                    !spec.fields.is_empty(),
+                    "empty explicit field allowlist for {}",
+                    entry.collection
+                );
+                assert!(seen.insert(spec.subsection), "duplicate subsection spec");
             }
         }
     }
