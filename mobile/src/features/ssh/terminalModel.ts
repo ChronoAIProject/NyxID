@@ -76,7 +76,7 @@ export function controlInput(input: string): string {
 }
 export const terminalBridgeSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }).strict(),
-  z.object({ type: z.literal("input"), data: z.string().max(65536) }).strict(),
+  z.object({ type: z.literal("input"), data: z.string().max(65548) }).strict(),
   z
     .object({
       type: z.literal("resize"),
@@ -94,13 +94,14 @@ export const terminalCommandSchema = z.discriminatedUnion("type", [
       type: z.literal("output"),
       data: z
         .string()
-        .max(22000)
+        .max(87384)
         .regex(/^[A-Za-z0-9+/]*={0,2}$/),
       id: z.number().int().positive(),
     })
     .strict(),
   z.object({ type: z.literal("key"), key: z.enum(terminalKeys) }).strict(),
   z.object({ type: z.literal("paste"), text: z.string().max(65536) }).strict(),
+  z.object({ type: z.literal("reset") }).strict(),
   z.object({ type: z.literal("fit") }).strict(),
 ]);
 export type TerminalCommand = z.infer<typeof terminalCommandSchema>;

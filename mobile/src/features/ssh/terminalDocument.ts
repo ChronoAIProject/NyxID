@@ -11,7 +11,7 @@ export function terminalDocument(theme: {
 window.open=undefined; window.fetch=undefined; window.WebSocket=undefined; window.XMLHttpRequest=undefined;
 document.addEventListener('click',function(e){e.preventDefault();});
 const send=(message)=>window.ReactNativeWebView.postMessage(JSON.stringify(message));
-const term=new Terminal({fontFamily:'monospace',fontSize:14,convertEol:false,scrollback:2000,allowProposedApi:false,theme:${JSON.stringify(theme)},linkHandler:{activate(){},hover(){},leave(){}}});
+const term=new Terminal({fontFamily:"ui-monospace, Menlo, 'Roboto Mono', monospace",fontSize:14,convertEol:false,scrollback:2000,allowProposedApi:false,theme:${JSON.stringify(theme)},linkHandler:{activate(){},hover(){},leave(){}}});
 const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(document.getElementById('terminal'));
 const textarea=document.querySelector('textarea');if(textarea){textarea.autocorrect='off';textarea.autocapitalize='off';textarea.spellcheck=false;textarea.setAttribute('autocomplete','off');}
 term.onData((data)=>send({type:'input',data}));
@@ -22,6 +22,7 @@ case 'output': {const raw=atob(message.data);const data=Uint8Array.from(raw,c=>c
 case 'paste':term.paste(message.text);term.focus();break;
 case 'key':term.input(keyInput(message.key,term.modes.applicationCursorKeysMode),true);term.focus();break;
 case 'fit':resize();break;
+case 'reset':term.reset();term.focus();break;
 }};
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(document.getElementById('terminal'));resize();send({type:'ready'});
 </script></body></html>`;

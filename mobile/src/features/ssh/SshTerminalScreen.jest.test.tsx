@@ -7,7 +7,7 @@ import { refreshAccessTokenIfNeeded } from "../../lib/api/http";
 import * as Clipboard from "expo-clipboard";
 const mockInject = jest.fn();
 let mockFocused = true;
-const mockNavigation = { setOptions: jest.fn() };
+const mockNavigation = { setOptions: jest.fn(), navigate: jest.fn() };
 const mockAppHandlers: ((value: AppStateStatus) => void)[] = [];
 jest.mock("@react-navigation/native", () => ({
   useIsFocused: () => mockFocused,
@@ -29,7 +29,15 @@ jest.mock("../../components/workspace/WorkspaceUI", () => ({
   },
 }));
 jest.mock("../../components/settings/SettingsList", () => ({
-  SettingsGroup: ({ children }: any) => children,
+  SettingsGroup: ({ children, footer }: any) => {
+    const { Text } = require("react-native");
+    return (
+      <>
+        {children}
+        {footer ? <Text>{footer}</Text> : null}
+      </>
+    );
+  },
   SettingsRow: ({ label, onPress }: any) => {
     const { Text } = require("react-native");
     return <Text onPress={onPress}>{label}</Text>;
@@ -69,7 +77,7 @@ jest.mock("../../lib/env", () => ({
   getFrontendUrl: () => "https://web.example",
 }));
 jest.mock("../../lib/api/servicesApi", () => ({
-  servicesApi: { connection: jest.fn() },
+  servicesApi: { connection: jest.fn(), connections: jest.fn() },
 }));
 jest.mock("expo-clipboard", () => ({
   getStringAsync: jest.fn(async () => "ls\n"),
@@ -113,6 +121,7 @@ beforeEach(() => {
   mockInject.mockClear();
   global.WebSocket = Socket as unknown as typeof WebSocket;
   jest.mocked(servicesApi.connection).mockResolvedValue(connection);
+  jest.mocked(servicesApi.connections).mockResolvedValue([connection]);
   jest
     .spyOn(AppState, "addEventListener")
     .mockImplementation((_event, handler) => {
@@ -129,13 +138,15 @@ const message = (view: any, data: unknown) =>
 
 test("bearer stays in the RN socket header; inline HTML, bridge and every injected script stay token-free", async () => {
   const screen = await render(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
   expect(view.props.source.html).not.toContain("SENTINEL_BEARER_TOKEN");
   expect(view.props.source.baseUrl).toBe("about:blank");
   expect(view.props.originWhitelist).toEqual(["about:blank"]);
   expect(view.props.allowFileAccess).toBe(false);
+  expect(view.props.hideKeyboardAccessoryView).toBe(true);
+  expect(view.props.keyboardDisplayRequiresUserAction).toBe(true);
   await act(async () => {
     message(view, { type: "ready" });
   });
@@ -178,7 +189,7 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
 
 test("background and blur close the socket and require explicit reconnect; 401 retries once", async () => {
   const screen = await render(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   await act(async () => {
     message(screen.getByTestId("terminal-webview"), { type: "ready" });
@@ -200,6 +211,10 @@ test("background and blur close the socket and require explicit reconnect; 401 r
   await fireEvent.press(screen.getByText("Reconnect"));
   expect(Socket.instances.length).toBe(3);
   await act(async () => {
+    mockAppHandlers.forEach((handler) => handler("inactive"));
+  });
+  expect(Socket.instances[2]!.close).not.toHaveBeenCalled();
+  await act(async () => {
     mockAppHandlers.forEach((handler) => handler("background"));
   });
   expect(Socket.instances[2]!.close).toHaveBeenCalledWith(1000);
@@ -210,14 +225,14 @@ test("background and blur close the socket and require explicit reconnect; 401 r
   expect(Socket.instances.length).toBe(3);
   mockFocused = false;
   await screen.rerender(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   await screen.unmount();
 });
 
 test("sticky Ctrl-C sends a binary interrupt once and releases the selected key", async () => {
   const screen = await render(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
   await act(async () => {
@@ -239,7 +254,7 @@ test("sticky Ctrl-C sends a binary interrupt once and releases the selected key"
 
 test("a terminated renderer gets a fresh inline document and navigation allowance", async () => {
   const screen = await render(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const first = screen.getByTestId("terminal-webview");
   first.props.onLoadStart();
@@ -266,7 +281,7 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
   "server errors retain actionable node/host messages: %s",
   async (detail) => {
     const screen = await render(
-      <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+      <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
     );
     await act(async () => {
       message(screen.getByTestId("terminal-webview"), { type: "ready" });
@@ -278,6 +293,9 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
       });
     });
     expect(screen.getByText("Connected")).toBeTruthy();
+    expect(
+      mockInject.mock.calls.some(([script]) => script.includes('"type":"reset"')),
+    ).toBe(true);
     await act(async () => {
       socket.onmessage?.({
         data: JSON.stringify({ type: "error", message: detail }),
@@ -293,7 +311,7 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
 test("remote close and invalid bridge data never replay shell input; resizing is debounced", async () => {
   jest.useFakeTimers();
   const screen = await render(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
   await act(async () => {
@@ -333,7 +351,7 @@ test("several principals require selection; a clipboard read resolving after blu
     ssh_allowed_principals: ["ops", "deploy"],
   });
   const screen = await render(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   await act(async () => {
     message(screen.getByTestId("terminal-webview"), { type: "ready" });
@@ -354,7 +372,7 @@ test("several principals require selection; a clipboard read resolving after blu
   await fireEvent.press(screen.getByLabelText("Paste"));
   mockFocused = false;
   await screen.rerender(
-    <SshTerminalScreen route={{ params: { serviceId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const injections = mockInject.mock.calls.length;
   await act(async () => {
@@ -362,5 +380,78 @@ test("several principals require selection; a clipboard read resolving after blu
   });
   expect(mockInject).toHaveBeenCalledTimes(injections);
   expect(Socket.instances[0]!.close).toHaveBeenCalledWith(1000);
+  await screen.unmount();
+});
+
+test("a catalog deep link resolves the active connection, while an unknown catalog is actionable", async () => {
+  const deep = await render(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog" } }} />,
+  );
+  await act(async () => {
+    message(deep.getByTestId("terminal-webview"), { type: "ready" });
+  });
+  expect(Socket.instances[0]!.url).toContain("/ssh/catalog/terminal?");
+  await deep.unmount();
+
+  Socket.instances = [];
+  jest.mocked(servicesApi.connections).mockResolvedValue([]);
+  const unknown = await render(
+    <SshTerminalScreen route={{ params: { serviceId: "missing-catalog" } }} />,
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(
+    unknown.getByText(
+      "This SSH service is not connected to your account. Open Services to connect it first.",
+    ),
+  ).toBeTruthy();
+  await fireEvent.press(unknown.getByText("Open Services"));
+  expect(mockNavigation.navigate).toHaveBeenCalledWith("Services");
+  await unknown.unmount();
+});
+
+test("a disallowed deep-link principal shows the picker instead of hanging", async () => {
+  const screen = await render(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", principal: "forbidden" } }}
+    />,
+  );
+  expect(
+    screen.getByText(
+      "That SSH principal is not allowed for this service. Choose one below.",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText("ops")).toBeTruthy();
+  expect(Socket.instances.length).toBe(0);
+  await screen.unmount();
+});
+
+test.each([
+  [
+    "node_key",
+    "Certificate-mode services are required for the mobile terminal. Run nyxid ssh exec <service> from a computer.",
+  ],
+  [
+    "proxy_only",
+    "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer.",
+  ],
+  ["cert", "Enable this connection to open the terminal."],
+])("non-terminal SSH mode copy is actionable: %s", async (mode, copy) => {
+  jest.mocked(servicesApi.connection).mockResolvedValue({
+    ...connection,
+    ssh_auth_mode: mode,
+    ...(mode === "cert" ? { is_active: false } : {}),
+  });
+  const screen = await render(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(screen.getByText(copy)).toBeTruthy();
+  expect(screen.queryByText("Open web terminal")).toBeNull();
   await screen.unmount();
 });

@@ -78,7 +78,13 @@ export type WorkspaceContentParamList = Omit<
   AgentDetail: { agentId: string };
   AgentProfileEdit: { agentId: string; field: AgentProfileField };
   GroupEditor: { groupId?: string } | undefined;
-  SshTerminal: { serviceId: string; principal?: string };
+  SshTerminal: {
+    /** Catalog service id used by the terminal WebSocket and deep links. */
+    serviceId: string;
+    /** Exact UserService connection id when opened from Services/Plugins. */
+    connectionId?: string;
+    principal?: string;
+  };
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
   SkillDetail: SkillPageParams;

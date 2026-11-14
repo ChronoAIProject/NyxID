@@ -3,6 +3,7 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 import {
   terminalBridgeSchema,
+  terminalCommandSchema,
   terminalKeyInput,
   terminalScript,
   terminalSize,
@@ -61,7 +62,7 @@ test("terminal key bar respects application cursor mode and sticky Ctrl mappings
 });
 test("bridge messages are strict and bounded; command serialization cannot inject JavaScript", () => {
   for (const value of [
-    { type: "input", data: "a".repeat(65537) },
+    { type: "input", data: "a".repeat(65549) },
     { type: "resize", cols: 1, rows: 2 },
     { type: "resize", cols: 80, rows: NaN },
     { type: "navigate", url: "https://evil.example" },
@@ -70,6 +71,23 @@ test("bridge messages are strict and bounded; command serialization cannot injec
     assert.equal(terminalBridgeSchema.safeParse(value).success, false);
   assert.equal(
     terminalBridgeSchema.safeParse({ type: "input", data: "ls\r" }).success,
+    true,
+  );
+  assert.equal(
+    terminalBridgeSchema.safeParse({ type: "input", data: "x".repeat(65548) })
+      .success,
+    true,
+  );
+  assert.equal(
+    terminalBridgeSchema.safeParse({ type: "input", data: "x".repeat(65549) })
+      .success,
+    false,
+  );
+  assert.equal(
+    terminalCommandSchema.safeParse({
+      type: "paste",
+      text: "x".repeat(65536),
+    }).success,
     true,
   );
   const text = "');window.fetch('https://evil.example');</script>";
@@ -100,6 +118,7 @@ test("offline WebView has no network permissions, navigation or external assets"
   assert.match(html, /window\.fetch=undefined/);
   assert.match(html, /window\.WebSocket=undefined/);
   assert.match(html, /window\.open=undefined/);
+  assert.match(html, /ui-monospace, Menlo, 'Roboto Mono', monospace/);
   assert.match(html, /textarea\.autocorrect='off'/);
   assert.match(html, /textarea\.spellcheck=false/);
   assert.match(html, /term\.paste\(message.text\)/);
@@ -145,7 +164,7 @@ test("output batches preserve binary bytes and wait for acknowledgements; queue 
     [...Buffer.from(sent[0]!.data, "base64")],
     [0, 27, 255, 195, 169],
   );
-  output.push(new Uint8Array(17000).buffer);
+  output.push(new Uint8Array(70000).buffer);
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(sent.length, 1);
   output.ack(999);
@@ -154,8 +173,8 @@ test("output batches preserve binary bytes and wait for acknowledgements; queue 
   output.ack(sent[0]!.id);
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(sent.length, 2);
-  assert.equal(Buffer.from(sent[1]!.data, "base64").length, 16384);
-  output.push(new Uint8Array(262145).buffer);
+  assert.equal(Buffer.from(sent[1]!.data, "base64").length, 65536);
+  output.push(new Uint8Array(4 * 1024 * 1024 + 1).buffer);
   assert.equal(overflow, 1);
   output.clear();
 });

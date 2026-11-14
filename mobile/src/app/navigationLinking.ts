@@ -53,7 +53,11 @@ export const navigationLinkingConfig: NonNullable<
         Services: "services",
         SshTerminal: {
           path: "ssh/:serviceId/terminal",
-          parse: { serviceId: String, principal: String },
+          parse: {
+            serviceId: String,
+            connectionId: String,
+            principal: String,
+          },
         },
         Activity: { path: "activity", parse: { challengeId: String } },
         Notifications: {

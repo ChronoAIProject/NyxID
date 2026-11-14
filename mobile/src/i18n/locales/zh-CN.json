@@ -347,8 +347,6 @@
   "Retry authorization": "重试授权",
   "SSH terminal": "SSH 终端",
   "Open terminal": "打开终端",
-  "Open web terminal": "打开网页版终端",
-  "The mobile terminal is available for active certificate-mode SSH services. Use the web terminal or nyxid ssh exec for other modes.": "移动终端仅支持已启用的证书模式 SSH 服务。其他模式请使用网页版终端或 nyxid ssh exec。",
   "Bind an online credential node to this SSH service before opening a terminal.": "打开终端前，请将在线凭据节点绑定到此 SSH 服务。",
   "Connecting…": "正在连接…",
   "Connected": "已连接",
@@ -376,5 +374,11 @@
   "ArrowLeft": "向左箭头",
   "ArrowRight": "向右箭头",
   "Choose an SSH principal to connect.": "请选择 SSH 登录身份以连接。",
-  "No SSH principals are configured for this service.": "此服务尚未配置 SSH 登录身份。"
+  "No SSH principals are configured for this service.": "此服务尚未配置 SSH 登录身份。",
+  "Certificate-mode services are required for the mobile terminal. Run nyxid ssh exec <service> from a computer.": "移动终端需要证书模式服务。请在电脑上运行 nyxid ssh exec <service>。",
+  "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer.": "移动终端需要证书模式服务。请在电脑上运行 nyxid ssh proxy。",
+  "Enable this connection to open the terminal.": "请启用此连接以打开终端。",
+  "This SSH service is not connected to your account. Open Services to connect it first.": "此 SSH 服务尚未连接到您的账户。请先打开服务进行连接。",
+  "Open Services": "打开服务",
+  "That SSH principal is not allowed for this service. Choose one below.": "此 SSH 登录身份不允许用于此服务。请从下方选择一个。"
 }

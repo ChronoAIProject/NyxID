@@ -1,5 +1,8 @@
 import { fromByteArray } from "base64-js";
 
+export const TERMINAL_OUTPUT_BATCH_BYTES = 64 * 1024;
+export const TERMINAL_OUTPUT_QUEUE_BYTES = 4 * 1024 * 1024;
+
 // One acknowledged batch at a time bounds both the JS queue and WebView work.
 export class TerminalOutput {
   private queue: Uint8Array[] = [];
@@ -13,7 +16,7 @@ export class TerminalOutput {
   ) {}
   push(data: ArrayBuffer) {
     if (data.byteLength === 0) return;
-    if (this.bytes + data.byteLength > 262144) {
+    if (this.bytes + data.byteLength > TERMINAL_OUTPUT_QUEUE_BYTES) {
       this.clear();
       this.overflow();
       return;
@@ -36,7 +39,9 @@ export class TerminalOutput {
   }
   private flush() {
     if (this.awaiting || !this.queue.length) return;
-    const batch = new Uint8Array(Math.min(this.bytes, 16384));
+    const batch = new Uint8Array(
+      Math.min(this.bytes, TERMINAL_OUTPUT_BATCH_BYTES),
+    );
     let offset = 0;
     while (offset < batch.length && this.queue.length) {
       const head = this.queue[0]!;
