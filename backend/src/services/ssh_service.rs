@@ -331,6 +331,13 @@ async fn generate_service_ca(
     ))
 }
 
+/// Sole signer for NyxID SSH user certificates. Callers are the
+/// `POST /ssh/{id}/certificate` route used by `nyxid ssh proxy` and
+/// `nyxid ssh issue-cert` (including the HTTP flow in
+/// `backend/src/ssh_cli.rs`), `ssh_web_terminal::generate_ephemeral_credentials`
+/// for browser and mobile terminals, cert-mode SSH exec, and MCP exec.
+/// Newly issued certificates carry only the `permit-pty` extension: no agent,
+/// port/TCP, X11-forwarding, or user-rc extensions are issued.
 pub async fn issue_certificate(
     encryption_keys: &EncryptionKeys,
     ssh_service: &SshServiceConfig,
@@ -686,6 +693,27 @@ mod tests {
         assert_eq!(
             certificate.extensions().0,
             std::collections::BTreeMap::from([(String::from("permit-pty"), String::new())])
+        );
+        assert!(certificate.critical_options().0.is_empty());
+        assert_eq!(certificate.valid_principals(), &[String::from("ubuntu")]);
+        assert_eq!(certificate.key_id(), issued.key_id);
+        assert_eq!(certificate.key_id(), "nyxid:service-1:user-1:ubuntu");
+        assert_eq!(
+            certificate.cert_type(),
+            ssh_key::certificate::CertType::User
+        );
+        assert_ne!(certificate.serial(), 0);
+        assert_eq!(
+            certificate.valid_after(),
+            issued.valid_after.timestamp() as u64
+        );
+        assert_eq!(
+            certificate.valid_before(),
+            issued.valid_before.timestamp() as u64
+        );
+        assert_eq!(
+            certificate.valid_before() - certificate.valid_after(),
+            30 * 60
         );
     }
 
