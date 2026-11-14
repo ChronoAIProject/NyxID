@@ -78,6 +78,8 @@ export function setupSettingsScreen(
     params,
     language = "en",
     diagnosticsOffered = false,
+    accountPolicy,
+    devicePolicy,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
@@ -91,12 +93,15 @@ export function setupSettingsScreen(
     params?: Record<string, unknown>;
     language?: Language;
     diagnosticsOffered?: boolean;
+    accountPolicy?: string;
+    devicePolicy?: 1|2;
   } = {},
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
   let pending = false;
   const mutations: unknown[] = [];
   const mutationOptions: Record<string, any>[] = [];
+  const analyticsSaves:unknown[][]=[];
   const deviceChoices: boolean[] = [];
   const pushes: unknown[][] = [];
   const preferences: unknown[] = [];
@@ -217,7 +222,7 @@ export function setupSettingsScreen(
                   ? voiceEnabled
                     ? ["assistant:voice"]
                     : []
-                  : { enabled: true, diagnostics_offered: diagnosticsOffered, current_policy_version: diagnosticsOffered ? "2" : "1" },
+                  : { enabled: true, policy_version:accountPolicy, diagnostics_offered: diagnosticsOffered, current_policy_version: diagnosticsOffered ? "2" : "1" },
       }),
       useMutation: (options: Record<string, any>) => {
         mutationOptions.push(options);
@@ -255,12 +260,12 @@ export function setupSettingsScreen(
     "../../lib/consent": {
       useMobileConsent: () => ({
         accountId: "account",
-        enabled: false,
+        enabled: false, policy:devicePolicy,
         setConsent: (value: boolean) => deviceChoices.push(value),
       }),
     },
-    "../../lib/analyticsConsentState": {},
-    "../../lib/analyticsRelay": {},
+    "../../lib/analyticsConsentState": {analyticsConsentState:{getSnapshot:()=>({accountId:"account",enabled:false})}},
+    "../../lib/analyticsRelay": {saveAnalyticsPermission:(...args:unknown[])=>{analyticsSaves.push(args);}},
     "../../lib/api/http": {
       requestJson: async () => ({ enabled: true }),
       requestBoundAuthenticatedResponse: async () => ({ response: { body: null }, assertOwner: async () => {} }),
@@ -358,7 +363,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
-    mutationOptions,
+    mutationOptions, analyticsSaves,
     pushPreferenceMutations,
     deviceChoices,
     sheets,

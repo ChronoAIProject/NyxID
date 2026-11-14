@@ -32,14 +32,14 @@ assert(nativeCrashThreadIndex([], faultAddress: 0) == nil)
 let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: directory) }
-for name in ["binding.json", "event-1.json", "binding.json.tmp", "event-2.json.tmp", ".staging"] {
+for name in ["binding.json", "raw-authority.json", "event-1.json", "binding.json.tmp", "event-2.json.tmp", ".staging"] {
   try Data("sanitized private buffer".utf8).write(to: directory.appendingPathComponent(name))
 }
 try FileManager.default.createDirectory(
   at: directory.appendingPathComponent("raw"), withIntermediateDirectories: true)
 purgeInterruptedCrashWrites(in: directory)
 let retainedFiles = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-assert(Set(retainedFiles) == Set(["binding.json", "event-1.json", "raw"]))
+assert(Set(retainedFiles) == Set(["binding.json", "raw-authority.json", "event-1.json", "raw"]))
 
 assert(!crashCaptureCanArm(reporterAvailable: false, enabled: false))
 assert(!crashCaptureCanArm(reporterAvailable: false, enabled: true))
@@ -135,11 +135,11 @@ for (index, image) in mappedImages.enumerated() {
   assert(uuid == String(format: "aabbccdd-eeff-4a55-8b66-%012x", index))
   let name = image["name"] as! String
   assert(!name.contains("/") && name == URL(fileURLWithPath: fixtureImages[index].name).lastPathComponent)
-  assert((image["size"] as! NSNumber).uint64Value == fixtureImages[index].size)
+  assert((image["size"] as! UInt64) == fixtureImages[index].size)
 }
 for (index, frame) in mappedFrames.enumerated() {
   assert(Set(frame.keys) == Set(["image", "offset"]))
-  let offset = (frame["offset"] as! NSNumber).uint64Value
+  let offset = (frame["offset"] as! UInt64)
   if let image = frame["image"] as? Int {
     assert(image == index % 20 && image < 16)
     assert(offset == 0x2A0 + UInt64(index) * 4 && offset < fixtureImages[image].size)
@@ -176,10 +176,10 @@ assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regression
 variant = fixture
 variant.faultAddress = 0
 let firstThread = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
-assert(((firstThread["native_frames"] as! [[String: Any]])[0]["offset"] as! NSNumber).uint64Value == 0x1000)
+assert(((firstThread["native_frames"] as! [[String: Any]])[0]["offset"] as! UInt64) == 0x1000)
 variant.threads[5].crashed = true
 let markedThread = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
-assert(((markedThread["native_frames"] as! [[String: Any]])[0]["offset"] as! NSNumber).uint64Value == 0x1500)
+assert(((markedThread["native_frames"] as! [[String: Any]])[0]["offset"] as! UInt64) == 0x1500)
 for invalidImage in [
   ParsedNativeCrash.Image(uuid: nil, name: "NyxIDMobile", baseAddress: fixtureImages[0].baseAddress, size: 0x10_0000),
   ParsedNativeCrash.Image(uuid: fixtureImages[0].uuid, name: "/private/\(secret)", baseAddress: fixtureImages[0].baseAddress, size: 0x10_0000),
@@ -188,7 +188,7 @@ for invalidImage in [
   variant.images[0] = invalidImage
   let record = sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow)!
   let frame = (record["native_frames"] as! [[String: Any]])[0]
-  assert(frame["image"] is NSNull && (frame["offset"] as! NSNumber).uint64Value == 0)
+  assert(frame["image"] is NSNull && (frame["offset"] as! UInt64) == 0)
 }
 for signal in ["SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "SIGTRAP", "SIGSYS", secret] {
   variant = fixture
@@ -251,9 +251,9 @@ native["exception_class"] = "Unknown"
 native["native_signal"] = "SIGABRT"
 native["js_frames"] = []
 native["native_images"] = [
-  ["uuid": UUID().uuidString, "name": "NyxIDMobile", "size": 4096, "registers": secret]
+  ["uuid": UUID().uuidString, "name": "NyxIDMobile", "size": UInt64(4096), "registers": secret]
 ]
-native["native_frames"] = [["image": 0, "offset": 32, "function": secret]]
+native["native_frames"] = [["image": 0, "offset": UInt64(32), "function": secret]]
 for key in ["reason", "registers", "message", "customData", "absolutePath"] { native[key] = secret }
 let output = sanitizedNativeRecord(native)!
 assert(Set(output.keys) == nativeKeys)
@@ -264,3 +264,17 @@ for value in [
 ] { assert(!bytes.contains(value)) }
 print("Generated native crash regression fixture: \(rawFixtureData.count) bytes (40 threads x 64 frames, 600 images)")
 print("Native crash size decision, mapping, discard log, JS fatal rejection and native allowlist proofs passed")
+
+for age: TimeInterval in [0, 86399, 86400, -300] {
+  assert(initialRawReportDecision(bindingEpoch: epoch, reportEpoch: epoch, fileAgeSeconds: age) == .retain)
+}
+for age: TimeInterval? in [nil, 86400.01, -300.01, .infinity, .nan] {
+  assert(initialRawReportDecision(bindingEpoch: epoch, reportEpoch: epoch, fileAgeSeconds: age) == .discard)
+}
+for pair: (String?, String?) in [(nil, epoch), (epoch, nil), (epoch, UUID().uuidString), ("", "")] {
+  assert(initialRawReportDecision(bindingEpoch: pair.0, reportEpoch: pair.1, fileAgeSeconds: 1) == .discard)
+}
+
+variant = fixture
+variant.timestamp = nil
+assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow) == nil)

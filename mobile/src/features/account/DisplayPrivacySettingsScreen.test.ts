@@ -264,3 +264,10 @@ test("Privacy hides all policy-2 groups and rows when diagnostics is not offered
   assert.ok(env.row("Allow on this device"));
   env.harness.unmount();
 });
+
+for (const [accountPolicy,devicePolicy,offered,expected] of [["2",1,true,2],["1",2,true,2],["2",2,false,1],["1",1,true,1]] as const) test(`account switch keeps acknowledged policy account=${accountPolicy} device=${devicePolicy} offered=${offered}`,()=>{
+  const env=setupSettingsScreen("./PrivacySettingsScreen.tsx","PrivacySettingsScreen",{diagnosticsOffered:offered,accountPolicy,devicePolicy});
+  env.mutationOptions[0]!.mutationFn(true);
+  assert.equal(env.analyticsSaves[0]![5],expected);
+  env.harness.unmount();
+});

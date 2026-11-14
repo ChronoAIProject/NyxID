@@ -18,6 +18,8 @@
   "Conversation": "对话",
   "Copy Recovery Codes": "复制恢复码",
   "Copy Setup Key": "复制设置密钥",
+  "Could not save account analytics permission.": "无法保存账户分析授权。",
+  "Could not save updated analytics permission.": "无法保存更新后的分析授权。",
   "Could not save updated analytics permission. This device remains off.": "无法保存更新后的分析授权。本设备保持关闭。",
   "Couldn't load active sessions": "无法加载活跃会话",
   "Couldn't load your profile": "无法加载个人资料",

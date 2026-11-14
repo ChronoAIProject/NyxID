@@ -62,6 +62,7 @@ export function PrivacySettingsScreen(
         requestJson,
         analyticsConsentState.getSnapshot,
         deviceConsent.setConsent,
+        analyticsPermission.data?.diagnostics_offered && (analyticsPermission.data?.policy_version === "2" || deviceConsent.policy === 2) ? 2 : 1,
       ),
     onSuccess: () => {
       void analyticsPermission.refetch();
@@ -69,7 +70,7 @@ export function PrivacySettingsScreen(
     onError: () =>
       setToast({
         message:
-          "Could not save account analytics permission. This device remains off; retry to withdraw across devices.",
+          "Could not save account analytics permission.",
         kind: "error",
       }),
   });
@@ -147,7 +148,7 @@ export function PrivacySettingsScreen(
   const reviewDiagnostics = useMutation({
     mutationFn: () => saveAnalyticsPermission(deviceConsent.accountId!, true, requestJson, analyticsConsentState.getSnapshot, deviceConsent.setConsent, 2),
     onSuccess: () => { void analyticsPermission.refetch(); },
-    onError: () => setToast({message:"Could not save updated analytics permission. This device remains off.",kind:"error"}),
+    onError: () => setToast({message:"Could not save updated analytics permission.",kind:"error"}),
   });
   const review = () => Alert.alert(t("Review updated analytics"), t("Optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Review to allow updated analytics, or keep your current choice."), [
     {text:t("Not now"),style:"cancel"}, {text:t("Allow updated analytics"),onPress:()=>reviewDiagnostics.mutate()},

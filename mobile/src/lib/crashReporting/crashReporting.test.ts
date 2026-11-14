@@ -163,7 +163,7 @@ function harness() {
       enabled: true,
       policy_version: "2",
       current_policy_version: "2",
-      diagnostics_available: true,
+      diagnostics_status: "available", diagnostics_available: true,
     };
   const sent: unknown[] = [];
   const fatal: string[] = [];
@@ -301,7 +301,7 @@ test("account A to B to A, withdrawal/regrant, kill switch and logout cannot res
   await h.lifecycle.refresh();
   assert.equal(h.records.length, 0);
   h.lifecycle.fatal(new Error(sentinel));
-  h.permission({ diagnostics_available: false });
+  h.permission({ diagnostics_status: "not_offered", diagnostics_available: false });
   await h.lifecycle.refresh();
   assert.equal(h.binding, null);
   assert.equal(h.records.length, 0);
@@ -353,7 +353,7 @@ test("Android uses installed version and reports JavaScript fatal records only",
         revision: b.revision,
         enabled: true,
         policy_version: "2",
-        diagnostics_available: true,
+        diagnostics_status: "available", diagnostics_available: true,
       }) as T,
     uuid: randomUUID,
     platform: "android",
@@ -405,7 +405,7 @@ test("device/session generations fence pending mobile sends even when the bindin
     account_id: binding.accountId,
     enabled: true,
     policy_version: "2",
-    diagnostics_available: true,
+    diagnostics_status: "available", diagnostics_available: true,
     revision: binding.revision,
   });
   assert.equal(await pending, false);
@@ -462,7 +462,7 @@ test("offline relaunch pauses without purging and retries the same revision; den
   assert.equal(h.records.length, 0);
   assert.equal(h.sent.length, 1);
   relaunched.fatal(new Error("next"));
-  h.fail({ errorCode: 13401 });
+  h.fail({ errorCode: 13400 });
   await relaunched.refresh();
   assert.equal(h.binding, null);
   assert.equal(h.records.length, 0);
@@ -492,4 +492,38 @@ test("an unavailable native reporter cannot arm JavaScript capture", async () =>
   assert.equal(h.binding,null);
   assert.equal(h.fatal.length,0);
   assert.equal(h.sent.length,0);
+});
+
+for (const [status, enabled, policy, action] of [
+  ["available",true,"2","available"], ["not_offered",true,"2","disarm"],
+  ["consent_required",true,"1","disarm"], ["consent_required",false,"2","disarm"],
+  ["unknown",true,"2","pause"], [undefined,true,"2","pause"],
+] as const) test(`permission ${status}/${enabled}/${policy} ${action}s without confusing unknown with withdrawal`, async () => {
+  const h=harness(); await h.lifecycle.setRestoring(false); h.lifecycle.fatal(new Error(sentinel));
+  const epoch=h.binding!.epochId, purges=h.purges;
+  h.permission({diagnostics_status:status,enabled,policy_version:policy,diagnostics_available:status==="available"});
+  await h.relaunch().setRestoring(false);
+  if (action==="disarm") { assert.equal(h.binding,null); assert.equal(h.records.length,0); }
+  if (action==="pause") { assert.equal(h.purges,purges); assert.equal(h.records.length,1); assert.equal(h.binding!.epochId,epoch);
+    h.permission({diagnostics_status:"available",diagnostics_available:true}); await h.lifecycle.refresh(); assert.equal(h.records.length,0); assert.equal(h.sent.length,1);
+  }
+  if (action==="available") assert.equal(h.sent.length,1);
+});
+for (const [statusCode,errorCode,action] of [
+  [400,1000,"drop"],[401,1000,"drop"],[403,1000,"drop"],[404,1000,"drop"],[422,1000,"drop"],
+  [429,1000,"pause"],[503,1000,"pause"],[500,1000,"pause"],[0,0,"pause"],
+  [403,13401,"pause"],[404,13400,"disarm"],
+] as const) test(`HTTP ${statusCode}/${errorCode} ${action}s the persisted record`,async()=>{
+  const h=harness(); await h.lifecycle.setRestoring(false); h.lifecycle.fatal(new Error(sentinel));
+  const purges=h.purges, epoch=h.binding!.epochId;
+  const native=h.native; let current=true;
+  const send=createCrashRelay(async<T>(path: string)=>{
+    if(path.endsWith("/analytics")) return {account_id:h.binding!.accountId,revision:h.binding!.revision,enabled:true,policy_version:"2",diagnostics_status:"available",diagnostics_available:true} as T;
+    throw {statusCode,errorCode};
+  },()=>current,()=>{native.disarm();current=false;},()=>0,()=>{current=false;native.pause();});
+  const b=h.binding!; const r=revalidateNativeRecord(h.records[0]!)!.report;
+  if(await send(r,b)) native.removeRecords([r.event_id]);
+  if(action==="drop") {assert.equal(h.records.length,0);assert.equal(h.purges,purges);}
+  else if(action==="disarm") {assert.equal(h.records.length,0);assert.equal(h.binding,null);}
+  else {assert.equal(h.records.length,1);assert.equal(h.purges,purges);assert.equal(h.binding!.epochId,epoch);}
 });

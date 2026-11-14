@@ -136,9 +136,18 @@ test('device withdrawal during mobile policy negotiation prevents PUT', async ()
   let calls = 0;
   const request: RelayRequest = async <T>() => { calls++; return new Promise<T>(resolve => { release = value => resolve(value as T); }); };
   const pending = saveAnalyticsPermission('a', true, request, state.getSnapshot, state.setConsent, 2);
-  assert.equal(state.getSnapshot().enabled, false);
+  assert.equal(state.getSnapshot().enabled, true);
   state.setConsent(false);
   release({ ...permission, current_policy_version: '2' });
   await assert.rejects(pending, /analytics_authority_changed/);
   assert.equal(calls, 1);
+});
+
+test('failed policy-two re-ack preserves an existing device opt-in; first opt-in stays off', async()=>{
+  for (const initiallyEnabled of [true,false]) {
+    const {state}=setup(); state.setConsent(initiallyEnabled,1);
+    await assert.rejects(saveAnalyticsPermission('a',true,async()=>{throw new Error('offline');},state.getSnapshot,state.setConsent,2),/offline/);
+    assert.equal(state.getSnapshot().enabled,initiallyEnabled);
+    assert.equal(state.getSnapshot().policy,1);
+  }
 });

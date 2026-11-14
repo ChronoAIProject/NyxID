@@ -30,6 +30,7 @@ public class NyxCrashReporterModule: Module {
       maxReportBytes: UInt(crashRawReportMaxBytes)) else { return nil }
     return PLCrashReporter(configuration: config)
   }()
+  private var rawAuthorityURL: URL { directory.appendingPathComponent("raw-authority.json") }
   private var bindingURL: URL { directory.appendingPathComponent("binding.json") }
   private func binding() -> [String: String]? {
     guard let data = try? Data(contentsOf: bindingURL), data.count < 4096,
@@ -78,10 +79,12 @@ public class NyxCrashReporterModule: Module {
     // Convert a capture-time-authorized raw report locally, then purge it even
     // when the network is offline. Only bounded sanitized records survive pause.
     _ = collect()
+    try? FileManager.default.removeItem(at: rawAuthorityURL)
   }
   private func disarm() {
     armed = false
     reporter?.customData = nil
+    try? FileManager.default.removeItem(at: rawAuthorityURL)
     try? FileManager.default.removeItem(at: bindingURL)
     purgeRecords()
     purgeInterruptedCrashWrites(in: directory)
@@ -139,6 +142,31 @@ public class NyxCrashReporterModule: Module {
     }
     return crash
   }
+  private func pendingRawAge() -> TimeInterval? {
+    let raw = directory.appendingPathComponent("raw/live_report.plcrash")
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: raw.path),
+      let modified = attributes[.modificationDate] as? Date else { return nil }
+    return Date().timeIntervalSince(modified)
+  }
+  private func rawEpoch(_ crash: PLCrashReport) -> String? {
+    guard let custom = crash.customData,
+      let token = (try? JSONSerialization.jsonObject(with: custom)) as? [String: String]
+    else { return nil }
+    return token["e"]
+  }
+  /// Module initialization only purges. Enabling and arming stay JS-driven.
+  private func initialRawPurge() {
+    guard let reporter else { purgePendingRaw(); return }
+    guard reporter.hasPendingCrashReport() else { return }
+    guard let bound = binding(), let epoch = bound["epochId"],
+      let authority = try? Data(contentsOf: rawAuthorityURL),
+      String(data: authority, encoding: .utf8) == epoch,
+      initialRawReportDecision(bindingEpoch: epoch, reportEpoch: epoch, fileAgeSeconds: pendingRawAge()) == .retain
+    else { purgePendingRaw(); return } // No binding/authority or expired: delete unread.
+    guard let crash = loadPendingRaw(reporter),
+      initialRawReportDecision(bindingEpoch: epoch, reportEpoch: rawEpoch(crash), fileAgeSeconds: pendingRawAge()) == .retain
+    else { purgePendingRaw(); return }
+  }
   /// All processing is invoked from JS, with no AppDelegate/SceneDelegate hooks.
   private func collect() -> [String] {
     defer { purgePendingRaw() }  // Explicit purge point 2: success, mismatch, corrupt, oversized and JS-duplicate paths.
@@ -147,7 +175,8 @@ public class NyxCrashReporterModule: Module {
       return []
     }
     if let reporter, reporter.hasPendingCrashReport() {
-      if let crash = loadPendingRaw(reporter),
+      if initialRawReportDecision(bindingEpoch: bound["epochId"], reportEpoch: bound["epochId"], fileAgeSeconds: pendingRawAge()) == .retain,
+        let crash = loadPendingRaw(reporter),
         let custom = crash.customData,
         let token = (try? JSONSerialization.jsonObject(with: custom)) as? [String: String],
         pendingCrashDecision(
@@ -177,6 +206,10 @@ public class NyxCrashReporterModule: Module {
   }
   /// Never access exceptionInfo, registers, processInfo, machineInfo or symbols.
   private func sanitize(_ crash: PLCrashReport) -> [String: Any]? {
+    guard let signal = crash.signalInfo, let application = crash.applicationInfo,
+      let system = crash.systemInfo, let timestamp = system.timestamp,
+      let osVersion = system.operatingSystemVersion
+    else { return nil }
     let parsed = ParsedNativeCrash(
       threads: (crash.threads as? [PLCrashReportThreadInfo] ?? []).map {
         ParsedNativeCrash.Thread(
@@ -185,18 +218,25 @@ public class NyxCrashReporterModule: Module {
             $0.instructionPointer
           })
       },
-      images: (crash.images as? [PLCrashReportBinaryImageInfo] ?? []).map {
+      images: (crash.images as? [PLCrashReportBinaryImageInfo] ?? []).compactMap {
+        guard let name = $0.imageName else { return nil }
+        return
         ParsedNativeCrash.Image(
-          uuid: $0.imageUUID, name: $0.imageName, baseAddress: $0.imageBaseAddress, size: $0.imageSize)
+          uuid: $0.imageUUID, name: name, baseAddress: $0.imageBaseAddress, size: $0.imageSize)
       },
-      signalName: crash.signalInfo.name, faultAddress: crash.signalInfo.address,
-      appMarketingVersion: crash.applicationInfo.applicationMarketingVersion,
-      appBuild: crash.applicationInfo.applicationVersion,
-      osVersion: crash.systemInfo.operatingSystemVersion, timestamp: crash.systemInfo.timestamp)
+      signalName: signal.name, faultAddress: signal.address,
+      appMarketingVersion: application.applicationMarketingVersion,
+      appBuild: application.applicationVersion,
+      osVersion: osVersion, timestamp: timestamp)
     return sanitizedNativeCrash(parsed, eventId: UUID().uuidString.lowercased(), now: Date())
   }
   public func definition() -> ModuleDefinition {
     Name("NyxCrashReporter")
+    OnCreate {
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      self.initialRawPurge()
+    }
     Function("getAppIdentity") {
       [
         "osVersion":
@@ -223,6 +263,7 @@ public class NyxCrashReporterModule: Module {
       guard let reporter = self.reporter else { self.disarm(); return false }
       if self.binding() != value { self.disarm() }
       try self.write(JSONSerialization.data(withJSONObject: value), to: self.bindingURL)
+      try self.write(Data((value["epochId"] ?? "").utf8), to: self.rawAuthorityURL)
       reporter.customData = try JSONSerialization.data(withJSONObject: ["e": value["epochId"] ?? ""])
       if !self.enabled { self.enabled = reporter.enable() }
       self.armed = crashCaptureCanArm(reporterAvailable: true, enabled: self.enabled)

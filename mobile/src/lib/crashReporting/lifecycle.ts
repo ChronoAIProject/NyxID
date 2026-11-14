@@ -1,7 +1,12 @@
 import type { ConsentSnapshot } from "../analyticsConsentState";
 import type { AnalyticsPermission, RelayRequest } from "../analyticsRelay";
 import { revalidateNativeRecord, type CrashBinding } from "./nativeRecord";
-import { createCrashRelay, crashAuthorityError, excludedMobileError } from "./reporter";
+import {
+  createCrashRelay,
+  crashAuthorityError,
+  excludedMobileError,
+  permissionDecision,
+} from "./reporter";
 import {
   exceptionClass,
   validateCrashRecord,
@@ -46,6 +51,11 @@ export function createCrashLifecycle(deps: {
     ready = false;
     deps.native.disarm();
   };
+  const pause = () => {
+    generation++;
+    ready = false;
+    deps.native.pause();
+  };
   const current = (b: CrashBinding) =>
     eligible() &&
     ready &&
@@ -57,9 +67,16 @@ export function createCrashLifecycle(deps: {
     current,
     disarm,
     () => generation,
+    pause,
   );
   const makeRecord = (error: unknown, kind: CrashKind): CrashReport | null => {
-    if (!binding || !current(binding) || count >= 10 || excludedMobileError(error)) return null;
+    if (
+      !binding ||
+      !current(binding) ||
+      count >= 10 ||
+      excludedMobileError(error)
+    )
+      return null;
     if (
       error instanceof Error &&
       ["AbortError", "CanceledError", "CancelledError"].includes(error.name)
@@ -92,8 +109,11 @@ export function createCrashLifecycle(deps: {
     disarm,
     setRestoring(value: boolean) {
       restoring = value;
-      if (value) { generation++; ready = false; deps.native.pause(); }
-      else return this.refresh();
+      if (value) {
+        generation++;
+        ready = false;
+        deps.native.pause();
+      } else return this.refresh();
     },
     async refresh() {
       generation++;
@@ -125,13 +145,10 @@ export function createCrashLifecycle(deps: {
           { expectedAccountId: start.accountId!, authorityGuard: guard },
         );
         guard();
-        if (
-          !permission.enabled ||
-          permission.policy_version !== "2" ||
-          !permission.diagnostics_available ||
-          permission.account_id !== start.accountId
-        ) {
-          disarm();
+        const decision = permissionDecision(permission, start.accountId!);
+        if (decision !== "available") {
+          if (decision === "disarm") disarm();
+          else pause();
           return;
         }
         const previous = deps.native.getBinding();
@@ -148,7 +165,10 @@ export function createCrashLifecycle(deps: {
             epochId: deps.uuid(),
           };
         }
-        if (!deps.native.arm(binding)) { disarm(); return; }
+        if (!deps.native.arm(binding)) {
+          disarm();
+          return;
+        }
         ready = true;
         for (const raw of deps.native.collectPending()) {
           guard();
@@ -171,9 +191,12 @@ export function createCrashLifecycle(deps: {
         }
       } catch (error) {
         if (epoch === generation) {
-          const code = error && typeof error === "object" ? (error as {errorCode?: number}).errorCode : undefined;
-          if (code === 13400 || code === 13401 || !eligible()) disarm();
-          else { ready = false; binding = null; deps.native.pause(); }
+          const code =
+            error && typeof error === "object"
+              ? (error as { errorCode?: number }).errorCode
+              : undefined;
+          if (code === 13400 || !eligible()) disarm();
+          else pause();
         }
       }
     },

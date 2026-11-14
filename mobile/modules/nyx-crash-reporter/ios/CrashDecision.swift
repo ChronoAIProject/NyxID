@@ -18,6 +18,18 @@ func crashDiscardLogLine(reason: CrashDiscardReason, byteCount: Int?) -> String 
   return "nyx-crash: raw report discarded reason=\(reason.rawValue) bytes=\(bytes)"
 }
 
+let crashRecordMaxAgeSeconds: TimeInterval = 86400
+enum InitialRawReportDecision: Equatable { case retain, discard }
+/// Missing authority/age is never permission to retain raw crash material.
+func initialRawReportDecision(bindingEpoch: String?, reportEpoch: String?, fileAgeSeconds: TimeInterval?) -> InitialRawReportDecision {
+  guard let epoch = bindingEpoch, !epoch.isEmpty, epoch == reportEpoch,
+    let age = fileAgeSeconds, age.isFinite, age >= -300, age <= crashRecordMaxAgeSeconds
+  else { return .discard }
+  return .retain
+}
+struct NativeCrashImage { var uuid: String; var name: String; var size: UInt64 }
+struct NativeCrashFrame { var image: Int?; var offset: UInt64 }
+
 /// Parser-independent values only. Exception text, registers and other parser metadata have no field.
 struct ParsedNativeCrash {
   struct Thread {
@@ -37,25 +49,25 @@ struct ParsedNativeCrash {
   var appMarketingVersion: String?
   var appBuild: String?
   var osVersion: String
-  var timestamp: Date
+  var timestamp: Date?
 }
 
 func sanitizedNativeCrash(_ crash: ParsedNativeCrash, eventId: String, now: Date) -> [String: Any]? {
-  guard let threadIndex = nativeCrashThreadIndex(
+  guard let timestamp = crash.timestamp, let threadIndex = nativeCrashThreadIndex(
     crash.threads.map { (crashed: $0.crashed, frameAddresses: $0.frames) },
     faultAddress: crash.faultAddress),
-    crash.timestamp.timeIntervalSince(now) >= -86400,
-    crash.timestamp.timeIntervalSince(now) <= 300
+    timestamp.timeIntervalSince(now) >= -86400,
+    timestamp.timeIntervalSince(now) <= 300
   else { return nil }
   var selected: [ParsedNativeCrash.Image] = []
-  var images: [[String: Any]] = []
-  var frames: [[String: Any]] = []
+  var images: [NativeCrashImage] = []
+  var frames: [NativeCrashFrame] = []
   for address in crash.threads[threadIndex].frames.prefix(64) {
     guard let image = crash.images.first(where: {
       address >= $0.baseAddress && address - $0.baseAddress < $0.size
     }), let rawUuid = image.uuid
     else {
-      frames.append(["image": NSNull(), "offset": 0])
+      frames.append(NativeCrashFrame(image: nil, offset: 0))
       continue
     }
     let compact = rawUuid.replacingOccurrences(of: "-", with: "")
@@ -65,19 +77,19 @@ func sanitizedNativeCrash(_ crash: ParsedNativeCrash, eventId: String, now: Date
     guard UUID(uuidString: uuidText) != nil else { continue }
     let name = URL(fileURLWithPath: image.name).lastPathComponent
     guard crashMatches(name, "^[A-Za-z0-9_.+-]{1,64}$") else {
-      frames.append(["image": NSNull(), "offset": 0])
+      frames.append(NativeCrashFrame(image: nil, offset: 0))
       continue
     }
     var index = selected.firstIndex(where: { $0.baseAddress == image.baseAddress })
     if index == nil && selected.count < 16 {
       index = selected.count
       selected.append(image)
-      images.append(["uuid": uuidText.lowercased(), "name": name, "size": image.size])
+      images.append(NativeCrashImage(uuid: uuidText.lowercased(), name: name, size: image.size))
     }
     if let index {
-      frames.append(["image": index, "offset": address - image.baseAddress])
+      frames.append(NativeCrashFrame(image: index, offset: address - image.baseAddress))
     } else {
-      frames.append(["image": NSNull(), "offset": 0])
+      frames.append(NativeCrashFrame(image: nil, offset: 0))
     }
   }
   let version = crash.appMarketingVersion ?? "0"
@@ -91,11 +103,11 @@ func sanitizedNativeCrash(_ crash: ParsedNativeCrash, eventId: String, now: Date
   let formatter = ISO8601DateFormatter()
   formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
   return sanitizedNativeRecord([
-    "schema_version": 1, "event_id": eventId, "captured_at": formatter.string(from: crash.timestamp),
+    "schema_version": 1, "event_id": eventId, "captured_at": formatter.string(from: timestamp),
     "platform": "ios", "kind": "native_crash", "exception_class": "Unknown",
     "native_signal": ["SIGSEGV", "SIGBUS", "SIGABRT", "SIGILL", "SIGFPE", "SIGTRAP", "SIGSYS"]
       .contains(signal) ? signal : "Other", "app_version": version, "app_build": build,
-    "os_version": os, "js_frames": [], "native_images": images, "native_frames": frames,
+    "os_version": os, "js_frames": [], "native_images": images.map { ["uuid": $0.uuid, "name": $0.name, "size": $0.size] as [String: Any] }, "native_frames": frames.map { ["image": $0.image.map { $0 as Any } ?? NSNull(), "offset": $0.offset] as [String: Any] },
   ])
 }
 
@@ -120,7 +132,7 @@ func purgeInterruptedCrashWrites(in directory: URL) {
       at: directory, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
   for file in files {
     let name = file.lastPathComponent
-    guard name != "binding.json",
+    guard name != "binding.json", name != "raw-authority.json",
       !(name.hasPrefix("event-") && file.pathExtension == "json"),
       (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
     else { continue }
@@ -228,22 +240,22 @@ func sanitizedNativeRecord(_ input: [String: Any]) -> [String: Any]? {
   for image in images {
     guard let uuid = image["uuid"] as? String, UUID(uuidString: uuid) != nil,
       let name = image["name"] as? String, crashMatches(name, "^[A-Za-z0-9_.+-]{1,64}$"),
-      let size = image["size"] as? NSNumber, size.uint64Value > 0,
-      size.uint64Value <= UInt64(Int64.max)
+      let size = image["size"] as? UInt64, size > 0,
+      size <= UInt64(Int64.max)
     else { return nil }
     safeImages.append(["uuid": uuid, "name": name, "size": size])
   }
   for frame in frames {
-    guard let offset = frame["offset"] as? NSNumber, offset.uint64Value <= UInt64(Int64.max) else {
+    guard let offset = frame["offset"] as? UInt64, offset <= UInt64(Int64.max) else {
       return nil
     }
     if let index = frame["image"] as? Int {
-      guard images.indices.contains(index), let size = images[index]["size"] as? NSNumber,
-        offset.uint64Value < size.uint64Value
+      guard images.indices.contains(index), let size = images[index]["size"] as? UInt64,
+        offset < size
       else { return nil }
       safeFrames.append(["image": index, "offset": offset])
     } else {
-      safeFrames.append(["image": NSNull(), "offset": 0])
+      safeFrames.append(["image": NSNull(), "offset": UInt64(0)])
     }
   }
   return [

@@ -6,17 +6,39 @@ export function crashAuthorityError(): Error {
   return error;
 }
 export function excludedMobileError(error: unknown): boolean {
-  return (error instanceof ApiError && error.statusCode < 500) ||
-    (typeof error === "object" && error !== null && ownErrors.has(error));
+  return (
+    (error instanceof ApiError && error.statusCode < 500) ||
+    (typeof error === "object" && error !== null && ownErrors.has(error))
+  );
 }
 import type { RelayRequest, AnalyticsPermission } from "../analyticsRelay";
 import type { CrashReport } from "../../../../shared/crash-report";
 import type { CrashBinding } from "./nativeRecord";
+/** Missing status is an older/rolled-back server, never proof of withdrawal. */
+export function permissionDecision(
+  permission: AnalyticsPermission,
+  accountId: string,
+): "available" | "pause" | "disarm" {
+  if (
+    permission.account_id !== accountId ||
+    !permission.enabled ||
+    permission.diagnostics_status === "not_offered" ||
+    (permission.diagnostics_status === "consent_required" &&
+      permission.policy_version !== "2")
+  )
+    return "disarm";
+  return permission.diagnostics_status === "available" &&
+    permission.policy_version === "2" &&
+    permission.diagnostics_available === true
+    ? "available"
+    : "pause";
+}
 export function createCrashRelay(
   request: RelayRequest,
   isCurrent: (binding: CrashBinding) => boolean,
   denied: () => void,
   authorityVersion: () => number = () => 0,
+  paused: () => void = () => {},
 ) {
   let inFlight = 0;
   return async (
@@ -41,14 +63,14 @@ export function createCrashRelay(
         options,
       );
       guard();
-      if (
-        !permission.enabled ||
-        permission.policy_version !== "2" ||
-        !permission.diagnostics_available ||
-        permission.revision !== binding.revision ||
-        permission.account_id !== binding.accountId
-      ) {
-        denied();
+      const decision = permissionDecision(permission, binding.accountId);
+      if (decision !== "available") {
+        if (decision === "disarm") denied();
+        else paused();
+        return false;
+      }
+      if (permission.revision !== binding.revision) {
+        paused();
         return false;
       }
       await request("/users/me/crash-reports", {
@@ -67,7 +89,27 @@ export function createCrashRelay(
         error && typeof error === "object"
           ? (error as { errorCode?: number }).errorCode
           : undefined;
-      if (current() && (code === 13400 || code === 13401)) denied();
+      if (!current()) return false;
+      if (code === 13400) {
+        denied();
+        return false;
+      }
+      if (code === 13401) {
+        paused();
+        return false;
+      }
+      const status =
+        error && typeof error === "object"
+          ? (error as { statusCode?: number }).statusCode
+          : undefined;
+      if (
+        status !== undefined &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429
+      )
+        return true; // Permanently rejected: remove this record only.
+      paused();
       return false;
     } finally {
       inFlight--;
