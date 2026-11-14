@@ -21,6 +21,11 @@ import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
 
+import { installCrashReporting, crashRootOptions } from "./lib/crash-reporting/install";
+import { refreshCrashPermission } from "./lib/crash-reporting/reporter";
+installCrashReporting();
+useAuthStore.subscribe(() => { void refreshCrashPermission(); });
+useConsentStore.subscribe(() => { void refreshCrashPermission(); });
 installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -81,6 +86,7 @@ function Root() {
   const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
+  useEffect(() => { if (ready) void refreshCrashPermission(); }, [ready, telemetryAccountId, consentEnabled]);
 
   // Runtime telemetry config. Cached with `staleTime: Infinity`
   // (see hooks/use-public-config.ts), so fetched at most once per
@@ -186,7 +192,7 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-void appLanguageReady.then(() => createRoot(rootElement).render(
+void appLanguageReady.then(() => createRoot(rootElement, crashRootOptions).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <Root />

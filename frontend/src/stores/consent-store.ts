@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand';
 
-type Choice = { enabled: boolean; asked: boolean };
+type Choice = { enabled: boolean; asked: boolean; policy?: 1|2 };
 const OFF: Choice = { enabled: false, asked: false };
 // A failed withdrawal must not be undone by rereading an older disk opt-in.
 // Only a successful explicit positive write clears this in-memory denial.
@@ -19,7 +19,7 @@ function readChoice(accountId: string | null): Choice {
     const value: unknown = JSON.parse(localStorage.getItem(consentStorageKey(accountId)) ?? 'null');
     if (value && typeof value === 'object' && 'enabled' in value && 'asked' in value
         && typeof value.enabled === 'boolean' && typeof value.asked === 'boolean')
-      return { enabled: value.enabled, asked: value.asked };
+      return { enabled: value.enabled, asked: value.asked, policy: 'policy' in value && value.policy === 2 ? 2 : 1 };
   } catch { /* Missing, blocked or corrupt storage fails closed. */ }
   return OFF;
 }
@@ -28,7 +28,7 @@ export interface ConsentState extends Choice {
   persistenceError: boolean;
   accountId: string | null;
   bindAccount(accountId: string | null): void;
-  setConsent(enabled: boolean): void;
+  setConsent(enabled: boolean, policy?: 1|2): void;
   clearConsent(): void;
 }
 export const useConsentStore = create<ConsentState>((set, get) => ({
@@ -36,10 +36,10 @@ export const useConsentStore = create<ConsentState>((set, get) => ({
   bindAccount(accountId) {
     set({ accountId, persistenceError: !!accountId && persistenceFailures.has(accountId), ...readChoice(accountId), revision: get().revision + 1 });
   },
-  setConsent(enabled) {
+  setConsent(enabled, policy = 1) {
     const { accountId } = get();
     if (!accountId) return;
-    const choice = { enabled, asked: true };
+    const choice = { enabled, asked: true, policy };
     try { localStorage.setItem(consentStorageKey(accountId), JSON.stringify(choice)); }
     catch { /* An unsaved opt-in must not appear durable. Withdrawal still wins. */
       failedDenials.add(accountId);
