@@ -29,17 +29,56 @@ pub async fn tick(db: &Database, config: &CrashConfig) -> AppResult<()> {
     if config.interval.is_zero() {
         return Ok(());
     }
-    db.collection::<Document>(COLLECTION_NAME).update_many(doc! {
-        "export.status": "dispatching", "$expr": {"$and": [{"$lte": ["$export.lease_until", "$$NOW"]}, {"$gt": ["$expires_at", "$$NOW"]}]}
-    }, doc! {"$set": {"export.status": "unknown", "export.last_error_code": "dispatch_lease_expired", "export.lease_id": null, "export.lease_until": null}}).await?;
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_many(
+            doc! {
+                "export.status": "dispatching",
+                "$expr": {
+                    "$and": [
+                        {"$lte": ["$export.lease_until", "$$NOW"]},
+                        {"$gt": ["$expires_at", "$$NOW"]}
+                    ]
+                }
+            },
+            doc! {
+                "$set": {
+                    "export.status": "unknown",
+                    "export.last_error_code": "dispatch_lease_expired",
+                    "export.lease_id": null,
+                    "export.lease_until": null
+                }
+            },
+        )
+        .await?;
     for _ in 0..16 {
         let lease = uuid::Uuid::new_v4().to_string();
-        let row = db.collection::<ClientErrorReport>(COLLECTION_NAME).find_one_and_update(doc! {
-            "export.status": "pending", "$expr": {"$and": [
-                {"$gt": ["$expires_at", "$$NOW"]}, {"$lte": ["$export.next_attempt_at", "$$NOW"]},
-                {"$lte": [{"$ifNull": ["$export.lease_until", bson::DateTime::from_millis(0)]}, "$$NOW"]}
-            ]}
-        }, vec![doc! {"$set": {"export.lease_id": &lease, "export.lease_until": {"$add": ["$$NOW", 60000_i64]}}}]).sort(doc! {"export.next_attempt_at": 1}).return_document(ReturnDocument::After).await?;
+        let row = db
+            .collection::<ClientErrorReport>(COLLECTION_NAME)
+            .find_one_and_update(
+                doc! {
+                    "export.status": "pending",
+                    "$expr": {"$and": [
+                        {"$gt": ["$expires_at", "$$NOW"]},
+                        {"$lte": ["$export.next_attempt_at", "$$NOW"]},
+                        {"$lte": [
+                            {"$ifNull": [
+                                "$export.lease_until",
+                                bson::DateTime::from_millis(0)
+                            ]},
+                            "$$NOW"
+                        ]}
+                    ]}
+                },
+                vec![doc! {
+                    "$set": {
+                        "export.lease_id": &lease,
+                        "export.lease_until": {"$add": ["$$NOW", 60000_i64]}
+                    }
+                }],
+            )
+            .sort(doc! {"export.next_attempt_at": 1})
+            .return_document(ReturnDocument::After)
+            .await?;
         let Some(row) = row else {
             break;
         };
@@ -55,7 +94,12 @@ async fn settle(
     code: Option<&str>,
     retry: Option<u64>,
 ) -> AppResult<()> {
-    let mut fields = doc! {"export.status": status.as_str(), "export.last_error_code": code, "export.lease_id": null, "export.lease_until": null};
+    let mut fields = doc! {
+        "export.status": status.as_str(),
+        "export.last_error_code": code,
+        "export.lease_id": null,
+        "export.lease_until": null
+    };
     if let Some(seconds) = retry {
         fields.insert(
             "export.next_attempt_at",
@@ -65,7 +109,19 @@ async fn settle(
     if status == ExportStatus::Exported {
         fields.insert("export.exported_at", "$$NOW");
     }
-    db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id": id, "export.lease_id": lease, "$expr": {"$and": [{"$gt": ["$export.lease_until", "$$NOW"]}, {"$gt": ["$expires_at", "$$NOW"]}]}}, vec![doc! {"$set": fields}]).await?;
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": id,
+                "export.lease_id": lease,
+                "$expr": {"$and": [
+                    {"$gt": ["$export.lease_until", "$$NOW"]},
+                    {"$gt": ["$expires_at", "$$NOW"]}
+                ]}
+            },
+            vec![doc! {"$set": fields}],
+        )
+        .await?;
     Ok(())
 }
 async fn dispatch(
@@ -134,10 +190,25 @@ async fn dispatch(
         )
         .await;
     }
-    let changed = db.collection::<Document>(COLLECTION_NAME).update_one(doc! {
-        "_id": &row.id, "export.status": "pending", "export.lease_id": lease,
-        "$expr": {"$and": [{"$gt": ["$export.lease_until", "$$NOW"]}, {"$gt": ["$export.deadline", "$$NOW"]}, {"$gt": ["$expires_at", "$$NOW"]}]}
-    }, doc! {"$set": {"export.status": "dispatching"}, "$inc": {"export.attempts": 1_i64}}).await?;
+    let changed = db
+        .collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": &row.id,
+                "export.status": "pending",
+                "export.lease_id": lease,
+                "$expr": {"$and": [
+                    {"$gt": ["$export.lease_until", "$$NOW"]},
+                    {"$gt": ["$export.deadline", "$$NOW"]},
+                    {"$gt": ["$expires_at", "$$NOW"]}
+                ]}
+            },
+            doc! {
+                "$set": {"export.status": "dispatching"},
+                "$inc": {"export.attempts": 1_i64}
+            },
+        )
+        .await?;
     if changed.modified_count != 1 {
         return Ok(());
     }

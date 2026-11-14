@@ -42,15 +42,33 @@ pub fn envelope(safe: &SanitizedReport<'_>) -> Vec<u8> {
         .to_string();
     let native = r.kind == Kind::NativeCrash;
     let frames: Vec<Value> = if native {
-        r.native_frames.iter().rev().map(|f| {
-            // Unknown images have no address: absolute process addresses are never exported.
-            match f.image {
-                Some(index) => json!({"instruction_addr": format!("0x{:x}", f.offset), "addr_mode": format!("rel:{index}"), "package": r.native_images[usize::from(index)].name}),
-                None => json!({"instruction_addr": "0x0"}),
-            }
-        }).collect()
+        r.native_frames
+            .iter()
+            .rev()
+            .map(|f| {
+                // Unknown images have no address: absolute process addresses are never exported.
+                match f.image {
+                    Some(index) => json!({
+                        "instruction_addr": format!("0x{:x}", f.offset),
+                        "addr_mode": format!("rel:{index}"),
+                        "package": r.native_images[usize::from(index)].name
+                    }),
+                    None => json!({"instruction_addr": "0x0"}),
+                }
+            })
+            .collect()
     } else {
-        r.js_frames.iter().rev().map(|f| json!({"abs_path": format!("app:///{}", f.asset), "lineno": f.line, "colno": f.column})).collect()
+        r.js_frames
+            .iter()
+            .rev()
+            .map(|f| {
+                json!({
+                    "abs_path": format!("app:///{}", f.asset),
+                    "lineno": f.line,
+                    "colno": f.column
+                })
+            })
+            .collect()
     };
     let release = if r.platform == Platform::Web {
         format!(
@@ -68,13 +86,26 @@ pub fn envelope(safe: &SanitizedReport<'_>) -> Vec<u8> {
     };
     let mut event = json!({
         "event_id": event_id, "timestamp": r.captured_at, "level": safe.severity,
-        "platform": if native {"cocoa"} else {"javascript"}, "release": release, "dist": r.app_build,
+        "platform": if native {"cocoa"} else {"javascript"},
+        "release": release, "dist": r.app_build,
         "environment": safe.environment,
-        "sdk": {"name": "nyxid.crash-export", "version": env!("CARGO_PKG_VERSION"), "settings": {"infer_ip": "never"}},
-        "exception": {"values": [{"type": r.native_signal.map(|s| s.as_str()).unwrap_or(r.exception_class.as_str()),
-            "mechanism": {"type": r.kind.as_str(), "handled": matches!(r.kind, Kind::RenderError | Kind::RecoverableError | Kind::ResourceError)},
+        "sdk": {
+            "name": "nyxid.crash-export",
+            "version": env!("CARGO_PKG_VERSION"),
+            "settings": {"infer_ip": "never"}
+        },
+        "exception": {"values": [{
+            "type": r.native_signal.map(|s| s.as_str()).unwrap_or(r.exception_class.as_str()),
+            "mechanism": {
+                "type": r.kind.as_str(),
+                "handled": matches!(
+                    r.kind,
+                    Kind::RenderError | Kind::RecoverableError | Kind::ResourceError
+                )
+            },
             "stacktrace": {"frames": frames}}]},
-        "contexts": {"os": {"version": r.os_version}}, "tags": {"kind": r.kind.as_str(), "platform": r.platform.as_str()}
+        "contexts": {"os": {"version": r.os_version}},
+        "tags": {"kind": r.kind.as_str(), "platform": r.platform.as_str()}
     });
     if r.platform != Platform::Web {
         event["contexts"]["os"]["name"] = json!(if r.platform == Platform::Ios {
@@ -91,7 +122,15 @@ pub fn envelope(safe: &SanitizedReport<'_>) -> Vec<u8> {
         }] = json!({"name": runtime.name.as_str(), "version": runtime.major.to_string()});
     }
     if native {
-        event["debug_meta"] = json!({"images": r.native_images.iter().map(|i| json!({"type": "macho", "debug_id": i.uuid, "image_addr": "0x0", "image_size": i.size, "code_file": i.name})).collect::<Vec<_>>()});
+        event["debug_meta"] = json!({
+            "images": r.native_images.iter().map(|i| json!({
+                "type": "macho",
+                "debug_id": i.uuid,
+                "image_addr": "0x0",
+                "image_size": i.size,
+                "code_file": i.name
+            })).collect::<Vec<_>>()
+        });
     }
     let payload = serde_json::to_vec(&event).expect("closed envelope");
     let mut bytes = format!(

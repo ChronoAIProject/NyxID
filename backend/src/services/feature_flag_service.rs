@@ -1103,8 +1103,16 @@ pub(crate) async fn resolve_crash_reporting(
             .iter()
             .map(|m| bson::Bson::String(m.org_user_id.clone())),
     );
-    let rows: Vec<FeatureFlagOverride> = db.collection(COLLECTION_NAME)
-        .find(doc! {"flag_key": CRASH_REPORTS_FLAG_KEY, "definition_id": null, "org_user_id": {"$in": scopes}}).await?.try_collect().await?;
+    let rows: Vec<FeatureFlagOverride> = db
+        .collection(COLLECTION_NAME)
+        .find(doc! {
+            "flag_key": CRASH_REPORTS_FLAG_KEY,
+            "definition_id": null,
+            "org_user_id": {"$in": scopes}
+        })
+        .await?
+        .try_collect()
+        .await?;
     let (org, platform): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.org_user_id.is_some());
     let killed = platform
         .iter()

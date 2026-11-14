@@ -41,9 +41,18 @@ impl Default for CrashConfig {
 impl CrashConfig {
     pub fn from_config(config: &crate::config::AppConfig) -> Result<Self, &'static str> {
         let value = &config.crash_reporting;
-        let destination = |v: &Option<crate::config::CrashDestinationConfig>| -> Result<Option<Arc<dyn CrashReportExporter>>, &'static str> {
-            v.as_ref().map(|v| sentry::SentryExporter::new(v).map(|e| Arc::new(e) as Arc<dyn CrashReportExporter>)).transpose()
-        };
+        let destination =
+            |v: &Option<crate::config::CrashDestinationConfig>| -> Result<
+                Option<Arc<dyn CrashReportExporter>>,
+                &'static str,
+            > {
+            v.as_ref()
+                .map(|v| {
+                    sentry::SentryExporter::new(v)
+                        .map(|e| Arc::new(e) as Arc<dyn CrashReportExporter>)
+                })
+                .transpose()
+            };
         Ok(Self {
             web: destination(&value.web)?,
             mobile: destination(&value.mobile)?,

@@ -40,7 +40,12 @@ impl RegisterRelease {
         Ok(())
     }
     fn filter(&self) -> Document {
-        doc! {"platform": self.platform.as_str(), "app_version": &self.app_version, "app_build": &self.app_build, "artifact_id": &self.artifact_id}
+        doc! {
+            "platform": self.platform.as_str(),
+            "app_version": &self.app_version,
+            "app_build": &self.app_build,
+            "artifact_id": &self.artifact_id
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,7 +78,17 @@ pub async fn register(
         registered_at: Utc::now(),
         registered_by: actor.map(str::to_owned),
     };
-    let result = db.collection::<ClientRelease>(RELEASES).update_one(identity.filter(), doc! {"$setOnInsert": bson::to_document(&row).map_err(|_| AppError::Internal("Release serialization failed".into()))?}).upsert(true).await?;
+    let result = db
+        .collection::<ClientRelease>(RELEASES)
+        .update_one(
+            identity.filter(),
+            doc! {
+                "$setOnInsert": bson::to_document(&row)
+                    .map_err(|_| AppError::Internal("Release serialization failed".into()))?
+            },
+        )
+        .upsert(true)
+        .await?;
     Ok(if result.upserted_id.is_some() {
         Registration::Registered
     } else {
@@ -239,12 +254,33 @@ mod review_tests;
 /// A web identity binds its artifact; store binaries bind platform/version/build.
 /// Verification is query-time so registration requires no report backfill.
 pub fn verification_lookup() -> Document {
-    doc! {"$lookup": {"from": RELEASES, "let": {"platform": "$report.platform", "version": "$report.app_version", "build": "$report.app_build", "artifact": "$report.artifact_id"}, "pipeline": [
-        {"$match": {"$expr": {"$and": [
-            {"$eq": ["$platform", "$$platform"]}, {"$eq": ["$app_version", "$$version"]}, {"$eq": ["$app_build", "$$build"]},
-            {"$or": [{"$ne": ["$$platform", "web"]}, {"$eq": ["$artifact_id", "$$artifact"]}]}
-        ]}}}, {"$limit": 1}, {"$project": {"_id":1}}
-    ], "as": "registered_release"}}
+    doc! {
+        "$lookup": {
+            "from": RELEASES,
+            "let": {
+                "platform": "$report.platform",
+                "version": "$report.app_version",
+                "build": "$report.app_build",
+                "artifact": "$report.artifact_id"
+            },
+            "pipeline": [{
+                "$match": {
+                    "$expr": {
+                        "$and": [
+                            {"$eq": ["$platform", "$$platform"]},
+                            {"$eq": ["$app_version", "$$version"]},
+                            {"$eq": ["$app_build", "$$build"]},
+                            {"$or": [
+                                {"$ne": ["$$platform", "web"]},
+                                {"$eq": ["$artifact_id", "$$artifact"]}
+                            ]}
+                        ]
+                    }
+                }
+            }, {"$limit": 1}, {"$project": {"_id": 1}}],
+            "as": "registered_release"
+        }
+    }
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     db.collection::<ClientRelease>(RELEASES)

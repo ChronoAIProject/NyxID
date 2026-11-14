@@ -148,9 +148,23 @@ pub async fn count(db: &Database, platform: Option<Platform>, outcome: &'static 
     let now = Utc::now();
     let platform = platform.map(Platform::as_str).unwrap_or("unknown");
     let bucket = now.timestamp() / 3600;
-    let mut result = db.collection::<Document>(COUNTERS).update_one(doc! {"bucket": bucket, "platform": platform, "outcome": outcome}, doc! {
-        "$inc": {"count": 1_i64}, "$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "received_at": bson::DateTime::from_millis(bucket * 3600 * 1000), "expires_at": bson::DateTime::from_chrono(now + chrono::Duration::days(30))}
-    }).upsert(true).await;
+    let mut result = db
+        .collection::<Document>(COUNTERS)
+        .update_one(
+            doc! {"bucket": bucket, "platform": platform, "outcome": outcome},
+            doc! {
+                "$inc": {"count": 1_i64},
+                "$setOnInsert": {
+                    "_id": uuid::Uuid::new_v4().to_string(),
+                    "received_at": bson::DateTime::from_millis(bucket * 3600 * 1000),
+                    "expires_at": bson::DateTime::from_chrono(
+                        now + chrono::Duration::days(30)
+                    )
+                }
+            },
+        )
+        .upsert(true)
+        .await;
     // Concurrent first writes can race the unique bucket upsert. Retry only a
     // proven duplicate; an ambiguous transport failure must not double-count.
     if result.as_ref().is_err_and(|e| match e.kind.as_ref() {
@@ -218,7 +232,19 @@ pub async fn insert(
         Ok(_) => Ok((false, row.id)),
         Err(error) => {
             // Unique owner/event index makes retries idempotent. Never resurrect an expired report.
-            if let Some(existing) = db.collection::<ClientErrorReport>(COLLECTION_NAME).find_one(doc! {"user_id": actor, "event_id": &row.event_id, "expires_at": {"$gt": bson::DateTime::from_chrono(now)}}).await? { Ok((true, existing.id)) } else { Err(error) }
+            if let Some(existing) = db
+                .collection::<ClientErrorReport>(COLLECTION_NAME)
+                .find_one(doc! {
+                    "user_id": actor,
+                    "event_id": &row.event_id,
+                    "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
+                })
+                .await?
+            {
+                Ok((true, existing.id))
+            } else {
+                Err(error)
+            }
         }
     }
 }
@@ -244,7 +270,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             false,
         ),
         (
-            doc! {"report.platform": 1, "environment": 1, "report.app_version": 1, "report.app_build": 1, "received_at": -1},
+            doc! {
+                "report.platform": 1,
+                "environment": 1,
+                "report.app_version": 1,
+                "report.app_build": 1,
+                "received_at": -1
+            },
             "crash_versions",
             false,
             false,

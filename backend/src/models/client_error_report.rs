@@ -9,15 +9,64 @@ macro_rules! closed_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub enum $name { $(#[serde(rename = $value)] $variant),+ }
-        impl $name { pub fn as_str(self) -> &'static str { match self { $(Self::$variant => $value),+ } } }
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $value),+ }
+            }
+        }
     };
 }
 closed_enum!(Platform { Web => "web", Ios => "ios", Android => "android" });
-closed_enum!(Kind { NativeCrash => "native_crash", JsFatal => "js_fatal", JsError => "js_error", UnhandledRejection => "unhandled_rejection", RenderError => "render_error", RecoverableError => "recoverable_error", ResourceError => "resource_error" });
-closed_enum!(ExceptionClass { Error => "Error", TypeError => "TypeError", ReferenceError => "ReferenceError", RangeError => "RangeError", SyntaxError => "SyntaxError", EvalError => "EvalError", UriError => "URIError", AggregateError => "AggregateError", ChunkLoadError => "ChunkLoadError", NonError => "NonError", Other => "Other", Unknown => "Unknown" });
-closed_enum!(NativeSignal { Segv => "SIGSEGV", Bus => "SIGBUS", Abrt => "SIGABRT", Ill => "SIGILL", Fpe => "SIGFPE", Trap => "SIGTRAP", Sys => "SIGSYS", Other => "Other" });
-closed_enum!(RuntimeName { Chrome => "chrome", Safari => "safari", Firefox => "firefox", Edge => "edge", Hermes => "hermes", Other => "other" });
-closed_enum!(ExportStatus { Disabled => "disabled", Pending => "pending", Dispatching => "dispatching", Exported => "exported", Unknown => "unknown", Failed => "failed", Discarded => "discarded" });
+closed_enum!(Kind {
+    NativeCrash => "native_crash",
+    JsFatal => "js_fatal",
+    JsError => "js_error",
+    UnhandledRejection => "unhandled_rejection",
+    RenderError => "render_error",
+    RecoverableError => "recoverable_error",
+    ResourceError => "resource_error"
+});
+closed_enum!(ExceptionClass {
+    Error => "Error",
+    TypeError => "TypeError",
+    ReferenceError => "ReferenceError",
+    RangeError => "RangeError",
+    SyntaxError => "SyntaxError",
+    EvalError => "EvalError",
+    UriError => "URIError",
+    AggregateError => "AggregateError",
+    ChunkLoadError => "ChunkLoadError",
+    NonError => "NonError",
+    Other => "Other",
+    Unknown => "Unknown"
+});
+closed_enum!(NativeSignal {
+    Segv => "SIGSEGV",
+    Bus => "SIGBUS",
+    Abrt => "SIGABRT",
+    Ill => "SIGILL",
+    Fpe => "SIGFPE",
+    Trap => "SIGTRAP",
+    Sys => "SIGSYS",
+    Other => "Other"
+});
+closed_enum!(RuntimeName {
+    Chrome => "chrome",
+    Safari => "safari",
+    Firefox => "firefox",
+    Edge => "edge",
+    Hermes => "hermes",
+    Other => "other"
+});
+closed_enum!(ExportStatus {
+    Disabled => "disabled",
+    Pending => "pending",
+    Dispatching => "dispatching",
+    Exported => "exported",
+    Unknown => "unknown",
+    Failed => "failed",
+    Discarded => "discarded"
+});
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

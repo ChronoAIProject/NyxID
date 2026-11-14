@@ -1293,7 +1293,8 @@ impl AppConfig {
         .unwrap_or_else(|message| panic!("{message}"));
 
         Self {
-            crash_reporting: CrashReportingConfig::load(|key| env::var(key)).unwrap_or_else(|message| panic!("{message}")),
+            crash_reporting: CrashReportingConfig::load(|key| env::var(key))
+                .unwrap_or_else(|message| panic!("{message}")),
             resource_request_proof_enabled: parse_bool_env("NYXID_RESOURCE_REQUEST_PROOF_ENABLED", false),
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))

@@ -241,7 +241,24 @@ pub async fn summary(db: &Database, query: &SummaryQuery) -> AppResult<SummaryDa
         doc! {"$group": group},
         doc! {"$sort": {"last_seen": -1}},
         doc! {"$limit": 200},
-        doc! {"$set": {"artifact_ids": {"$slice": [{"$sortArray": {"input": {"$filter": {"input": "$artifact_ids", "as": "artifact", "cond": {"$ne": ["$$artifact", null]}}}, "sortBy": 1}}, 10]}}},
+        doc! {
+            "$set": {
+                "artifact_ids": {
+                    "$slice": [{
+                        "$sortArray": {
+                            "input": {
+                                "$filter": {
+                                    "input": "$artifact_ids",
+                                    "as": "artifact",
+                                    "cond": {"$ne": ["$$artifact", null]}
+                                }
+                            },
+                            "sortBy": 1
+                        }
+                    }, 10]
+                }
+            }
+        },
     ];
     let versions: Vec<Document> = db
         .collection::<Document>(COLLECTION_NAME)

@@ -474,7 +474,9 @@ function ThemedAppShell({
   const persistentSidebar =
     isAuthenticated && workspaceSidebarLayout(width).persistent;
   const reviewDiagnostics = useCallback(() => {
-    if (navigationRef.isReady()) navigationRef.navigate('WorkspaceSheet', {screen:'PrivacySettings'});
+    if (navigationRef.isReady()) {
+      navigationRef.navigate("WorkspaceSheet", { screen: "PrivacySettings" });
+    }
   }, [navigationRef]);
   useDiagnosticsNotice(isAuthenticated, reviewDiagnostics);
   const authenticatedNow = useRef(isAuthenticated);
