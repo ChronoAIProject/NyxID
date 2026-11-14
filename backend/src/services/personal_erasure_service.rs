@@ -57,6 +57,7 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
         ])
         .await?;
     super::personal_erasure_registry::ensure_indexes(db).await?;
+    super::personal_data_registry::ensure_indexes(db).await?;
     preparation::ensure_indexes(db).await?;
     issuance::ensure_indexes(db).await?;
     Ok(())

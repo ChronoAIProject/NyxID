@@ -6,6 +6,8 @@ use bson::{Bson, Document, doc};
 use futures::TryStreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use uuid::Uuid;
 
 use crate::{
     AppState,
@@ -13,21 +15,16 @@ use crate::{
     services::personal_data_registry::{self, Erasure, OwnerSelector},
 };
 
-const PAGE: i64 = 64;
+const AGGREGATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const APPLY_BATCH: usize = 64;
-
-#[derive(Clone, Debug, Serialize)]
-pub struct OrphanCandidate {
-    pub collection: String,
-    pub id: String,
-    pub owner_id: String,
-}
+const OWNER_ID_REPORT_CAP: usize = 128;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct OrphanCollectionReport {
     pub collection: String,
     pub candidate_count: usize,
     pub owner_ids: Vec<String>,
+    pub owner_ids_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,6 +35,24 @@ pub struct OrphanSweepReport {
     pub candidate_count: usize,
 }
 
+#[derive(Clone, Debug)]
+struct OrphanGroup {
+    collection: &'static str,
+    field: &'static str,
+    owner_id: String,
+    row_ids: Vec<Bson>,
+    disposition: Erasure,
+}
+
+#[derive(Serialize)]
+struct DigestGroup<'a> {
+    collection: &'a str,
+    field: &'a str,
+    owner_id: &'a str,
+    row_count: usize,
+    row_ids_sha256: String,
+}
+
 fn owner_fields(entry: &personal_data_registry::Entry) -> Option<&'static [&'static str]> {
     match entry.owner {
         OwnerSelector::Fields(fields) if !fields.is_empty() => Some(fields),
@@ -45,6 +60,7 @@ fn owner_fields(entry: &personal_data_registry::Entry) -> Option<&'static [&'sta
     }
 }
 
+#[cfg(test)]
 fn owner_values(row: &Document, field: &str) -> Vec<String> {
     fn collect(value: &Bson, segments: &[&str], output: &mut Vec<String>) {
         if segments.is_empty() {
@@ -59,15 +75,12 @@ fn owner_values(row: &Document, field: &str) -> Vec<String> {
             }
             return;
         }
-
         match value {
             Bson::Document(document) => {
                 if let Some(next) = document.get(segments[0]) {
                     collect(next, &segments[1..], output);
                 }
             }
-            // MongoDB dotted predicates traverse arrays of documents. Keep
-            // the same semantics for nested owner selectors in the sweep.
             Bson::Array(values) => {
                 for value in values {
                     collect(value, segments, output);
@@ -78,35 +91,122 @@ fn owner_values(row: &Document, field: &str) -> Vec<String> {
     }
 
     let mut values = Vec::new();
-    let root = Bson::Document(row.clone());
-    collect(&root, &field.split('.').collect::<Vec<_>>(), &mut values);
+    collect(
+        &Bson::Document(row.clone()),
+        &field.split('.').collect::<Vec<_>>(),
+        &mut values,
+    );
     values.sort();
     values.dedup();
     values
 }
 
-async fn owner_is_live(db: &mongodb::Database, owner: &str) -> AppResult<bool> {
-    if db
-        .collection::<Document>(crate::models::user::COLLECTION_NAME)
-        .find_one(doc! {"_id": owner})
-        .projection(doc! {"_id": 1})
-        .await?
-        .is_some()
-    {
-        return Ok(true);
+fn owner_pipeline(field: &str) -> Vec<Document> {
+    let mut owner_match = Document::new();
+    owner_match.insert(field, doc! {"$exists": true});
+    let mut pipeline = vec![doc! {"$match": owner_match}];
+    let mut path = String::new();
+    let segments: Vec<&str> = field.split('.').collect();
+    for segment in segments.iter().take(segments.len().saturating_sub(1)) {
+        if !path.is_empty() {
+            path.push('.');
+        }
+        path.push_str(segment);
+        pipeline.push(doc! {"$unwind": format!("${path}")});
     }
-    Ok(db
-        .collection::<Document>(crate::models::service_account::COLLECTION_NAME)
-        .find_one(doc! {"_id": owner})
-        .projection(doc! {"_id": 1})
-        .await?
-        .is_some())
+    pipeline.push(doc! {
+        "$group": {
+            "_id": format!("${field}"),
+            "row_ids": {"$addToSet": "$_id"},
+            "row_count": {"$sum": 1_i32},
+        }
+    });
+    pipeline
 }
 
-async fn collect_candidates(
+async fn aggregate_groups(
     db: &mongodb::Database,
-) -> AppResult<Vec<(OrphanCandidate, Bson, &'static str, Erasure)>> {
-    let mut out = Vec::new();
+    collection: &'static str,
+    field: &'static str,
+    disposition: Erasure,
+) -> AppResult<Vec<OrphanGroup>> {
+    let mut cursor = db
+        .collection::<Document>(collection)
+        .aggregate(owner_pipeline(field))
+        .allow_disk_use(true)
+        .max_time(AGGREGATE_TIMEOUT)
+        .await?;
+    let mut groups = Vec::new();
+    while let Some(row) = cursor.try_next().await? {
+        let Ok(owner_id) = row.get_str("_id") else {
+            continue;
+        };
+        if Uuid::parse_str(owner_id).is_err() {
+            continue;
+        }
+        let row_ids = row.get_array("row_ids").cloned().unwrap_or_default();
+        if row_ids.is_empty() {
+            continue;
+        }
+        groups.push(OrphanGroup {
+            collection,
+            field,
+            owner_id: owner_id.to_owned(),
+            row_ids,
+            disposition,
+        });
+    }
+    Ok(groups)
+}
+
+async fn live_owner_ids(
+    db: &mongodb::Database,
+    groups: &[OrphanGroup],
+) -> AppResult<HashSet<String>> {
+    let owners: Vec<String> = groups
+        .iter()
+        .map(|group| group.owner_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if owners.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut live = HashSet::new();
+    for collection in [
+        crate::models::user::COLLECTION_NAME,
+        crate::models::service_account::COLLECTION_NAME,
+    ] {
+        let mut cursor = db
+            .collection::<Document>(collection)
+            .find(doc! {"_id": {"$in": &owners}})
+            .projection(doc! {"_id": 1})
+            .batch_size(256)
+            .max_time(AGGREGATE_TIMEOUT)
+            .await?;
+        while let Some(row) = cursor.try_next().await? {
+            if let Some(id) = row.get_str("_id").ok() {
+                live.insert(id.to_owned());
+            }
+        }
+    }
+    let mut jobs = db
+        .collection::<Document>(crate::models::personal_erasure::COLLECTION_NAME)
+        .find(doc! {"user_id": {"$in": &owners}})
+        .projection(doc! {"user_id": 1})
+        .batch_size(256)
+        .max_time(AGGREGATE_TIMEOUT)
+        .await?;
+    while let Some(row) = jobs.try_next().await? {
+        if let Some(id) = row.get_str("user_id").ok() {
+            live.insert(id.to_owned());
+        }
+    }
+    Ok(live)
+}
+
+async fn collect_groups(db: &mongodb::Database) -> AppResult<Vec<OrphanGroup>> {
+    let mut all = Vec::new();
     for entry in personal_data_registry::entries() {
         if !matches!(entry.erasure, Erasure::LocalInventory | Erasure::Redacted) {
             continue;
@@ -115,59 +215,81 @@ async fn collect_candidates(
             continue;
         };
         for field in fields {
-            let mut filter = Document::new();
-            filter.insert(*field, doc! {"$exists": true});
-            let mut projection = doc! {"_id": 1};
-            if *field == "usages.user_id" {
-                projection.insert("usages", 1);
-            } else {
-                projection.insert(*field, 1);
-            }
-            let mut cursor = db
-                .collection::<Document>(entry.collection)
-                .find(filter)
-                .projection(projection)
-                // Cursor batches bound each server response while still walking
-                // the complete collection for an exact dry-run digest.
-                .batch_size(PAGE as u32)
-                .await?;
-            while let Some(row) = cursor.try_next().await? {
-                let id = row
-                    .get("_id")
-                    .cloned()
-                    .ok_or_else(|| AppError::Internal("Orphan row is missing _id".into()))?;
-                for owner in owner_values(&row, field) {
-                    if owner.is_empty() || owner_is_live(db, &owner).await? {
-                        continue;
-                    }
-                    out.push((
-                        OrphanCandidate {
-                            collection: entry.collection.to_owned(),
-                            id: id.to_string(),
-                            owner_id: owner,
-                        },
-                        id.clone(),
-                        *field,
-                        entry.erasure,
-                    ));
-                }
-            }
+            all.extend(aggregate_groups(db, entry.collection, field, entry.erasure).await?);
         }
     }
-    out.sort_by(|left, right| {
-        (&left.0.collection, &left.0.id, &left.0.owner_id).cmp(&(
-            &right.0.collection,
-            &right.0.id,
-            &right.0.owner_id,
+    let live = live_owner_ids(db, &all).await?;
+    all.retain(|group| !live.contains(&group.owner_id));
+    all.sort_by(|left, right| {
+        (&left.collection, &left.field, &left.owner_id).cmp(&(
+            &right.collection,
+            &right.field,
+            &right.owner_id,
         ))
     });
-    Ok(out)
+    Ok(all)
 }
 
-fn digest(candidates: &[OrphanCandidate]) -> AppResult<String> {
-    let bytes = serde_json::to_vec(candidates)
+fn row_id_hash(row_ids: &[Bson]) -> AppResult<String> {
+    // BSON serialization requires a document root. Wrapping each scalar in a
+    // fixed key gives every BSON type a canonical, length-delimited encoding.
+    let mut values = row_ids
+        .iter()
+        .map(|value| {
+            bson::to_vec(&doc! {"value": value})
+                .map_err(|_| AppError::Internal("Orphan row id encoding failed".into()))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    values.sort();
+    let mut encoded = Vec::new();
+    for bytes in values {
+        encoded.extend((bytes.len() as u64).to_be_bytes());
+        encoded.extend(bytes);
+    }
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn digest(groups: &[OrphanGroup]) -> AppResult<String> {
+    let entries: Vec<DigestGroup<'_>> = groups
+        .iter()
+        .map(|group| {
+            Ok(DigestGroup {
+                collection: group.collection,
+                field: group.field,
+                owner_id: &group.owner_id,
+                row_count: group.row_ids.len(),
+                row_ids_sha256: row_id_hash(&group.row_ids)?,
+            })
+        })
+        .collect::<AppResult<_>>()?;
+    let bytes = serde_json::to_vec(&entries)
         .map_err(|_| AppError::Internal("Orphan digest encoding failed".into()))?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn reports(groups: &[OrphanGroup]) -> (Vec<OrphanCollectionReport>, usize) {
+    let mut grouped = BTreeMap::<String, OrphanCollectionReport>::new();
+    let mut count = 0;
+    for group in groups {
+        count += group.row_ids.len();
+        let report = grouped
+            .entry(group.collection.to_owned())
+            .or_insert_with(|| OrphanCollectionReport {
+                collection: group.collection.to_owned(),
+                candidate_count: 0,
+                owner_ids: Vec::new(),
+                owner_ids_truncated: false,
+            });
+        report.candidate_count += group.row_ids.len();
+        if report.owner_ids.len() < OWNER_ID_REPORT_CAP
+            && !report.owner_ids.contains(&group.owner_id)
+        {
+            report.owner_ids.push(group.owner_id.clone());
+        } else if !report.owner_ids.contains(&group.owner_id) {
+            report.owner_ids_truncated = true;
+        }
+    }
+    (grouped.into_values().collect(), count)
 }
 
 async fn was_applied(db: &mongodb::Database, digest: &str) -> AppResult<bool> {
@@ -178,33 +300,99 @@ async fn was_applied(db: &mongodb::Database, digest: &str) -> AppResult<bool> {
             "event_data.digest": digest,
         })
         .projection(doc! {"_id": 1})
+        .max_time(AGGREGATE_TIMEOUT)
         .await?
         .is_some())
 }
 
 pub async fn scan(db: &mongodb::Database) -> AppResult<OrphanSweepReport> {
-    let candidates = collect_candidates(db).await?;
-    let public: Vec<OrphanCandidate> = candidates.iter().map(|item| item.0.clone()).collect();
-    let mut grouped = std::collections::BTreeMap::<String, OrphanCollectionReport>::new();
-    for candidate in &public {
-        let item = grouped
-            .entry(candidate.collection.clone())
-            .or_insert_with(|| OrphanCollectionReport {
-                collection: candidate.collection.clone(),
-                candidate_count: 0,
-                owner_ids: Vec::new(),
-            });
-        item.candidate_count += 1;
-        if !item.owner_ids.contains(&candidate.owner_id) {
-            item.owner_ids.push(candidate.owner_id.clone());
-        }
-    }
+    let groups = collect_groups(db).await?;
+    let (collections, candidate_count) = reports(&groups);
     Ok(OrphanSweepReport {
         dry_run: true,
-        digest: digest(&public)?,
-        candidate_count: public.len(),
-        collections: grouped.into_values().collect(),
+        digest: digest(&groups)?,
+        collections,
+        candidate_count,
     })
+}
+
+async fn redact_invite_row(db: &mongodb::Database, id: &Bson, owner: &str) -> AppResult<()> {
+    let Some(mut row) = db
+        .collection::<Document>("invite_codes")
+        .find_one(doc! {"_id": id, "usages.user_id": owner})
+        .await?
+    else {
+        return Ok(());
+    };
+    let usages = row.get_array("usages").cloned().unwrap_or_default();
+    let mut changed = false;
+    let usages = usages
+        .into_iter()
+        .map(|value| {
+            let Some(mut usage) = value.as_document().cloned() else {
+                return value;
+            };
+            if usage.get_str("user_id").ok() == Some(owner) && usage.contains_key("email") {
+                usage.remove("email");
+                changed = true;
+            }
+            Bson::Document(usage)
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        row.insert("usages", usages);
+        db.collection::<Document>("invite_codes")
+            .replace_one(doc! {"_id": id}, row)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<()> {
+    let mut ids = group.row_ids.clone();
+    for chunk in ids.chunks_mut(APPLY_BATCH) {
+        let mut filter = Document::new();
+        filter.insert("_id", doc! {"$in": chunk.to_vec()});
+        filter.insert(group.field, group.owner_id.as_str());
+        match group.disposition {
+            Erasure::LocalInventory => {
+                db.collection::<Document>(group.collection)
+                    .delete_many(filter)
+                    .await?;
+            }
+            Erasure::Redacted
+                if group.collection == "service_change_events" && group.field == "owner_id" =>
+            {
+                db.collection::<Document>(group.collection)
+                    .delete_many(filter)
+                    .await?;
+            }
+            Erasure::Redacted
+                if group.collection == "invite_codes" && group.field == "usages.user_id" =>
+            {
+                for id in chunk.iter() {
+                    redact_invite_row(db, id, &group.owner_id).await?;
+                }
+            }
+            Erasure::Redacted
+                if group.collection == "service_change_events"
+                    && group.field == "actor.person_id" =>
+            {
+                db.collection::<Document>(group.collection)
+                    .update_many(filter, doc! {"$set": {"actor.name": "Deleted account"}})
+                    .await?;
+            }
+            Erasure::Redacted => {
+                let mut set = Document::new();
+                set.insert(group.field, Bson::Null);
+                db.collection::<Document>(group.collection)
+                    .update_many(filter, doc! {"$set": set})
+                    .await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub async fn apply(
@@ -212,14 +400,10 @@ pub async fn apply(
     actor: &str,
     expected_digest: &str,
 ) -> AppResult<OrphanSweepReport> {
-    let candidates = collect_candidates(db).await?;
-    let public: Vec<OrphanCandidate> = candidates.iter().map(|item| item.0.clone()).collect();
-    let actual = digest(&public)?;
+    let groups = collect_groups(db).await?;
+    let actual = digest(&groups)?;
     if actual != expected_digest {
-        // A successful apply removes the candidate rows, so a second apply
-        // with the reviewed digest sees an empty set. The chained event is
-        // the durable idempotency marker for that exact reviewed set.
-        if public.is_empty() && was_applied(db, expected_digest).await? {
+        if groups.is_empty() && was_applied(db, expected_digest).await? {
             return Ok(OrphanSweepReport {
                 dry_run: false,
                 digest: expected_digest.to_owned(),
@@ -231,84 +415,41 @@ pub async fn apply(
             "Orphan candidate set changed; run a new dry-run".into(),
         ));
     }
-    let mut grouped = std::collections::BTreeMap::<String, OrphanCollectionReport>::new();
-    for candidate in &public {
-        let item = grouped
-            .entry(candidate.collection.clone())
-            .or_insert_with(|| OrphanCollectionReport {
-                collection: candidate.collection.clone(),
-                candidate_count: 0,
-                owner_ids: Vec::new(),
-            });
-        item.candidate_count += 1;
-        if !item.owner_ids.contains(&candidate.owner_id) {
-            item.owner_ids.push(candidate.owner_id.clone());
+    for group in &groups {
+        // Recheck liveness immediately before each bounded mutation. A newly
+        // recreated account or service account must never be swept.
+        let live = live_owner_ids(db, std::slice::from_ref(group)).await?;
+        if live.contains(&group.owner_id) {
+            continue;
         }
+        apply_group(db, group).await?;
     }
-    for batch in candidates.chunks(APPLY_BATCH) {
-        for (candidate, id, field, disposition) in batch {
-            // The owner may have been recreated after the reviewed dry run.
-            // Recheck immediately before each mutation so a live person,
-            // organization user, or service account is always protected.
-            if owner_is_live(db, &candidate.owner_id).await? {
-                continue;
-            }
-            let mut filter = doc! {"_id": id.clone()};
-            if field.ends_with("_ids") {
-                filter.insert(*field, doc! {"$in": [candidate.owner_id.as_str()]});
-            } else {
-                filter.insert(*field, candidate.owner_id.as_str());
-            }
-            match disposition {
-                Erasure::Redacted => {
-                    if candidate.collection == "service_change_events" && *field == "owner_id" {
-                        db.collection::<Document>(&candidate.collection)
-                            .delete_one(filter)
-                            .await?;
-                        continue;
-                    }
-                    if candidate.collection == "invite_codes" && *field == "usages.user_id" {
-                        db.collection::<Document>(&candidate.collection)
-                            .update_one(
-                                filter,
-                                doc! {"$pull": {"usages": {"user_id": candidate.owner_id.as_str()}}},
-                            )
-                            .await?;
-                        continue;
-                    }
-                    let update = if candidate.collection == "service_change_events"
-                        && *field == "actor.person_id"
-                    {
-                        doc! {"$set": {"actor.name": "Deleted account", "actor.person_id": Bson::Null, "actor.api_key_id": Bson::Null, "actor.app_id": Bson::Null}}
-                    } else {
-                        let mut set = Document::new();
-                        set.insert(*field, Bson::Null);
-                        doc! {"$set": set}
-                    };
-                    db.collection::<Document>(&candidate.collection)
-                        .update_one(filter, update)
-                        .await?;
-                }
-                Erasure::LocalInventory => {
-                    db.collection::<Document>(&candidate.collection)
-                        .delete_one(filter)
-                        .await?;
-                }
-                _ => {}
-            }
-        }
-    }
+    let (collections, candidate_count) = reports(&groups);
     crate::services::audit_service::log_actor_event(
         db.clone(),
-        &crate::services::audit_service::AuditActor { user_id: actor.to_owned(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None },
+        &crate::services::audit_service::AuditActor {
+            user_id: actor.to_owned(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
         "user.account.erasure_orphan_sweep",
-        Some(serde_json::json!({"digest": expected_digest, "candidate_count": public.len(), "collections": grouped.values().map(|item| (&item.collection, item.candidate_count)).collect::<Vec<_>>() })),
-    ).await.map_err(|_| AppError::Internal("Orphan sweep audit append failed".into()))?;
+        Some(serde_json::json!({
+            "digest": expected_digest,
+            "candidate_count": candidate_count,
+            "collections": collections.iter().map(|item| {
+                serde_json::json!({"collection": item.collection, "candidate_count": item.candidate_count})
+            }).collect::<Vec<_>>(),
+        })),
+    )
+    .await
+    .map_err(|_| AppError::Internal("Orphan sweep audit append failed".into()))?;
     Ok(OrphanSweepReport {
         dry_run: false,
         digest: actual,
-        candidate_count: public.len(),
-        collections: grouped.into_values().collect(),
+        collections,
+        candidate_count,
     })
 }
 
@@ -351,32 +492,50 @@ mod tests {
             owner_values(&row, "usages.user_id"),
             ["person-1", "person-2"]
         );
-
-        let nested_array = doc! {
-            "actors": [
-                {"person": {"id": "person-3"}},
-                {"person": {"id": "person-4"}},
-            ],
-        };
-        assert_eq!(
-            owner_values(&nested_array, "actors.person.id"),
-            ["person-3", "person-4"]
-        );
     }
 
     #[test]
-    fn digest_is_ordered_and_changes_with_the_exact_candidate_set() {
-        let first = vec![OrphanCandidate {
-            collection: "one".into(),
-            id: "a".into(),
-            owner_id: "u".into(),
+    fn digest_binds_collection_field_owner_count_and_sorted_row_hash() {
+        let one = vec![OrphanGroup {
+            collection: "one",
+            field: "owner_id",
+            owner_id: Uuid::new_v4().to_string(),
+            row_ids: vec![Bson::String("b".into()), Bson::String("a".into())],
+            disposition: Erasure::LocalInventory,
         }];
-        let second = vec![OrphanCandidate {
-            collection: "two".into(),
-            id: "a".into(),
-            owner_id: "u".into(),
-        }];
-        assert_ne!(digest(&first).unwrap(), digest(&second).unwrap());
-        assert_eq!(digest(&first).unwrap(), digest(&first).unwrap());
+        let mut two = one.clone();
+        two[0].field = "other_owner";
+        assert_ne!(digest(&one).unwrap(), digest(&two).unwrap());
+        let mut reordered = one.clone();
+        reordered[0].row_ids.reverse();
+        assert_eq!(digest(&one).unwrap(), digest(&reordered).unwrap());
+    }
+
+    #[test]
+    fn sentinel_and_non_uuid_owners_are_not_candidates() {
+        assert!(Uuid::parse_str("system").is_err());
+        assert!(Uuid::parse_str("00000000-0000-0000-0000-000000000001").is_ok());
+    }
+
+    #[test]
+    fn report_caps_owner_ids_without_changing_exact_counts() {
+        let owner = Uuid::new_v4().to_string();
+        let groups = (0..OWNER_ID_REPORT_CAP + 1)
+            .map(|index| OrphanGroup {
+                collection: "rows",
+                field: "owner_id",
+                owner_id: if index == 0 {
+                    owner.clone()
+                } else {
+                    Uuid::new_v4().to_string()
+                },
+                row_ids: vec![Bson::String(index.to_string())],
+                disposition: Erasure::LocalInventory,
+            })
+            .collect::<Vec<_>>();
+        let (reports, count) = reports(&groups);
+        assert_eq!(count, OWNER_ID_REPORT_CAP + 1);
+        assert_eq!(reports[0].owner_ids.len(), OWNER_ID_REPORT_CAP);
+        assert!(reports[0].owner_ids_truncated);
     }
 }

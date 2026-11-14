@@ -4,6 +4,7 @@ use super::*;
 use mongodb::options::ReturnDocument;
 
 const LEASE_SECONDS: i64 = 120;
+const RECONCILIATION_PAGE_CAP: usize = 64;
 
 async fn claim(db: &Database) -> AppResult<Option<PersonalErasureJob>> {
     let durable = super::super::transaction_service::durable_database(db);
@@ -60,7 +61,30 @@ async fn reconcile_completed_once(state: &crate::AppState) -> AppResult<bool> {
         .lease_token
         .as_deref()
         .ok_or_else(|| AppError::Conflict("Erasure reconciliation lease unavailable".into()))?;
-    let clean = super::local::pass(state, &job).await?;
+    let mut clean = false;
+    for _ in 0..RECONCILIATION_PAGE_CAP {
+        // Do not continue a repair after another worker has taken the lease.
+        // The local pass is itself bounded; this check fences the next page
+        // and, most importantly, the eventual revision stamp.
+        let lease_alive = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {
+                "_id": &job.id,
+                "status": "complete",
+                "lease_token": lease,
+                "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]},
+            })
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some();
+        if !lease_alive {
+            return Ok(true);
+        }
+        if super::local::pass(state, &job).await? {
+            clean = true;
+            break;
+        }
+    }
     if !clean {
         // Release the lease; the next tick can continue the bounded pass.
         db.collection::<Document>(JOBS)
@@ -217,7 +241,13 @@ async fn checkpoint(
             "domains":domain_expressions,
             "status":status,"updated_at":"$$NOW",
             "completed_at":if complete {bson::Bson::String("$$NOW".into())} else {bson::Bson::Null},
-            "local_inventory_revision": if complete {bson::Bson::Int32(super::local::LOCAL_INVENTORY_REVISION as i32)} else {bson::Bson::Int32(job.local_inventory_revision as i32)},
+            // The inventory revision records the revision that actually ran
+            // the local inventory domain. A later domain completing cannot
+            // make an old local pass look current during a mixed-fleet rollout.
+            "local_inventory_revision": if index < domains.len()
+                && domains[index].domain == "local_inventory"
+                && domains[index].status == DomainStatus::Complete
+            {bson::Bson::Int32(super::local::LOCAL_INVENTORY_REVISION as i32)} else {bson::Bson::Int32(job.local_inventory_revision as i32)},
             "lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,
             "retry_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":retry_seconds}},
         }},
@@ -702,6 +732,59 @@ mod tests {
         assert_eq!(current.domains[0].status, DomainStatus::Complete);
         assert_eq!(current.status, ErasureStatus::Pending);
         assert!(current.completed_at.is_none());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_job_reconciliation_cleans_new_inventory_once_and_stamps_revision() {
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(doc! {
+                "_id": "reconciliation-leftover",
+                "user_id": &user,
+                "payload": "must-be-erased",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id},
+                vec![doc! {"$set": {
+                    "status": "complete",
+                    "completed_at": "$$NOW",
+                    "local_inventory_revision": 0_i32,
+                    "domains": bson::to_bson(&accepted.domains).unwrap(),
+                    "retry_at": "$$NOW",
+                }}],
+            )
+            .await
+            .unwrap();
+        assert!(reconcile_completed_once(&state).await.unwrap());
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id": "reconciliation-leftover"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let repaired = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id": &accepted.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired.get_i32("local_inventory_revision").unwrap(),
+            super::local::LOCAL_INVENTORY_REVISION as i32
+        );
+        assert!(
+            repaired
+                .get("lease_token")
+                .is_some_and(|value| value.as_null().is_some())
+        );
+        assert!(!reconcile_completed_once(&state).await.unwrap());
         db.drop().await.unwrap();
     }
 }

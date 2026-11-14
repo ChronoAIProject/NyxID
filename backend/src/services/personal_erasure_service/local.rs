@@ -442,22 +442,20 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ("assistant_action_receipts", doc! {"user_id": owner}),
         ("assistant_voice_windows", doc! {"user_id": owner}),
         ("assistant_wire_logs", doc! {"user_id": owner}),
-        (
-            "auth_device_code_reservations",
-            doc! {"approved_user_id": owner},
-        ),
         ("channel_adapter_accounts", doc! {"user_id": owner}),
         ("mcp_session_notifications", doc! {"user_id": owner}),
         ("openclaw_channel_mappings", doc! {"user_id": owner}),
         ("telegram_bot_requests", doc! {"user_id": owner}),
-        ("telegram_bot_claims", doc! {"owner_user_id": owner}),
+        (
+            "telegram_bot_claims",
+            doc! {"owner_user_id": owner, "status":"redeemed", "delivered":true},
+        ),
         ("telegram_managed_bot_events", doc! {"user_id": owner}),
         (
             "feature_flag_overrides",
             doc! {"target_kind": "user", "target_key": owner},
         ),
         ("invocation_diagnostics", doc! {"actor_user_id": owner}),
-        ("managed_executions", doc! {"actor_user_id": owner}),
         (
             "platform_personal_setup_selections",
             doc! {"user_id": owner},
@@ -481,19 +479,60 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             "encrypted_record_migration_runs",
             doc! {"owner_uuid": owner},
         ),
-        ("nyxbot_gateway_releases", doc! {"owner_user_id": owner}),
-        ("assistant_group_agent_access", doc! {"user_id": owner}),
-        ("assistant_group_transfers", doc! {"user_id": owner}),
+        ("assistant_group_agent_access", doc! {"owner_id": owner}),
         ("assistant_learning_migrations", doc! {"owner_id": owner}),
-        ("ownership_transfers", doc! {"actor_user_id": owner}),
-        ("catalog_skill_revisions", doc! {"actor_id": owner}),
-        ("catalog_skill_operations", doc! {"actor_id": owner}),
-        ("credit_schedule_periods", doc! {"target_user_ids": owner}),
-        ("usage_allowance_periods", doc! {"owner_user_id": owner}),
-        ("org_channel_guest_budgets", doc! {"user_id": owner}),
-        ("org_channel_guest_holds", doc! {"user_id": owner}),
     ]);
     rows
+}
+
+/// Return the owner field paths used by the inventory filters. This is kept
+/// next to the filters so registry drift cannot silently change the orphan
+/// sweep or export owner selector.
+#[cfg(test)]
+pub(crate) fn inventory_owner_fields(
+    owner: &str,
+) -> std::collections::BTreeMap<&'static str, std::collections::BTreeSet<String>> {
+    fn collect(
+        value: &bson::Bson,
+        path: Option<&str>,
+        owner: &str,
+        output: &mut std::collections::BTreeSet<String>,
+    ) {
+        match value {
+            bson::Bson::String(value) if value == owner => {
+                if let Some(path) = path {
+                    output.insert(path.to_owned());
+                }
+            }
+            bson::Bson::Document(document) => {
+                for (key, value) in document {
+                    if key.starts_with('$') {
+                        collect(value, path, owner, output);
+                    } else {
+                        let next = match path {
+                            Some(path) => format!("{path}.{key}"),
+                            None => key.clone(),
+                        };
+                        collect(value, Some(&next), owner, output);
+                    }
+                }
+            }
+            bson::Bson::Array(values) => {
+                for value in values {
+                    collect(value, path, owner, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut fields = std::collections::BTreeMap::new();
+    for (collection, filter) in inventory(owner) {
+        let mut row = std::collections::BTreeSet::new();
+        collect(&bson::Bson::Document(filter), None, owner, &mut row);
+        fields.insert(collection, row);
+    }
+    fields
 }
 
 /// Redact shared records after personal ownership has been removed. These
@@ -602,19 +641,27 @@ async fn redact_invite_usages(db: &Database, owner: &str) -> AppResult<bool> {
                 .cloned()
                 .ok_or_else(|| AppError::Internal("Invite code identity missing".into()))?;
             let usages = row.get_array("usages").cloned().unwrap_or_default();
+            let mut changed_usage = false;
             let filtered: Vec<bson::Bson> = usages
                 .into_iter()
-                .filter(|usage| {
-                    usage
-                        .as_document()
-                        .and_then(|doc| doc.get_str("user_id").ok())
-                        != Some(owner)
+                .map(|usage| {
+                    let Some(mut usage) = usage.as_document().cloned() else {
+                        return usage;
+                    };
+                    if usage.get_str("user_id").ok() == Some(owner) && usage.contains_key("email") {
+                        usage.remove("email");
+                        changed_usage = true;
+                    }
+                    bson::Bson::Document(usage)
                 })
                 .collect();
+            if !changed_usage {
+                continue;
+            }
             let result = db
                 .collection::<Document>("invite_codes")
                 .update_one(
-                    doc! {"_id": id, "usages.user_id": owner},
+                    doc! {"_id": id, "usages.user_id": owner, "usages.email": {"$exists": true}},
                     doc! {"$set": {"usages": filtered}},
                 )
                 .session(&mut tx)
@@ -638,12 +685,13 @@ async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
         db,
         owner,
         "service_change_events",
-        doc! {"actor.person_id": owner, "owner_id": {"$ne": owner}},
+        doc! {
+            "actor.person_id": owner,
+            "owner_id": {"$ne": owner},
+            "actor.name": {"$ne": "Deleted account"},
+        },
         doc! {"$set": {
         "actor.name": "Deleted account",
-        "actor.person_id": bson::Bson::Null,
-        "actor.api_key_id": bson::Bson::Null,
-        "actor.app_id": bson::Bson::Null,
         }},
     )
     .await?
