@@ -216,19 +216,28 @@ impl PerKeyRateLimiter {
     }
 
     pub async fn check_shared(&self, key: &str) -> Result<bool, AppError> {
+        Ok(self.check_shared_with_retry(key).await?.0)
+    }
+
+    pub async fn check_shared_with_retry(&self, key: &str) -> Result<(bool, u64), AppError> {
         if let Some(db) = self.db.as_ref() {
-            return Ok(RateWindowStore::admit(
+            let admission = RateWindowStore::admit(
                 db,
                 &self.namespace,
                 key,
                 u64::from(self.max_requests),
                 std::time::Duration::from_secs(self.window_secs),
             )
-            .await?
-            .allowed);
+            .await?;
+            let retry_after = (admission
+                .reset_at
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                .max(1)) as u64;
+            return Ok((admission.allowed, retry_after));
         }
         #[cfg(test)]
-        return Ok(self.check(key));
+        return Ok((self.check(key), self.window_secs));
         #[cfg(not(test))]
         unreachable!("production rate limiters always have a MongoDB backend")
     }

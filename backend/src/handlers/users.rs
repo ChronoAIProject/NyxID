@@ -90,23 +90,29 @@ pub async fn save_security_preferences(
 pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> AppResult<Response> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     let account_id = auth_user.user_id.to_string();
-    if !state
-        .account_export_limiter
-        .check_shared(&account_id)
-        .await?
-    {
-        return Err(AppError::RateLimitedWithRetry { retry_after: 3600 });
-    }
     let _permit = state
         .account_export_semaphore
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::RateLimitedWithRetry { retry_after: 1 })?;
+    let admission = state
+        .account_export_limiter
+        .check_shared_with_retry(&account_id)
+        .await?;
+    if !admission.0 {
+        return Err(AppError::RateLimitedWithRetry {
+            retry_after: admission.1,
+        });
+    }
     let export = crate::services::account_export_service::build(&state.db, &account_id).await?;
     let counts: Vec<serde_json::Value> = export
         .sections
         .iter()
-        .map(|(name, section)| serde_json::json!({"section": name, "count": section.items.len(), "total_count": section.total_count}))
+        .flat_map(|(name, subsections)| {
+            subsections.iter().map(move |(subsection, value)| {
+                serde_json::json!({"section": name, "subsection": subsection, "count": value.items.len(), "total_count": value.total_count})
+            })
+        })
         .collect();
     let bytes = serde_json::to_vec(&export)
         .map_err(|_| AppError::Internal("Account export encoding failed".into()))?;

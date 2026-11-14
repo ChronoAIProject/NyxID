@@ -1,38 +1,367 @@
-//! Bounded, explicit account export. Model structs are never serialized here:
-//! every field is selected into a dedicated JSON value so secrets cannot leak
-//! when a model gains a new field.
-
+//! Bounded, explicit account export. Model structs are never serialized here.
+use crate::{
+    errors::{AppError, AppResult},
+    services::personal_data_registry,
+};
+use bson::{Bson, Document, doc};
+use chrono::Utc;
+use futures::TryStreamExt;
+use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
 
-use bson::{Bson, Document, doc};
-use chrono::Utc;
-use futures::TryStreamExt;
-use serde::Serialize;
-
-use crate::{
-    errors::{AppError, AppResult},
-    services::personal_data_registry,
-};
-
 pub const FORMAT: &str = "nyxid.account-export";
 pub const VERSION: u32 = 1;
 pub const MAX_BYTES: usize = 32 * 1024 * 1024;
-pub const SECTION_ROW_CAP: i64 = 1_000;
+pub const SUBSECTION_ROW_CAP: i64 = 10_000;
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 pub const FILE_PAYLOADS_METADATA_ONLY: bool = true;
-const SECTION_ITEM_CAP: usize = SECTION_ROW_CAP as usize;
 
-// These are the only fields used by the registry-driven fallback exporter.
-// They are deliberately boring, owner-visible metadata fields; adding a
-// model field never makes it appear in an export accidentally.
-const COMMON_SAFE_FIELDS: &[&str] = &[
-    "_id",
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct ExportSubsection {
+    pub items: Vec<serde_json::Value>,
+    pub total_count: u64,
+    pub truncated: bool,
+}
+#[derive(Debug, Serialize, Clone)]
+pub struct ExportLimits {
+    pub max_bytes: usize,
+    pub subsection_row_cap: i64,
+    pub query_timeout_ms: u64,
+    pub file_payloads: &'static str,
+}
+#[derive(Debug, Serialize, Clone)]
+pub struct AccountExport {
+    pub format: &'static str,
+    pub version: u32,
+    pub generated_at: String,
+    pub account_id: String,
+    pub limits: ExportLimits,
+    pub truncated_sections: Vec<String>,
+    pub excluded: Vec<&'static str>,
+    pub sections: BTreeMap<String, BTreeMap<String, ExportSubsection>>,
+}
+
+fn bson_json(value: &Bson) -> Option<serde_json::Value> {
+    Some(match value {
+        Bson::String(value) => serde_json::Value::String(value.clone()),
+        Bson::Boolean(value) => serde_json::Value::Bool(*value),
+        Bson::Int32(value) => serde_json::json!(*value),
+        Bson::Int64(value) => serde_json::json!(*value),
+        Bson::Double(value) if value.is_finite() => serde_json::json!(*value),
+        Bson::DateTime(value) => serde_json::Value::String(value.to_chrono().to_rfc3339()),
+        Bson::ObjectId(value) => serde_json::Value::String(value.to_hex()),
+        Bson::Decimal128(value) => serde_json::Value::String(value.to_string()),
+        Bson::Null => serde_json::Value::Null,
+        Bson::Document(value) => serde_json::Value::Object(
+            value
+                .iter()
+                .filter(|(key, _)| !forbidden_key(key))
+                .filter_map(|(key, value)| bson_json(value).map(|value| (key.clone(), value)))
+                .collect(),
+        ),
+        Bson::Array(values) => {
+            serde_json::Value::Array(values.iter().filter_map(bson_json).collect())
+        }
+        Bson::Binary(_) => return None,
+        _ => return None,
+    })
+}
+
+fn forbidden_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("hash")
+        || key.contains("hmac")
+        || key.contains("encrypted")
+        || key.contains("ciphertext")
+        || key.contains("secret")
+        || key.contains("password")
+        || key.contains("private")
+        || key.contains("token_value")
+        || key == "token"
+        || key.contains("key_prefix")
+        || key == "kid"
+        || key == "key_id"
+        || key.contains("wrapped")
+        || key == "dek"
+        || key.contains("nonce")
+        || key.contains("signature")
+}
+fn get_path<'a>(row: &'a Document, path: &str) -> Option<&'a Bson> {
+    let mut value = row.get(path.split('.').next()?)?;
+    for segment in path.split('.').skip(1) {
+        value = value.as_document()?.get(segment)?;
+    }
+    Some(value)
+}
+fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    for field in fields {
+        if *field == "_id" || forbidden_key(field) {
+            continue;
+        }
+        if let Some(value) = get_path(row, field).and_then(bson_json) {
+            result.insert((*field).to_owned(), value);
+        }
+    }
+    serde_json::Value::Object(result)
+}
+
+/// One registry `Export::Section` maps to exactly one explicit subsection.
+fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
+    match collection {
+        "agent_key_login_requests" => Some(("account", "agent_key_login_requests")),
+        "agent_service_bindings" => Some(("account", "agent_service_bindings")),
+        "billing_wallet" => Some(("billing", "wallet")),
+        "api_key_credentials" => Some(("services", "api_key_credentials")),
+        "api_keys" => Some(("services", "api_keys")),
+        "approval_grants" => Some(("account", "approval_grants")),
+        "approval_requests" => Some(("account", "approval_requests")),
+        "assistant_acknowledgements" => Some(("assistant", "assistant_acknowledgements")),
+        "assistant_action_receipts" => Some(("account_activity", "assistant_action_receipts")),
+        "assistant_agent_consents" => Some(("assistant", "assistant_agent_consents")),
+        "assistant_agent_credentials" => Some(("assistant", "assistant_agent_credentials")),
+        "assistant_agent_learning" => Some(("assistant", "assistant_agent_learning")),
+        "assistant_agent_learning_members" => {
+            Some(("assistant", "assistant_agent_learning_members"))
+        }
+        "assistant_agent_learning_proposals" => {
+            Some(("assistant", "assistant_agent_learning_proposals"))
+        }
+        "assistant_agent_learning_runs" => Some(("assistant", "assistant_agent_learning_runs")),
+        "assistant_agent_learning_skill_roots" => {
+            Some(("assistant", "assistant_agent_learning_skill_roots"))
+        }
+        "assistant_agent_private_notes" => Some(("assistant", "assistant_agent_private_notes")),
+        "assistant_agent_shares" => Some(("assistant", "assistant_agent_shares")),
+        "assistant_agent_sharing" => Some(("assistant", "assistant_agent_sharing")),
+        "assistant_agents" => Some(("assistant", "assistant_agents")),
+        "assistant_artifact_deliveries" => Some(("assistant", "assistant_artifact_deliveries")),
+        "assistant_async_operations" => Some(("assistant", "assistant_async_operations")),
+        "assistant_async_quotas" => Some(("assistant", "assistant_async_quotas")),
+        "assistant_attachment_expiry" => Some(("assistant", "assistant_attachment_expiry")),
+        "assistant_attachments" => Some(("assistant", "assistant_attachments")),
+        "assistant_authored_draft_claims" => Some(("assistant", "assistant_authored_draft_claims")),
+        "assistant_checkpoints" => Some(("assistant", "assistant_checkpoints")),
+        "assistant_cma_agents" => Some(("assistant", "assistant_cma_agents")),
+        "assistant_cma_creations" => Some(("assistant", "assistant_cma_creations")),
+        "assistant_cma_sandboxes" => Some(("assistant", "assistant_cma_sandboxes")),
+        "assistant_cma_session_origins" => {
+            Some(("account_activity", "assistant_cma_session_origins"))
+        }
+        "assistant_conversations" => Some(("assistant", "assistant_conversations")),
+        "assistant_direct_handoffs" => Some(("assistant", "assistant_direct_handoffs")),
+        "assistant_group_agent_access" => {
+            Some(("account_activity", "assistant_group_agent_access"))
+        }
+        "assistant_group_agent_proposals" => Some(("assistant", "assistant_group_agent_proposals")),
+        "assistant_group_execution_slots" => {
+            Some(("account_activity", "assistant_group_execution_slots"))
+        }
+        "assistant_group_invites" => Some(("assistant", "assistant_group_invites")),
+        "assistant_group_mention_notifications" => {
+            Some(("assistant", "assistant_group_mention_notifications"))
+        }
+        "assistant_group_messages" => Some(("assistant", "assistant_group_messages")),
+        "assistant_group_read_states" => Some(("assistant", "assistant_group_read_states")),
+        "assistant_group_requests" => Some(("assistant", "assistant_group_requests")),
+        "assistant_group_transfers" => Some(("account_activity", "assistant_group_transfers")),
+        "assistant_groups" => Some(("assistant", "assistant_groups")),
+        "assistant_invocation_turns" => Some(("assistant", "assistant_invocation_turns")),
+        "assistant_invocations" => Some(("assistant", "assistant_invocations")),
+        "assistant_learning_migrations" => {
+            Some(("account_activity", "assistant_learning_migrations"))
+        }
+        "assistant_learning_publication_targets" => {
+            Some(("account_activity", "assistant_learning_publication_targets"))
+        }
+        "assistant_message_feedback" => Some(("assistant", "assistant_message_feedback")),
+        "assistant_messages" => Some(("assistant", "assistant_messages")),
+        "assistant_notification_push_budgets" => {
+            Some(("account", "assistant_notification_push_budgets"))
+        }
+        "assistant_notification_push_sources" => {
+            Some(("account", "assistant_notification_push_sources"))
+        }
+        "assistant_notifications" => Some(("assistant", "assistant_notifications")),
+        "assistant_onboarding" => Some(("assistant", "assistant_onboarding")),
+        "assistant_resources" => Some(("assistant", "assistant_resources")),
+        "assistant_service_execution" => Some(("assistant", "assistant_service_execution")),
+        "assistant_settings" => Some(("assistant", "assistant_settings")),
+        "assistant_skill_draft_attempts" => Some(("assistant", "assistant_skill_draft_attempts")),
+        "assistant_tool_results" => Some(("assistant", "assistant_tool_results")),
+        "assistant_voice_announcements" => Some(("assistant", "assistant_voice_announcements")),
+        "assistant_voice_requests" => Some(("assistant", "assistant_voice_requests")),
+        "assistant_voice_windows" => Some(("account_activity", "assistant_voice_windows")),
+        "assistant_wire_logs" => Some(("account_activity", "assistant_wire_logs")),
+        "async_service_operation_artifacts" => {
+            Some(("assistant", "async_service_operation_artifacts"))
+        }
+        "auth_device_codes" => Some(("account", "auth_device_codes")),
+        "auth_device_codes_v2" => Some(("account", "auth_device_codes_v2")),
+        "authorization_codes" => Some(("account", "authorization_codes")),
+        "catalog_delegation_grants" => Some(("services", "catalog_delegation_grants")),
+        "channel_activity_notifications" => Some(("channels", "channel_activity_notifications")),
+        "channel_adapter_accounts" => Some(("account_activity", "channel_adapter_accounts")),
+        "channel_adapter_allocations" => Some(("channels", "channel_adapter_allocations")),
+        "channel_adapter_bindings" => Some(("channels", "channel_adapter_bindings")),
+        "channel_adapter_events" => Some(("channels", "channel_adapter_events")),
+        "channel_adapter_resource_claims" => Some(("channels", "channel_adapter_resource_claims")),
+        "channel_adapter_sessions" => Some(("channels", "channel_adapter_sessions")),
+        "channel_bots" => Some(("channels", "channel_bots")),
+        "channel_connect_links" => Some(("channels", "channel_connect_links")),
+        "channel_conversations" => Some(("channels", "channel_conversations")),
+        "channel_delivery_receipts" => Some(("channels", "channel_delivery_receipts")),
+        "channel_email_batches" => Some(("channels", "channel_email_batches")),
+        "channel_email_receipts" => Some(("channels", "channel_email_receipts")),
+        "channel_email_sends" => Some(("channels", "channel_email_sends")),
+        "channel_email_subscriptions" => Some(("channels", "channel_email_subscriptions")),
+        "channel_messages" => Some(("channels", "channel_messages")),
+        "channel_reply_deliveries" => Some(("channels", "channel_reply_deliveries")),
+        "channel_text_deliveries" => Some(("channels", "channel_text_deliveries")),
+        "channel_webhook_rejections" => Some(("channels", "channel_webhook_rejections")),
+        "channel_whatsapp_native" => Some(("channels", "channel_whatsapp_native")),
+        "cli_pairings" => Some(("account", "cli_pairings")),
+        "connect_links" => Some(("account", "connect_links")),
+        "consents" => Some(("account", "consents")),
+        "credit_grants" => Some(("billing", "credit_grants")),
+        "device_codes" => Some(("security", "device_codes")),
+        "device_onboard_credentials" => Some(("account", "device_onboard_credentials")),
+        "encrypted_record_migration_findings" => {
+            Some(("account_activity", "encrypted_record_migration_findings"))
+        }
+        "encrypted_record_migration_runs" => {
+            Some(("account_activity", "encrypted_record_migration_runs"))
+        }
+        "execution_permission_deliveries" => Some(("account", "execution_permission_deliveries")),
+        "feature_flag_overrides" => Some(("account_activity", "feature_flag_overrides")),
+        "generated_artifact_content_series" => {
+            Some(("account", "generated_artifact_content_series"))
+        }
+        "invite_codes" => Some(("account_activity", "invite_codes")),
+        "invocation_diagnostics" => Some(("account_activity", "invocation_diagnostics")),
+        "lark_base_write_photos" => Some(("account", "lark_base_write_photos")),
+        "lark_base_writes" => Some(("account", "lark_base_writes")),
+        "login_approvals" => Some(("security", "login_approvals")),
+        "login_codes" => Some(("security", "login_codes")),
+        "machine_authority_leases" => Some(("machines", "machine_authority_leases")),
+        "machine_confirmations" => Some(("machines", "machine_confirmations")),
+        "machine_contexts" => Some(("machines", "machine_contexts")),
+        "machine_desktops" => Some(("machines", "machine_desktops")),
+        "machine_external_grants" => Some(("machines", "machine_external_grants")),
+        "machine_free_slots" => Some(("machines", "machine_free_slots")),
+        "machine_jobs" => Some(("machines", "machine_jobs")),
+        "machine_oauth_consent_requests" => Some(("machines", "machine_oauth_consent_requests")),
+        "machine_orphan_inventory" => Some(("machines", "machine_orphan_inventory")),
+        "machine_revocations" => Some(("machines", "machine_revocations")),
+        "machine_separation_compatibility" => {
+            Some(("machines", "machine_separation_compatibility"))
+        }
+        "machine_setups" => Some(("machines", "machine_setups")),
+        "machine_update_attempts" => Some(("machines", "machine_update_attempts")),
+        "machine_updates" => Some(("machines", "machine_updates")),
+        "mcp_session_notifications" => Some(("account_activity", "mcp_session_notifications")),
+        "mcp_session_slots" => Some(("account", "mcp_session_slots")),
+        "mfa_challenges" => Some(("account", "mfa_challenges")),
+        "mfa_factors" => Some(("security", "mfa_factors")),
+        "node_registration_tokens" => Some(("account", "node_registration_tokens")),
+        "nodes" => Some(("machines", "nodes")),
+        "notification_channels" => Some(("security", "notification_channels")),
+        "nyxbot_channels" => Some(("channels", "nyxbot_channels")),
+        "nyxbot_event_bindings" => Some(("assistant", "nyxbot_event_bindings")),
+        "nyxbot_events" => Some(("assistant", "nyxbot_events")),
+        "nyxbot_gateway_responses" => Some(("assistant", "nyxbot_gateway_responses")),
+        "nyxbot_image_deliveries" => Some(("assistant", "nyxbot_image_deliveries")),
+        "nyxbot_image_deliveries_v2" => Some(("assistant", "nyxbot_image_deliveries_v2")),
+        "nyxbot_threads" => Some(("assistant", "nyxbot_threads")),
+        "nyxbot_watches" => Some(("assistant", "nyxbot_watches")),
+        "oauth_broker_bindings" => Some(("services", "oauth_broker_bindings")),
+        "oauth_clients" => Some(("services", "oauth_clients")),
+        "oauth_consent_requests" => Some(("services", "oauth_consent_requests")),
+        "oauth_delegation_authorities" => Some(("services", "oauth_delegation_authorities")),
+        "oauth_states" => Some(("services", "oauth_states")),
+        "openclaw_channel_mappings" => Some(("account_activity", "openclaw_channel_mappings")),
+        "oracle_pools" => Some(("account", "oracle_pools")),
+        "org_invites" => Some(("account", "org_invites")),
+        "org_memberships" => Some(("account", "org_memberships")),
+        "permission_key_policies" => Some(("account", "permission_key_policies")),
+        "platform_bot_cleanup" => Some(("account", "platform_bot_cleanup")),
+        "platform_bot_configs" => Some(("account", "platform_bot_configs")),
+        "platform_bot_installations" => Some(("account", "platform_bot_installations")),
+        "platform_bot_runtime_controls" => Some(("account", "platform_bot_runtime_controls")),
+        "platform_delivery_tests" => Some(("account", "platform_delivery_tests")),
+        "platform_discord_control_installation_history" => {
+            Some(("account", "platform_discord_control_installation_history"))
+        }
+        "platform_discord_control_installations" => {
+            Some(("account", "platform_discord_control_installations"))
+        }
+        "platform_guide_selections" => Some(("account_activity", "platform_guide_selections")),
+        "platform_native_entry_receipts" => Some(("account", "platform_native_entry_receipts")),
+        "platform_native_replies" => Some(("account_activity", "platform_native_replies")),
+        "platform_onboarding_binding_requests" => {
+            Some(("account_activity", "platform_onboarding_binding_requests"))
+        }
+        "platform_onboarding_bindings" => {
+            Some(("account_activity", "platform_onboarding_bindings"))
+        }
+        "platform_personal_decision_spacing" => {
+            Some(("account_activity", "platform_personal_decision_spacing"))
+        }
+        "platform_personal_setup_selections" => {
+            Some(("account_activity", "platform_personal_setup_selections"))
+        }
+        "platform_personal_stop_effects" => Some(("account", "platform_personal_stop_effects")),
+        "platform_public_deployment_activations" => {
+            Some(("account", "platform_public_deployment_activations"))
+        }
+        "platform_public_deployment_proofs" => {
+            Some(("account", "platform_public_deployment_proofs"))
+        }
+        "platform_public_probe_consents" => Some(("account", "platform_public_probe_consents")),
+        "platform_public_readiness_probes" => Some(("account", "platform_public_readiness_probes")),
+        "platform_setup_notices" => Some(("account", "platform_setup_notices")),
+        "platform_setup_steps" => Some(("account", "platform_setup_steps")),
+        "platform_setups" => Some(("account", "platform_setups")),
+        "refresh_tokens" => Some(("security", "refresh_tokens")),
+        "saved_logins" => Some(("account", "saved_logins")),
+        "service_account_key_read_grants" => Some(("services", "service_account_key_read_grants")),
+        "service_account_tokens" => Some(("services", "service_account_tokens")),
+        "service_accounts" => Some(("services", "service_accounts")),
+        "service_approval_configs" => Some(("services", "service_approval_configs")),
+        "service_change_events" => Some(("account_activity", "service_change_events")),
+        "service_pool_member_health" => Some(("services", "service_pool_member_health")),
+        "service_pools" => Some(("services", "service_pools")),
+        "service_preferences" => Some(("services", "service_preferences")),
+        "sessions" => Some(("security", "sessions")),
+        "telegram_bot_claims" => Some(("account_activity", "telegram_bot_claims")),
+        "telegram_bot_requests" => Some(("account_activity", "telegram_bot_requests")),
+        "telegram_managed_bot_events" => Some(("account_activity", "telegram_managed_bot_events")),
+        "trigger_deliveries" => Some(("account", "trigger_deliveries")),
+        "trigger_owner_limits" => Some(("account", "trigger_owner_limits")),
+        "trigger_runs" => Some(("account", "trigger_runs")),
+        "trigger_work" => Some(("account", "trigger_work")),
+        "triggers" => Some(("account", "triggers")),
+        "usage_workspaces" => Some(("billing", "usage_workspaces")),
+        "usage_meter" => Some(("billing", "usage_meter")),
+        "user_api_keys" => Some(("services", "user_api_keys")),
+        "user_endpoints" => Some(("services", "user_endpoints")),
+        "user_provider_credentials" => Some(("services", "user_provider_credentials")),
+        "user_provider_tokens" => Some(("services", "user_provider_tokens")),
+        "user_service_connections" => Some(("services", "user_service_connections")),
+        "user_services" => Some(("services", "user_services")),
+        "users" => Some(("account", "users")),
+        _ => None,
+    }
+}
+const METADATA_FIELDS: &[&str] = &[
     "user_id",
     "owner_id",
     "owner_user_id",
+    "approved_user_id",
+    "member_user_id",
     "conversation_id",
     "service_id",
     "service_slug",
@@ -56,147 +385,320 @@ const COMMON_SAFE_FIELDS: &[&str] = &[
     "deleted_at",
     "email_verified",
     "last_login_at",
+    "enabled",
+    "is_active",
+];
+const MESSAGE_FIELDS: &[&str] = &[
+    "user_id",
+    "conversation_id",
+    "role",
+    "content",
+    "created_at",
+];
+const CHANNEL_FIELDS: &[&str] = &[
+    "user_id",
+    "conversation_id",
+    "direction",
+    "text",
+    "created_at",
+];
+const FILE_METADATA_FIELDS: &[&str] = &[
+    "user_id",
+    "filename",
+    "content_type",
+    "size",
+    "created_at",
+    "expires_at",
+];
+const PROFILE_FIELDS: &[&str] = &[
+    "email",
+    "display_name",
+    "avatar_url",
+    "email_verified",
+    "mfa_enabled",
+    "social_provider",
+    "created_at",
+    "updated_at",
+    "last_login_at",
+    "profile_config",
+];
+const BILLING_WALLET_FIELDS: &[&str] = &[
+    "owner_id",
+    "plan_kind",
+    "balance_credits",
+    "reserved_credits",
+    "pending_lago_debits",
+    "pending_topup_expiry_credits",
+    "has_payment_instrument",
+    "overdraft_cap_credits",
+    "suspended",
+    "collection_state",
+    "balance_synced_at",
+    "created_at",
+    "updated_at",
+];
+const CREDIT_GRANT_FIELDS: &[&str] = &[
+    "recipient_user_id",
+    "target_kind",
+    "amount",
+    "remaining",
+    "reserved",
+    "scope",
+    "expires_at",
+    "reason",
+    "status",
+    "created_at",
+    "updated_at",
+    "consumed_at",
+    "expired_at",
+    "revoked_at",
+];
+const USAGE_FIELDS: &[&str] = &[
+    "billing_owner_id",
+    "service_id",
+    "service_slug",
+    "metric",
+    "quantity",
+    "status",
+    "created_at",
+    "settled_at",
+    "wallet_funded",
+    "grant_funded",
+    "allowance_funded",
+    "wallet_charge_credits",
 ];
 
-#[derive(Debug, Serialize, Clone, Default)]
-pub struct ExportSection {
-    pub items: Vec<serde_json::Value>,
-    pub total_count: u64,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct ExportLimits {
-    pub max_bytes: usize,
-    pub section_row_cap: i64,
-    pub query_timeout_ms: u64,
-    pub file_payloads: &'static str,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct AccountExport {
-    pub format: &'static str,
-    pub version: u32,
-    pub generated_at: String,
-    pub account_id: String,
-    pub limits: ExportLimits,
-    pub truncated_sections: Vec<String>,
-    pub excluded: Vec<&'static str>,
-    pub sections: BTreeMap<String, ExportSection>,
-}
-
-fn bson_json(value: &Bson) -> serde_json::Value {
-    match value {
-        Bson::String(value) => serde_json::Value::String(value.clone()),
-        Bson::Boolean(value) => serde_json::Value::Bool(*value),
-        Bson::Int32(value) => serde_json::json!(*value),
-        Bson::Int64(value) => serde_json::json!(*value),
-        Bson::Double(value) if value.is_finite() => serde_json::json!(*value),
-        Bson::DateTime(value) => serde_json::Value::String(value.to_chrono().to_rfc3339()),
-        Bson::ObjectId(value) => serde_json::Value::String(value.to_hex()),
-        Bson::Null => serde_json::Value::Null,
-        _ => serde_json::Value::Null,
+fn fields_for(collection: &str) -> &'static [&'static str] {
+    match collection {
+        "agent_key_login_requests" => METADATA_FIELDS,
+        "agent_service_bindings" => METADATA_FIELDS,
+        "api_key_credentials" => METADATA_FIELDS,
+        "api_keys" => METADATA_FIELDS,
+        "approval_grants" => METADATA_FIELDS,
+        "approval_requests" => METADATA_FIELDS,
+        "assistant_acknowledgements" => METADATA_FIELDS,
+        "assistant_action_receipts" => METADATA_FIELDS,
+        "assistant_agent_consents" => METADATA_FIELDS,
+        "assistant_agent_learning" => METADATA_FIELDS,
+        "assistant_agent_learning_members" => METADATA_FIELDS,
+        "assistant_agent_learning_proposals" => METADATA_FIELDS,
+        "assistant_agent_learning_runs" => METADATA_FIELDS,
+        "assistant_agent_learning_skill_roots" => METADATA_FIELDS,
+        "assistant_agent_private_notes" => METADATA_FIELDS,
+        "assistant_agent_shares" => METADATA_FIELDS,
+        "assistant_agent_sharing" => METADATA_FIELDS,
+        "assistant_agents" => METADATA_FIELDS,
+        "assistant_artifact_deliveries" => METADATA_FIELDS,
+        "assistant_async_operations" => METADATA_FIELDS,
+        "assistant_async_quotas" => METADATA_FIELDS,
+        "assistant_attachment_expiry" => METADATA_FIELDS,
+        "assistant_attachments" => FILE_METADATA_FIELDS,
+        "assistant_authored_draft_claims" => METADATA_FIELDS,
+        "assistant_checkpoints" => METADATA_FIELDS,
+        "assistant_cma_agents" => METADATA_FIELDS,
+        "assistant_cma_creations" => METADATA_FIELDS,
+        "assistant_cma_sandboxes" => METADATA_FIELDS,
+        "assistant_cma_session_origins" => METADATA_FIELDS,
+        "assistant_conversations" => METADATA_FIELDS,
+        "assistant_direct_handoffs" => METADATA_FIELDS,
+        "assistant_group_agent_access" => METADATA_FIELDS,
+        "assistant_group_agent_proposals" => METADATA_FIELDS,
+        "assistant_group_execution_slots" => METADATA_FIELDS,
+        "assistant_group_invites" => METADATA_FIELDS,
+        "assistant_group_mention_notifications" => METADATA_FIELDS,
+        "assistant_group_messages" => METADATA_FIELDS,
+        "assistant_group_read_states" => METADATA_FIELDS,
+        "assistant_group_requests" => METADATA_FIELDS,
+        "assistant_groups" => METADATA_FIELDS,
+        "assistant_invocation_turns" => METADATA_FIELDS,
+        "assistant_invocations" => METADATA_FIELDS,
+        "assistant_learning_migrations" => METADATA_FIELDS,
+        "assistant_learning_publication_targets" => METADATA_FIELDS,
+        "assistant_message_feedback" => METADATA_FIELDS,
+        "assistant_messages" => MESSAGE_FIELDS,
+        "assistant_notification_push_budgets" => METADATA_FIELDS,
+        "assistant_notification_push_sources" => METADATA_FIELDS,
+        "assistant_notifications" => METADATA_FIELDS,
+        "assistant_onboarding" => METADATA_FIELDS,
+        "assistant_resources" => METADATA_FIELDS,
+        "assistant_service_execution" => METADATA_FIELDS,
+        "assistant_settings" => METADATA_FIELDS,
+        "assistant_skill_draft_attempts" => METADATA_FIELDS,
+        "assistant_tool_results" => METADATA_FIELDS,
+        "assistant_voice_announcements" => METADATA_FIELDS,
+        "assistant_voice_requests" => METADATA_FIELDS,
+        "assistant_voice_windows" => METADATA_FIELDS,
+        "assistant_wire_logs" => METADATA_FIELDS,
+        "async_service_operation_artifacts" => FILE_METADATA_FIELDS,
+        "auth_device_codes" => METADATA_FIELDS,
+        "auth_device_codes_v2" => METADATA_FIELDS,
+        "authorization_codes" => METADATA_FIELDS,
+        "billing_wallet" => BILLING_WALLET_FIELDS,
+        "catalog_delegation_grants" => METADATA_FIELDS,
+        "channel_activity_notifications" => METADATA_FIELDS,
+        "channel_adapter_accounts" => METADATA_FIELDS,
+        "channel_adapter_allocations" => METADATA_FIELDS,
+        "channel_adapter_bindings" => METADATA_FIELDS,
+        "channel_adapter_events" => METADATA_FIELDS,
+        "channel_adapter_resource_claims" => METADATA_FIELDS,
+        "channel_adapter_sessions" => METADATA_FIELDS,
+        "channel_bots" => METADATA_FIELDS,
+        "channel_connect_links" => METADATA_FIELDS,
+        "channel_conversations" => METADATA_FIELDS,
+        "channel_delivery_receipts" => METADATA_FIELDS,
+        "channel_email_batches" => METADATA_FIELDS,
+        "channel_email_receipts" => METADATA_FIELDS,
+        "channel_email_sends" => METADATA_FIELDS,
+        "channel_email_subscriptions" => METADATA_FIELDS,
+        "channel_messages" => CHANNEL_FIELDS,
+        "channel_reply_deliveries" => METADATA_FIELDS,
+        "channel_text_deliveries" => METADATA_FIELDS,
+        "channel_webhook_rejections" => METADATA_FIELDS,
+        "channel_whatsapp_native" => METADATA_FIELDS,
+        "cli_pairings" => METADATA_FIELDS,
+        "connect_links" => METADATA_FIELDS,
+        "consents" => METADATA_FIELDS,
+        "credit_grants" => CREDIT_GRANT_FIELDS,
+        "device_codes" => METADATA_FIELDS,
+        "device_onboard_credentials" => METADATA_FIELDS,
+        "encrypted_record_migration_findings" => METADATA_FIELDS,
+        "encrypted_record_migration_runs" => METADATA_FIELDS,
+        "execution_permission_deliveries" => METADATA_FIELDS,
+        "feature_flag_overrides" => METADATA_FIELDS,
+        "generated_artifact_content_series" => METADATA_FIELDS,
+        "invite_codes" => METADATA_FIELDS,
+        "invocation_diagnostics" => METADATA_FIELDS,
+        "lark_base_write_photos" => METADATA_FIELDS,
+        "lark_base_writes" => METADATA_FIELDS,
+        "login_approvals" => METADATA_FIELDS,
+        "login_codes" => METADATA_FIELDS,
+        "machine_authority_leases" => METADATA_FIELDS,
+        "machine_confirmations" => METADATA_FIELDS,
+        "machine_contexts" => METADATA_FIELDS,
+        "machine_desktops" => METADATA_FIELDS,
+        "machine_external_grants" => METADATA_FIELDS,
+        "machine_free_slots" => METADATA_FIELDS,
+        "machine_jobs" => METADATA_FIELDS,
+        "machine_oauth_consent_requests" => METADATA_FIELDS,
+        "machine_orphan_inventory" => METADATA_FIELDS,
+        "machine_revocations" => METADATA_FIELDS,
+        "machine_separation_compatibility" => METADATA_FIELDS,
+        "machine_setups" => METADATA_FIELDS,
+        "machine_update_attempts" => METADATA_FIELDS,
+        "machine_updates" => METADATA_FIELDS,
+        "mcp_session_notifications" => METADATA_FIELDS,
+        "mcp_session_slots" => METADATA_FIELDS,
+        "mfa_challenges" => METADATA_FIELDS,
+        "mfa_factors" => METADATA_FIELDS,
+        "node_registration_tokens" => METADATA_FIELDS,
+        "nodes" => METADATA_FIELDS,
+        "notification_channels" => METADATA_FIELDS,
+        "nyxbot_channels" => METADATA_FIELDS,
+        "nyxbot_event_bindings" => METADATA_FIELDS,
+        "nyxbot_events" => METADATA_FIELDS,
+        "nyxbot_gateway_responses" => METADATA_FIELDS,
+        "nyxbot_image_deliveries" => METADATA_FIELDS,
+        "nyxbot_image_deliveries_v2" => METADATA_FIELDS,
+        "nyxbot_threads" => METADATA_FIELDS,
+        "nyxbot_watches" => METADATA_FIELDS,
+        "oauth_broker_bindings" => METADATA_FIELDS,
+        "oauth_clients" => METADATA_FIELDS,
+        "oauth_consent_requests" => METADATA_FIELDS,
+        "oauth_delegation_authorities" => METADATA_FIELDS,
+        "oauth_states" => METADATA_FIELDS,
+        "openclaw_channel_mappings" => METADATA_FIELDS,
+        "oracle_pools" => METADATA_FIELDS,
+        "org_invites" => METADATA_FIELDS,
+        "org_memberships" => METADATA_FIELDS,
+        "permission_key_policies" => METADATA_FIELDS,
+        "platform_bot_cleanup" => METADATA_FIELDS,
+        "platform_bot_configs" => METADATA_FIELDS,
+        "platform_bot_installations" => METADATA_FIELDS,
+        "platform_bot_runtime_controls" => METADATA_FIELDS,
+        "platform_delivery_tests" => METADATA_FIELDS,
+        "platform_discord_control_installation_history" => METADATA_FIELDS,
+        "platform_discord_control_installations" => METADATA_FIELDS,
+        "platform_guide_selections" => METADATA_FIELDS,
+        "platform_native_entry_receipts" => METADATA_FIELDS,
+        "platform_native_replies" => METADATA_FIELDS,
+        "platform_onboarding_binding_requests" => METADATA_FIELDS,
+        "platform_onboarding_bindings" => METADATA_FIELDS,
+        "platform_personal_decision_spacing" => METADATA_FIELDS,
+        "platform_personal_setup_selections" => METADATA_FIELDS,
+        "platform_personal_stop_effects" => METADATA_FIELDS,
+        "platform_public_deployment_activations" => METADATA_FIELDS,
+        "platform_public_deployment_proofs" => METADATA_FIELDS,
+        "platform_public_probe_consents" => METADATA_FIELDS,
+        "platform_public_readiness_probes" => METADATA_FIELDS,
+        "platform_setup_notices" => METADATA_FIELDS,
+        "platform_setup_steps" => METADATA_FIELDS,
+        "platform_setups" => METADATA_FIELDS,
+        "refresh_tokens" => METADATA_FIELDS,
+        "saved_logins" => METADATA_FIELDS,
+        "service_account_key_read_grants" => METADATA_FIELDS,
+        "service_account_tokens" => METADATA_FIELDS,
+        "service_accounts" => METADATA_FIELDS,
+        "service_approval_configs" => METADATA_FIELDS,
+        "service_change_events" => METADATA_FIELDS,
+        "service_pool_member_health" => METADATA_FIELDS,
+        "service_pools" => METADATA_FIELDS,
+        "service_preferences" => METADATA_FIELDS,
+        "sessions" => METADATA_FIELDS,
+        "telegram_bot_claims" => METADATA_FIELDS,
+        "telegram_bot_requests" => METADATA_FIELDS,
+        "telegram_managed_bot_events" => METADATA_FIELDS,
+        "trigger_deliveries" => METADATA_FIELDS,
+        "trigger_owner_limits" => METADATA_FIELDS,
+        "trigger_runs" => METADATA_FIELDS,
+        "trigger_work" => METADATA_FIELDS,
+        "triggers" => METADATA_FIELDS,
+        "usage_meter" => USAGE_FIELDS,
+        "usage_workspaces" => METADATA_FIELDS,
+        "user_api_keys" => METADATA_FIELDS,
+        "user_endpoints" => METADATA_FIELDS,
+        "user_provider_credentials" => METADATA_FIELDS,
+        "user_provider_tokens" => METADATA_FIELDS,
+        "user_service_connections" => METADATA_FIELDS,
+        "user_services" => METADATA_FIELDS,
+        "users" => PROFILE_FIELDS,
+        _ => &[],
     }
 }
-
-fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
-    let mut output = serde_json::Map::new();
-    for field in fields {
-        if let Some(value) = row.get(*field) {
-            output.insert((*field).to_owned(), bson_json(value));
-        }
-    }
-    serde_json::Value::Object(output)
-}
-
 fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Option<Document> {
-    let personal_fields = match entry.owner {
+    let fields = match entry.owner {
         personal_data_registry::OwnerSelector::Fields(fields) if !fields.is_empty() => fields,
-        personal_data_registry::OwnerSelector::Fields(_)
-        | personal_data_registry::OwnerSelector::NotPersonal => return None,
+        _ => return None,
     };
-    if personal_fields.len() == 1 && personal_fields[0] == "_id" {
+    if fields.len() == 1 && fields[0] == "_id" {
         return Some(doc! {"_id": account_id});
     }
-    let clauses = personal_fields
+    let clauses: Vec<Document> = fields
         .iter()
         .map(|field| {
-            let mut clause = Document::new();
-            clause.insert(*field, account_id);
-            clause
+            let mut d = Document::new();
+            d.insert(*field, account_id);
+            d
         })
-        .collect::<Vec<_>>();
+        .collect();
     Some(if clauses.len() == 1 {
         clauses.into_iter().next().unwrap()
     } else {
         doc! {"$or": clauses}
     })
 }
-
-fn append_section(
-    sections: &mut BTreeMap<String, ExportSection>,
-    name: &str,
-    mut incoming: ExportSection,
-) {
-    let section = sections.entry(name.to_owned()).or_default();
-    section.total_count = section.total_count.saturating_add(incoming.total_count);
-    section.truncated |= incoming.truncated;
-    let remaining = SECTION_ITEM_CAP.saturating_sub(section.items.len());
-    if incoming.items.len() > remaining {
-        incoming.items.truncate(remaining);
-        section.truncated = true;
-    }
-    section.items.extend(incoming.items);
-}
-
-fn file_metadata_fields(collection: &str) -> Option<&'static [&'static str]> {
-    match collection {
-        "assistant_attachments" | "async_service_operation_artifacts" => Some(&[
-            "_id",
-            "filename",
-            "content_type",
-            "size",
-            "created_at",
-            "expires_at",
-        ]),
-        // Delivery rows intentionally contain only lifecycle metadata. The
-        // attachment itself is exported from the two collections above.
-        "assistant_artifact_deliveries" => Some(&["_id", "expires_at"]),
-        _ => None,
-    }
-}
-
-fn fields_for_collection(collection: &str) -> &'static [&'static str] {
-    match collection {
-        // Shared catalog attribution keeps only the opaque account id and
-        // operational identifiers. Human names and contact fields are never
-        // selected from this retained collection.
-        "downstream_services" => &[
-            "_id",
-            "owner_user_id",
-            "service_id",
-            "slug",
-            "status",
-            "created_at",
-            "updated_at",
-        ],
-        _ => COMMON_SAFE_FIELDS,
-    }
-}
-
 async fn rows(
     db: &mongodb::Database,
     collection: &str,
     filter: Document,
     fields: &[&str],
     sort: Document,
-) -> AppResult<ExportSection> {
+) -> AppResult<ExportSubsection> {
     let total_count = db
         .collection::<Document>(collection)
         .count_documents(filter.clone())
         .max_time(QUERY_TIMEOUT)
         .await?;
-    let mut projection = doc! {"_id": 1};
+    let mut projection = Document::new();
     for field in fields {
         projection.insert(*field, 1);
     }
@@ -205,292 +707,285 @@ async fn rows(
         .find(filter)
         .projection(projection)
         .sort(sort)
-        .limit(SECTION_ROW_CAP + 1)
+        .limit(SUBSECTION_ROW_CAP + 1)
         .max_time(QUERY_TIMEOUT)
         .await?;
     let mut items = Vec::new();
     while let Some(row) = cursor.try_next().await? {
-        if items.len() == SECTION_ROW_CAP as usize {
+        if items.len() == SUBSECTION_ROW_CAP as usize {
             break;
         }
         items.push(safe_item(&row, fields));
     }
-    Ok(ExportSection {
-        truncated: total_count > SECTION_ROW_CAP as u64,
-        total_count,
+    Ok(ExportSubsection {
         items,
+        total_count,
+        truncated: total_count > SUBSECTION_ROW_CAP as u64,
     })
 }
-
-fn empty_sections() -> BTreeMap<String, ExportSection> {
+fn empty_sections() -> BTreeMap<String, BTreeMap<String, ExportSubsection>> {
     personal_data_registry::export_sections()
-        .map(|name| {
-            (
-                name.to_owned(),
-                ExportSection {
-                    items: Vec::new(),
-                    total_count: 0,
-                    truncated: false,
-                },
-            )
-        })
+        .map(|section| (section.to_owned(), BTreeMap::new()))
         .collect()
 }
-
 fn byte_size(export: &AccountExport) -> usize {
     serde_json::to_vec(export)
-        .map(|bytes| bytes.len())
+        .map(|v| v.len())
         .unwrap_or(usize::MAX)
 }
-
-fn enforce_cap(export: &mut AccountExport) {
+fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
+    let mut current = byte_size(export);
     let mut truncated = BTreeSet::new();
-    while byte_size(export) > MAX_BYTES {
-        let Some((name, section)) = export
+    while current > max_bytes {
+        let Some((section, subsection, value)) = export
             .sections
             .iter_mut()
-            .max_by_key(|(_, section)| section.items.len())
+            .flat_map(|(section, subs)| {
+                subs.iter_mut()
+                    .map(move |(sub, value)| (section, sub, value))
+            })
+            .max_by_key(|(_, _, value)| value.items.len())
         else {
             break;
         };
-        if section.items.pop().is_none() {
+        let Some(item) = value.items.pop() else {
             break;
-        }
-        section.truncated = true;
-        truncated.insert(name.clone());
+        };
+        current =
+            current.saturating_sub(serde_json::to_vec(&item).map(|v| v.len() + 1).unwrap_or(0));
+        value.truncated = true;
+        truncated.insert(format!("{section}.{subsection}"));
     }
     export.truncated_sections = truncated.into_iter().collect();
 }
 
+fn enforce_cap(export: &mut AccountExport) {
+    enforce_cap_with_limit(export, MAX_BYTES);
+}
+
 pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<AccountExport> {
     let mut sections = empty_sections();
-    let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-        .find_one(doc! {"_id": account_id})
-        .projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1})
-        .max_time(QUERY_TIMEOUT)
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-    sections
-        .entry("account".into())
-        .or_default()
-        .items
-        .push(safe_item(
-            &account,
-            &[
-                "_id",
-                "email",
-                "display_name",
-                "avatar_url",
-                "email_verified",
-                "created_at",
-                "updated_at",
-                "last_login_at",
-            ],
-        ));
-    sections.get_mut("account").unwrap().total_count = 1;
-
-    // Dedicated allowlists cover content, lifecycle metadata, files and
-    // billing. The registry-driven pass below covers every other personal
-    // section without serializing an entire model.
-    let mut handled = BTreeSet::from([
-        crate::models::user_service::COLLECTION_NAME,
-        crate::models::session::COLLECTION_NAME,
-        crate::models::assistant_message::COLLECTION_NAME,
-        crate::models::channel_message::COLLECTION_NAME,
-        crate::models::assistant_action_receipt::COLLECTION_NAME,
-        crate::models::machine_job::COLLECTION_NAME,
-        crate::models::audit_log::COLLECTION_NAME,
-        crate::models::billing_wallet::COLLECTION_NAME,
-        "assistant_attachments",
-        "assistant_artifact_deliveries",
-        "async_service_operation_artifacts",
-        crate::models::credit_grant::COLLECTION_NAME,
-        crate::models::usage_meter::COLLECTION_NAME,
-    ]);
-    let explicit = [
+    let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    sections.entry("account".into()).or_default().insert(
+        "profile".into(),
+        ExportSubsection {
+            items: vec![safe_item(
+                &account,
+                &[
+                    "email",
+                    "display_name",
+                    "avatar_url",
+                    "email_verified",
+                    "mfa_enabled",
+                    "social_provider",
+                    "created_at",
+                    "updated_at",
+                    "last_login_at",
+                    "profile_config",
+                ],
+            )],
+            total_count: 1,
+            truncated: false,
+        },
+    );
+    let mut handled = BTreeSet::new();
+    for (section, collection, fields, filter, subsection) in [
         (
             "services",
             crate::models::user_service::COLLECTION_NAME,
-            &[
-                "_id",
-                "slug",
-                "is_active",
-                "service_type",
-                "created_at",
-                "deleted_at",
-            ][..],
+            &["service_id", "slug", "created_at", "updated_at"][..],
+            doc! {"user_id": account_id},
+            "user_services",
         ),
         (
             "security",
             crate::models::session::COLLECTION_NAME,
-            &["_id", "created_at", "expires_at", "last_used_at"][..],
+            &["created_at", "expires_at", "last_used_at"][..],
+            doc! {"user_id": account_id},
+            "sessions",
         ),
         (
             "assistant",
             crate::models::assistant_message::COLLECTION_NAME,
-            &["_id", "conversation_id", "role", "content", "created_at"][..],
+            &["conversation_id", "role", "content", "created_at"][..],
+            doc! {"user_id": account_id},
+            "assistant_messages",
         ),
         (
             "channels",
             crate::models::channel_message::COLLECTION_NAME,
-            &["_id", "conversation_id", "direction", "text", "created_at"][..],
+            &["conversation_id", "direction", "text", "created_at"][..],
+            doc! {"user_id": account_id},
+            "channel_messages",
         ),
         (
             "account_activity",
             crate::models::assistant_action_receipt::COLLECTION_NAME,
-            &["_id", "action", "status", "created_at", "completed_at"][..],
+            &["action", "status", "created_at", "completed_at"][..],
+            doc! {"user_id": account_id},
+            "assistant_action_receipts",
         ),
         (
             "machines",
             crate::models::machine_job::COLLECTION_NAME,
-            &["_id", "status", "created_at", "completed_at"][..],
-        ),
-    ];
-    for (section, collection, fields) in explicit {
-        append_section(
-            &mut sections,
-            section,
-            rows(
-                db,
-                collection,
-                doc! {"user_id": account_id},
-                fields,
-                doc! {"created_at": -1},
-            )
-            .await?,
-        );
-    }
-
-    // Audit metadata is visible to the actor in account activity. Event
-    // payloads and chain material are deliberately excluded.
-    append_section(
-        &mut sections,
-        "account_activity",
-        rows(
-            db,
-            crate::models::audit_log::COLLECTION_NAME,
+            &["status", "created_at", "completed_at"][..],
             doc! {"user_id": account_id},
-            &["_id", "event_type", "created_at", "service_id", "status"],
-            doc! {"created_at": -1},
-        )
-        .await?,
-    );
-
-    for (collection, fields) in [
-        (
-            "assistant_attachments",
-            file_metadata_fields("assistant_attachments").unwrap(),
-        ),
-        (
-            "assistant_artifact_deliveries",
-            file_metadata_fields("assistant_artifact_deliveries").unwrap(),
-        ),
-        (
-            "async_service_operation_artifacts",
-            file_metadata_fields("async_service_operation_artifacts").unwrap(),
+            "machine_jobs",
         ),
     ] {
-        append_section(
-            &mut sections,
-            "assistant",
-            rows(
-                db,
-                collection,
-                doc! {"user_id": account_id},
-                fields,
-                doc! {"created_at": -1},
-            )
-            .await?,
+        sections.entry(section.into()).or_default().insert(
+            subsection.into(),
+            rows(db, collection, filter, fields, doc! {"created_at": -1}).await?,
         );
+        handled.insert(collection);
     }
+    let memberships = rows(
+        db,
+        "org_memberships",
+        doc! {"member_user_id": account_id},
+        &[
+            "org_user_id",
+            "member_user_id",
+            "role",
+            "created_at",
+            "updated_at",
+        ],
+        doc! {"created_at": -1},
+    )
+    .await?;
+    sections
+        .entry("account".into())
+        .or_default()
+        .insert("org_memberships".into(), memberships);
+    handled.insert("org_memberships");
+    let audit = rows(
+        db,
+        crate::models::audit_log::COLLECTION_NAME,
+        doc! {"user_id": account_id},
+        &["event_type", "created_at"],
+        doc! {"created_at": -1},
+    )
+    .await?;
+    sections
+        .entry("account_activity".into())
+        .or_default()
+        .insert("audit_log".into(), audit);
+    handled.insert(crate::models::audit_log::COLLECTION_NAME);
 
-    // Billing output is a bounded owner-visible summary. Amounts and statuses
-    // are useful to the account holder; provider identifiers, ledger hashes,
-    // settlement locks and raw billing documents are not exported.
-    if let Some(wallet) = db
-        .collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME)
-        .find_one(doc! {"owner_id": account_id})
-        .projection(doc! {"balance_credits": 1, "reserved_credits": 1, "collection_state": 1, "suspended": 1})
-        .max_time(QUERY_TIMEOUT)
-        .await?
-    {
-        append_section(&mut sections, "billing", ExportSection {
-            items: vec![safe_item(&wallet, &["balance_credits", "reserved_credits", "collection_state", "suspended"])],
-            total_count: 1,
-            truncated: false,
-        });
-    }
-    append_section(
-        &mut sections,
-        "billing",
-        rows(
-            db,
-            crate::models::credit_grant::COLLECTION_NAME,
-            doc! {"recipient_user_id": account_id},
-            &[
-                "_id",
-                "amount",
-                "remaining",
-                "reserved",
-                "status",
-                "scope",
-                "expires_at",
-                "reason",
-                "created_at",
-                "updated_at",
-                "consumed_at",
-                "expired_at",
-                "revoked_at",
-            ],
-            doc! {"created_at": -1},
-        )
-        .await?,
-    );
-    append_section(
-        &mut sections,
-        "billing",
-        rows(
-            db,
-            crate::models::usage_meter::COLLECTION_NAME,
-            doc! {"actor_user_id": account_id},
-            &[
-                "_id",
-                "service_slug",
-                "metric",
-                "model",
-                "quantity",
-                "reserved_credits",
-                "status",
-                "created_at",
-                "finalized_at",
-            ],
-            doc! {"created_at": -1},
-        )
-        .await?,
-    );
-
+    // Financial rows are retained for integrity, but the person's own
+    // user-visible summaries are part of the export. Only display fields are
+    // projected; ledger hashes, provider references and settlement locks stay
+    // excluded.
+    let wallet = rows(
+        db,
+        crate::models::billing_wallet::COLLECTION_NAME,
+        doc! {"owner_id": account_id},
+        &[
+            "owner_id",
+            "plan_kind",
+            "balance_credits",
+            "reserved_credits",
+            "pending_lago_debits",
+            "pending_topup_expiry_credits",
+            "has_payment_instrument",
+            "overdraft_cap_credits",
+            "suspended",
+            "collection_state",
+            "balance_synced_at",
+            "created_at",
+            "updated_at",
+        ],
+        doc! {"updated_at": -1},
+    )
+    .await?;
+    sections
+        .entry("billing".into())
+        .or_default()
+        .insert("wallet".into(), wallet);
+    handled.insert(crate::models::billing_wallet::COLLECTION_NAME);
+    let grants = rows(
+        db,
+        crate::models::credit_grant::COLLECTION_NAME,
+        doc! {"recipient_user_id": account_id},
+        &[
+            "recipient_user_id",
+            "target_kind",
+            "amount",
+            "remaining",
+            "reserved",
+            "scope",
+            "expires_at",
+            "reason",
+            "status",
+            "created_at",
+            "updated_at",
+            "consumed_at",
+            "expired_at",
+            "revoked_at",
+        ],
+        doc! {"created_at": -1},
+    )
+    .await?;
+    sections
+        .entry("billing".into())
+        .or_default()
+        .insert("credit_grants".into(), grants);
+    handled.insert(crate::models::credit_grant::COLLECTION_NAME);
+    let usage = rows(
+        db,
+        crate::models::usage_meter::COLLECTION_NAME,
+        doc! {"billing_owner_id": account_id},
+        &[
+            "billing_owner_id",
+            "service_id",
+            "service_slug",
+            "metric",
+            "quantity",
+            "status",
+            "created_at",
+            "settled_at",
+            "wallet_funded",
+            "grant_funded",
+            "allowance_funded",
+            "wallet_charge_credits",
+        ],
+        doc! {"created_at": -1},
+    )
+    .await?;
+    sections
+        .entry("billing".into())
+        .or_default()
+        .insert("usage_meter".into(), usage);
+    handled.insert(crate::models::usage_meter::COLLECTION_NAME);
     for entry in personal_data_registry::entries() {
         let personal_data_registry::Export::Section(section) = entry.export else {
             continue;
         };
-        if handled.contains(entry.collection) {
+        if entry.collection == crate::models::user::COLLECTION_NAME
+            || handled.contains(entry.collection)
+        {
             continue;
         }
+        let Some((spec_section, subsection)) = export_spec(entry.collection) else {
+            continue;
+        };
+        debug_assert_eq!(section, spec_section);
         let Some(filter) = owner_filter(entry, account_id) else {
             continue;
         };
-        let result = rows(
+        let value = rows(
             db,
             entry.collection,
             filter,
-            fields_for_collection(entry.collection),
+            fields_for(entry.collection),
             doc! {"created_at": -1},
         )
         .await?;
-        append_section(&mut sections, section, result);
-        handled.insert(entry.collection);
+        sections
+            .entry(section.into())
+            .or_default()
+            .insert(subsection.into(), value);
     }
-
     let mut export = AccountExport {
         format: FORMAT,
         version: VERSION,
@@ -498,7 +993,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         account_id: account_id.to_owned(),
         limits: ExportLimits {
             max_bytes: MAX_BYTES,
-            section_row_cap: SECTION_ROW_CAP,
+            subsection_row_cap: SUBSECTION_ROW_CAP,
             query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
             file_payloads: if FILE_PAYLOADS_METADATA_ONLY {
                 "metadata_only"
@@ -510,8 +1005,8 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         excluded: vec![
             "password and authentication hashes",
             "tokens, keys, secrets, ciphertext, signatures and provider credentials",
-            "raw uploaded/generated file payloads (metadata is included while retained)",
-            "transient coordination, lease, deduplication and erasure bookkeeping",
+            "raw uploaded/generated file payloads (metadata only)",
+            "transient coordination, lease, deduplication, erasure and retained integrity records",
         ],
         sections,
     };
@@ -522,47 +1017,88 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::str::FromStr;
     #[test]
-    fn forbidden_secret_names_are_not_in_allowlisted_fields() {
-        let mut fields = COMMON_SAFE_FIELDS.to_vec();
-        fields.extend_from_slice(&[
-            "email",
-            "avatar_url",
-            "content",
-            "event_type",
-            "service_type",
-            "last_used_at",
-            "finalized_at",
-        ]);
-        for field in fields {
-            assert!(
-                !field.contains("password")
-                    && !field.contains("token")
-                    && !field.contains("secret")
-            );
-        }
+    fn recursive_values_preserve_documents_arrays_and_decimal_strings() {
+        let value = bson_json(&Bson::Document(
+            doc! {"nested": [doc! {"amount": bson::Decimal128::from_str("12.34").unwrap()}]},
+        ))
+        .unwrap();
+        assert_eq!(value["nested"][0]["amount"], "12.34");
+        assert!(
+            bson_json(&Bson::Binary(bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![1]
+            }))
+            .is_none()
+        );
     }
 
     #[test]
-    fn file_allowlist_is_metadata_only() {
-        for collection in [
-            "assistant_attachments",
-            "assistant_artifact_deliveries",
-            "async_service_operation_artifacts",
-        ] {
-            let fields = file_metadata_fields(collection).expect("file collection is registered");
-            assert!(fields.iter().all(|field| {
-                matches!(
-                    *field,
-                    "_id" | "filename" | "content_type" | "size" | "created_at" | "expires_at"
-                )
-            }));
-            assert!(
-                !fields
-                    .iter()
-                    .any(|field| field.ends_with("encrypted") || field.contains("payload"))
-            );
+    fn safe_items_omit_credentials_ids_and_binary_values() {
+        let row = doc! {
+            "_id": "mcp-session-credential",
+            "content": {"text": "kept", "ciphertext": "sentinel", "nested": [1_i32]},
+            "token": "sentinel",
+            "encrypted_blob": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1, 2] },
+        };
+        let value = safe_item(&row, &["_id", "content", "token", "encrypted_blob"]);
+        assert_eq!(value["content"]["text"], "kept");
+        assert!(value["content"].get("ciphertext").is_none());
+        assert!(value.get("_id").is_none());
+        assert!(value.get("token").is_none());
+        assert!(value.get("encrypted_blob").is_none());
+    }
+
+    #[test]
+    fn byte_cap_marks_only_popped_subsections_as_truncated() {
+        let mut sections = BTreeMap::new();
+        sections.insert(
+            "assistant".into(),
+            BTreeMap::from([(
+                "messages".into(),
+                ExportSubsection {
+                    items: vec![serde_json::json!({"body": "x".repeat(64)}); 3],
+                    total_count: 3,
+                    truncated: false,
+                },
+            )]),
+        );
+        let mut export = AccountExport {
+            format: FORMAT,
+            version: VERSION,
+            generated_at: "2026-01-01T00:00:00Z".into(),
+            account_id: "account".into(),
+            limits: ExportLimits {
+                max_bytes: MAX_BYTES,
+                subsection_row_cap: SUBSECTION_ROW_CAP,
+                query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
+                file_payloads: "metadata_only",
+            },
+            truncated_sections: Vec::new(),
+            excluded: Vec::new(),
+            sections,
+        };
+        enforce_cap_with_limit(&mut export, 400);
+        assert!(export.sections["assistant"]["messages"].truncated);
+        assert_eq!(export.truncated_sections, vec!["assistant.messages"]);
+        assert!(byte_size(&export) <= 400);
+    }
+    #[test]
+    fn registry_export_mapping_is_one_to_one() {
+        let mut seen = BTreeSet::new();
+        for entry in personal_data_registry::entries() {
+            if matches!(entry.export, personal_data_registry::Export::Section(_)) {
+                let spec = export_spec(entry.collection).expect(entry.collection);
+                assert_eq!(
+                    spec.0,
+                    match entry.export {
+                        personal_data_registry::Export::Section(section) => section,
+                        _ => unreachable!(),
+                    }
+                );
+                assert!(seen.insert(spec.1), "duplicate subsection spec");
+            }
         }
     }
 }
