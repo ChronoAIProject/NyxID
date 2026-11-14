@@ -475,7 +475,7 @@ pub(crate) fn apply_server_owned_headers(
     headers
 }
 
-/// Request-local bearer material. Never persisted in MCP sessions or exposed by Debug.
+/// Request-local verified credential material. Never persisted in MCP sessions or exposed by Debug.
 #[derive(Clone)]
 pub(crate) struct CallerToken(zeroize::Zeroizing<String>);
 
@@ -489,6 +489,14 @@ impl std::ops::Deref for CallerToken {
 impl std::fmt::Debug for CallerToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CallerToken([REDACTED])")
+    }
+}
+
+impl CallerToken {
+    /// Retain a credential only for the lifetime of the authenticated request.
+    /// The caller must validate and classify the value before constructing it.
+    pub(crate) fn from_verified(value: &str) -> Self {
+        Self(zeroize::Zeroizing::new(value.to_owned()))
     }
 }
 
@@ -506,7 +514,7 @@ pub(crate) fn caller_bearer_token_for_downstream(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(|value| CallerToken(zeroize::Zeroizing::new(value.to_owned())))
+        .map(CallerToken::from_verified)
 }
 
 /// Credential ownership follows the resolved service, falling back to the

@@ -38,9 +38,17 @@ saved-path behavior, also deploy [PR #12](https://github.com/ChronoAIProject/chr
 before this frontend update. It never uses the full-inventory `/status` endpoint
 or a platform probe key.
 
+Agent Key-scoped invocation diagnostics additionally require
+[chrono-probe #16](https://github.com/ChronoAIProject/chrono-probe/issues/16),
+which preserves `X-API-Key` through exact-service authorization and the caller
+probe. Deploy that companion change before enabling Agent Key redemption from
+NyxID #2241; human bearer diagnostics remain compatible with older probe
+deployments.
+
 chrono-probe must be configured to call this NyxID installation for identity,
 service inventory, and exact proxy execution. Its existing authorizer reads
-`GET /api/v1/users/me` and `GET /api/v1/keys` with the callback token.
+`GET /api/v1/users/me` and `GET /api/v1/keys` with a human callback token.
+Agent Key caller probes read only `GET /api/v1/keys` with the same Agent Key.
 
 ## Routes and permissions
 
@@ -165,12 +173,13 @@ When enabled and configured, downstream 5xx responses and eligible transport or
 broker failures from REST proxy, provider LLM, LLM gateway and MCP service-tool
 calls can carry a short-lived opaque diagnostic handle. Downstream 4xx
 responses, including authentication, validation, missing-resource and throttling
-responses, do not qualify. Only ordinary, unconstrained access-token callers
-receive handles. Agent Keys, NyxBot conversation keys, sessions, service
-accounts, delegated and relay callers receive no handle, make no diagnostic
-database write and add no MCP diagnostic content. Agent Key probing remains
-deferred to #2241. The original request does not run a probe. It returns its
-original status and body after one bounded MongoDB insert, preserving
+responses, do not qualify. Ordinary, unconstrained access-token callers and
+eligible `ApiKeyPurpose::General` Agent Keys, including live NyxBot conversation
+keys, can receive handles. Scheduled, permission-bound, `PublicNyxbot`,
+`SharedEntryTransport`, session, service-account, delegated and relay callers
+receive no handle, make no diagnostic database write and add no MCP diagnostic
+content. The original request does not run a probe. It returns its original
+status and body after one bounded MongoDB insert, preserving
 application headers and appending `Cache-Control: no-store` without replacing
 downstream cache directives; if handle issuance cannot finish within 250ms, the
 original error is returned without a handle. Local input, scope, approval,
@@ -201,8 +210,9 @@ adding either diagnostic field, for both JSON and SSE responses, so random
 handles do not weaken the continuation loop guard. The handle contains no
 UserService ID, path, token, request body or routing data. NyxID stores only its
 SHA-256 hash. The record expires after 60 seconds and binds the original actor,
-authentication class, API-key identity, acting or OAuth client and exact
-execution-selected UserService, including a concrete pool member.
+authentication class, parent API-key identity, child Agent Key login credential
+when present, acting or OAuth client and exact execution-selected UserService,
+including a concrete pool member.
 
 Clients may explicitly redeem the handle once with the current NyxID identity:
 
@@ -214,12 +224,25 @@ Content-Type: application/json
 {"handle":"nyx_diag_..."}
 ```
 
+MCP callers redeem inside the same authenticated request context with
+`nyx__diagnose_invocation`, passing only the opaque `handle`. The native tool
+retains request-local credential material only for that call and never exposes
+it in tool arguments, results, logs or persisted MCP sessions.
+
+Agent Key callers may instead use `X-API-Key: <current Agent Key>`. NyxID also
+accepts a Bearer-form Agent Key at ingress, then forwards the already classified
+credential to chrono-probe as `X-API-Key`; this avoids asking chrono-probe to
+guess whether an opaque Bearer value is a human token or an Agent Key.
+
 The handle stays in the body so access logs and route metrics do not capture it.
-NyxID requires the same bound identity, then rechecks the current API-key
-purpose and execution scope, service allowlist, live ownership or organization
-access, resource ACL, active HTTP service state and exact UserService. A
-mismatch, expiry or revoked access returns the same not-found result and does
-not reveal which check failed.
+NyxID requires the same bound identity, then rechecks the current parent and
+child credential, API-key purpose and execution scope, service allowlist, live
+ownership or organization/shared-agent access, resource ACL, active HTTP
+service state and exact UserService. Conversation keys must retain the same
+live turn authority. The caller-scoped proxy request reuses the normal Agent Key
+execution path, which enforces node allowlists, credential bindings and
+assistant operation scopes again. A mismatch, expiry or revoked access returns
+the same not-found result and does not reveal which check failed.
 
 An ordinary access token can run a caller-scoped probe using only the bearer on
 the redemption request. chrono-probe receives that full bearer credential and
@@ -228,12 +251,15 @@ Configure access-log and observability redaction at the probe and every
 intermediary hop. DPoP- and mTLS-bound tokens cannot be replayed by the probe:
 they receive no new handle, and redemption of an existing handle returns
 `observation: unknown` and `outcome: non_delegable` without forwarding the
-token. Historical handles for Agent Keys and bot/conversation keys, sessions,
-relay, delegated and service-account identities also complete as
-`unknown/non_delegable`; they never fall back to an owner, operator or system
-monitoring key. Agent Key-scoped probing requires a separate authority-
-preserving contract. There is no cached status fallback because the shared
-latest-status result is not bound to the current caller.
+token. An eligible `ApiKeyPurpose::General` Agent Key,
+including a live bot/conversation key, can run the same exact-service check with
+its current Agent Key authority and returns `observation: agent` when evidence
+is attributable. Unsupported API-key purposes and other non-delegable identities
+do not receive new handles. If a previously eligible identity becomes
+non-delegable before redemption, the existing handle completes with
+`observation: unknown` and `outcome: non_delegable`. No path falls back to an
+owner, operator or system monitoring key. There is no cached status fallback
+because the shared latest-status result is not bound to the current caller.
 
 Redemption atomically claims `pending` work before any probe. Concurrent
 redemptions cannot start a second probe; a completed result is retry-readable
@@ -256,9 +282,19 @@ The explicit probe work, including feature and ACL reads, rate admission, both
 upstream requests and response reads, has a three-second budget. Redirects and
 ambient HTTP proxies remain disabled, and responses retain the existing 64KiB
 bound. A MongoDB token bucket permits one probe per acting person and exact
-service per ten seconds across replicas; a process permits at most 32 concurrent
-probe futures. chrono-probe callbacks and services on the configured monitoring
-origin are excluded from recursive diagnostics.
+service per ten seconds across replicas and across that person's Agent Keys.
+This owner-and-service key is intentional: minting multiple Agent Keys must not
+bypass the probe budget. A process permits at most 32 concurrent probe futures.
+chrono-probe callbacks and services on the configured monitoring origin are
+excluded from recursive diagnostics.
+Caller-scoped chrono-probe proxy requests carry the reserved
+`X-NyxID-Invocation-Diagnostic-Probe: 1` marker. NyxID removes it before
+downstream forwarding and suppresses handle issuance for that request, including
+raw Agent Key callbacks that do not have the `chrono-probe` acting-client ID.
+The marker is advisory and grants no execution authority. If the normal proxy
+policy would require approval, NyxID refuses that diagnostic probe before
+creating an approval request or sending a notification; the diagnostic remains
+bounded unknown/unavailable evidence instead of leaving a pending prompt.
 
 The existing probe API does not atomically pin the preflight configuration. If
 an owner clears a recipe between the status read and probe, chrono-probe can
@@ -270,6 +306,12 @@ Successful redemption returns only bounded enums:
 ```json
 {"observation":"caller","assessment":"operation_specific_likely","outcome":"completed"}
 ```
+
+An attributable General Agent Key uses the same finite result shape with
+`"observation":"agent"`. This proves only that the current exact Agent Key
+authority reached the selected service's health/readiness path. It does not
+prove human-owner reachability or that the original business operation was
+valid or authorized.
 
 The projection never contains paths, raw bodies, free-text reasons, hostnames,
 tokens, keys or internal errors.

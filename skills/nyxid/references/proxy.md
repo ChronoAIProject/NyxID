@@ -70,13 +70,15 @@ nyxid proxy request <slug> <path> -m POST --via-service <USER_SERVICE_ID> -d '<b
 
 NyxID may attach a short-lived opaque diagnostic handle when a REST, LLM, or MCP service invocation fails. The handle preserves the exact UserService selected by the backend, including a selected pool member, without exposing that identity, the downstream path, request data, or credentials to the caller.
 
-For REST and LLM responses, read `X-NyxID-Diagnostic-Handle` and `X-NyxID-Diagnostic-Expires-In`. MCP errors may include `nyxid_invocation_diagnostic.handle` as additive content while retaining the original tool error. When a handle is present, optionally redeem it with the same current NyxID identity:
+For REST and LLM responses, read `X-NyxID-Diagnostic-Handle` and `X-NyxID-Diagnostic-Expires-In`. MCP errors may include `nyxid_invocation_diagnostic.handle` as additive content while retaining the original tool error. When a handle is present, optionally redeem it with the same current NyxID identity. Shell and HTTP clients use:
 
 ```bash
 nyxid monitoring diagnose <handle> --output json
 ```
 
-The response contains only bounded `observation`, `assessment`, and `outcome` enums. Treat it as secondary evidence. The original invocation status, body, and error remain authoritative; a healthy caller-scoped probe does not prove that the failed operation was valid or authorized. `unknown` or `non_delegable` does not attribute the failure. Current Agent Key, bot, relay, session, delegated, and service-account identities do not produce caller-scoped evidence.
+MCP callers use `nyx__diagnose_invocation` with only the opaque `handle`; do not pass a service ID, path, token, or original request.
+
+The response contains only bounded `observation`, `assessment`, and `outcome` enums. Treat it as secondary evidence. The original invocation status, body, and error remain authoritative; a healthy caller-scoped probe does not prove that the failed operation was valid or authorized. `observation: agent` means only that the same current General Agent Key authority reached the exact backend-selected service's configured health/readiness path. It does not prove human-owner reachability. `unknown` or `non_delegable` does not attribute the failure. Unsupported Agent Key purposes receive no handle. A stale, stopped, or missing bot/conversation turn gets the same not-found result as every other identity mismatch; relay, session, delegated, and service-account identities receive no handle.
 
 Redeem a NyxID-issued handle at most once. The CLI itself may retry once only after the explicit `diagnostic_not_ready` response. Do not infer or enumerate UserServices, do not retry the failed business operation automatically, and do not log, repeat, persist, or place the handle in a URL.
 

@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     services::{
         billing::{BillingIngress, route_inventory::BillingRoutePolicy},
-        invocation_diagnostic_service::tests::{fixture, legacy_handle},
+        invocation_diagnostic_service::tests::fixture,
     },
     test_utils::{set_test_approval_preference, test_auth_user},
 };
@@ -27,6 +27,13 @@ fn auth(actor: &str) -> AuthUser {
     auth
 }
 
+fn agent_auth(actor: &str, key_id: &str) -> AuthUser {
+    let mut auth = auth(actor);
+    auth.auth_method = AuthMethod::ApiKey;
+    auth.api_key_id = Some(key_id.to_owned());
+    auth
+}
+
 fn request() -> Request<Body> {
     Request::builder()
         .uri("/test")
@@ -35,19 +42,23 @@ fn request() -> Request<Body> {
         .unwrap()
 }
 
-#[tokio::test]
-async fn proxy_only_agent_key_cannot_reach_redemption() {
-    let (state, actor, id, server) = fixture().await;
-    let key = crate::services::key_service::create_api_key(
+async fn restricted_agent_key(
+    state: &AppState,
+    actor: &str,
+    service_id: &str,
+    name: &str,
+) -> crate::services::key_service::CreatedApiKey {
+    let allowed_service_ids = vec![service_id.to_owned()];
+    crate::services::key_service::create_api_key(
         &state.db,
-        &actor,
-        "diagnostic agent",
+        actor,
+        name,
         "proxy",
         None,
         None,
+        Some(&allowed_service_ids),
         None,
-        None,
-        Some(true),
+        Some(false),
         Some(false),
         Some(false),
         None,
@@ -56,36 +67,201 @@ async fn proxy_only_agent_key_cannot_reach_redemption() {
         None,
     )
     .await
-    .unwrap();
-    let issued = legacy_handle(
+    .unwrap()
+}
+
+async fn issue_agent_handle(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+    service_id: &str,
+) -> crate::services::invocation_diagnostic_service::IssuedHandle {
+    crate::services::invocation_diagnostic_service::issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some(&key.id),
-        None,
-        &id,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            actor,
+            &AuthMethod::ApiKey,
+            Some(key_id),
+            None,
+            None,
+        )
+        .with_api_key_purpose(crate::models::api_key::ApiKeyPurpose::General),
+        service_id,
     )
     .await
     .unwrap()
-    .expect("diagnostic handle must be issued");
+    .expect("diagnostic handle must be issued")
+}
+
+async fn redeem_agent_handle(state: &AppState, raw_key: &str, handle: &str) -> Response {
     let (_, private) = crate::routes::build_router_with_state(state.clone());
-    let response = private
+    private
         .with_state(state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/monitoring/invocation-diagnostics")
                 .header("content-type", "application/json")
-                .header("x-api-key", &key.full_key)
-                .body(Body::from(json!({"handle": issued.handle}).to_string()))
+                .header("x-api-key", raw_key)
+                .body(Body::from(json!({"handle": handle}).to_string()))
                 .unwrap(),
         )
         .await
-        .unwrap();
+        .unwrap()
+}
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+#[tokio::test]
+async fn diagnostic_probe_marker_is_stripped_and_suppresses_recursive_handles() {
+    let (state, actor, id, server) = fixture().await;
+    let mut request = request();
+    request
+        .headers_mut()
+        .insert(PROBE_HEADER, "1".parse().unwrap());
+    let invocation = HttpInvocation::start(&state, &mut request);
+    assert!(invocation.is_none());
+    assert!(!request.headers().contains_key(PROBE_HEADER));
+    assert!(request.extensions().get::<DiagnosticProbe>().is_some());
+    Target::record_request(&request, Some(&id));
+    let result = HttpInvocation::finish(
+        invocation,
+        &state,
+        &auth(&actor),
+        Err(AppError::NodeProxyTimeout),
+    )
+    .await;
+    assert!(matches!(result, Err(AppError::NodeProxyTimeout)));
     assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn diagnostic_probe_that_requires_approval_leaves_no_pending_prompt() {
+    let (state, actor, id, server) = fixture().await;
+    let downstream = MockServer::start().await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>("user_endpoints")
+        .update_many(doc! {}, doc! {"$set":{"url":downstream.uri()}})
+        .await
+        .unwrap();
+    set_test_approval_preference(&state.db, &actor, true).await;
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/proxy/s/same-slug/healthz?_nyxid_via={id}"))
+        .header("authorization", "Bearer original-caller")
+        .header(PROBE_HEADER, "1")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+
+    let result = Box::pin(super::super::proxy::proxy_request_by_slug(
+        State(state.clone()),
+        auth(&actor),
+        TelemetryContext::default(),
+        Path(("same-slug".into(), "healthz".into())),
+        request,
+    ))
+    .await;
+    assert!(matches!(result, Err(AppError::Forbidden(_))));
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(downstream.received_requests().await.unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn proxy_only_agent_key_reaches_redemption_and_returns_agent_evidence() {
+    let (state, actor, id, server) = fixture().await;
+    let key = restricted_agent_key(&state, &actor, &id, "diagnostic agent").await;
+    crate::services::invocation_diagnostic_service::tests::mount_healthy_agent(
+        &server,
+        &id,
+        &key.full_key,
+    )
+    .await;
+    let issued = issue_agent_handle(&state, &actor, &key.id, &id).await;
+    let response = redeem_agent_handle(&state, &key.full_key, &issued.handle).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["outcome"], "completed");
+    assert_eq!(body["observation"], "agent");
+    assert_eq!(body["assessment"], "operation_specific_likely");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_redemption_rechecks_scope_rotation_and_revocation() {
+    let (state, actor, id, server) = fixture().await;
+
+    let narrowed = restricted_agent_key(&state, &actor, &id, "narrowed diagnostic agent").await;
+    let narrowed_handle = issue_agent_handle(&state, &actor, &narrowed.id, &id).await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &narrowed.id},
+            doc! {"$set": {"allow_all_services": false, "allowed_service_ids": []}},
+        )
+        .await
+        .unwrap();
+    let response = redeem_agent_handle(&state, &narrowed.full_key, &narrowed_handle.handle).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let rotated = restricted_agent_key(&state, &actor, &id, "rotated diagnostic agent").await;
+    let rotated_handle = issue_agent_handle(&state, &actor, &rotated.id, &id).await;
+    let successor = crate::services::key_service::rotate_api_key(
+        &state.db,
+        &state.encryption_keys,
+        &actor,
+        &rotated.id,
+    )
+    .await
+    .unwrap();
+    let old_response = redeem_agent_handle(&state, &rotated.full_key, &rotated_handle.handle).await;
+    assert_eq!(old_response.status(), StatusCode::UNAUTHORIZED);
+    let successor_response =
+        redeem_agent_handle(&state, &successor.full_key, &rotated_handle.handle).await;
+    assert_eq!(successor_response.status(), StatusCode::NOT_FOUND);
+
+    let revoked = restricted_agent_key(&state, &actor, &id, "revoked diagnostic agent").await;
+    let revoked_handle = issue_agent_handle(&state, &actor, &revoked.id, &id).await;
+    crate::services::key_service::delete_api_key(&state.db, &actor, &revoked.id)
+        .await
+        .unwrap();
+    let response = redeem_agent_handle(&state, &revoked.full_key, &revoked_handle.handle).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "stale Agent Key authority must fail before chrono-probe"
+    );
     state.db.drop().await.unwrap();
 }
 
@@ -289,10 +465,13 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
     let issued = crate::services::invocation_diagnostic_service::issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            None,
+        ),
         &id,
     )
     .await
@@ -321,8 +500,16 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
 
 #[tokio::test]
 async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
-    for code in [500, 503, 504] {
+    for (code, agent_key) in [
+        (500, false),
+        (503, false),
+        (504, false),
+        (500, true),
+        (503, true),
+        (504, true),
+    ] {
         let (state, actor, id, server) = fixture().await;
+        let key_id = uuid::Uuid::new_v4().to_string();
         let downstream = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/invalid-operation"))
@@ -338,6 +525,14 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
             .unwrap();
         set_test_approval_preference(&state.db, &actor, false).await;
         let mut request = request();
+        if agent_key {
+            request
+                .headers_mut()
+                .remove(axum::http::header::AUTHORIZATION);
+            request
+                .headers_mut()
+                .insert("x-api-key", "original-agent-key".parse().unwrap());
+        }
         *request.uri_mut() = format!("/api/v1/proxy/s/same-slug/invalid-operation?_nyxid_via={id}")
             .parse()
             .unwrap();
@@ -346,7 +541,11 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
             .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
         let response = Box::pin(super::super::proxy::proxy_request_by_slug(
             State(state.clone()),
-            auth(&actor),
+            if agent_key {
+                agent_auth(&actor, &key_id)
+            } else {
+                auth(&actor)
+            },
             TelemetryContext::default(),
             Path(("same-slug".into(), "invalid-operation".into())),
             request,
@@ -364,13 +563,19 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
             .collection::<crate::models::invocation_diagnostic::InvocationDiagnostic>(
                 crate::models::invocation_diagnostic::COLLECTION_NAME,
             );
+        let stored = rows
+            .find_one(doc! {"exact_user_service_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.exact_user_service_id, id);
         assert_eq!(
-            rows.find_one(doc! {"exact_user_service_id":&id})
-                .await
-                .unwrap()
-                .unwrap()
-                .exact_user_service_id,
-            id
+            stored.original_auth_method,
+            if agent_key { "api_key" } else { "access_token" }
+        );
+        assert_eq!(
+            stored.original_api_key_id.as_deref(),
+            agent_key.then_some(key_id.as_str())
         );
         assert!(server.received_requests().await.unwrap().is_empty());
     }
@@ -431,8 +636,9 @@ async fn invocation_diagnostic_ignores_local_websocket_handshake_rejections() {
 #[tokio::test]
 async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
     use crate::models::{downstream_service::DownstreamService, provider_config::ProviderConfig};
-    for gateway in [false, true] {
+    for (gateway, agent_key) in [(false, false), (true, false), (false, true), (true, true)] {
         let (state, actor, id, server) = fixture().await;
+        let key_id = uuid::Uuid::new_v4().to_string();
         let downstream = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/models"))
@@ -493,10 +699,19 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
         let mut request = Request::builder()
             .method("GET")
             .uri("/api/v1/llm/models")
-            .header("authorization", "Bearer original-caller")
             .header("content-type", "application/json")
             .body(Body::from(body))
             .unwrap();
+        if agent_key {
+            request
+                .headers_mut()
+                .insert("x-api-key", "original-agent-key".parse().unwrap());
+        } else {
+            request.headers_mut().insert(
+                axum::http::header::AUTHORIZATION,
+                "Bearer original-caller".parse().unwrap(),
+            );
+        }
         request
             .extensions_mut()
             .insert(BillingRoutePolicy::Metered(if gateway {
@@ -506,16 +721,24 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
             }));
         let response = if gateway {
             super::super::llm_gateway::gateway_request(
-                State(state),
-                auth(&actor),
+                State(state.clone()),
+                if agent_key {
+                    agent_auth(&actor, &key_id)
+                } else {
+                    auth(&actor)
+                },
                 Path("models".into()),
                 request,
             )
             .await
         } else {
             Box::pin(super::super::llm_gateway::llm_proxy_request(
-                State(state),
-                auth(&actor),
+                State(state.clone()),
+                if agent_key {
+                    agent_auth(&actor, &key_id)
+                } else {
+                    auth(&actor)
+                },
                 Path(("openai".into(), "models".into())),
                 request,
             ))
@@ -526,16 +749,32 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
         assert!(response.headers().contains_key(HANDLE_HEADER));
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("original operation permission error"));
+        let stored = state
+            .db
+            .collection::<crate::models::invocation_diagnostic::InvocationDiagnostic>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .find_one(doc! {"exact_user_service_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.original_auth_method,
+            if agent_key { "api_key" } else { "access_token" }
+        );
+        assert_eq!(
+            stored.original_api_key_id.as_deref(),
+            agent_key.then_some(key_id.as_str())
+        );
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
 
 #[tokio::test]
-async fn invocation_diagnostic_flag_off_and_non_delegable_callers_never_issue() {
+async fn invocation_diagnostic_flag_off_and_unsupported_callers_never_issue() {
     let (mut state, actor, id, server) = fixture().await;
     for (enabled, method) in [
         (false, AuthMethod::AccessToken),
-        (true, AuthMethod::ApiKey),
         (true, AuthMethod::Session),
         (true, AuthMethod::ServiceAccount),
         (true, AuthMethod::Delegated),
@@ -570,10 +809,15 @@ async fn invocation_diagnostic_flag_off_and_non_delegable_callers_never_issue() 
             "original"
         );
         assert!(
-            diagnostics::issue(&state.db, &state.config, &actor, &method, None, None, &id)
-                .await
-                .unwrap()
-                .is_none()
+            diagnostics::issue(
+                &state.db,
+                &state.config,
+                diagnostics::IssueIdentity::new(&actor, &method, None, None, None),
+                &id,
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
     assert_eq!(
@@ -642,10 +886,7 @@ async fn invocation_diagnostic_sender_constrained_bearer_is_not_forwarded() {
     let issued = diagnostics::issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        diagnostics::IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await

@@ -244,6 +244,8 @@ impl AuthUser {
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         let execution_route = path.starts_with("/proxy")
             || path.starts_with("/llm/")
+            || path == "/keys"
+            || path == "/monitoring/invocation-diagnostics"
             || matches!(path, "/mcp" | "/mcp/config")
             || path.starts_with("/oracle/pools/")
                 && (path.ends_with("/tasks")
@@ -578,6 +580,12 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
     // A restricted login credential can always revoke itself. The handler
     // requires the calling child identity and cannot revoke another credential.
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
+        return false;
+    }
+    // Diagnostic redemption is an operational follow-up to a failed proxy
+    // call. The handler still enforces proxy scope, caller identity, exact
+    // service authorization, and handle binding.
+    if *method == Method::POST && path == "/api/v1/monitoring/invocation-diagnostics" {
         return false;
     }
     if !matches!(
@@ -4373,6 +4381,8 @@ mod tests {
         for path in [
             "/api/v1/proxy/service/path",
             "/api/v1/llm/provider",
+            "/api/v1/keys",
+            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/oracle/pools/pool/tasks",
             "/api/v1/approvals/exact-service/requests/request/redeem",
             "/api/v1/assistant-attachments/attachment/content",
@@ -4387,7 +4397,6 @@ mod tests {
             );
         }
         for path in [
-            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/users/me",
             "/api/v1/assistant/agents",
             "/api/v1/channel-relay/conversations",
@@ -4671,7 +4680,6 @@ mod tests {
     fn api_key_management_write_routes_require_write_scope() {
         let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
         let write_routes = [
-            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/api/v1/api-keys"),
             (Method::POST, "/api/v1/api-keys/key-1/rotate"),
             (Method::POST, "/api/v1/keys"),
@@ -4725,6 +4733,7 @@ mod tests {
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
+            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/oauth/token"),
         ];
 

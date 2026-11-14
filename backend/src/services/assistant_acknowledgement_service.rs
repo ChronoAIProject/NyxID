@@ -404,6 +404,7 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             "search_tools"
             | "discover_services"
             | "list_connected_services"
+            | "diagnose_invocation"
             | "wait_for_connection"
             | "ssh_list_services"
             | "oracle_pools"
@@ -964,6 +965,7 @@ mod access_mode_tests {
             ("nyx__oracle_ask", none.clone(), Change),
             ("nyx__connect_service", none.clone(), Change),
             ("nyx__search_tools", none.clone(), Read),
+            ("nyx__diagnose_invocation", none.clone(), Read),
             ("nyxid__delete_agent_key", none.clone(), Destructive),
             ("nyxid__set_service_enabled", none.clone(), Change),
             ("nyxid__set_approval_mode", none.clone(), Sensitive),

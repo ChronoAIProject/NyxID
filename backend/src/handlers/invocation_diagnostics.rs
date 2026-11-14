@@ -18,12 +18,16 @@ use crate::{
     services::{
         audit_service::{self, AuditActor},
         invocation_diagnostic_service::{self as diagnostics, Diagnostic, Outcome, RedeemResult},
-        proxy_service,
+        monitoring_service::CallerCredential,
     },
     telemetry::{TelemetryContext, TelemetryEvent, emit_event},
 };
 
 pub(crate) use diagnostics::{EXPIRES_HEADER, HANDLE_HEADER};
+pub(crate) const PROBE_HEADER: &str = "x-nyxid-invocation-diagnostic-probe";
+
+#[derive(Clone, Copy)]
+pub(crate) struct DiagnosticProbe;
 
 /// Internal retained LLM sends must preserve typed failures for their durable
 /// delivery coordinator, which classifies uncertain provider outcomes.
@@ -59,9 +63,21 @@ pub(crate) struct HttpInvocation {
 
 impl HttpInvocation {
     pub(crate) fn start(state: &AppState, request: &mut Request<Body>) -> Option<Self> {
+        // The marker is advisory recursion protection, not authorization. It is
+        // always stripped so a reserved NyxID header never reaches downstream.
+        let diagnostic_probe = request
+            .headers_mut()
+            .remove(PROBE_HEADER)
+            .and_then(|value| value.to_str().ok().map(str::to_owned))
+            .as_deref()
+            == Some("1");
+        if diagnostic_probe {
+            request.extensions_mut().insert(DiagnosticProbe);
+        }
         // Nested gateway/pool wrappers share the outer invocation's budget.
         if !state.config.invocation_diagnostics_enabled
             || state.config.chrono_probe_url.is_none()
+            || diagnostic_probe
             || request
                 .extensions()
                 .get::<crate::mw::auth::SenderConstrainedToken>()
@@ -106,21 +122,27 @@ impl HttpInvocation {
             .clone();
         let Some(id) = id else { return result };
         // chrono-probe callbacks must not create recursive diagnostics.
-        if !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref())
-            || auth.assistant_chat.is_some()
-        {
+        if !diagnostics::can_probe(
+            &auth.auth_method,
+            Some(auth.api_key_purpose),
+            auth.acting_client_id.as_deref(),
+        ) {
             return result;
         }
         let actor_id = auth.user_id.to_string();
         let issued = match diagnostics::issue(
             &state.db,
             &state.config,
-            &actor_id,
-            &auth.auth_method,
-            auth.api_key_id.as_deref(),
-            auth.acting_client_id
-                .as_deref()
-                .or(auth.oauth_client_id.as_deref()),
+            diagnostics::IssueIdentity::new(
+                &actor_id,
+                &auth.auth_method,
+                auth.api_key_id.as_deref(),
+                auth.api_key_credential_id.as_deref(),
+                auth.acting_client_id
+                    .as_deref()
+                    .or(auth.oauth_client_id.as_deref()),
+            )
+            .with_api_key_purpose(auth.api_key_purpose),
             &id,
         )
         .await
@@ -151,15 +173,33 @@ impl HttpInvocation {
     }
 }
 
-pub(crate) fn live_bearer<'a>(
+pub(crate) fn live_credential<'a>(
     method: &AuthMethod,
     acting_client: Option<&str>,
-    token: Option<&'a str>,
-) -> Option<&'a str> {
-    if matches!(method, AuthMethod::AccessToken) && acting_client != Some("chrono-probe") {
-        token
-    } else {
-        None
+    headers: &'a HeaderMap,
+) -> Option<CallerCredential<'a>> {
+    let bearer = || {
+        headers
+            .get(axum::http::header::AUTHORIZATION)?
+            .to_str()
+            .ok()?
+            .strip_prefix("Bearer ")
+    };
+    match method {
+        AuthMethod::AccessToken if acting_client != Some("chrono-probe") => {
+            bearer().map(CallerCredential::Bearer)
+        }
+        // AuthUser has already proved this value is an Agent Key. Normalize
+        // either accepted inbound form to X-API-Key so chrono-probe does not
+        // have to infer whether a Bearer value is a human token or Agent Key.
+        AuthMethod::ApiKey => bearer()
+            .or_else(|| {
+                headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok())
+            })
+            .map(CallerCredential::ApiKey),
+        _ => None,
     }
 }
 
@@ -194,44 +234,25 @@ pub async fn redeem(
     sender_constraint: Option<axum::Extension<crate::mw::auth::SenderConstrainedToken>>,
     Json(request): Json<RedeemRequest>,
 ) -> AppResult<Response> {
-    if auth.ensure_llm_proxy_access().is_err() {
-        return Err(crate::errors::AppError::NotFound(
-            "Invocation diagnostic not found".into(),
-        ));
-    }
-    let supplied = sender_constraint
-        .is_none()
-        .then(|| proxy_service::caller_bearer_token_for_downstream(&headers, false))
-        .flatten();
-    let caller_token = live_bearer(
-        &auth.auth_method,
-        auth.acting_client_id.as_deref(),
-        supplied.as_deref(),
-    );
-    match diagnostics::redeem(
-        &state.db,
-        &state.config,
+    let caller_credential = if sender_constraint.is_some() {
+        None
+    } else {
+        live_credential(
+            &auth.auth_method,
+            auth.acting_client_id.as_deref(),
+            &headers,
+        )
+    };
+    match redeem_with_credential(
+        &state,
         &auth,
         &request.handle,
-        caller_token,
+        caller_credential,
+        &telemetry,
     )
     .await?
     {
-        RedeemResult::Completed {
-            diagnostic,
-            exact_user_service_id,
-            fresh,
-        } => {
-            if fresh {
-                observe(
-                    &state,
-                    &AuditActor::from_auth_user(&auth),
-                    &exact_user_service_id,
-                    &diagnostic,
-                    &telemetry,
-                )
-                .await;
-            }
+        RedeemResult::Completed { diagnostic, .. } => {
             let mut response = Json(RedeemResponse::from(&diagnostic)).into_response();
             response
                 .headers_mut()
@@ -239,6 +260,53 @@ pub async fn redeem(
             Ok(response)
         }
         RedeemResult::NotReady => Err(AppError::DiagnosticNotReady),
+    }
+}
+
+pub(crate) async fn redeem_with_credential(
+    state: &AppState,
+    auth: &AuthUser,
+    handle: &str,
+    caller_credential: Option<CallerCredential<'_>>,
+    telemetry: &TelemetryContext,
+) -> AppResult<RedeemResult> {
+    if auth.ensure_llm_proxy_access().is_err() {
+        return Err(crate::errors::AppError::NotFound(
+            "Invocation diagnostic not found".into(),
+        ));
+    }
+    auth.ensure_live_assistant_turn(&state.db, "monitoring.invocation_diagnostic")
+        .await
+        .map_err(conceal_turn_authority_error)?;
+    let result =
+        diagnostics::redeem(&state.db, &state.config, auth, handle, caller_credential).await?;
+    if let RedeemResult::Completed {
+        diagnostic,
+        exact_user_service_id,
+        fresh: true,
+    } = &result
+    {
+        observe(
+            state,
+            &AuditActor::from_auth_user(auth),
+            exact_user_service_id,
+            diagnostic,
+            telemetry,
+        )
+        .await;
+    }
+    Ok(result)
+}
+
+fn conceal_turn_authority_error(error: crate::errors::AppError) -> crate::errors::AppError {
+    match error {
+        crate::errors::AppError::AssistantTurnRequired
+        | crate::errors::AppError::Forbidden(_)
+        | crate::errors::AppError::Unauthorized(_)
+        | crate::errors::AppError::ApiKeyScopeForbidden(_) => {
+            crate::errors::AppError::NotFound("Invocation diagnostic not found".into())
+        }
+        error => error,
     }
 }
 
@@ -299,27 +367,61 @@ mod integration_tests;
 mod tests {
     use super::*;
     #[test]
-    fn only_original_ordinary_bearers_can_be_used() {
+    fn only_supported_live_credentials_can_be_used() {
+        let bearer_headers = HeaderMap::from_iter([(
+            axum::http::header::AUTHORIZATION,
+            "Bearer original".parse().unwrap(),
+        )]);
+        let key_headers =
+            HeaderMap::from_iter([("x-api-key".parse().unwrap(), "agent".parse().unwrap())]);
         for method in [
-            AuthMethod::ApiKey,
             AuthMethod::Delegated,
             AuthMethod::Relay,
             AuthMethod::Session,
             AuthMethod::ServiceAccount,
         ] {
-            assert!(live_bearer(&method, None, Some("secret")).is_none());
+            assert!(live_credential(&method, None, &bearer_headers).is_none());
         }
-        assert_eq!(
-            live_bearer(&AuthMethod::AccessToken, None, Some("original")),
-            Some("original")
-        );
+        assert!(matches!(
+            live_credential(&AuthMethod::AccessToken, None, &bearer_headers),
+            Some(CallerCredential::Bearer("original"))
+        ));
+        assert!(matches!(
+            live_credential(&AuthMethod::ApiKey, None, &key_headers),
+            Some(CallerCredential::ApiKey("agent"))
+        ));
+        assert!(matches!(
+            live_credential(&AuthMethod::ApiKey, None, &bearer_headers),
+            Some(CallerCredential::ApiKey("original"))
+        ));
         assert!(
-            live_bearer(
+            live_credential(
                 &AuthMethod::AccessToken,
                 Some("chrono-probe"),
-                Some("secret")
+                &bearer_headers,
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn only_turn_authority_refusals_are_concealed_as_not_found() {
+        for error in [
+            crate::errors::AppError::AssistantTurnRequired,
+            crate::errors::AppError::Forbidden("stale turn".into()),
+            crate::errors::AppError::Unauthorized("stale key".into()),
+            crate::errors::AppError::ApiKeyScopeForbidden("scope changed".into()),
+        ] {
+            assert!(matches!(
+                conceal_turn_authority_error(error),
+                crate::errors::AppError::NotFound(_)
+            ));
+        }
+        assert!(matches!(
+            conceal_turn_authority_error(crate::errors::AppError::Internal(
+                "database unavailable".into()
+            )),
+            crate::errors::AppError::Internal(message) if message == "database unavailable"
+        ));
     }
 }

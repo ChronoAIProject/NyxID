@@ -8,6 +8,58 @@ use wiremock::{
     matchers::{method, path},
 };
 
+fn conversation_auth(
+    actor: &str,
+    key_id: &str,
+    credential_id: &str,
+    raw_key: &str,
+) -> McpAuthContext {
+    use crate::{
+        models::assistant_conversation::AgentRole,
+        services::assistant_acknowledgement_service::ChatAuthority,
+    };
+
+    let mut auth = McpAuthContext::user(actor.to_owned(), AuthMethod::ApiKey);
+    auth.scope = "proxy".into();
+    auth.is_api_key = true;
+    auth.api_key_id = Some(key_id.to_owned());
+    auth.api_key_credential_id = Some(credential_id.to_owned());
+    auth.diagnostic_credential = Some(proxy_service::CallerToken::from_verified(raw_key));
+    auth.chat = Some(ChatAuthority {
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
+        channel_adapter_origin: None,
+        invocation_controlled: true,
+        invocation_id: None,
+        platform_thread: false,
+        platform_origin: None,
+        report_to: None,
+        with_nyxbot: true,
+        org_agent_access: None,
+        turn_id: Some("turn-1".into()),
+        turn_stopped: false,
+        turn_live: true,
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
+        conversation_id: "conversation-1".into(),
+        user_id: actor.to_owned(),
+        api_key_id: key_id.to_owned(),
+        role: AgentRole::Orchestrator,
+        agent_id: "nyxbot".into(),
+        agent_name: "NyxBot".into(),
+        guest: false,
+        confirmation_policy: None,
+    });
+    auth
+}
+
 #[tokio::test]
 async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_original_content() {
     for (universal, enabled, agent_key, status) in [
@@ -80,7 +132,7 @@ async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_or
             &state, &auth, None, &request, false, permit,
         ))
         .await;
-        let should_issue = enabled && !agent_key && status >= 500;
+        let should_issue = enabled && status >= 500;
         if should_issue {
             assert_eq!(response.headers()["cache-control"], "no-store");
         }
@@ -193,5 +245,228 @@ async fn invocation_diagnostic_random_handles_do_not_change_progress_digest() {
         }
         assert_eq!(digests[0], digests[1]);
         assert_eq!(digests[1], digests[2]);
+    }
+}
+
+#[tokio::test]
+async fn conversation_agent_key_redeems_with_the_same_child_and_raw_key() {
+    let (state, actor, id, server) = fixture().await;
+    let key_id = uuid::Uuid::new_v4().to_string();
+    let credential_id = uuid::Uuid::new_v4().to_string();
+    let raw_key = "nyxid_ag_current_conversation_key";
+    // The probe endpoint is bound to the exact UserService id, not to any
+    // service identifier supplied by the MCP caller.
+    crate::services::invocation_diagnostic_service::tests::mount_healthy_agent(
+        &server, &id, raw_key,
+    )
+    .await;
+    let issued = crate::services::invocation_diagnostic_service::issue(
+        &state.db,
+        &state.config,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some(&key_id),
+            Some(&credential_id),
+            None,
+        )
+        .with_api_key_purpose(crate::models::api_key::ApiKeyPurpose::General),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("conversation diagnostic handle");
+    let auth = conversation_auth(&actor, &key_id, &credential_id, raw_key);
+
+    let response = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &issued.handle}),
+        Some(json!(1)),
+    )
+    .await;
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap()).unwrap();
+    assert_eq!(
+        body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"]["observation"],
+        "agent"
+    );
+    assert_eq!(
+        body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"]["outcome"],
+        "completed"
+    );
+    assert!(!body.to_string().contains(raw_key));
+    assert!(!body.to_string().contains(&id));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+    let replay = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &issued.handle}),
+        Some(json!(2)),
+    )
+    .await;
+    let replay_body: Value =
+        serde_json::from_slice(&to_bytes(replay.into_body(), 16384).await.unwrap()).unwrap();
+    assert_eq!(
+        replay_body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"],
+        body["result"]["structuredContent"]["nyxid_invocation_diagnostic_result"]
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "completed replay must not start another probe"
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_diagnostic_tool_bounds_validation_not_ready_and_internal_failures() {
+    let (state, actor, id, server) = fixture().await;
+    let mut auth = McpAuthContext::user(actor.clone(), AuthMethod::AccessToken);
+    auth.scope = "proxy".into();
+    auth.caller_token = Some(proxy_service::CallerToken::from_verified("original-caller"));
+
+    for arguments in [json!({}), json!({"handle": 7})] {
+        let response =
+            handle_invocation_diagnostic(&state, &auth, &arguments, Some(json!(1))).await;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], -32602, "{body}");
+        assert_eq!(body["error"]["message"], "Missing handle", "{body}");
+    }
+
+    let running = crate::services::invocation_diagnostic_service::tests::legacy_handle(
+        &state.db,
+        &state.config,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            None,
+        ),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("running diagnostic handle");
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::invocation_diagnostic::COLLECTION_NAME,
+        )
+        .update_one(
+            mongodb::bson::doc! {
+                "handle_hash": crate::crypto::token::hash_token(&running.handle)
+            },
+            mongodb::bson::doc! {
+                "$set": {
+                    "state": "running",
+                    "claim_id": "other-worker",
+                    "claimed_at": mongodb::bson::DateTime::now(),
+                }
+            },
+        )
+        .await
+        .unwrap();
+    let response = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &running.handle}),
+        Some(json!(2)),
+    )
+    .await;
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    assert_eq!(
+        body["result"]["content"][0]["text"], r#"{"error":"diagnostic_not_ready","retry_after":1}"#,
+        "{body}"
+    );
+
+    let malformed = crate::services::invocation_diagnostic_service::tests::legacy_handle(
+        &state.db,
+        &state.config,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            None,
+        ),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("malformed completed diagnostic handle");
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::invocation_diagnostic::COLLECTION_NAME,
+        )
+        .update_one(
+            mongodb::bson::doc! {
+                "handle_hash": crate::crypto::token::hash_token(&malformed.handle)
+            },
+            mongodb::bson::doc! {"$set": {"state": "completed"}},
+        )
+        .await
+        .unwrap();
+    let response = handle_invocation_diagnostic(
+        &state,
+        &auth,
+        &json!({"handle": &malformed.handle}),
+        Some(json!(3)),
+    )
+    .await;
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    assert_eq!(
+        body["result"]["content"][0]["text"], "Invocation diagnostic unavailable",
+        "{body}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stopped_and_missing_conversation_turns_cannot_redeem_or_probe() {
+    for stopped in [false, true] {
+        let (state, actor, _, server) = fixture().await;
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let credential_id = uuid::Uuid::new_v4().to_string();
+        let mut auth = conversation_auth(
+            &actor,
+            &key_id,
+            &credential_id,
+            "nyxid_ag_stale_conversation_key",
+        );
+        let chat = auth.chat.as_mut().unwrap();
+        chat.turn_live = false;
+        chat.turn_stopped = stopped;
+        if !stopped {
+            chat.turn_id = None;
+        }
+
+        let response = handle_invocation_diagnostic(
+            &state,
+            &auth,
+            &json!({"handle":"nyx_diag_untrusted"}),
+            Some(json!(1)),
+        )
+        .await;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["content"][0]["text"],
+            "Invocation diagnostic not found"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        state.db.drop().await.unwrap();
     }
 }
