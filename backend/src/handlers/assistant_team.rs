@@ -38,7 +38,6 @@ use crate::{
         assistant_settings_service as settings,
         assistant_team_service::{self as team, TeamRefusal},
         assistant_team_tools,
-        coordination_service::RateWindowStore,
     },
 };
 
@@ -222,6 +221,21 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
+        let automation =
+            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
+                .await?;
+        if !automation
+            && crate::services::coordination_service::RateWindowStore::is_exhausted(
+                &state.db,
+                "assistant_event_turns",
+                owner,
+                team::EVENT_TURNS_PER_HOUR,
+                Duration::from_secs(3600),
+            )
+            .await?
+        {
+            return Ok(());
+        }
         if Box::pin(crate::services::channel_thread_follow_service::prune_queue(
             &state.db, owner, id,
         ))
@@ -241,9 +255,6 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         }) {
             return Ok(());
         }
-        let automation =
-            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
-                .await?;
         if !automation && !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
             return Ok(());
         }
@@ -255,9 +266,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         {
             return team::drop_events(&state.db, owner, id).await;
         }
-        // Take a pool slot before spending the hourly budget, so a full pool
-        // never uses it up. NyxBot's event turns share the pool with working
-        // specialists.
+        // NyxBot's event turns share the pool with working specialists.
+        // The engine spends the hourly budget in the turn admission transaction.
         let limit = team_pool_limit(state, owner).await + 1;
         let pool = if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
             Pool::Channel { owner }
@@ -267,19 +277,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         let Some(permit) = acquire(state, pool).await? else {
             return Ok(());
         };
-        if !automation
-            && !RateWindowStore::admit(
-                &state.db,
-                "assistant_event_turns",
-                owner,
-                team::EVENT_TURNS_PER_HOUR,
-                Duration::from_secs(3600),
-            )
-            .await?
-            .allowed
-        {
-            return Ok(());
-        }
+        #[cfg(test)]
+        tests::wait_for_wake_barrier(&state.db).await;
         let mut start = event_turn(id);
         start.org_access = org_access;
         let mut group_seen = None;

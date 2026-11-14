@@ -3765,18 +3765,41 @@ pub async fn begin_turn_with_voice(
                 let start = &start;
                 // MongoDB's retry driver stores and polls this callback through
                 // several frames. Keep the turn/message/upload transaction on the heap.
-                let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
-                    db,
-                    session,
-                    &keys,
-                    user_id,
-                    start,
-                    &ids,
-                    &new_agent,
-                    learning_epoch,
-                    None,
-                    voice_request_id.as_deref(),
-                ))
+                let operation: AppResult<_> = Box::pin(async {
+                    let admission = Box::pin(begin_owner_turn_in_session(
+                        db,
+                        session,
+                        &keys,
+                        user_id,
+                        start,
+                        &ids,
+                        &new_agent,
+                        learning_epoch,
+                        None,
+                        voice_request_id.as_deref(),
+                    ))
+                    .await?;
+                    if start.origin == TurnOrigin::Event
+                        && let OwnerTurnAdmission::Started(claim) = &admission
+                        && claim
+                            .conversation
+                            .active_turn
+                            .as_ref()
+                            .is_some_and(|turn| turn.automation_work.is_none())
+                        && !super::coordination_service::RateWindowStore::admit_in_session(
+                            db,
+                            "assistant_event_turns",
+                            user_id,
+                            super::assistant_team_service::EVENT_TURNS_PER_HOUR,
+                            std::time::Duration::from_secs(3600),
+                            session,
+                        )
+                        .await?
+                    {
+                        return Err(AppError::RateLimited);
+                    }
+                    Ok(admission)
+                })
                 .await;
                 transactions::transaction_result(operation)
             })
