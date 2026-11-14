@@ -1,7 +1,7 @@
 import type { ConsentSnapshot } from "../analyticsConsentState";
 import type { AnalyticsPermission, RelayRequest } from "../analyticsRelay";
 import { revalidateNativeRecord, type CrashBinding } from "./nativeRecord";
-import { createCrashRelay } from "./reporter";
+import { createCrashRelay, crashAuthorityError, excludedMobileError } from "./reporter";
 import {
   exceptionClass,
   validateCrashRecord,
@@ -12,7 +12,8 @@ import { parseMobileStack } from "./stack";
 export interface CrashNativeModule {
   getAppIdentity(): { version: string; build: string; osVersion?: string };
   getBinding(): CrashBinding | null;
-  arm(binding: CrashBinding): void;
+  arm(binding: CrashBinding): boolean;
+  pause(): void;
   disarm(): void;
   recordFatalJs(json: string): void;
   collectPending(): string[];
@@ -58,7 +59,7 @@ export function createCrashLifecycle(deps: {
     () => generation,
   );
   const makeRecord = (error: unknown, kind: CrashKind): CrashReport | null => {
-    if (!binding || !current(binding) || count >= 10) return null;
+    if (!binding || !current(binding) || count >= 10 || excludedMobileError(error)) return null;
     if (
       error instanceof Error &&
       ["AbortError", "CanceledError", "CancelledError"].includes(error.name)
@@ -80,7 +81,6 @@ export function createCrashLifecycle(deps: {
       app_build: identity.build,
       ...(deps.artifactId ? { artifact_id: deps.artifactId } : {}),
       os_version: deps.osVersion(),
-      runtime: { name: "hermes", major: 0 },
       js_frames: parseMobileStack(error instanceof Error ? error.stack : ""),
       native_images: [],
       native_frames: [],
@@ -92,11 +92,13 @@ export function createCrashLifecycle(deps: {
     disarm,
     setRestoring(value: boolean) {
       restoring = value;
-      if (!value) return this.refresh();
+      if (value) { generation++; ready = false; deps.native.pause(); }
+      else return this.refresh();
     },
     async refresh() {
       generation++;
       ready = false;
+      deps.native.pause();
       if (restoring || !deps.snapshot().isHydrated) return;
       if (!eligible()) {
         disarm();
@@ -115,7 +117,7 @@ export function createCrashLifecycle(deps: {
           now.accountId !== start.accountId ||
           !eligible()
         )
-          throw new Error("crash_authority_changed");
+          throw crashAuthorityError();
       };
       try {
         const permission = await deps.request<AnalyticsPermission>(
@@ -146,7 +148,7 @@ export function createCrashLifecycle(deps: {
             epochId: deps.uuid(),
           };
         }
-        deps.native.arm(binding);
+        if (!deps.native.arm(binding)) { disarm(); return; }
         ready = true;
         for (const raw of deps.native.collectPending()) {
           guard();
@@ -167,8 +169,12 @@ export function createCrashLifecycle(deps: {
           if (await send(record.report, binding))
             deps.native.removeRecords([record.report.event_id]);
         }
-      } catch {
-        if (epoch === generation) disarm();
+      } catch (error) {
+        if (epoch === generation) {
+          const code = error && typeof error === "object" ? (error as {errorCode?: number}).errorCode : undefined;
+          if (code === 13400 || code === 13401 || !eligible()) disarm();
+          else { ready = false; binding = null; deps.native.pause(); }
+        }
       }
     },
     fatal(error: unknown) {

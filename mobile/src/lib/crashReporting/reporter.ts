@@ -1,3 +1,14 @@
+import { ApiError } from "../api/ApiError";
+const ownErrors = new WeakSet<object>();
+export function crashAuthorityError(): Error {
+  const error = new Error("crash_authority_changed");
+  ownErrors.add(error);
+  return error;
+}
+export function excludedMobileError(error: unknown): boolean {
+  return (error instanceof ApiError && error.statusCode < 500) ||
+    (typeof error === "object" && error !== null && ownErrors.has(error));
+}
 import type { RelayRequest, AnalyticsPermission } from "../analyticsRelay";
 import type { CrashReport } from "../../../../shared/crash-report";
 import type { CrashBinding } from "./nativeRecord";
@@ -16,7 +27,7 @@ export function createCrashRelay(
     const version = authorityVersion();
     const current = () => version === authorityVersion() && isCurrent(binding);
     const guard = () => {
-      if (!current()) throw new Error("crash_authority_changed");
+      if (!current()) throw crashAuthorityError();
     };
     inFlight++;
     try {

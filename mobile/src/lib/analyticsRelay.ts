@@ -1,6 +1,6 @@
 import type { ConsentSnapshot } from './analyticsConsentState';
 import type { MobileEvent } from './telemetry-schema';
-export type AnalyticsPermission = { policy_version?: string|null; current_policy_version?: string; diagnostics_available?: boolean; account_id: string; enabled: boolean; revision: string };
+export type AnalyticsPermission = { policy_version?: string|null; current_policy_version?: string; diagnostics_offered?: boolean; diagnostics_available?: boolean; account_id: string; enabled: boolean; revision: string };
 export type RelayRequest = <T>(path: string, options?: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; expectedAccountId?: string; authorityGuard?: () => void }) => Promise<T>;
 /** No event queue or positive permission cache. Every event obtains a new revision. */
 export function createAnalyticsRelay(snapshot: () => ConsentSnapshot, request: RelayRequest) {

@@ -25,6 +25,7 @@ for (const language of ["en", "zh-CN", "zh-TW"] as Language[])
       enabled: true,
       policy_version: "1",
       current_policy_version: "2",
+      diagnostics_offered: true,
     };
     const t = (phrase: string) => translate(language, phrase);
     const h = hookHarness<void>({
@@ -74,3 +75,19 @@ for (const language of ["en", "zh-CN", "zh-TW"] as Language[])
     assert.equal(alerts.length, 2);
     h.unmount();
   });
+
+test("disabled diagnostics never displays an updated analytics alert", async () => {
+  let alerts = 0;
+  const h = hookHarness<void>({
+    "react-native": { Alert: { alert: () => { alerts++; } } },
+    "@react-native-async-storage/async-storage": { getItem: async () => null, setItem: async () => assert.fail("no dismissal while not offered") },
+    "../consent": { useMobileConsent: () => ({accountId:"a",isHydrated:true,enabled:true,policy:1}) },
+    "../api/http": { requestJson: async () => ({account_id:"a",enabled:true,policy_version:"1",current_policy_version:"1",diagnostics_offered:false}) },
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({t:(s:string)=>s}) },
+  });
+  const {useDiagnosticsNotice} = h.load(fileURLToPath(new URL("./useDiagnosticsNotice.ts", import.meta.url))) as {useDiagnosticsNotice:(authenticated:boolean,review:()=>void)=>void};
+  h.mount(() => useDiagnosticsNotice(true, () => assert.fail("not offered")));
+  await tick();
+  assert.equal(alerts,0);
+  h.unmount();
+});

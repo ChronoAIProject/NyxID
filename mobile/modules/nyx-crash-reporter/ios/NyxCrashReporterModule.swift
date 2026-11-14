@@ -6,6 +6,7 @@ import Foundation
 public class NyxCrashReporterModule: Module {
   private let lock = NSRecursiveLock()
   private var enabled = false
+  private var armed = false
   private lazy var directory: URL = {
     let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("nyx-crash", isDirectory: true)
@@ -18,15 +19,15 @@ public class NyxCrashReporterModule: Module {
     try? resource.setResourceValues(values)
     return url
   }()
-  private lazy var reporter: PLCrashReporter = {
+  private lazy var reporter: PLCrashReporter? = {
     let raw = directory.appendingPathComponent("raw", isDirectory: true)
     try? FileManager.default.createDirectory(
       at: raw, withIntermediateDirectories: true,
       attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-    let config = PLCrashReporterConfig(
+    guard let config = PLCrashReporterConfig(
       signalHandlerType: .BSD, symbolicationStrategy: [],
-      shouldRegisterUncaughtExceptionHandler: false, basePath: raw.path, maxReportBytes: 256 * 1024)!
-    return PLCrashReporter(configuration: config)!
+      shouldRegisterUncaughtExceptionHandler: false, basePath: raw.path, maxReportBytes: 256 * 1024) else { return nil }
+    return PLCrashReporter(configuration: config)
   }()
   private var bindingURL: URL { directory.appendingPathComponent("binding.json") }
   private func binding() -> [String: String]? {
@@ -63,13 +64,28 @@ public class NyxCrashReporterModule: Module {
   private func purgeRecords() {
     for file in recordFiles() { try? FileManager.default.removeItem(at: file) }
   }
+  private func purgePendingRaw() {
+    if let reporter { _ = reporter.purgePendingCrashReport() }
+    else {
+      let raw = directory.appendingPathComponent("raw", isDirectory: true)
+      for file in (try? FileManager.default.contentsOfDirectory(at: raw, includingPropertiesForKeys: nil)) ?? [] { try? FileManager.default.removeItem(at: file) }
+    }
+  }
+  private func pause() {
+    armed = false
+    reporter?.customData = nil
+    // Convert a capture-time-authorized raw report locally, then purge it even
+    // when the network is offline. Only bounded sanitized records survive pause.
+    _ = collect()
+  }
   private func disarm() {
-    reporter.customData = nil
+    armed = false
+    reporter?.customData = nil
     try? FileManager.default.removeItem(at: bindingURL)
     purgeRecords()
     purgeInterruptedCrashWrites(in: directory)
     // Explicit purge point 1: no current capture authority; raw data is deleted unread.
-    _ = reporter.purgePendingCrashReport()
+    purgePendingRaw()
   }
   private func trim() {
     purgeInterruptedCrashWrites(in: directory)
@@ -107,12 +123,12 @@ public class NyxCrashReporterModule: Module {
   }
   /// All processing is invoked from JS, with no AppDelegate/SceneDelegate hooks.
   private func collect() -> [String] {
-    defer { _ = reporter.purgePendingCrashReport() }  // Explicit purge point 2: success, mismatch, corrupt, oversized and JS-duplicate paths.
+    defer { purgePendingRaw() }  // Explicit purge point 2: success, mismatch, corrupt, oversized and JS-duplicate paths.
     guard let bound = binding() else {
       disarm()
       return []
     }
-    if reporter.hasPendingCrashReport() {
+    if let reporter, reporter.hasPendingCrashReport() {
       if let data = reporter.loadPendingCrashReportData(), data.count <= 256 * 1024,
         let crash = try? PLCrashReport(data: data),
         let custom = crash.customData,
@@ -124,7 +140,7 @@ public class NyxCrashReporterModule: Module {
       {
         try? persist(record, bound: bound)
       }
-      _ = reporter.purgePendingCrashReport()  // Purge before returning any sanitized data to JS.
+      purgePendingRaw()  // Purge before returning any sanitized data to JS.
     }
     trim()
     return recordFiles().compactMap { file in
@@ -219,21 +235,28 @@ public class NyxCrashReporterModule: Module {
       defer { self.lock.unlock() }
       return self.binding()
     }
-    Function("arm") { (value: [String: String]) in
+    Function("arm") { (value: [String: String]) -> Bool in
       self.lock.lock()
       defer { self.lock.unlock() }
       guard Set(value.keys) == Set(["accountId", "revision", "epochId"]),
         value.values.allSatisfy({ UUID(uuidString: $0) != nil })
       else {
         self.disarm()
-        return
+        return false
       }
+      guard let reporter = self.reporter else { self.disarm(); return false }
       if self.binding() != value { self.disarm() }
       try self.write(JSONSerialization.data(withJSONObject: value), to: self.bindingURL)
-      self.reporter.customData = try JSONSerialization.data(withJSONObject: ["e": value["epochId"]!]
-      )
-      if !self.enabled { self.enabled = self.reporter.enable() }
-      if !self.enabled { self.disarm() }
+      reporter.customData = try JSONSerialization.data(withJSONObject: ["e": value["epochId"] ?? ""])
+      if !self.enabled { self.enabled = reporter.enable() }
+      self.armed = crashCaptureCanArm(reporterAvailable: true, enabled: self.enabled)
+      if !self.armed { self.disarm() }
+      return self.armed
+    }
+    Function("pause") {
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      self.pause()
     }
     Function("disarm") {
       self.lock.lock()
@@ -243,13 +266,13 @@ public class NyxCrashReporterModule: Module {
     Function("recordFatalJs") { (json: String) in
       self.lock.lock()
       defer { self.lock.unlock() }
-      guard let bound = self.binding(), let data = json.data(using: .utf8), data.count <= 32 * 1024,
+      guard self.armed, let bound = self.binding(), let data = json.data(using: .utf8), data.count <= 32 * 1024,
         let object = try? JSONSerialization.jsonObject(with: data),
         let record = sanitizedFatalJs(object)
       else { return }
       try self.persist(record, bound: bound)
-      self.reporter.customData = try JSONSerialization.data(withJSONObject: [
-        "e": bound["epochId"]!, "j": record["event_id"] as! String,
+      self.reporter?.customData = try JSONSerialization.data(withJSONObject: [
+        "e": bound["epochId"] ?? "", "j": record["event_id"] as? String ?? "",
       ])
     }
     Function("collectPending") { () -> [String] in

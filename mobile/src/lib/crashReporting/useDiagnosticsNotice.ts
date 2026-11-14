@@ -25,6 +25,7 @@ export function useDiagnosticsNotice(
         !active ||
         p.account_id !== accountId ||
         !p.enabled ||
+        p.diagnostics_offered !== true ||
         p.current_policy_version !== "2" ||
         (p.policy_version === "2" && policy === 2)
       )

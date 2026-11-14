@@ -77,6 +77,7 @@ export function setupSettingsScreen(
     nyxbotNotifications,
     params,
     language = "en",
+    diagnosticsOffered = false,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
@@ -89,6 +90,7 @@ export function setupSettingsScreen(
     };
     params?: Record<string, unknown>;
     language?: Language;
+    diagnosticsOffered?: boolean;
   } = {},
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
@@ -215,7 +217,7 @@ export function setupSettingsScreen(
                   ? voiceEnabled
                     ? ["assistant:voice"]
                     : []
-                  : { enabled: true },
+                  : { enabled: true, diagnostics_offered: diagnosticsOffered, current_policy_version: diagnosticsOffered ? "2" : "1" },
       }),
       useMutation: (options: Record<string, any>) => {
         mutationOptions.push(options);

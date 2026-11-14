@@ -1,6 +1,4 @@
-import { useDiagnosticsNotice } from '../lib/crashReporting/useDiagnosticsNotice';
-import { installMobileCrashReporting } from "../lib/crashReporting/runtime";
-installMobileCrashReporting();
+import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
 import { LanguageProvider } from "../i18n/LanguageProvider";
 import "react-native-gesture-handler";
 import { useForegroundNotificationToast } from "./useForegroundNotificationToast";

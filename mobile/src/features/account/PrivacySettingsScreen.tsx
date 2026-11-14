@@ -224,10 +224,10 @@ export function PrivacySettingsScreen(
             }
           />
         </SettingsGroup>
-        <SettingsGroup title={t("Crash diagnostics")} footer={t("iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured.")}>
+        {analyticsPermission.data?.diagnostics_offered === true && <SettingsGroup title={t("Crash diagnostics")} footer={t("iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured.")}>
           <SettingsRow icon={ChartColumn} label={t("Crash diagnostics")} detail={t(analyticsPermission.data?.diagnostics_available && deviceConsent.enabled && deviceConsent.policy === 2 ? "Crash diagnostics enabled" : "Crash diagnostics need updated permission")} chevron={false} />
           <SettingsRow label={t("Review updated analytics")} onPress={analyticsPermission.data?.current_policy_version === "2" && !reviewDiagnostics.isPending && !saveAnalytics.isPending ? review : undefined} />
-        </SettingsGroup>
+        </SettingsGroup>}
         {analyticsPermission.isError && (
           <PrimaryButton
             refreshLabelOnFontScaleChange

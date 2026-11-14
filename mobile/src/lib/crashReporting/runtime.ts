@@ -45,15 +45,15 @@ export function installMobileCrashReporting(): void {
       },
     );
   // RN 0.83's Hermes tracker is initialized only in development by RN itself.
-  // Use its exported default options to retain RN's existing exception/log path.
-  const previous = (
+  // Release uses capture-only callbacks; development preserves RN diagnostics.
+  const previous = __DEV__ ? (
     require("react-native/Libraries/promiseRejectionTrackingOptions") as {
       default: RejectionOptions;
     }
-  ).default;
+  ).default : {};
   const options = chainRejections(previous, (e) => {
     void lifecycle.capture(e, "unhandled_rejection");
-  });
+  }, __DEV__);
   const hermes = (
     globalThis as typeof globalThis & {
       HermesInternal?: {

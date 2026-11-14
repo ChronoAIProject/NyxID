@@ -27,11 +27,17 @@ export type RejectionOptions = {
   onUnhandled?: (id: number, error: unknown) => void;
   onHandled?: (id: number) => void;
 };
-/** RN 0.83 exports its tracker options; preserve both callbacks in all builds. */
+/** Release tracking captures only; development retains RN diagnostics. */
 export function chainRejections(
   previous: RejectionOptions,
   capture: (error: unknown) => void,
+  development: boolean,
 ): RejectionOptions {
+  if (!development) return {
+    allRejections: true,
+    onUnhandled(_id, error) { capture(error); },
+    onHandled() {},
+  };
   return {
     ...previous,
     allRejections: true,

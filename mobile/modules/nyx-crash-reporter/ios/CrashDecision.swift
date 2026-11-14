@@ -1,5 +1,9 @@
 import Foundation
 
+func crashCaptureCanArm(reporterAvailable: Bool, enabled: Bool) -> Bool {
+  reporterAvailable && enabled
+}
+
 /// A crash during the atomic write can leave staging files. They never become
 /// records and must not outlive the next buffer operation or a withdrawal.
 func purgeInterruptedCrashWrites(in directory: URL) {
@@ -70,7 +74,7 @@ func sanitizedFatalJs(_ value: Any) -> [String: Any]? {
   }
   var result: [String: Any] = [
     "schema_version": 1, "event_id": event, "captured_at": captured,
-    "platform": v["platform"] as! String, "kind": "js_fatal", "exception_class": cls,
+    "platform": "ios", "kind": "js_fatal", "exception_class": cls,
     "app_version": version, "app_build": build, "os_version": os, "js_frames": safeFrames,
     "native_images": [], "native_frames": [],
   ]

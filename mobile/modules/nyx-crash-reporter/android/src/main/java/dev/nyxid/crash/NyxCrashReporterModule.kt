@@ -14,6 +14,7 @@ import java.util.UUID
 
 /** Android JS fatal persistence only. No JVM/NDK crash handler is installed. */
 class NyxCrashReporterModule : Module() {
+  private var armed = false
   private val mutex = Any()
   private val directory: File get() = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "nyx-crash").also { it.mkdirs() }
   private fun bindingFile() = File(directory, "binding.json")
@@ -27,7 +28,7 @@ class NyxCrashReporterModule : Module() {
   private fun purgeInterruptedWrites() {
     directory.listFiles()?.filter { it.isFile && it.name != "binding.json" && !(it.name.startsWith("event-") && it.extension == "json") }?.forEach { it.delete() }
   }
-  private fun disarm() { directory.listFiles()?.filter { it.isFile }?.forEach { it.delete() } }
+  private fun disarm() { armed = false; directory.listFiles()?.filter { it.isFile }?.forEach { it.delete() } }
   private fun trim() {
     purgeInterruptedWrites()
     val now = System.currentTimeMillis()
@@ -80,11 +81,14 @@ class NyxCrashReporterModule : Module() {
       val previous = binding()
       if (previous == null || listOf("accountId","revision","epochId").any { previous.getString(it) != value[it] }) disarm()
       atomic(bindingFile(),json.toString().toByteArray())
+      armed = true
+      true
     } }
+    Function("pause") { synchronized(mutex) { armed = false; trim() } }
     Function("disarm") { synchronized(mutex) { disarm() } }
     Function("recordFatalJs") { json: String -> synchronized(mutex) {
       val bound = binding()
-      if (bound != null && json.toByteArray().size <= 32768) {
+      if (armed && bound != null && json.toByteArray().size <= 32768) {
         val safe = runCatching { sanitize(JSONObject(json)) }.getOrNull()
         if (safe != null) {
           val bytes = JSONObject().put("binding",bound).put("report",safe).put("storedAt",System.currentTimeMillis()).toString().toByteArray()

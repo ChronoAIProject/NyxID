@@ -12,6 +12,10 @@ purgeInterruptedCrashWrites(in: directory)
 let retainedFiles = try FileManager.default.contentsOfDirectory(atPath: directory.path)
 assert(Set(retainedFiles) == Set(["binding.json", "event-1.json", "raw"]))
 
+assert(!crashCaptureCanArm(reporterAvailable: false, enabled: false))
+assert(!crashCaptureCanArm(reporterAvailable: false, enabled: true))
+assert(!crashCaptureCanArm(reporterAvailable: true, enabled: false))
+assert(crashCaptureCanArm(reporterAvailable: true, enabled: true))
 let epoch = UUID().uuidString
 assert(pendingCrashDecision(bindingEpoch: epoch, reportEpoch: epoch, jsEventId: nil) == .native)
 assert(pendingCrashDecision(bindingEpoch: nil, reportEpoch: epoch, jsEventId: nil) == .discard)

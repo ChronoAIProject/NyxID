@@ -139,6 +139,7 @@ test("fatal handler persists synchronously before the original RN fatal handler 
       onHandled: () => calls.push("rn-handled"),
     },
     () => calls.push("report"),
+    true,
   );
   options.onUnhandled!(1, new Error(sentinel));
   options.onHandled!(1);
@@ -167,20 +168,27 @@ function harness() {
   const sent: unknown[] = [];
   const fatal: string[] = [];
   let arms = 0,
-    purges = 0;
+    purges = 0, pauses = 0;
+  let failure: unknown = null;
+  let armed = false;
   const native: CrashNativeModule = {
     getAppIdentity: () => ({ version: "9.8.7", build: "654" }),
     getBinding: () => binding,
     arm: (b) => {
       arms++;
       binding = { ...b };
+      armed = true;
+      return true;
     },
+    pause: () => { pauses++; armed = false; },
     disarm: () => {
       purges++;
+      armed = false;
       binding = null;
       records = [];
     },
     recordFatalJs: (json) => {
+      assert.ok(armed);
       fatal.push(json);
       records.push(JSON.stringify({ binding, report: JSON.parse(json) }));
     },
@@ -196,11 +204,11 @@ function harness() {
     opts?: Parameters<RelayRequest>[1],
   ) => {
     opts?.authorityGuard?.();
-    if (path.endsWith("/analytics")) return permission as T;
+    if (path.endsWith("/analytics")) { if (failure) throw failure; return permission as T; }
     sent.push(opts?.body);
     return {} as T;
   };
-  const lifecycle = createCrashLifecycle({
+  const create = () => createCrashLifecycle({
     native,
     snapshot: () => snapshot,
     request,
@@ -208,8 +216,10 @@ function harness() {
     platform: "ios",
     osVersion: () => "18.1",
   });
+  const lifecycle = create();
   return {
     lifecycle,
+    relaunch: create,
     sent,
     fatal,
     native,
@@ -222,6 +232,8 @@ function harness() {
     get arms() {
       return arms;
     },
+    get pauses() { return pauses; },
+    fail: (error: unknown) => { failure = error; },
     get purges() {
       return purges;
     },
@@ -325,7 +337,8 @@ test("Android uses installed version and reports JavaScript fatal records only",
     native: {
       getAppIdentity: () => ({ version: "2.3.4", build: "99" }),
       getBinding: () => b,
-      arm: () => calls.push("arm"),
+      arm: () => { calls.push("arm"); return true; },
+      pause: () => { calls.push("pause"); },
       disarm: () => calls.push("purge"),
       recordFatalJs: (json) => {
         saved = JSON.parse(json);
@@ -426,4 +439,57 @@ test("a stale account denial cannot purge the successor mobile binding", async (
   reject({ errorCode: 13401 });
   assert.equal(await pending, false);
   assert.equal(denials, 0);
+});
+
+test("offline relaunch pauses without purging and retries the same revision; denial purges", async () => {
+  const h = harness();
+  await h.lifecycle.setRestoring(false);
+  h.lifecycle.fatal(new Error(sentinel));
+  const epoch = h.binding!.epochId;
+  const purges = h.purges;
+  const relaunched = h.relaunch();
+  h.fail(new Error("network unavailable"));
+  await relaunched.setRestoring(false);
+  assert.equal(h.purges, purges);
+  assert.equal(h.records.length, 1);
+  assert.equal(h.binding!.epochId, epoch);
+  relaunched.fatal(new Error("while paused"));
+  assert.equal(h.fatal.length, 1);
+  assert.ok(h.pauses > 0);
+  h.fail(null);
+  await relaunched.refresh();
+  assert.equal(h.binding!.epochId, epoch);
+  assert.equal(h.records.length, 0);
+  assert.equal(h.sent.length, 1);
+  relaunched.fatal(new Error("next"));
+  h.fail({ errorCode: 13401 });
+  await relaunched.refresh();
+  assert.equal(h.binding, null);
+  assert.equal(h.records.length, 0);
+});
+test("mobile excludes HTTP refusals and reporter-owned errors but retains server failures", async () => {
+  const { ApiError } = await import("../api/ApiError");
+  const { crashAuthorityError } = await import("./reporter");
+  const h = harness();
+  await h.lifecycle.setRestoring(false);
+  for (const statusCode of [0, 400, 401, 403, 404, 429, 499]) {
+    await h.lifecycle.capture(new ApiError({statusCode, errorCode: 1000, errorKey: "refused", message: sentinel}));
+  }
+  await h.lifecycle.capture(crashAuthorityError());
+  assert.equal(h.sent.length, 0);
+  await h.lifecycle.capture(new ApiError({statusCode: 503, errorCode: 1000, errorKey: "unavailable", message: sentinel}));
+  assert.equal(h.sent.length, 1);
+  assert.ok(!JSON.stringify(h.sent).includes(sentinel));
+  assert.ok(!JSON.stringify(h.sent).includes('"runtime"'));
+});
+
+test("an unavailable native reporter cannot arm JavaScript capture", async () => {
+  const h=harness();
+  h.native.arm=()=>false;
+  await h.lifecycle.setRestoring(false);
+  h.lifecycle.fatal(new Error(sentinel));
+  await h.lifecycle.capture(new Error(sentinel));
+  assert.equal(h.binding,null);
+  assert.equal(h.fatal.length,0);
+  assert.equal(h.sent.length,0);
 });
