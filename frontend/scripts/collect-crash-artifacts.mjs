@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isCrashArtifactId } from "./crash-build-identity.mjs";
 export async function collectCrashArtifacts(root, environment = process.env) {
   const dist = path.join(root, "dist");
   const identity = JSON.parse(
     fs.readFileSync(path.join(dist, "crash-build.json"), "utf8"),
   );
-  if (!/^[a-f0-9-]{36}$/.test(identity.artifact_id))
+  if (!isCrashArtifactId(identity.artifact_id))
     throw new Error("Missing crash artifact identity");
   const target = path.resolve(
     root,

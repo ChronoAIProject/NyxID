@@ -4,7 +4,7 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 import fs from "node:fs"
-import { randomUUID } from "node:crypto"
+import { buildArtifactId } from "./scripts/crash-build-identity.mjs"
 import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
@@ -263,7 +263,7 @@ function docsSync(): Plugin {
 // evaluation time is enough, since a new evaluation means a new build.
 const SOURCE_COMMIT = process.env.SOURCE_COMMIT || process.env.NYXID_GIT_HASH || null
 const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
-const ARTIFACT_ID = randomUUID()
+const ARTIFACT_ID = buildArtifactId(process.env.CRASH_ARTIFACT_ID)
 const APP_VERSION = JSON.parse(fs.readFileSync(path.resolve(__dirname, "package.json"), "utf8")).version as string
 
 export default defineConfig({

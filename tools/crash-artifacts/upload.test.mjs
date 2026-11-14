@@ -240,3 +240,24 @@ test("failed public-map assertions also delete unrequested private copies", asyn
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("collector accepts a shared supplied UUID and rejects malformed identities", async () => {
+  const { collectCrashArtifacts } = await import("../../frontend/scripts/collect-crash-artifacts.mjs");
+  const { buildArtifactId } = await import("../../frontend/scripts/crash-build-identity.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nyx-shared-artifact-"));
+  const root = path.join(directory, "frontend");
+  fs.mkdirSync(path.join(root, "dist/assets"), { recursive: true });
+  try {
+    const id = buildArtifactId("2e6e467d-54b7-4839-bfb1-c3e563368b37");
+    fs.writeFileSync(path.join(root, "dist/crash-build.json"), JSON.stringify({ artifact_id: id }));
+    fs.writeFileSync(path.join(root, "dist/assets/app.js"), "closed");
+    fs.writeFileSync(path.join(root, "dist/assets/app.js.map"), "{}");
+    const result = await collectCrashArtifacts(root, {});
+    assert.ok(result.target.endsWith(id));
+    assert.equal(fs.existsSync(path.join(root, "dist/assets/app.js.map")), false);
+    fs.writeFileSync(path.join(root, "dist/crash-build.json"), JSON.stringify({ artifact_id: "-".repeat(36) }));
+    await assert.rejects(collectCrashArtifacts(root, {}), /Missing crash artifact identity/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

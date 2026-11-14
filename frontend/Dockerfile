@@ -26,6 +26,8 @@ COPY cli/resources/machine-container/seccomp.json /build/cli/resources/machine-c
 # restart backend, done.
 
 ARG NYXID_GIT_HASH
+ARG CRASH_ARTIFACT_ID
+ENV CRASH_ARTIFACT_ID=${CRASH_ARTIFACT_ID}
 ARG SOURCE_DATE_EPOCH
 ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}

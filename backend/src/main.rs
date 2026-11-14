@@ -1379,6 +1379,13 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
+    services::shutdown::process().spawn_worker(
+        services::crash_report_service::releases::run_manifest_refresh(
+            db.clone(),
+            Arc::new(config.clone()),
+            services::shutdown::process(),
+        ),
+    );
     services::shutdown::process().spawn_worker(services::crash_report_export::worker::run(
         db.clone(),
         crash_reports,

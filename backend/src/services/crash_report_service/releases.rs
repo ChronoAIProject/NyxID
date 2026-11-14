@@ -88,7 +88,21 @@ pub async fn register(
             },
         )
         .upsert(true)
-        .await?;
+        .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error)
+            if matches!(error.kind.as_ref(),
+                mongodb::error::ErrorKind::Command(command) if command.code == 11000
+            ) || matches!(error.kind.as_ref(),
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write))
+                    if write.code == 11000
+            ) =>
+        {
+            return Ok(Registration::AlreadyRegistered);
+        }
+        Err(error) => return Err(error.into()),
+    };
     Ok(if result.upserted_id.is_some() {
         Registration::Registered
     } else {
@@ -169,7 +183,7 @@ struct CachedManifest {
 }
 type Gate = Arc<tokio::sync::Mutex<Option<CachedManifest>>>;
 static FLIGHTS: LazyLock<std::sync::Mutex<HashMap<String, Gate>>> = LazyLock::new(Default::default);
-async fn cached_manifest(url: url::Url, identity: &RegisterRelease) -> Option<Manifest> {
+async fn cached_manifest(url: url::Url, identity: Option<&RegisterRelease>) -> Option<Manifest> {
     let key = url.origin().ascii_serialization();
     let gate = {
         let mut gates = FLIGHTS.lock().expect("manifest flights");
@@ -203,7 +217,7 @@ async fn cached_manifest(url: url::Url, identity: &RegisterRelease) -> Option<Ma
     });
     let manifest = match fetch_manifest(url.clone()).await {
         Ok(manifest) => {
-            if !manifest.matches(identity) {
+            if identity.is_some_and(|identity| !manifest.matches(identity)) {
                 logging::manifest_failure(
                     logging::ManifestFailure::Mismatch,
                     url.host_str().unwrap_or_default(),
@@ -240,11 +254,53 @@ pub async fn auto_register_web(
         _ => return,
     }
     for url in manifest_urls(config) {
-        if let Some(manifest) = cached_manifest(url, identity).await
+        if let Some(manifest) = cached_manifest(url, Some(identity)).await
             && manifest.matches(identity)
         {
             let _ = register(db, identity, ReleaseSource::FrontendManifest, None).await;
             return;
+        }
+    }
+}
+// The initial interval tick registers the live release before any crash arrives.
+// Each refresh shares the hardened, single-flight origin cache with ingestion.
+const MANIFEST_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+pub async fn run_manifest_refresh(
+    db: Database,
+    config: Arc<crate::config::AppConfig>,
+    shutdown: super::super::shutdown::Runtime,
+) {
+    run_manifest_refresh_every(db, config, shutdown, MANIFEST_REFRESH_INTERVAL).await;
+}
+async fn run_manifest_refresh_every(
+    db: Database,
+    config: Arc<crate::config::AppConfig>,
+    shutdown: super::super::shutdown::Runtime,
+    cadence: Duration,
+) {
+    let mut interval = tokio::time::interval(cadence);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    while let Some(_work) = shutdown.tick(&mut interval).await {
+        refresh_live_manifests(&db, &config, &shutdown).await;
+    }
+}
+async fn refresh_live_manifests(
+    db: &Database,
+    config: &crate::config::AppConfig,
+    shutdown: &super::super::shutdown::Runtime,
+) {
+    for url in manifest_urls(config) {
+        if shutdown.is_draining() {
+            break;
+        }
+        if let Some(manifest) = cached_manifest(url, None).await {
+            let identity = RegisterRelease {
+                platform: Platform::Web,
+                app_version: manifest.app_version,
+                app_build: manifest.app_build,
+                artifact_id: Some(manifest.artifact_id),
+            };
+            let _ = register(db, &identity, ReleaseSource::FrontendManifest, None).await;
         }
     }
 }
