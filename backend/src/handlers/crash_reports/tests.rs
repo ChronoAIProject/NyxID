@@ -628,27 +628,46 @@ async fn default_off_ingestion_never_performs_an_unthrottled_counter_write() {
 
 #[tokio::test]
 async fn web_manifest_runs_only_after_successful_insert_and_never_delays_ingestion() {
-    use std::{sync::Arc, time::Duration};
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
     let (db, id, revision) = account("crash_manifest_after_insert").await;
     readiness::ready_test_replica(&db).await;
     flags::set_platform_override(&db, service::FLAG, &FlagTarget::User(id.clone()), true, &id)
         .await
         .unwrap();
-    let server = MockServer::builder().start().await;
     let started = Arc::new(tokio::sync::Notify::new());
-    let notify = started.clone();
-    Mock::given(path("/crash-build.json"))
-        .respond_with(move |_: &wiremock::Request| {
-            notify.notify_one();
-            ResponseTemplate::new(503).set_delay(Duration::from_secs(3))
-        })
-        .expect(1)
-        .mount(&server)
-        .await;
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new().route(
+        "/crash-build.json",
+        axum::routing::get({
+            let started = started.clone();
+            let release = release.clone();
+            let calls = calls.clone();
+            move || {
+                let started = started.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    let _permit = release.acquire().await.unwrap();
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut state = test_app_state(db.clone());
     state.config.environment = "development".into();
-    state.config.frontend_url = server.uri();
+    state.config.frontend_url = origin;
     state.config.domain_aliases.frontend_urls.clear();
     let send = |rev: &str| {
         ingest(
@@ -663,12 +682,12 @@ async fn web_manifest_runs_only_after_successful_insert_and_never_delays_ingesti
         send(&uuid::Uuid::new_v4().to_string()).await,
         Err(AppError::CrashReportConsentRequired)
     ));
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     db.run_command(bson::doc! {"collMod":COLLECTION_NAME,"validator":{"_id":{"$type":"int"}}})
         .await
         .unwrap();
     assert!(send(&revision).await.is_err());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     db.run_command(bson::doc! {"collMod":COLLECTION_NAME,"validator":{}})
         .await
         .unwrap();
@@ -690,6 +709,13 @@ async fn web_manifest_runs_only_after_successful_insert_and_never_delays_ingesti
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("background fetch must start");
+    assert_eq!(state.shutdown.counts().detached, 1);
+    assert_eq!(state.shutdown.begin_drain().unwrap().detached, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), state.shutdown.idle())
+            .await
+            .is_err()
+    );
     assert_eq!(
         db.collection::<bson::Document>(crate::models::client_release_registry::COLLECTION_NAME)
             .count_documents(bson::doc! {})
@@ -697,4 +723,12 @@ async fn web_manifest_runs_only_after_successful_insert_and_never_delays_ingesti
             .unwrap(),
         0
     );
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), state.shutdown.idle())
+        .await
+        .expect("drain completes only after registration returns");
+    assert_eq!(state.shutdown.counts().detached, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
 }

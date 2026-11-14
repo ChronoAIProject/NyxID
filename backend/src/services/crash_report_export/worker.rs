@@ -257,6 +257,143 @@ mod tests {
         super::tick(db, config, &shutdown).await
     }
 
+    struct BlockingExporter {
+        calls: AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl CrashReportExporter for BlockingExporter {
+        fn destination_id(&self) -> &str {
+            "test-project"
+        }
+
+        async fn submit(&self, _: &SanitizedReport<'_>) -> SubmitOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            SubmitOutcome::Exported
+        }
+    }
+
+    async fn blocking_setup(
+        name: &str,
+    ) -> (
+        Database,
+        String,
+        String,
+        String,
+        CrashConfig,
+        Arc<BlockingExporter>,
+    ) {
+        let (db, actor, revision, id, mut config, _) = setup(name, 0).await;
+        let exporter = Arc::new(BlockingExporter {
+            calls: AtomicUsize::new(0),
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        config.web = Some(exporter.clone());
+        config.interval = Duration::from_secs(3600);
+        (db, actor, revision, id, config, exporter)
+    }
+
+    #[tokio::test]
+    async fn drain_counts_inflight_export_settles_it_and_stops_before_the_next_claim() {
+        let (db, actor, revision, first, config, exporter) = blocking_setup("crash_drain").await;
+        crate::test_utils::await_responsive_majority_io(&db).await;
+        let (_, second) =
+            crash_report_service::insert(&db, &config, "test", &actor, &revision, report())
+                .await
+                .unwrap();
+        // Keep both rows due regardless of clock skew, with deterministic claim order.
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &second},
+                doc! {"$set": {"export.next_attempt_at": bson::DateTime::from_millis(1)}},
+            )
+            .await
+            .unwrap();
+        let shutdown = Runtime::default();
+        let worker = shutdown.spawn_worker(run(db.clone(), Arc::new(config), shutdown.clone()));
+        tokio::time::timeout(Duration::from_secs(5), exporter.started.notified())
+            .await
+            .unwrap();
+        let dispatching = row(&db, &first).await;
+        assert_eq!(dispatching.export.status, ExportStatus::Dispatching);
+        assert_eq!(dispatching.export.attempts, 1);
+        assert!(dispatching.export.lease_id.is_some());
+        assert!(dispatching.export.lease_until.is_some());
+        assert_eq!(shutdown.begin_drain().unwrap().background, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), shutdown.idle())
+                .await
+                .is_err()
+        );
+        let pending = row(&db, &second).await;
+        assert_eq!(pending.export.status, ExportStatus::Pending);
+        assert!(pending.export.lease_id.is_none());
+        exporter.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row(&db, &first).await.export.status, ExportStatus::Exported);
+        let pending = row(&db, &second).await;
+        assert_eq!(pending.export.status, ExportStatus::Pending);
+        assert!(pending.export.lease_id.is_none());
+        assert_eq!(exporter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(shutdown.counts().background, 0);
+        assert_eq!(shutdown.tracked_units(), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_deadline_keeps_dispatch_intent_and_expired_lease_is_unknown_without_resend() {
+        let (db, _, _, id, config, exporter) = blocking_setup("crash_drain_deadline").await;
+        let shutdown = Runtime::default();
+        let worker =
+            shutdown.spawn_worker(run(db.clone(), Arc::new(config.clone()), shutdown.clone()));
+        tokio::time::timeout(Duration::from_secs(5), exporter.started.notified())
+            .await
+            .unwrap();
+        assert_eq!(shutdown.begin_drain().unwrap().background, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), shutdown.idle())
+                .await
+                .is_err()
+        );
+        // The production hard deadline aborts tracked tasks through Runtime::stop.
+        shutdown.stop();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), shutdown.tasks_stopped())
+            .await
+            .unwrap();
+        let abandoned = row(&db, &id).await;
+        assert_eq!(abandoned.export.status, ExportStatus::Dispatching);
+        let stale_lease = abandoned.export.lease_id.unwrap();
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &id},
+                doc! {"$set": {"export.lease_until": bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        tick(&db, &config).await.unwrap();
+        settle(&db, &id, &stale_lease, ExportStatus::Exported, None, None)
+            .await
+            .unwrap();
+        tick(&db, &config).await.unwrap();
+        let unknown = row(&db, &id).await;
+        assert_eq!(unknown.export.status, ExportStatus::Unknown);
+        assert_eq!(
+            unknown.export.last_error_code.as_deref(),
+            Some("dispatch_lease_expired")
+        );
+        assert!(unknown.export.lease_id.is_none());
+        assert_eq!(exporter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(shutdown.tracked_units(), 0);
+    }
+
     struct Exporter {
         calls: AtomicUsize,
         outcome: u8,
