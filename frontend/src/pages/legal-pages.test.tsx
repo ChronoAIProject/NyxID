@@ -72,7 +72,7 @@ it("renders hosted content, encryption limits, recipients and incomplete-erasure
     "users with permission to read administrative usage reports, including Usage Viewers",
   );
   expect(screen.getByText(/NyxID requests revocation/)).toHaveTextContent(
-    "Deletion does not yet cover every stored record",
+    "Personal local account, authentication, service, assistant, channel, device and related rows covered by the personal-data registry are erased after acceptance",
   );
   expect(screen.getByText(/Software defaults are 24 hours/)).toHaveTextContent(
     "not a promise of the hosted deployment's current settings",
