@@ -140,7 +140,10 @@ fn forbidden_key(key: &str) -> bool {
         || key.contains("access_token")
         || key.contains("refresh_token")
         || key.contains("raw_token")
-        || key.contains("credential")
+        || key == "credential"
+        || key.ends_with("_credential")
+        || key.contains("credential_id")
+        || key.ends_with("_credentials")
         || key.contains("oauth")
         || key.contains("authorization_code")
         || key.contains("api_key")
@@ -1637,6 +1640,10 @@ async fn build_with_limit(
             .map_err(|error| AppError::Internal(error.to_string()))?;
         debug_assert_eq!(section, spec.section);
         let Some(filter) = owner_filter(entry, account_id) else {
+            sections
+                .entry(spec.section.into())
+                .or_default()
+                .insert(spec.subsection.into(), ExportSubsection::default());
             continue;
         };
         let value = rows(
@@ -2181,6 +2188,12 @@ mod tests {
                 continue;
             };
             if entry.collection == crate::models::user::COLLECTION_NAME {
+                continue;
+            }
+            if matches!(
+                entry.owner,
+                personal_data_registry::OwnerSelector::NotPersonal
+            ) {
                 continue;
             }
             let subsection = export.sections[section]
