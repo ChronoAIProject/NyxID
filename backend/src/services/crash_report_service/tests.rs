@@ -419,6 +419,7 @@ async fn admin_reports_label_verified_and_unverified_web_and_ios_releases() {
     .unwrap();
 
     verified_web.platform = Platform::Ios;
+    verified_web.event_id = uuid::Uuid::new_v4().to_string();
     verified_web.artifact_id = None;
     verified_web.app_version = "2.0.0".into();
     verified_web.app_build = "200".into();
@@ -498,41 +499,47 @@ async fn admin_report_list_uses_one_batched_registry_query_per_page() {
     )
     .await
     .unwrap();
-    let mut row = report();
-    row.artifact_id = Some(uuid::Uuid::new_v4().to_string());
     let now = Utc::now();
-    let stored = ClientErrorReport {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: uuid::Uuid::new_v4().to_string(),
-        event_id: row.event_id.clone(),
-        consent_revision: uuid::Uuid::new_v4().to_string(),
-        severity: validation::severity(row.kind).into(),
-        fingerprint: validation::fingerprint(&row),
-        report: row,
-        environment: "test".into(),
-        received_at: now,
-        expires_at: now + chrono::Duration::days(30),
-        export: Export {
-            status: ExportStatus::Disabled,
-            destination_id: None,
-            attempts: 0,
-            lease_id: None,
-            lease_until: None,
-            next_attempt_at: None,
-            deadline: now + chrono::Duration::hours(24),
-            last_error_code: None,
-            exported_at: None,
-        },
-    };
+    let stored = (0..4)
+        .map(|index| {
+            let mut row = report();
+            row.app_version = format!("1.2.{index}");
+            row.app_build = format!("build-{index}");
+            row.artifact_id = Some(uuid::Uuid::new_v4().to_string());
+            ClientErrorReport {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: uuid::Uuid::new_v4().to_string(),
+                event_id: row.event_id.clone(),
+                consent_revision: uuid::Uuid::new_v4().to_string(),
+                severity: validation::severity(row.kind).into(),
+                fingerprint: validation::fingerprint(&row),
+                report: row,
+                environment: "test".into(),
+                received_at: now + chrono::Duration::milliseconds(i64::from(index)),
+                expires_at: now + chrono::Duration::days(30),
+                export: Export {
+                    status: ExportStatus::Disabled,
+                    destination_id: None,
+                    attempts: 0,
+                    lease_id: None,
+                    lease_until: None,
+                    next_attempt_at: None,
+                    deadline: now + chrono::Duration::hours(24),
+                    last_error_code: None,
+                    exported_at: None,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
     db.collection::<ClientErrorReport>(COLLECTION_NAME)
-        .insert_one(stored)
+        .insert_many(stored)
         .await
         .unwrap();
     release_reads.store(0, Ordering::Relaxed);
     let (rows, _) = admin::list(&db, &admin::ReportQuery::default())
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 4);
     assert_eq!(release_reads.load(Ordering::Relaxed), 1);
 }
 
