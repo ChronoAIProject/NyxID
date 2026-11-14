@@ -53,7 +53,7 @@ MIME type, byte size, creation and expiry timestamps).
 
 ### Complete subsection map
 
-Every registry export source has one subsection. The following table is the version-1 field contract; fields containing dates use RFC3339 strings, Decimal128 values use decimal strings, and binary values are omitted.
+Every registry export source has one subsection. The following table is the version-1 field contract; fields containing dates use RFC3339 strings, Decimal128 values use decimal strings, and binary values are omitted. Per-collection allowlists include the visible authored fields for that source: conversation `title`; agent `name`, `description`, `display_name`, `persona`, `voice_instructions`, and the requesting person's own `memory.text`; private-note `notes.text`; feedback `comment`; trigger labels, schedules, and assistant instructions; endpoint labels and URLs; connection labels and metadata; node names; channel-bot labels; OAuth client names, redirect URIs and scopes; and service-account names and descriptions. Shared/team memory, system-injected instructions, and group messages whose `author_user_id` is another person are excluded.
 
 | Section | Subsection | Allowlisted fields |
 |---|---|---|

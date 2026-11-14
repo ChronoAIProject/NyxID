@@ -19,6 +19,10 @@ pub const SUBSECTION_ROW_CAP: i64 = 10_000;
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 pub const FILE_PAYLOADS_METADATA_ONLY: bool = true;
 
+#[derive(Debug, thiserror::Error)]
+#[error("no account-export allowlist for collection {0}")]
+pub struct ExportSpecError(pub String);
+
 #[derive(Debug, Serialize, Clone, Default)]
 pub struct ExportSubsection {
     pub items: Vec<serde_json::Value>,
@@ -68,6 +72,57 @@ fn bson_json(value: &Bson) -> Option<serde_json::Value> {
         Bson::Binary(_) => return None,
         _ => return None,
     })
+}
+
+/// URLs are exported as origins plus a safe path. Credentials, query values,
+/// and fragments are always removed; fields whose providers commonly put
+/// tokens in path segments opt into `drop_path` at the allowlist boundary.
+fn sanitize_url(value: &str, drop_path: bool) -> String {
+    let Ok(mut parsed) = url::Url::parse(value) else {
+        return value.to_owned();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    if drop_path {
+        parsed.set_path("");
+    }
+    parsed.to_string()
+}
+
+fn is_url_field(field: &str) -> bool {
+    matches!(
+        field,
+        "avatar_url"
+            | "url"
+            | "base_url"
+            | "endpoint"
+            | "openapi_spec_url"
+            | "target_url"
+            | "project_url"
+            | "redirect_uris"
+            | "delivery.url"
+            | "schedule.url"
+            | "webhook_url"
+            | "connection_webhook_url"
+            | "revocation_webhook_url"
+    )
+}
+
+fn url_path_is_opaque(field: &str) -> bool {
+    matches!(
+        field,
+        "avatar_url"
+            | "redirect_uris"
+            | "target_url"
+            | "project_url"
+            | "delivery.url"
+            | "schedule.url"
+            | "webhook_url"
+            | "connection_webhook_url"
+            | "revocation_webhook_url"
+    )
 }
 
 fn forbidden_key(key: &str) -> bool {
@@ -144,6 +199,23 @@ fn insert_path(
     }
 }
 
+fn sanitize_json_url(value: serde_json::Value, field: &str) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) if is_url_field(field) => {
+            serde_json::Value::String(sanitize_url(&value, url_path_is_opaque(field)))
+        }
+        serde_json::Value::Array(values) if is_url_field(field) => {
+            serde_json::Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| sanitize_json_url(value, field))
+                    .collect(),
+            )
+        }
+        other => other,
+    }
+}
+
 fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
     let mut result = serde_json::Map::new();
     for field in fields {
@@ -151,7 +223,7 @@ fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
             continue;
         }
         if let Some(value) = get_path(row, field).as_ref().and_then(bson_json) {
-            insert_path(&mut result, field, value);
+            insert_path(&mut result, field, sanitize_json_url(value, field));
         }
     }
     serde_json::Value::Object(result)
@@ -400,6 +472,43 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "user_provider_tokens" => Some(("services", "user_provider_tokens")),
         "user_service_connections" => Some(("services", "user_service_connections")),
         "user_services" => Some(("services", "user_services")),
+        "assistant_agent_learning_members" => Some(("assistant", "assistant_agent_learning_members")),
+        "assistant_agent_learning_proposals" => Some(("assistant", "assistant_agent_learning_proposals")),
+        "assistant_agent_learning_skill_roots" => Some(("assistant", "assistant_agent_learning_skill_roots")),
+        "assistant_cma_session_origins" => Some(("account_activity", "assistant_cma_session_origins")),
+        "assistant_group_agent_access" => Some(("account_activity", "assistant_group_agent_access")),
+        "assistant_group_execution_slots" => Some(("account_activity", "assistant_group_execution_slots")),
+        "assistant_group_mention_notifications" => Some(("assistant", "assistant_group_mention_notifications")),
+        "assistant_learning_migrations" => Some(("account_activity", "assistant_learning_migrations")),
+        "assistant_learning_publication_targets" => Some(("account_activity", "assistant_learning_publication_targets")),
+        "assistant_notification_push_budgets" => Some(("account", "assistant_notification_push_budgets")),
+        "assistant_notification_push_sources" => Some(("account", "assistant_notification_push_sources")),
+        "assistant_voice_sessions" => Some(("account_activity", "assistant_voice_sessions")),
+        "async_service_operation_artifacts" => Some(("assistant", "async_service_operation_artifacts")),
+        "encrypted_record_migration_findings" => Some(("account_activity", "encrypted_record_migration_findings")),
+        "encrypted_record_migration_runs" => Some(("account_activity", "encrypted_record_migration_runs")),
+        "generated_artifact_content_series" => Some(("account", "generated_artifact_content_series")),
+        "node_pending_credentials" => Some(("services", "node_pending_credentials")),
+        "oracle_login_snapshots" => Some(("account", "oracle_login_snapshots")),
+        "oracle_sessions" => Some(("assistant", "oracle_sessions")),
+        "oracle_tasks" => Some(("assistant", "oracle_tasks")),
+        "oracle_worker_commands" => Some(("account_activity", "oracle_worker_commands")),
+        "oracle_workers" => Some(("account", "oracle_workers")),
+        "org_channel_lanes" => Some(("channels", "org_channel_lanes")),
+        "org_channel_link_challenges" => Some(("account_activity", "org_channel_link_challenges")),
+        "org_channel_messages" => Some(("channels", "org_channel_messages")),
+        "org_channel_sender_links" => Some(("channels", "org_channel_sender_links")),
+        "platform_discord_control_installation_history" => Some(("account", "platform_discord_control_installation_history")),
+        "platform_discord_control_installations" => Some(("account", "platform_discord_control_installations")),
+        "platform_onboarding_binding_requests" => Some(("account_activity", "platform_onboarding_binding_requests")),
+        "platform_onboarding_bindings" => Some(("account_activity", "platform_onboarding_bindings")),
+        "platform_personal_bindings" => Some(("account", "platform_personal_bindings")),
+        "platform_personal_decision_spacing" => Some(("account_activity", "platform_personal_decision_spacing")),
+        "platform_personal_link_challenges" => Some(("account_activity", "platform_personal_link_challenges")),
+        "platform_personal_link_intents" => Some(("account_activity", "platform_personal_link_intents")),
+        "platform_personal_setup_selections" => Some(("account_activity", "platform_personal_setup_selections")),
+        "platform_public_deployment_activations" => Some(("account", "platform_public_deployment_activations")),
+        "platform_public_deployment_proofs" => Some(("account", "platform_public_deployment_proofs")),
         "users" => Some(("account", "users")),
         _ => None,
     }
@@ -415,12 +524,13 @@ struct ExplicitExportSpec {
 /// Resolve the section, subsection, and field allowlist together.  Keeping
 /// this as one explicit lookup means a new registry export cannot silently
 /// fall through to a broad common projection.
-fn explicit_export_spec(collection: &str) -> Option<ExplicitExportSpec> {
-    let (section, subsection) = export_spec(collection)?;
-    Some(ExplicitExportSpec {
+fn explicit_export_spec(collection: &str) -> Result<ExplicitExportSpec, ExportSpecError> {
+    let (section, subsection) = export_spec(collection)
+        .ok_or_else(|| ExportSpecError(collection.to_owned()))?;
+    Ok(ExplicitExportSpec {
         section,
         subsection,
-        fields: fields_for(collection),
+        fields: fields_for(collection)?,
     })
 }
 const ACCOUNT_RECORD_FIELDS: &[&str] = &[
@@ -498,6 +608,52 @@ const ASSISTANT_RECORD_FIELDS: &[&str] = &[
     "updated_at",
     "completed_at",
     "expires_at",
+];
+const ASSISTANT_AGENT_FIELDS: &[&str] = &[
+    "user_id", "name", "display_name", "description", "specialty",
+    "persona", "voice_instructions", "memory.text", "created_at", "updated_at",
+];
+const ASSISTANT_CONVERSATION_FIELDS: &[&str] = &[
+    "user_id", "title", "model", "created_at", "updated_at", "message_count",
+];
+const GROUP_MESSAGE_FIELDS: &[&str] = &[
+    "user_id", "group_id", "author_user_id", "role", "text", "created_at",
+];
+const FEEDBACK_FIELDS: &[&str] = &[
+    "user_id", "message_id", "rating", "comment", "created_at", "updated_at",
+];
+const PRIVATE_NOTES_FIELDS: &[&str] = &[
+    "actor_user_id", "agent_id", "revision", "notes.text", "notes.created_at",
+    "notes.updated_at", "updated_at",
+];
+const TRIGGER_FIELDS: &[&str] = &[
+    "user_id", "label", "status", "source", "schedule", "schedule_state",
+    "overlap", "delivery", "created_at", "updated_at",
+];
+const USER_ENDPOINT_FIELDS: &[&str] = &[
+    "user_id", "label", "url", "catalog_service_id", "openapi_spec_url",
+    "recommended_skills", "created_at", "updated_at",
+];
+const SERVICE_CONNECTION_FIELDS: &[&str] = &[
+    "user_id", "service_id", "credential_type", "credential_label", "metadata",
+    "is_active", "created_at", "updated_at",
+];
+const NODE_FIELDS: &[&str] = &[
+    "user_id", "name", "status", "is_active", "created_at", "updated_at",
+];
+const CHANNEL_BOT_FIELDS: &[&str] = &[
+    "user_id", "label", "platform", "status", "is_active", "created_at", "updated_at",
+];
+const OAUTH_CLIENT_FIELDS: &[&str] = &[
+    "created_by", "client_name", "redirect_uris", "allowed_scopes", "grant_types",
+    "client_type", "is_active", "delegation_scopes", "default_service_catalog_slugs",
+    "broker_capability_enabled", "connection_webhook_url", "revocation_webhook_url",
+    "connection_webhook_enabled", "created_at", "updated_at",
+];
+const SERVICE_ACCOUNT_FIELDS: &[&str] = &[
+    "owner_user_id", "created_by", "name", "description", "role_ids", "allowed_scopes",
+    "is_active", "purpose", "rate_limit_override", "created_at", "updated_at",
+    "last_authenticated_at",
 ];
 const CHANNEL_RECORD_FIELDS: &[&str] = &[
     "user_id",
@@ -676,8 +832,8 @@ const USAGE_FIELDS: &[&str] = &[
     "wallet_charge_credits",
 ];
 
-fn fields_for(collection: &str) -> &'static [&'static str] {
-    match collection {
+fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecError> {
+    let fields = match collection {
         "agent_key_login_requests" => ACCOUNT_RECORD_FIELDS,
         "agent_service_bindings" => ACCOUNT_RECORD_FIELDS,
         "api_key_credentials" => SERVICE_RECORD_FIELDS,
@@ -692,10 +848,10 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "assistant_agent_learning_proposals" => ACCOUNT_RECORD_FIELDS,
         "assistant_agent_learning_runs" => ASSISTANT_RECORD_FIELDS,
         "assistant_agent_learning_skill_roots" => ACCOUNT_RECORD_FIELDS,
-        "assistant_agent_private_notes" => ASSISTANT_RECORD_FIELDS,
+        "assistant_agent_private_notes" => PRIVATE_NOTES_FIELDS,
         "assistant_agent_shares" => ASSISTANT_RECORD_FIELDS,
         "assistant_agent_sharing" => ASSISTANT_RECORD_FIELDS,
-        "assistant_agents" => ASSISTANT_RECORD_FIELDS,
+        "assistant_agents" => ASSISTANT_AGENT_FIELDS,
         "assistant_artifact_deliveries" => ASSISTANT_RECORD_FIELDS,
         "assistant_async_operations" => ASSISTANT_RECORD_FIELDS,
         "assistant_async_quotas" => ASSISTANT_RECORD_FIELDS,
@@ -707,14 +863,14 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "assistant_cma_creations" => ASSISTANT_RECORD_FIELDS,
         "assistant_cma_sandboxes" => ASSISTANT_RECORD_FIELDS,
         "assistant_cma_session_origins" => ACCOUNT_RECORD_FIELDS,
-        "assistant_conversations" => ASSISTANT_RECORD_FIELDS,
+        "assistant_conversations" => ASSISTANT_CONVERSATION_FIELDS,
         "assistant_direct_handoffs" => ASSISTANT_RECORD_FIELDS,
         "assistant_group_agent_access" => ACCOUNT_RECORD_FIELDS,
         "assistant_group_agent_proposals" => ASSISTANT_RECORD_FIELDS,
         "assistant_group_execution_slots" => ACCOUNT_RECORD_FIELDS,
         "assistant_group_invites" => ASSISTANT_RECORD_FIELDS,
         "assistant_group_mention_notifications" => ACCOUNT_RECORD_FIELDS,
-        "assistant_group_messages" => ASSISTANT_RECORD_FIELDS,
+        "assistant_group_messages" => GROUP_MESSAGE_FIELDS,
         "assistant_group_read_states" => ASSISTANT_RECORD_FIELDS,
         "assistant_group_requests" => ASSISTANT_RECORD_FIELDS,
         "assistant_groups" => ASSISTANT_RECORD_FIELDS,
@@ -722,7 +878,7 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "assistant_invocations" => ASSISTANT_RECORD_FIELDS,
         "assistant_learning_migrations" => ACCOUNT_RECORD_FIELDS,
         "assistant_learning_publication_targets" => ACCOUNT_RECORD_FIELDS,
-        "assistant_message_feedback" => ASSISTANT_RECORD_FIELDS,
+        "assistant_message_feedback" => FEEDBACK_FIELDS,
         "assistant_messages" => MESSAGE_FIELDS,
         "assistant_notification_push_budgets" => ACCOUNT_RECORD_FIELDS,
         "assistant_notification_push_sources" => ACCOUNT_RECORD_FIELDS,
@@ -810,7 +966,7 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "nyxbot_threads" => ASSISTANT_RECORD_FIELDS,
         "nyxbot_watches" => ASSISTANT_RECORD_FIELDS,
         "oauth_broker_bindings" => SERVICE_RECORD_FIELDS,
-        "oauth_clients" => SERVICE_RECORD_FIELDS,
+        "oauth_clients" => OAUTH_CLIENT_FIELDS,
         "oauth_consent_requests" => SERVICE_RECORD_FIELDS,
         "oauth_delegation_authorities" => SERVICE_RECORD_FIELDS,
         "oauth_states" => SERVICE_RECORD_FIELDS,
@@ -845,7 +1001,7 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "saved_logins" => ACCOUNT_RECORD_FIELDS,
         "service_account_key_read_grants" => SERVICE_RECORD_FIELDS,
         "service_account_tokens" => SERVICE_RECORD_FIELDS,
-        "service_accounts" => SERVICE_RECORD_FIELDS,
+        "service_accounts" => SERVICE_ACCOUNT_FIELDS,
         "service_approval_configs" => SERVICE_RECORD_FIELDS,
         "service_change_events" => SERVICE_HISTORY_FIELDS,
         "service_pool_member_health" => SERVICE_RECORD_FIELDS,
@@ -859,20 +1015,45 @@ fn fields_for(collection: &str) -> &'static [&'static str] {
         "trigger_owner_limits" => ACCOUNT_RECORD_FIELDS,
         "trigger_runs" => ACCOUNT_RECORD_FIELDS,
         "trigger_work" => ACCOUNT_RECORD_FIELDS,
-        "triggers" => ACCOUNT_RECORD_FIELDS,
+        "triggers" => TRIGGER_FIELDS,
         "usage_meter" => USAGE_FIELDS,
         "usage_workspaces" => ACCOUNT_RECORD_FIELDS,
         "user_api_keys" => SERVICE_RECORD_FIELDS,
-        "user_endpoints" => SERVICE_RECORD_FIELDS,
+        "user_endpoints" => USER_ENDPOINT_FIELDS,
         "user_provider_credentials" => SERVICE_RECORD_FIELDS,
         "user_provider_tokens" => SERVICE_RECORD_FIELDS,
-        "user_service_connections" => SERVICE_RECORD_FIELDS,
+        "user_service_connections" => SERVICE_CONNECTION_FIELDS,
         "user_services" => SERVICE_RECORD_FIELDS,
+        "assistant_voice_sessions" => ACTIVITY_RECORD_FIELDS,
+        "generated_artifact_content_series" => FILE_METADATA_FIELDS,
+        "node_pending_credentials" => SERVICE_RECORD_FIELDS,
+        "oracle_login_snapshots" => ACCOUNT_RECORD_FIELDS,
+        "oracle_sessions" => ASSISTANT_RECORD_FIELDS,
+        "oracle_tasks" => ASSISTANT_RECORD_FIELDS,
+        "oracle_worker_commands" => ACTIVITY_RECORD_FIELDS,
+        "oracle_workers" => ACCOUNT_RECORD_FIELDS,
+        "org_channel_lanes" => CHANNEL_RECORD_FIELDS,
+        "org_channel_link_challenges" => ACTIVITY_RECORD_FIELDS,
+        "org_channel_messages" => CHANNEL_FIELDS,
+        "org_channel_sender_links" => CHANNEL_RECORD_FIELDS,
+        "platform_personal_bindings" => ACCOUNT_RECORD_FIELDS,
+        "platform_personal_link_challenges" => ACTIVITY_RECORD_FIELDS,
+        "platform_personal_link_intents" => ACTIVITY_RECORD_FIELDS,
         "users" => PROFILE_FIELDS,
-        _ => panic!("missing explicit export field allowlist for {collection}"),
-    }
+        _ => return Err(ExportSpecError(collection.to_owned())),
+    };
+    Ok(fields)
 }
 fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Option<Document> {
+    if entry.collection == "assistant_group_messages" {
+        // Group rows are keyed by the group owner, but the export is a
+        // person's authored record. Never include agent, notice, or another
+        // participant's text merely because it shares the group.
+        return Some(doc! {
+            "user_id": account_id,
+            "author_user_id": account_id,
+        });
+    }
     let fields = match entry.owner {
         personal_data_registry::OwnerSelector::Fields(fields) if !fields.is_empty() => fields,
         _ => return None,
@@ -894,12 +1075,36 @@ fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Opti
         doc! {"$or": clauses}
     })
 }
+
+struct ExportBudget {
+    remaining: usize,
+}
+
+impl ExportBudget {
+    fn new() -> Self {
+        // Leave room for the fixed envelope, section names, and truncation
+        // metadata. The final cap pass remains a correctness backstop.
+        Self { remaining: MAX_BYTES.saturating_sub(64 * 1024) }
+    }
+
+    fn admit(&mut self, value: &serde_json::Value) -> bool {
+        let bytes = serde_json::to_vec(value).map(|value| value.len()).unwrap_or(usize::MAX);
+        let needed = bytes.saturating_add(1);
+        if needed > self.remaining {
+            return false;
+        }
+        self.remaining -= needed;
+        true
+    }
+}
+
 async fn rows(
     db: &mongodb::Database,
     collection: &str,
     filter: Document,
     fields: &[&str],
     sort: Document,
+    budget: &mut ExportBudget,
 ) -> AppResult<ExportSubsection> {
     let total_count = db
         .collection::<Document>(collection)
@@ -919,16 +1124,23 @@ async fn rows(
         .max_time(QUERY_TIMEOUT)
         .await?;
     let mut items = Vec::new();
+    let mut truncated = total_count > SUBSECTION_ROW_CAP as u64;
     while let Some(row) = cursor.try_next().await? {
         if items.len() == SUBSECTION_ROW_CAP as usize {
+            truncated = true;
             break;
         }
-        items.push(safe_item(&row, fields));
+        let item = safe_item(&row, fields);
+        if !budget.admit(&item) {
+            truncated = true;
+            break;
+        }
+        items.push(item);
     }
     Ok(ExportSubsection {
         items,
         total_count,
-        truncated: total_count > SUBSECTION_ROW_CAP as u64,
+        truncated,
     })
 }
 fn empty_sections() -> BTreeMap<String, BTreeMap<String, ExportSubsection>> {
@@ -1013,6 +1225,7 @@ fn enforce_cap(export: &mut AccountExport) {
 
 pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<AccountExport> {
     let mut sections = empty_sections();
+    let mut budget = ExportBudget::new();
     let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
     sections.entry("account".into()).or_default().insert(
         "profile".into(),
@@ -1087,7 +1300,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
     ] {
         sections.entry(section.into()).or_default().insert(
             subsection.into(),
-            rows(db, collection, filter, fields, doc! {"created_at": -1}).await?,
+            rows(db, collection, filter, fields, doc! {"created_at": -1}, &mut budget).await?,
         );
         handled.insert(collection);
     }
@@ -1103,6 +1316,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
             "updated_at",
         ],
         doc! {"created_at": -1},
+        &mut budget,
     )
     .await?;
     sections
@@ -1116,6 +1330,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         doc! {"user_id": account_id},
         &["event_type", "created_at"],
         doc! {"created_at": -1},
+        &mut budget,
     )
     .await?;
     sections
@@ -1148,6 +1363,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
             "updated_at",
         ],
         doc! {"updated_at": -1},
+        &mut budget,
     )
     .await?;
     sections
@@ -1176,6 +1392,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
             "revoked_at",
         ],
         doc! {"created_at": -1},
+        &mut budget,
     )
     .await?;
     sections
@@ -1202,6 +1419,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
             "wallet_charge_credits",
         ],
         doc! {"created_at": -1},
+        &mut budget,
     )
     .await?;
     sections
@@ -1218,9 +1436,8 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
         {
             continue;
         }
-        let Some(spec) = explicit_export_spec(entry.collection) else {
-            continue;
-        };
+        let spec = explicit_export_spec(entry.collection)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
         debug_assert_eq!(section, spec.section);
         let Some(filter) = owner_filter(entry, account_id) else {
             continue;
@@ -1231,6 +1448,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
             filter,
             spec.fields,
             doc! {"created_at": -1},
+            &mut budget,
         )
         .await?;
         sections
@@ -1285,6 +1503,68 @@ mod tests {
             }))
             .is_none()
         );
+    }
+
+    #[test]
+    fn url_sanitizer_removes_userinfo_query_fragment_and_opaque_paths() {
+        let url = sanitize_url(
+            "https://user:URL_USERINFO@api.example.test/v1/PATH_TOKEN?api_key=URL_QUERY#URL_FRAGMENT",
+            true,
+        );
+        assert_eq!(url, "https://api.example.test/");
+        assert!(!url.contains("URL_USERINFO"));
+        assert!(!url.contains("URL_QUERY"));
+        assert!(!url.contains("URL_FRAGMENT"));
+        assert!(!url.contains("PATH_TOKEN"));
+        let endpoint = sanitize_url(
+            "https://user:pass@api.example.test/v1?token=secret#fragment",
+            false,
+        );
+        assert_eq!(endpoint, "https://api.example.test/v1");
+    }
+
+    #[test]
+    fn export_budget_stops_admitting_rows_at_the_byte_cap() {
+        let mut budget = ExportBudget { remaining: 16 };
+        assert!(budget.admit(&serde_json::json!("123456")));
+        assert!(!budget.admit(&serde_json::json!("this row is too large")));
+    }
+
+    #[test]
+    fn per_collection_allowlists_keep_authored_text_and_only_own_memory() {
+        let row = doc! {
+            "title": "PERSON_TITLE",
+            "persona": "PERSON_PERSONA",
+            "memory": [{"text": "PERSON_MEMORY"}],
+            "notes": [{"text": "PERSON_NOTE"}],
+            "comment": "PERSON_FEEDBACK",
+            "url": "https://user:pass@example.test/v1?token=URL_QUERY#URL_FRAGMENT",
+            "shared_memory": "OTHER_PERSON_SHARED_MEMORY",
+        };
+        let value = safe_item(&row, ASSISTANT_AGENT_FIELDS);
+        assert_eq!(value["title"], "PERSON_TITLE");
+        assert_eq!(value["persona"], "PERSON_PERSONA");
+        assert_eq!(value["memory"][0]["text"], "PERSON_MEMORY");
+        assert!(safe_item(&row, ASSISTANT_RECORD_FIELDS).get("memory").is_none());
+        let notes = safe_item(&row, PRIVATE_NOTES_FIELDS);
+        assert_eq!(notes["notes"][0]["text"], "PERSON_NOTE");
+        assert!(!serde_json::to_string(&value).unwrap().contains("OTHER_PERSON_SHARED_MEMORY"));
+    }
+
+    #[test]
+    fn every_url_allowlist_field_uses_the_common_sanitizer() {
+        let row = doc! {
+            "avatar_url": "https://u:URL_USERINFO@example.test/avatar/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "url": "https://u:URL_USERINFO@example.test/v1/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
+            "redirect_uris": ["https://u:URL_USERINFO@example.test/cb/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"],
+            "delivery": {"url": "https://u:URL_USERINFO@example.test/hook/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"},
+        };
+        let value = safe_item(&row, &["avatar_url", "url", "redirect_uris", "delivery.url"]);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
+            assert!(!bytes.windows(sentinel.len()).any(|window| window == sentinel.as_bytes()));
+        }
+        assert_eq!(value["url"], "https://example.test/v1/PATH_TOKEN");
     }
 
     #[test]
@@ -1507,6 +1787,10 @@ mod tests {
                 put_owner(&mut target, field, &owner);
                 put_owner(&mut other, field, &bystander);
             }
+            if entry.collection == "assistant_group_messages" {
+                put_owner(&mut target, "author_user_id", &owner);
+                put_owner(&mut other, "author_user_id", &bystander);
+            }
             db.collection::<Document>(entry.collection)
                 .insert_many([target, other])
                 .await
@@ -1520,7 +1804,7 @@ mod tests {
             let personal_data_registry::Export::Section(section) = entry.export else {
                 continue;
             };
-            let Some(spec) = explicit_export_spec(entry.collection) else {
+            let Ok(spec) = explicit_export_spec(entry.collection) else {
                 continue;
             };
             if entry.collection == crate::models::user::COLLECTION_NAME {
