@@ -77,27 +77,24 @@ async fn ensure_owner_index_gaps(db: &Database) -> AppResult<()> {
             .push(field);
     }
     for (collection, fields) in fields_by_collection {
-        let indexes: Vec<IndexModel> = match db
-            .collection::<Document>(collection)
-            .list_indexes()
-            .await
-        {
-            Ok(cursor) => cursor.try_collect().await?,
-            Err(error)
-                if matches!(
-                    error.kind.as_ref(),
-                    mongodb::error::ErrorKind::Command(command) if command.code == 26
-                ) => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
+        let indexes: Vec<IndexModel> =
+            match db.collection::<Document>(collection).list_indexes().await {
+                Ok(cursor) => cursor.try_collect().await?,
+                Err(error)
+                    if matches!(
+                        error.kind.as_ref(),
+                        mongodb::error::ErrorKind::Command(command) if command.code == 26
+                    ) =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error.into()),
+            };
         for field in fields {
-            if indexes.iter().any(|index| {
-                index
-                    .keys
-                    .keys()
-                    .next()
-                    .is_some_and(|first| first == field)
-            }) {
+            if indexes
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|first| first == field))
+            {
                 continue;
             }
             let name = format!(

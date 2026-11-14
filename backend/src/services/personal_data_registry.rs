@@ -2620,7 +2620,11 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use futures::TryStreamExt;
-    use std::{collections::{BTreeMap, BTreeSet}, fs, path::Path};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        path::Path,
+    };
 
     #[test]
     fn registry_has_unique_collection_names() {
@@ -3204,10 +3208,7 @@ mod tests {
         assert_eq!(claims.get_bool("delivered"), Ok(true));
     }
 
-    async fn index_models(
-        db: &mongodb::Database,
-        collection: &str,
-    ) -> Vec<mongodb::IndexModel> {
+    async fn index_models(db: &mongodb::Database, collection: &str) -> Vec<mongodb::IndexModel> {
         let Ok(cursor) = db
             .collection::<mongodb::bson::Document>(collection)
             .list_indexes()
@@ -3429,11 +3430,9 @@ mod tests {
             .iter()
             .filter_map(|entry| match entry.erasure {
                 Erasure::LocalInventory | Erasure::Redacted => match entry.owner {
-                    OwnerSelector::Fields(fields) => Some(
-                        fields
-                            .iter()
-                            .map(move |field| (entry.collection, *field)),
-                    ),
+                    OwnerSelector::Fields(fields) => {
+                        Some(fields.iter().map(move |field| (entry.collection, *field)))
+                    }
                     OwnerSelector::NotPersonal => None,
                 },
                 _ => None,
@@ -3448,13 +3447,10 @@ mod tests {
             let covered = if field == "_id" {
                 true
             } else {
-                index_models(db, collection).await.iter().any(|index| {
-                    index
-                        .keys
-                        .keys()
-                        .next()
-                        .is_some_and(|first| first == field)
-                })
+                index_models(db, collection)
+                    .await
+                    .iter()
+                    .any(|index| index.keys.keys().next().is_some_and(|first| first == field))
             };
             if !covered {
                 missing.push((collection, field));
@@ -3477,7 +3473,10 @@ mod tests {
                 missing.push((spec.child, spec.child_parent_field));
             }
         }
-        assert!(missing.is_empty(), "owner predicates lack prefix indexes: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "owner predicates lack prefix indexes: {missing:?}"
+        );
     }
 
     #[tokio::test]
@@ -3497,10 +3496,9 @@ mod tests {
 
     #[tokio::test]
     async fn origin_main_indexes_survive_branch_startup_and_old_fleet_restart() {
-        let db = crate::test_utils::connect_transaction_test_database(
-            "privacy_startup_upgrade_indexes",
-        )
-        .await;
+        let db =
+            crate::test_utils::connect_transaction_test_database("privacy_startup_upgrade_indexes")
+                .await;
 
         // Checked-in origin/main fixture: db::ensure_indexes plus the exact
         // security and personal-erasure calls that origin/main runs at startup.
@@ -3514,8 +3512,7 @@ mod tests {
         // fixture: every uncovered registry/join predicate appears once, and
         // no manifest entry redundantly duplicates an origin index.
         for (collection, field) in registry_owner_predicates() {
-            let covered = field == "_id"
-                || snapshot_has_prefix(&origin[collection], field);
+            let covered = field == "_id" || snapshot_has_prefix(&origin[collection], field);
             assert_eq!(
                 covered,
                 !OWNER_INDEX_GAPS.contains(&(collection, field)),
