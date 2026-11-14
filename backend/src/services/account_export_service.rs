@@ -204,14 +204,12 @@ fn sanitize_json_url(value: serde_json::Value, field: &str) -> serde_json::Value
         serde_json::Value::String(value) if is_url_field(field) => {
             serde_json::Value::String(sanitize_url(&value, url_path_is_opaque(field)))
         }
-        serde_json::Value::Array(values) if is_url_field(field) => {
-            serde_json::Value::Array(
-                values
-                    .into_iter()
-                    .map(|value| sanitize_json_url(value, field))
-                    .collect(),
-            )
-        }
+        serde_json::Value::Array(values) if is_url_field(field) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| sanitize_json_url(value, field))
+                .collect(),
+        ),
         other => other,
     }
 }
@@ -472,22 +470,52 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "user_provider_tokens" => Some(("services", "user_provider_tokens")),
         "user_service_connections" => Some(("services", "user_service_connections")),
         "user_services" => Some(("services", "user_services")),
-        "assistant_agent_learning_members" => Some(("assistant", "assistant_agent_learning_members")),
-        "assistant_agent_learning_proposals" => Some(("assistant", "assistant_agent_learning_proposals")),
-        "assistant_agent_learning_skill_roots" => Some(("assistant", "assistant_agent_learning_skill_roots")),
-        "assistant_cma_session_origins" => Some(("account_activity", "assistant_cma_session_origins")),
-        "assistant_group_agent_access" => Some(("account_activity", "assistant_group_agent_access")),
-        "assistant_group_execution_slots" => Some(("account_activity", "assistant_group_execution_slots")),
-        "assistant_group_mention_notifications" => Some(("assistant", "assistant_group_mention_notifications")),
-        "assistant_learning_migrations" => Some(("account_activity", "assistant_learning_migrations")),
-        "assistant_learning_publication_targets" => Some(("account_activity", "assistant_learning_publication_targets")),
-        "assistant_notification_push_budgets" => Some(("account", "assistant_notification_push_budgets")),
-        "assistant_notification_push_sources" => Some(("account", "assistant_notification_push_sources")),
+        "assistant_agent_learning_members" => {
+            Some(("assistant", "assistant_agent_learning_members"))
+        }
+        "assistant_agent_learning_proposals" => {
+            Some(("assistant", "assistant_agent_learning_proposals"))
+        }
+        "assistant_agent_learning_skill_roots" => {
+            Some(("assistant", "assistant_agent_learning_skill_roots"))
+        }
+        "assistant_cma_session_origins" => {
+            Some(("account_activity", "assistant_cma_session_origins"))
+        }
+        "assistant_group_agent_access" => {
+            Some(("account_activity", "assistant_group_agent_access"))
+        }
+        "assistant_group_execution_slots" => {
+            Some(("account_activity", "assistant_group_execution_slots"))
+        }
+        "assistant_group_mention_notifications" => {
+            Some(("assistant", "assistant_group_mention_notifications"))
+        }
+        "assistant_learning_migrations" => {
+            Some(("account_activity", "assistant_learning_migrations"))
+        }
+        "assistant_learning_publication_targets" => {
+            Some(("account_activity", "assistant_learning_publication_targets"))
+        }
+        "assistant_notification_push_budgets" => {
+            Some(("account", "assistant_notification_push_budgets"))
+        }
+        "assistant_notification_push_sources" => {
+            Some(("account", "assistant_notification_push_sources"))
+        }
         "assistant_voice_sessions" => Some(("account_activity", "assistant_voice_sessions")),
-        "async_service_operation_artifacts" => Some(("assistant", "async_service_operation_artifacts")),
-        "encrypted_record_migration_findings" => Some(("account_activity", "encrypted_record_migration_findings")),
-        "encrypted_record_migration_runs" => Some(("account_activity", "encrypted_record_migration_runs")),
-        "generated_artifact_content_series" => Some(("account", "generated_artifact_content_series")),
+        "async_service_operation_artifacts" => {
+            Some(("assistant", "async_service_operation_artifacts"))
+        }
+        "encrypted_record_migration_findings" => {
+            Some(("account_activity", "encrypted_record_migration_findings"))
+        }
+        "encrypted_record_migration_runs" => {
+            Some(("account_activity", "encrypted_record_migration_runs"))
+        }
+        "generated_artifact_content_series" => {
+            Some(("account", "generated_artifact_content_series"))
+        }
         "node_pending_credentials" => Some(("services", "node_pending_credentials")),
         "oracle_login_snapshots" => Some(("account", "oracle_login_snapshots")),
         "oracle_sessions" => Some(("assistant", "oracle_sessions")),
@@ -498,17 +526,37 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "org_channel_link_challenges" => Some(("account_activity", "org_channel_link_challenges")),
         "org_channel_messages" => Some(("channels", "org_channel_messages")),
         "org_channel_sender_links" => Some(("channels", "org_channel_sender_links")),
-        "platform_discord_control_installation_history" => Some(("account", "platform_discord_control_installation_history")),
-        "platform_discord_control_installations" => Some(("account", "platform_discord_control_installations")),
-        "platform_onboarding_binding_requests" => Some(("account_activity", "platform_onboarding_binding_requests")),
-        "platform_onboarding_bindings" => Some(("account_activity", "platform_onboarding_bindings")),
+        "platform_discord_control_installation_history" => {
+            Some(("account", "platform_discord_control_installation_history"))
+        }
+        "platform_discord_control_installations" => {
+            Some(("account", "platform_discord_control_installations"))
+        }
+        "platform_onboarding_binding_requests" => {
+            Some(("account_activity", "platform_onboarding_binding_requests"))
+        }
+        "platform_onboarding_bindings" => {
+            Some(("account_activity", "platform_onboarding_bindings"))
+        }
         "platform_personal_bindings" => Some(("account", "platform_personal_bindings")),
-        "platform_personal_decision_spacing" => Some(("account_activity", "platform_personal_decision_spacing")),
-        "platform_personal_link_challenges" => Some(("account_activity", "platform_personal_link_challenges")),
-        "platform_personal_link_intents" => Some(("account_activity", "platform_personal_link_intents")),
-        "platform_personal_setup_selections" => Some(("account_activity", "platform_personal_setup_selections")),
-        "platform_public_deployment_activations" => Some(("account", "platform_public_deployment_activations")),
-        "platform_public_deployment_proofs" => Some(("account", "platform_public_deployment_proofs")),
+        "platform_personal_decision_spacing" => {
+            Some(("account_activity", "platform_personal_decision_spacing"))
+        }
+        "platform_personal_link_challenges" => {
+            Some(("account_activity", "platform_personal_link_challenges"))
+        }
+        "platform_personal_link_intents" => {
+            Some(("account_activity", "platform_personal_link_intents"))
+        }
+        "platform_personal_setup_selections" => {
+            Some(("account_activity", "platform_personal_setup_selections"))
+        }
+        "platform_public_deployment_activations" => {
+            Some(("account", "platform_public_deployment_activations"))
+        }
+        "platform_public_deployment_proofs" => {
+            Some(("account", "platform_public_deployment_proofs"))
+        }
         "users" => Some(("account", "users")),
         _ => None,
     }
@@ -525,8 +573,8 @@ struct ExplicitExportSpec {
 /// this as one explicit lookup means a new registry export cannot silently
 /// fall through to a broad common projection.
 fn explicit_export_spec(collection: &str) -> Result<ExplicitExportSpec, ExportSpecError> {
-    let (section, subsection) = export_spec(collection)
-        .ok_or_else(|| ExportSpecError(collection.to_owned()))?;
+    let (section, subsection) =
+        export_spec(collection).ok_or_else(|| ExportSpecError(collection.to_owned()))?;
     Ok(ExplicitExportSpec {
         section,
         subsection,
@@ -610,49 +658,128 @@ const ASSISTANT_RECORD_FIELDS: &[&str] = &[
     "expires_at",
 ];
 const ASSISTANT_AGENT_FIELDS: &[&str] = &[
-    "user_id", "name", "display_name", "description", "specialty",
-    "persona", "voice_instructions", "memory.text", "created_at", "updated_at",
+    "user_id",
+    "name",
+    "display_name",
+    "description",
+    "specialty",
+    "persona",
+    "voice_instructions",
+    "memory.text",
+    "created_at",
+    "updated_at",
 ];
 const ASSISTANT_CONVERSATION_FIELDS: &[&str] = &[
-    "user_id", "title", "model", "created_at", "updated_at", "message_count",
+    "user_id",
+    "title",
+    "model",
+    "created_at",
+    "updated_at",
+    "message_count",
 ];
 const GROUP_MESSAGE_FIELDS: &[&str] = &[
-    "user_id", "group_id", "author_user_id", "role", "text", "created_at",
+    "user_id",
+    "group_id",
+    "author_user_id",
+    "role",
+    "text",
+    "created_at",
 ];
 const FEEDBACK_FIELDS: &[&str] = &[
-    "user_id", "message_id", "rating", "comment", "created_at", "updated_at",
+    "user_id",
+    "message_id",
+    "rating",
+    "comment",
+    "created_at",
+    "updated_at",
 ];
 const PRIVATE_NOTES_FIELDS: &[&str] = &[
-    "actor_user_id", "agent_id", "revision", "notes.text", "notes.created_at",
-    "notes.updated_at", "updated_at",
+    "actor_user_id",
+    "agent_id",
+    "revision",
+    "notes.text",
+    "notes.created_at",
+    "notes.updated_at",
+    "updated_at",
 ];
 const TRIGGER_FIELDS: &[&str] = &[
-    "user_id", "label", "status", "source", "schedule", "schedule_state",
-    "overlap", "delivery", "created_at", "updated_at",
+    "user_id",
+    "label",
+    "status",
+    "source",
+    "schedule",
+    "schedule_state",
+    "overlap",
+    "delivery",
+    "created_at",
+    "updated_at",
 ];
 const USER_ENDPOINT_FIELDS: &[&str] = &[
-    "user_id", "label", "url", "catalog_service_id", "openapi_spec_url",
-    "recommended_skills", "created_at", "updated_at",
+    "user_id",
+    "label",
+    "url",
+    "catalog_service_id",
+    "openapi_spec_url",
+    "recommended_skills",
+    "created_at",
+    "updated_at",
 ];
 const SERVICE_CONNECTION_FIELDS: &[&str] = &[
-    "user_id", "service_id", "credential_type", "credential_label", "metadata",
-    "is_active", "created_at", "updated_at",
+    "user_id",
+    "service_id",
+    "credential_type",
+    "credential_label",
+    "metadata",
+    "is_active",
+    "created_at",
+    "updated_at",
 ];
 const NODE_FIELDS: &[&str] = &[
-    "user_id", "name", "status", "is_active", "created_at", "updated_at",
+    "user_id",
+    "name",
+    "status",
+    "is_active",
+    "created_at",
+    "updated_at",
 ];
 const CHANNEL_BOT_FIELDS: &[&str] = &[
-    "user_id", "label", "platform", "status", "is_active", "created_at", "updated_at",
+    "user_id",
+    "label",
+    "platform",
+    "status",
+    "is_active",
+    "created_at",
+    "updated_at",
 ];
 const OAUTH_CLIENT_FIELDS: &[&str] = &[
-    "created_by", "client_name", "redirect_uris", "allowed_scopes", "grant_types",
-    "client_type", "is_active", "delegation_scopes", "default_service_catalog_slugs",
-    "broker_capability_enabled", "connection_webhook_url", "revocation_webhook_url",
-    "connection_webhook_enabled", "created_at", "updated_at",
+    "created_by",
+    "client_name",
+    "redirect_uris",
+    "allowed_scopes",
+    "grant_types",
+    "client_type",
+    "is_active",
+    "delegation_scopes",
+    "default_service_catalog_slugs",
+    "broker_capability_enabled",
+    "connection_webhook_url",
+    "revocation_webhook_url",
+    "connection_webhook_enabled",
+    "created_at",
+    "updated_at",
 ];
 const SERVICE_ACCOUNT_FIELDS: &[&str] = &[
-    "owner_user_id", "created_by", "name", "description", "role_ids", "allowed_scopes",
-    "is_active", "purpose", "rate_limit_override", "created_at", "updated_at",
+    "owner_user_id",
+    "created_by",
+    "name",
+    "description",
+    "role_ids",
+    "allowed_scopes",
+    "is_active",
+    "purpose",
+    "rate_limit_override",
+    "created_at",
+    "updated_at",
     "last_authenticated_at",
 ];
 const CHANNEL_RECORD_FIELDS: &[&str] = &[
@@ -1084,11 +1211,15 @@ impl ExportBudget {
     fn new() -> Self {
         // Leave room for the fixed envelope, section names, and truncation
         // metadata. The final cap pass remains a correctness backstop.
-        Self { remaining: MAX_BYTES.saturating_sub(64 * 1024) }
+        Self {
+            remaining: MAX_BYTES.saturating_sub(64 * 1024),
+        }
     }
 
     fn admit(&mut self, value: &serde_json::Value) -> bool {
-        let bytes = serde_json::to_vec(value).map(|value| value.len()).unwrap_or(usize::MAX);
+        let bytes = serde_json::to_vec(value)
+            .map(|value| value.len())
+            .unwrap_or(usize::MAX);
         let needed = bytes.saturating_add(1);
         if needed > self.remaining {
             return false;
@@ -1300,7 +1431,15 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
     ] {
         sections.entry(section.into()).or_default().insert(
             subsection.into(),
-            rows(db, collection, filter, fields, doc! {"created_at": -1}, &mut budget).await?,
+            rows(
+                db,
+                collection,
+                filter,
+                fields,
+                doc! {"created_at": -1},
+                &mut budget,
+            )
+            .await?,
         );
         handled.insert(collection);
     }
@@ -1545,10 +1684,18 @@ mod tests {
         assert_eq!(value["title"], "PERSON_TITLE");
         assert_eq!(value["persona"], "PERSON_PERSONA");
         assert_eq!(value["memory"][0]["text"], "PERSON_MEMORY");
-        assert!(safe_item(&row, ASSISTANT_RECORD_FIELDS).get("memory").is_none());
+        assert!(
+            safe_item(&row, ASSISTANT_RECORD_FIELDS)
+                .get("memory")
+                .is_none()
+        );
         let notes = safe_item(&row, PRIVATE_NOTES_FIELDS);
         assert_eq!(notes["notes"][0]["text"], "PERSON_NOTE");
-        assert!(!serde_json::to_string(&value).unwrap().contains("OTHER_PERSON_SHARED_MEMORY"));
+        assert!(
+            !serde_json::to_string(&value)
+                .unwrap()
+                .contains("OTHER_PERSON_SHARED_MEMORY")
+        );
     }
 
     #[test]
@@ -1559,10 +1706,17 @@ mod tests {
             "redirect_uris": ["https://u:URL_USERINFO@example.test/cb/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"],
             "delivery": {"url": "https://u:URL_USERINFO@example.test/hook/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"},
         };
-        let value = safe_item(&row, &["avatar_url", "url", "redirect_uris", "delivery.url"]);
+        let value = safe_item(
+            &row,
+            &["avatar_url", "url", "redirect_uris", "delivery.url"],
+        );
         let bytes = serde_json::to_vec(&value).unwrap();
         for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
-            assert!(!bytes.windows(sentinel.len()).any(|window| window == sentinel.as_bytes()));
+            assert!(
+                !bytes
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes())
+            );
         }
         assert_eq!(value["url"], "https://example.test/v1/PATH_TOKEN");
     }

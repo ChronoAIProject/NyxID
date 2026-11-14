@@ -1708,7 +1708,9 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_delivery_tests",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::JoinedChild { parent: "platform_bot_installations" },
+        erasure: Erasure::JoinedChild {
+            parent: "platform_bot_installations",
+        },
         export: Export::Section("account_activity"),
         why: "platform_delivery_tests stores short-lived delivery-test state joined to a person-owned platform installation.",
     },
@@ -2009,14 +2011,18 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_setup_notices",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::JoinedChild { parent: "platform_setups" },
+        erasure: Erasure::JoinedChild {
+            parent: "platform_setups",
+        },
         export: Export::Section("account_activity"),
         why: "platform_setup_notices stores short-lived setup notices joined to a person-owned setup.",
     },
     Entry {
         collection: "platform_setup_steps",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::JoinedChild { parent: "platform_setups" },
+        erasure: Erasure::JoinedChild {
+            parent: "platform_setups",
+        },
         export: Export::Section("account_activity"),
         why: "platform_setup_steps stores short-lived setup work joined to a person-owned setup.",
     },
@@ -3192,9 +3198,15 @@ mod tests {
                 "platform_bot_runtime_controls",
                 &["public_policy.sponsor_owner_user_id"][..],
             ),
-            ("platform_personal_stop_effects", &["active_turn.origin.user_id"][..]),
+            (
+                "platform_personal_stop_effects",
+                &["active_turn.origin.user_id"][..],
+            ),
             ("platform_personal_bindings", &["user_id"][..]),
-            ("platform_personal_link_challenges", &["reviewed_user_id"][..]),
+            (
+                "platform_personal_link_challenges",
+                &["reviewed_user_id"][..],
+            ),
             ("platform_personal_link_intents", &["claimant_user_id"][..]),
             ("oracle_sessions", &["owner_user_id"][..]),
             ("oracle_tasks", &["submitter_user_id"][..]),
