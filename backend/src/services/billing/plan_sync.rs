@@ -276,14 +276,9 @@ async fn restore_cache(
     code: &str,
     input: Option<&ServicePriceSync>,
 ) -> AppResult<()> {
-    use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME};
+    use crate::models::billing_rate_cache::BillingRateCache;
     let Some(input) = input else {
-        db.collection::<Document>(COLLECTION_NAME)
-            .update_many(
-                doc! {"lago_metric_code":code},
-                doc! {"$set":{"retired_at":mongodb::bson::DateTime::now()}},
-            )
-            .await?;
+        super::rate_cache::retire(db, code).await?;
         return Ok(());
     };
     let pico = super::amounts::decimal_to_pico(&input.credits_per_unit)
@@ -297,10 +292,7 @@ async fn restore_cache(
         synced_at: chrono::Utc::now(),
         retired_at: None,
     };
-    db.collection::<BillingRateCache>(COLLECTION_NAME)
-        .replace_one(doc! {"_id":&cache.id}, cache)
-        .upsert(true)
-        .await?;
+    super::rate_cache::replace(db, &cache).await?;
     Ok(())
 }
 
