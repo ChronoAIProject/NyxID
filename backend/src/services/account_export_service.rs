@@ -1777,7 +1777,10 @@ mod tests {
         let trigger = safe_item(&row, TRIGGER_FIELDS);
         assert_eq!(trigger["label"], "PERSON_TRIGGER_LABEL");
         assert_eq!(trigger["schedule"]["expression"], "PERSON_SCHEDULE");
-        assert_eq!(trigger["delivery"]["instruction"], "PERSON_TRIGGER_INSTRUCTION");
+        assert_eq!(
+            trigger["delivery"]["instruction"],
+            "PERSON_TRIGGER_INSTRUCTION"
+        );
         let endpoint = safe_item(&row, USER_ENDPOINT_FIELDS);
         assert_eq!(endpoint["url"], "https://example.test/v1");
         let connection = safe_item(&row, SERVICE_CONNECTION_FIELDS);
@@ -1892,7 +1895,10 @@ mod tests {
             ("revocation_webhook_url", OAUTH_CLIENT_FIELDS),
         ];
         for (field, allowlist) in fields {
-            assert!(allowlist.contains(&field), "URL field {field} is not allowlisted");
+            assert!(
+                allowlist.contains(&field),
+                "URL field {field} is not allowlisted"
+            );
             let value = "https://export-user:URL_USERINFO@example.test/token/PATH_TOKEN?token=URL_QUERY#URL_FRAGMENT";
             let mut row = Document::new();
             if field == "redirect_uris" {
@@ -1905,7 +1911,12 @@ mod tests {
             let json = safe_item(&row, allowlist);
             let bytes = serde_json::to_vec(&json).unwrap();
             for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
-                assert!(!bytes.windows(sentinel.len()).any(|window| window == sentinel.as_bytes()), "{field} leaked {sentinel}");
+                assert!(
+                    !bytes
+                        .windows(sentinel.len())
+                        .any(|window| window == sentinel.as_bytes()),
+                    "{field} leaked {sentinel}"
+                );
             }
         }
     }
