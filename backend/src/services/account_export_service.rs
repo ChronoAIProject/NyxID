@@ -2064,8 +2064,11 @@ mod tests {
 
     #[test]
     fn unknown_export_collection_returns_typed_error() {
-        let error = explicit_export_spec("collection_added_after_registry").unwrap_err();
-        assert_eq!(error.0, "collection_added_after_registry");
+        let result = explicit_export_spec("collection_added_after_registry");
+        assert!(matches!(
+            result,
+            Err(ExportSpecError(collection)) if collection == "collection_added_after_registry"
+        ));
     }
 
     fn put_owner(document: &mut Document, path: &str, owner: &str) {
