@@ -11,6 +11,7 @@ enum CrashDiscardReason: String, CaseIterable {
   case epochMismatch = "epoch_mismatch"
   case expired
   case jsDuplicate = "js_duplicate"
+  case reporterUnavailable = "reporter_unavailable"
 }
 enum RawCrashReportDecision: Equatable { case parse, discard(CrashDiscardReason) }
 
@@ -29,7 +30,10 @@ enum CrashRawNotice: String { case ageUnknown = "age_unknown" }
 
 func crashRawNoticeLogLine(reason: CrashRawNotice, byteCount: Int?) -> String {
   let bytes = byteCount.flatMap { $0 >= 0 ? String($0) : nil } ?? "unknown"
-  return "nyx-crash: raw report age unknown bytes=\(bytes)"
+  switch reason {
+  case .ageUnknown:
+    return "nyx-crash: raw report age unknown bytes=\(bytes)"
+  }
 }
 
 let crashRecordMaxAgeSeconds: TimeInterval = 86400
@@ -57,6 +61,148 @@ func parsedCrashTimestampDecision(timestamp: Date?, now: Date) -> ParsedCrashTim
   }
   return .continueParsing
 }
+
+protocol PendingRawSource {
+  var hasPending: Bool { get }
+  var modificationDate: Date? { get }
+  func loadData() -> Data?
+  func purge()
+}
+
+struct ParsedPendingRaw {
+  var crash: ParsedNativeCrash
+  var reportEpoch: String?
+  var jsEventId: String?
+}
+
+private func emitPendingRawLog(_ line: String) {
+  NSLog("%@", line)
+}
+
+private func consumePendingRawCore(
+  source: PendingRawSource,
+  bindingEpoch: String?,
+  authorityEpoch: String?,
+  now: Date,
+  parse: (Data) -> ParsedPendingRaw?,
+  beforePurge: (([String: Any]?) -> Void)?,
+  emit: (String) -> Void
+) -> [String: Any]? {
+  guard source.hasPending else {
+    source.purge()
+    return nil
+  }
+  let modificationDate = source.modificationDate
+  let fileAge = modificationDate.map { now.timeIntervalSince($0) }
+  defer { source.purge() }
+
+  switch initialRawReportDecision(
+    bindingEpoch: bindingEpoch, authorityEpoch: authorityEpoch, fileAgeSeconds: fileAge)
+  {
+  case .discard(let reason):
+    emit(crashDiscardLogLine(reason: reason, byteCount: nil))
+    return nil
+  case .parse:
+    break
+  }
+
+  let data = source.loadData()
+  let byteCount = data?.count
+  if modificationDate == nil {
+    emit(crashRawNoticeLogLine(reason: .ageUnknown, byteCount: byteCount))
+  }
+  switch rawCrashReportDecision(byteCount: byteCount ?? 0) {
+  case .discard(let reason):
+    emit(crashDiscardLogLine(reason: reason, byteCount: byteCount))
+    return nil
+  case .parse:
+    break
+  }
+  guard let data, let parsed = parse(data) else {
+    emit(crashDiscardLogLine(reason: .unparseable, byteCount: byteCount))
+    return nil
+  }
+  switch pendingCrashDecision(
+    bindingEpoch: bindingEpoch, reportEpoch: parsed.reportEpoch, jsEventId: parsed.jsEventId)
+  {
+  case .discard(let reason):
+    emit(crashDiscardLogLine(reason: reason, byteCount: byteCount))
+    return nil
+  case .native:
+    break
+  }
+  switch parsedCrashTimestampDecision(timestamp: parsed.crash.timestamp, now: now) {
+  case .discard(let reason):
+    emit(crashDiscardLogLine(reason: reason, byteCount: byteCount))
+    return nil
+  case .continueParsing:
+    break
+  }
+  let record = sanitizedNativeCrash(
+    parsed.crash,
+    eventId: UUID().uuidString.lowercased(),
+    now: now,
+    fallbackCapturedAt: modificationDate ?? now)
+  if record == nil {
+    emit(crashDiscardLogLine(reason: .unparseable, byteCount: byteCount))
+  }
+  beforePurge?(record)
+  return record
+}
+
+func consumePendingRaw(
+  source: PendingRawSource,
+  bindingEpoch: String?,
+  authorityEpoch: String?,
+  now: Date,
+  parse: (Data) -> ParsedPendingRaw?
+) -> [String: Any]? {
+  consumePendingRaw(
+    source: source,
+    bindingEpoch: bindingEpoch,
+    authorityEpoch: authorityEpoch,
+    now: now,
+    parse: parse,
+    emit: nil)
+}
+
+func consumePendingRaw(
+  source: PendingRawSource,
+  bindingEpoch: String?,
+  authorityEpoch: String?,
+  now: Date,
+  parse: (Data) -> ParsedPendingRaw?,
+  emit: ((String) -> Void)?
+) -> [String: Any]? {
+  consumePendingRawCore(
+    source: source,
+    bindingEpoch: bindingEpoch,
+    authorityEpoch: authorityEpoch,
+    now: now,
+    parse: parse,
+    beforePurge: nil,
+    emit: emit ?? emitPendingRawLog)
+}
+
+func consumePendingRaw(
+  source: PendingRawSource,
+  bindingEpoch: String?,
+  authorityEpoch: String?,
+  now: Date,
+  parse: (Data) -> ParsedPendingRaw?,
+  beforePurge: @escaping ([String: Any]?) -> Void,
+  emit: ((String) -> Void)? = nil
+) -> [String: Any]? {
+  consumePendingRawCore(
+    source: source,
+    bindingEpoch: bindingEpoch,
+    authorityEpoch: authorityEpoch,
+    now: now,
+    parse: parse,
+    beforePurge: beforePurge,
+    emit: emit ?? emitPendingRawLog)
+}
+
 struct NativeCrashImage { var uuid: String; var name: String; var size: UInt64 }
 struct NativeCrashFrame { var image: Int?; var offset: UInt64 }
 

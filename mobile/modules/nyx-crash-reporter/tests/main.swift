@@ -212,7 +212,7 @@ assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regression
 variant.timestamp = regressionNow.addingTimeInterval(301)
 assert(sanitizedNativeCrash(variant, eventId: regressionEventId, now: regressionNow, fallbackCapturedAt: regressionNow) == nil)
 
-let logPattern = "^nyx-crash: raw report discarded reason=(oversize|unparseable|unauthorized|epoch_mismatch|expired|js_duplicate) bytes=([0-9]+|unknown)$"
+let logPattern = "^nyx-crash: raw report discarded reason=(oversize|unparseable|unauthorized|epoch_mismatch|expired|js_duplicate|reporter_unavailable) bytes=([0-9]+|unknown)$"
 let logByteCounts: [Int?] = [nil, 0, rawFixtureData.count, crashRawReportMaxBytes + 1, Int.max, -1]
 for reason in CrashDiscardReason.allCases {
   for count in logByteCounts {
@@ -320,3 +320,173 @@ assert(sanitizedNativeCrash(
 assert(sanitizedNativeCrash(
   variant, eventId: regressionEventId, now: regressionNow,
   fallbackCapturedAt: regressionNow.addingTimeInterval(301)) == nil)
+
+// The module and OnCreate share this source-independent consume path. The fake
+// records calls so unread purges and persist-before-purge ordering stay tested
+// on Linux as well as macOS, without importing PLCrashReporter.
+final class FakePendingRawSource: PendingRawSource {
+  let hasPending: Bool
+  let modificationDate: Date?
+  let data: Data?
+  var calls: [String] = []
+
+  init(hasPending: Bool = true, modificationDate: Date?, data: Data? = Data("raw".utf8)) {
+    self.hasPending = hasPending
+    self.modificationDate = modificationDate
+    self.data = data
+  }
+
+  func loadData() -> Data? {
+    calls.append("load")
+    return data
+  }
+
+  func purge() {
+    calls.append("purge")
+  }
+}
+
+func pending(_ crash: ParsedNativeCrash, reportEpoch: String? = epoch, jsEventId: String? = nil)
+  -> ParsedPendingRaw
+{
+  ParsedPendingRaw(crash: crash, reportEpoch: reportEpoch, jsEventId: jsEventId)
+}
+
+let consumeData = Data("authorized pending report".utf8)
+let freshMtime = regressionNow.addingTimeInterval(-120)
+let freshSource = FakePendingRawSource(modificationDate: freshMtime, data: consumeData)
+var freshPersisted: [String: Any]?
+var freshLogs: [String] = []
+let freshRecord = consumePendingRaw(
+  source: freshSource,
+  bindingEpoch: epoch,
+  authorityEpoch: epoch,
+  now: regressionNow,
+  parse: { data in
+    assert(data == consumeData)
+    return pending(fixture)
+  },
+  beforePurge: { record in
+    assert(freshSource.calls == ["load"])
+    assert(record != nil)
+    freshPersisted = record
+  },
+  emit: { freshLogs.append($0) })
+assert(freshRecord != nil && freshPersisted != nil)
+assert(freshSource.calls == ["load", "purge"])
+assert(freshLogs.isEmpty)
+
+var nilMtimeCrash = fixture
+nilMtimeCrash.timestamp = nil
+let nilMtimeSource = FakePendingRawSource(modificationDate: nil, data: consumeData)
+var nilMtimeLogs: [String] = []
+let nilMtimeRecord = consumePendingRaw(
+  source: nilMtimeSource,
+  bindingEpoch: epoch,
+  authorityEpoch: epoch,
+  now: regressionNow,
+  parse: { _ in pending(nilMtimeCrash) },
+  beforePurge: { record in assert(record != nil) },
+  emit: { nilMtimeLogs.append($0) })
+assert(nilMtimeRecord != nil)
+assert(nilMtimeSource.calls == ["load", "purge"])
+assert(nilMtimeLogs == ["nyx-crash: raw report age unknown bytes=\(consumeData.count)"])
+assert((nilMtimeRecord?["captured_at"] as? String) == capturedFormatter.string(from: regressionNow))
+
+func assertUnreadPurge(
+  bindingEpoch: String?, authorityEpoch: String?, modificationDate: Date?, logReason: String
+) {
+  let source = FakePendingRawSource(modificationDate: modificationDate, data: consumeData)
+  var parseCalled = false
+  var logs: [String] = []
+  let record = consumePendingRaw(
+    source: source,
+    bindingEpoch: bindingEpoch,
+    authorityEpoch: authorityEpoch,
+    now: regressionNow,
+    parse: { _ in
+      parseCalled = true
+      return pending(fixture)
+    },
+    emit: { logs.append($0) })
+  assert(record == nil)
+  assert(!parseCalled)
+  assert(source.calls == ["purge"])
+  assert(logs == ["nyx-crash: raw report discarded reason=\(logReason) bytes=unknown"])
+}
+
+assertUnreadPurge(bindingEpoch: nil, authorityEpoch: epoch, modificationDate: freshMtime, logReason: "unauthorized")
+assertUnreadPurge(bindingEpoch: epoch, authorityEpoch: nil, modificationDate: freshMtime, logReason: "unauthorized")
+assertUnreadPurge(
+  bindingEpoch: epoch, authorityEpoch: UUID().uuidString, modificationDate: freshMtime,
+  logReason: "epoch_mismatch")
+assertUnreadPurge(
+  bindingEpoch: epoch, authorityEpoch: epoch,
+  modificationDate: regressionNow.addingTimeInterval(-crashRecordMaxAgeSeconds - 1),
+  logReason: "expired")
+let noPendingSource = FakePendingRawSource(hasPending: false, modificationDate: freshMtime)
+var noPendingParseCalled = false
+assert(
+  consumePendingRaw(
+    source: noPendingSource,
+    bindingEpoch: epoch,
+    authorityEpoch: epoch,
+    now: regressionNow,
+    parse: { _ in
+      noPendingParseCalled = true
+      return pending(fixture)
+    }) == nil)
+assert(!noPendingParseCalled && noPendingSource.calls == ["purge"])
+
+let oversizeSource = FakePendingRawSource(
+  modificationDate: freshMtime,
+  data: Data(repeating: 0, count: crashRawReportMaxBytes + 1))
+var oversizeParseCalled = false
+var oversizeLogs: [String] = []
+assert(
+  consumePendingRaw(
+    source: oversizeSource,
+    bindingEpoch: epoch,
+    authorityEpoch: epoch,
+    now: regressionNow,
+    parse: { _ in
+      oversizeParseCalled = true
+      return pending(fixture)
+    },
+    emit: { oversizeLogs.append($0) }) == nil)
+assert(!oversizeParseCalled && oversizeSource.calls == ["load", "purge"])
+assert(oversizeLogs == ["nyx-crash: raw report discarded reason=oversize bytes=\(crashRawReportMaxBytes + 1)"])
+
+func assertParsedDiscard(_ value: ParsedPendingRaw?, reason: String) {
+  let source = FakePendingRawSource(modificationDate: freshMtime, data: consumeData)
+  var parseCalled = false
+  var logs: [String] = []
+  assert(
+    consumePendingRaw(
+      source: source,
+      bindingEpoch: epoch,
+      authorityEpoch: epoch,
+      now: regressionNow,
+      parse: { _ in
+        parseCalled = true
+        return value
+      },
+      emit: { logs.append($0) }) == nil)
+  assert(parseCalled && source.calls == ["load", "purge"])
+  assert(logs == ["nyx-crash: raw report discarded reason=\(reason) bytes=\(consumeData.count)"])
+}
+
+assertParsedDiscard(nil, reason: "unparseable")
+assertParsedDiscard(pending(fixture, jsEventId: regressionEventId), reason: "js_duplicate")
+assertParsedDiscard(pending(fixture, reportEpoch: UUID().uuidString), reason: "epoch_mismatch")
+var expiredParsedCrash = fixture
+expiredParsedCrash.timestamp = regressionNow.addingTimeInterval(-crashRecordMaxAgeSeconds - 1)
+assertParsedDiscard(pending(expiredParsedCrash), reason: "expired")
+
+let noticeReasons: [CrashRawNotice] = [.ageUnknown]
+for noticeReason in noticeReasons {
+  let notice = crashRawNoticeLogLine(reason: noticeReason, byteCount: nil)
+  assert(notice == "nyx-crash: raw report age unknown bytes=unknown")
+  assert(crashMatches(notice, "^nyx-crash: raw report age unknown bytes=([0-9]+|unknown)$"))
+}
+print("Shared pending-raw consume proof passed")

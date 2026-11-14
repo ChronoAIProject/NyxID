@@ -132,11 +132,14 @@ reports measured about 375 KB; the raw cap provides headroom and is separate
 from the sanitized buffer's 32 KiB per record / three records / 256 KiB total /
 24-hour limits. `rawCrashReportDecision` permits parsing only nonempty data up
 to the raw cap. Every discard emits only
-`nyx-crash: raw report discarded reason=<oversize|unparseable|unauthorized|epoch_mismatch|expired|js_duplicate> bytes=<n|unknown>`.
+`nyx-crash: raw report discarded reason=<oversize|unparseable|unauthorized|epoch_mismatch|expired|js_duplicate|reporter_unavailable> bytes=<n|unknown>`.
 The separate closed `crashRawNoticeLogLine` emits the `age_unknown` notice while
 processing continues. `crashDiscardLogLine` accepts only the closed discard-reason
 enum and an optional integer size; the module logs its result with
 `NSLog("%@", line)`.
+The parsed timestamp is a nil-safe cross-check: `captured_at` uses it when present,
+then the pending file's modification time, then collection time. The same
+24-hour/five-minute window applies to whichever timestamp is selected.
 Report data, paths, identifiers, registers and exception text cannot enter this
 formatter.
 When the reporter could not be created, the fallback purge logs only if it
@@ -152,12 +155,16 @@ deletes such an unauthorized raw file unread. If the app is never launched again
 the file remains on the device. Registers never leave the device.
 
 `pendingCrashDecision` is a pure function: only an equal nonempty epoch and no
-`j` marker permits native conversion. `NyxCrashReporterModule.collect` always
-purges raw data in its `defer`, and explicitly purges **before returning** any
-sanitized records. This covers successful parsing, epoch mismatch, corrupt or
-oversized data and a JS fatal duplicate. No binding calls `disarm`, which purges
-the raw file unread. `disarm` also purges binding and all sanitized records.
-These are the container-inspection purge points for simulator/device review.
+`j` marker permits native conversion. The pure `consumePendingRaw` function is
+shared by module `OnCreate` and the JS-driven `collect` path. It converts an
+authorized report and persists the sanitized record before its single explicit
+purge. Unauthorized, epoch-mismatched or expired reports are purged without
+loading bytes; oversized, unparseable, timestamp-expired and JS-duplicate
+reports are parsed only as needed for their closed decision and are then
+purged. `collect` reads the already sanitized records after this consume step.
+No binding calls `disarm`, which purges the raw file unread. `disarm` also
+purges binding and all sanitized records. These are the container-inspection
+purge points for simulator/device review.
 Native sanitization selects the thread marked `crashed`. If an externally
 delivered signal leaves no crash marker, it selects the thread whose frames
 contain the signal's faulting address, then falls back to the first thread.

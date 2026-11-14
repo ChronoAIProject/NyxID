@@ -4,6 +4,15 @@ import ExpoModulesCore
 import Foundation
 
 public class NyxCrashReporterModule: Module {
+  private struct ReporterPendingRawSource: PendingRawSource {
+    let reporter: PLCrashReporter
+    let modificationDateValue: Date?
+    var hasPending: Bool { reporter.hasPendingCrashReport() }
+    var modificationDate: Date? { modificationDateValue }
+    func loadData() -> Data? { reporter.loadPendingCrashReportData() }
+    func purge() { _ = reporter.purgePendingCrashReport() }
+  }
+
   private let lock = NSRecursiveLock()
   private var enabled = false
   private var armed = false
@@ -105,7 +114,7 @@ public class NyxCrashReporterModule: Module {
     purgeRecords()
     purgeInterruptedCrashWrites(in: directory)
     // Explicit purge point 1: no current capture authority; raw data is deleted unread.
-    purgePendingRawAndLog(.unauthorized)
+    purgePendingRawAndLog(reporter == nil ? .reporterUnavailable : .unauthorized)
   }
   private func trim() {
     purgeInterruptedCrashWrites(in: directory)
@@ -172,90 +181,76 @@ public class NyxCrashReporterModule: Module {
     else { return nil }
     return token["j"]
   }
-  /// Authority and known file age are checked before loading any report bytes.
-  /// The parser is used only after those checks, initially for epoch/JS-marker
-  /// and timestamp validation. No parser values are persisted here.
-  private func authorizedPendingRaw(_ reporter: PLCrashReporter, bound: [String: String])
-    -> PLCrashReport?
-  {
-    let epoch = bound["epochId"]
-    let authorityEpoch = rawAuthorityEpoch()
-    let age = pendingRawAge(reporter)
-    switch initialRawReportDecision(
-      bindingEpoch: epoch, authorityEpoch: authorityEpoch, fileAgeSeconds: age)
-    {
-    case .discard(let reason):
-      logRaw(reason, byteCount: nil)
-      return nil
-    case .parse:
-      break
-    }
-    let data = reporter.loadPendingCrashReportData()
-    let byteCount = data?.count
-    if age == nil {
-      NSLog(
-        "%@", crashRawNoticeLogLine(reason: .ageUnknown, byteCount: byteCount))
-    }
-    if case .discard(let reason) = rawCrashReportDecision(byteCount: byteCount ?? 0) {
-      logRaw(reason, byteCount: byteCount)
-      return nil
-    }
-    guard let data, let crash = try? PLCrashReport(data: data) else {
-      logRaw(.unparseable, byteCount: byteCount)
-      return nil
-    }
-    switch pendingCrashDecision(
-      bindingEpoch: epoch, reportEpoch: rawEpoch(crash), jsEventId: rawJsEventId(crash))
-    {
-    case .discard(let reason):
-      logRaw(reason, byteCount: byteCount)
-      return nil
-    case .native:
-      break
-    }
-    switch parsedCrashTimestampDecision(timestamp: crash.systemInfo?.timestamp, now: Date()) {
-    case .discard(let reason):
-      logRaw(reason, byteCount: byteCount)
-      return nil
-    case .continueParsing:
-      return crash
-    }
+  private func parsePendingRaw(_ data: Data) -> ParsedPendingRaw? {
+    guard let crash = try? PLCrashReport(data: data),
+      let signal = crash.signalInfo,
+      let application = crash.applicationInfo,
+      let system = crash.systemInfo,
+      let osVersion = system.operatingSystemVersion
+    else { return nil }
+    let parsed = ParsedNativeCrash(
+      threads: (crash.threads as? [PLCrashReportThreadInfo] ?? []).map {
+        ParsedNativeCrash.Thread(
+          crashed: $0.crashed,
+          frames: ($0.stackFrames as? [PLCrashReportStackFrameInfo] ?? []).map {
+            $0.instructionPointer
+          })
+      },
+      images: (crash.images as? [PLCrashReportBinaryImageInfo] ?? []).compactMap {
+        guard let name = $0.imageName else { return nil }
+        return ParsedNativeCrash.Image(
+          uuid: $0.imageUUID, name: name, baseAddress: $0.imageBaseAddress, size: $0.imageSize)
+      },
+      signalName: signal.name, faultAddress: signal.address,
+      appMarketingVersion: application.applicationMarketingVersion,
+      appBuild: application.applicationVersion,
+      osVersion: osVersion, timestamp: system.timestamp)
+    return ParsedPendingRaw(
+      crash: parsed, reportEpoch: rawEpoch(crash), jsEventId: rawJsEventId(crash))
   }
-  /// Module initialization only purges. Enabling and arming stay JS-driven.
+
+  private func consumePendingRawFromReporter(
+    reporter: PLCrashReporter,
+    bound: [String: String],
+    now: Date
+  ) -> [String: Any]? {
+    let source = ReporterPendingRawSource(
+      reporter: reporter, modificationDateValue: pendingRawModificationDate(reporter))
+    return consumePendingRaw(
+      source: source,
+      bindingEpoch: bound["epochId"],
+      authorityEpoch: rawAuthorityEpoch(),
+      now: now,
+      parse: { [weak self] data in self?.parsePendingRaw(data) },
+      beforePurge: { [weak self] record in
+        guard let self, let record else { return }
+        try? self.persist(record, bound: bound)
+      })
+  }
+
+  /// Module initialization converts an authorized report before purging it.
   private func initialRawPurge() {
     guard let reporter else {
-      purgePendingRawAndLog(.unauthorized)
+      purgePendingRawAndLog(.reporterUnavailable)
       return
     }
-    guard reporter.hasPendingCrashReport() else { return }
     guard let bound = binding() else {
       purgePendingRawAndLog(.unauthorized)
       return
     }
-    _ = authorizedPendingRaw(reporter, bound: bound)
-    purgePendingRaw()
+    _ = consumePendingRawFromReporter(reporter: reporter, bound: bound, now: Date())
   }
   /// All conversion is invoked from JS, with no AppDelegate/SceneDelegate hooks.
   private func collect() -> [String] {
-    defer { purgePendingRaw() }  // Explicit purge point 2: every raw-report decision path.
     guard let bound = binding() else {
       disarm()
       return []
     }
-    if reporter == nil {
-      purgePendingRawAndLog(.unauthorized)
+    if let reporter {
+      _ = consumePendingRawFromReporter(reporter: reporter, bound: bound, now: Date())
+    } else {
+      purgePendingRawAndLog(.reporterUnavailable)
     }
-    let fallbackCapturedAt = reporter.flatMap(pendingRawModificationDate) ?? Date()
-    if let reporter, reporter.hasPendingCrashReport(),
-      let crash = authorizedPendingRaw(reporter, bound: bound)
-    {
-      if let record = sanitize(crash, fallbackCapturedAt: fallbackCapturedAt) {
-        try? persist(record, bound: bound)
-      } else {
-        logRaw(.unparseable, byteCount: nil)
-      }
-    }
-    purgePendingRaw()  // Purge before returning any sanitized data to JS.
     trim()
     return recordFiles().compactMap { file in
       guard let data = try? Data(contentsOf: file),
@@ -271,33 +266,6 @@ public class NyxCrashReporterModule: Module {
       }
       return String(data: output, encoding: .utf8)
     }
-  }
-  /// Never access exceptionInfo, registers, processInfo, machineInfo or symbols.
-  private func sanitize(_ crash: PLCrashReport, fallbackCapturedAt: Date) -> [String: Any]? {
-    guard let signal = crash.signalInfo, let application = crash.applicationInfo,
-      let system = crash.systemInfo, let osVersion = system.operatingSystemVersion
-    else { return nil }
-    let parsed = ParsedNativeCrash(
-      threads: (crash.threads as? [PLCrashReportThreadInfo] ?? []).map {
-        ParsedNativeCrash.Thread(
-          crashed: $0.crashed,
-          frames: ($0.stackFrames as? [PLCrashReportStackFrameInfo] ?? []).map {
-            $0.instructionPointer
-          })
-      },
-      images: (crash.images as? [PLCrashReportBinaryImageInfo] ?? []).compactMap {
-        guard let name = $0.imageName else { return nil }
-        return
-        ParsedNativeCrash.Image(
-          uuid: $0.imageUUID, name: name, baseAddress: $0.imageBaseAddress, size: $0.imageSize)
-      },
-      signalName: signal.name, faultAddress: signal.address,
-      appMarketingVersion: application.applicationMarketingVersion,
-      appBuild: application.applicationVersion,
-      osVersion: osVersion, timestamp: system.timestamp)
-    return sanitizedNativeCrash(
-      parsed, eventId: UUID().uuidString.lowercased(), now: Date(),
-      fallbackCapturedAt: fallbackCapturedAt)
   }
   public func definition() -> ModuleDefinition {
     Name("NyxCrashReporter")
