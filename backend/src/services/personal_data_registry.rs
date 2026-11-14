@@ -2542,78 +2542,303 @@ pub fn export_sections() -> impl Iterator<Item = &'static str> {
 }
 
 /// Owner predicates that are not covered by an index in the origin/main
-/// startup definitions.  This is an explicit rollout manifest rather than a
+/// startup definitions and need a new index because the collection is a large,
+/// per-event stream. This is an explicit rollout manifest rather than a
 /// blanket "one index per field" loop: existing indexes are reused whenever
-/// their first key covers the predicate, and only these audited gaps can add
-/// a new index.
+/// their first key covers the predicate.
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
-    ("agent_key_login_requests", "approved_user_id"),
-    ("assistant_agent_consents", "owner_id"),
-    ("assistant_agent_learning_members", "member_user_id"),
-    ("assistant_agent_learning_runs", "owner_id"),
-    ("assistant_agent_learning_skill_roots", "owner_id"),
-    ("assistant_agent_private_notes", "actor_user_id"),
-    ("assistant_agent_shares", "owner_id"),
-    ("assistant_agent_sharing", "owner_id"),
-    ("assistant_async_quotas", "user_id"),
-    ("assistant_checkpoints", "user_id"),
-    ("assistant_group_agent_access", "owner_id"),
-    ("assistant_group_agent_proposals", "proposed_by"),
-    ("assistant_group_invites", "accepted_by_user_id"),
-    ("assistant_group_invites", "intended_user_id"),
-    ("assistant_group_invites", "issuer_user_id"),
     ("assistant_group_mention_notifications", "user_id"),
     ("assistant_group_messages", "user_id"),
-    ("assistant_group_read_states", "user_id"),
-    ("assistant_group_requests", "user_id"),
-    ("assistant_learning_migrations", "owner_id"),
-    ("assistant_skill_draft_attempts", "user_id"),
-    ("assistant_voice_announcements", "user_id"),
-    ("assistant_voice_windows", "user_id"),
-    ("assistant_wire_logs", "user_id"),
-    ("auth_device_codes", "approved_user_id"),
-    ("auth_device_codes_v2", "approved_user_id"),
-    ("authorization_codes", "user_id"),
-    ("channel_adapter_accounts", "user_id"),
-    ("channel_adapter_allocations", "user_id"),
     ("channel_adapter_events", "user_id"),
     ("channel_delivery_receipts", "user_id"),
     ("channel_email_batches", "user_id"),
     ("channel_email_receipts", "user_id"),
     ("channel_email_sends", "user_id"),
-    ("channel_email_subscriptions", "user_id"),
     ("channel_reply_deliveries", "user_id"),
-    ("device_codes", "approved_by_user_id"),
-    ("encrypted_record_migration_findings", "owner_uuid"),
-    ("encrypted_record_migration_runs", "owner_uuid"),
-    ("feature_flag_overrides", "target_key"),
-    ("invite_codes", "usages.user_id"),
-    ("invocation_diagnostics", "actor_user_id"),
-    ("login_approvals", "user_id"),
     ("mcp_session_notifications", "user_id"),
-    ("mfa_challenges", "user_id"),
     ("nyxbot_events", "user_id"),
-    ("oauth_consent_requests", "user_id"),
-    ("openclaw_channel_mappings", "user_id"),
-    ("org_invites", "created_by"),
-    ("platform_guide_selections", "user_id"),
-    ("platform_native_replies", "user_id"),
-    ("platform_onboarding_binding_requests", "user_id"),
-    ("platform_personal_decision_spacing", "user_id"),
-    ("platform_personal_setup_selections", "user_id"),
     ("refresh_tokens", "user_id"),
-    ("service_account_key_read_grants", "owner_id"),
     ("service_change_events", "actor.person_id"),
-    ("service_pool_member_health", "owner_id"),
-    ("telegram_bot_claims", "owner_user_id"),
-    ("telegram_bot_requests", "user_id"),
-    ("telegram_managed_bot_events", "user_id"),
+    ("service_pool_health_observations", "pool_id"),
     ("trigger_deliveries", "user_id"),
     ("trigger_work", "user_id"),
-    ("channel_send_claims", "conversation_id"),
-    ("platform_delivery_tests", "installation_id"),
-    ("platform_setup_steps", "setup_id"),
-    ("service_pool_health_observations", "pool_id"),
+];
+
+/// Predicates deliberately left without a new index. Each one is either a
+/// short-lived row, a small/resource-bounded lifecycle collection, a joined
+/// child bounded by its parent, or (for channel claims) already served by the
+/// composite `_id` prefix used by erasure and the orphan sweep.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnerIndexBoundedReason {
+    ShortTtl,
+    SmallOrResourceBounded,
+    JoinedLifecycleBounded,
+    ExistingIdPrefix,
+}
+
+#[cfg(test)]
+const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
+    (
+        "assistant_wire_logs",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "invocation_diagnostics",
+        "actor_user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "agent_key_login_requests",
+        "approved_user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "assistant_agent_consents",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_agent_learning_members",
+        "member_user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_agent_learning_runs",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_agent_learning_skill_roots",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_agent_private_notes",
+        "actor_user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_agent_shares",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_agent_sharing",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_async_quotas",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_checkpoints",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_agent_access",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_agent_proposals",
+        "proposed_by",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_invites",
+        "accepted_by_user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_invites",
+        "intended_user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_invites",
+        "issuer_user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_read_states",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_group_requests",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_learning_migrations",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_skill_draft_attempts",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "assistant_voice_announcements",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "assistant_voice_windows",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "auth_device_codes",
+        "approved_user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "auth_device_codes_v2",
+        "approved_user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "authorization_codes",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "channel_adapter_accounts",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "channel_adapter_allocations",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "channel_email_subscriptions",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "device_codes",
+        "approved_by_user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "encrypted_record_migration_findings",
+        "owner_uuid",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "encrypted_record_migration_runs",
+        "owner_uuid",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "feature_flag_overrides",
+        "target_key",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "invite_codes",
+        "usages.user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "login_approvals",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "mfa_challenges",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "oauth_consent_requests",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "openclaw_channel_mappings",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "org_invites",
+        "created_by",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "platform_guide_selections",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "platform_native_replies",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "platform_onboarding_binding_requests",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "platform_personal_decision_spacing",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "platform_personal_setup_selections",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "service_account_key_read_grants",
+        "owner_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "service_pool_member_health",
+        "owner_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "telegram_bot_claims",
+        "owner_user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "telegram_bot_requests",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
+        "telegram_managed_bot_events",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "channel_send_claims",
+        "conversation_id",
+        OwnerIndexBoundedReason::ExistingIdPrefix,
+    ),
+    (
+        "platform_delivery_tests",
+        "installation_id",
+        OwnerIndexBoundedReason::JoinedLifecycleBounded,
+    ),
+    (
+        "platform_setup_steps",
+        "setup_id",
+        OwnerIndexBoundedReason::JoinedLifecycleBounded,
+    ),
 ];
 
 #[cfg(test)]
@@ -3425,6 +3650,41 @@ mod tests {
         }
     }
 
+    fn assert_only_manifest_indexes_added(
+        before: &BTreeMap<String, Vec<mongodb::bson::Document>>,
+        after: &BTreeMap<String, Vec<mongodb::bson::Document>>,
+    ) {
+        let mut added = BTreeSet::new();
+        for (collection, definitions) in after {
+            for definition in definitions {
+                if before[collection].contains(definition) {
+                    continue;
+                }
+                let keys = definition.get_document("key").expect("index keys");
+                // Creating the first index on a formerly absent collection
+                // also creates MongoDB's mandatory identity index.
+                if before[collection].is_empty() && keys == &bson::doc! {"_id": 1} {
+                    continue;
+                }
+                assert_eq!(keys.len(), 1, "unexpected added index: {definition:?}");
+                let field = keys.keys().next().unwrap();
+                assert!(
+                    OWNER_INDEX_GAPS.contains(&(collection.as_str(), field.as_str())),
+                    "index added outside the minimal manifest: {collection}.{field}"
+                );
+                assert_eq!(keys.get_i32(field), Ok(1));
+                let expected_name = format!(
+                    "personal_erasure_owner_{}_{}",
+                    collection.replace('.', "_"),
+                    field.replace('.', "_")
+                );
+                assert_eq!(definition.get_str("name"), Ok(expected_name.as_str()));
+                assert!(added.insert((collection.as_str(), field.as_str())));
+            }
+        }
+        assert_eq!(added, OWNER_INDEX_GAPS.iter().copied().collect());
+    }
+
     fn registry_owner_predicates() -> BTreeSet<(&'static str, &'static str)> {
         ENTRIES
             .iter()
@@ -3441,37 +3701,75 @@ mod tests {
             .collect()
     }
 
-    async fn assert_owner_prefix_coverage(db: &mongodb::Database) {
-        let mut missing = Vec::new();
-        for (collection, field) in registry_owner_predicates() {
-            let covered = if field == "_id" {
-                true
-            } else {
-                index_models(db, collection)
-                    .await
+    fn owner_index_bounded_predicates() -> BTreeSet<(&'static str, &'static str)> {
+        OWNER_INDEX_BOUNDED
+            .iter()
+            .map(|(collection, field, _)| (*collection, *field))
+            .collect()
+    }
+
+    fn owner_index_manifest_predicates() -> BTreeSet<(&'static str, &'static str)> {
+        OWNER_INDEX_GAPS
+            .iter()
+            .copied()
+            .chain(
+                OWNER_INDEX_BOUNDED
                     .iter()
-                    .any(|index| index.keys.keys().next().is_some_and(|first| first == field))
-            };
+                    .map(|(collection, field, _)| (*collection, *field)),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn owner_index_manifest_classifies_every_origin_gap() {
+        let kept: BTreeSet<_> = OWNER_INDEX_GAPS.iter().copied().collect();
+        let bounded = owner_index_bounded_predicates();
+        assert_eq!(kept.len(), OWNER_INDEX_GAPS.len(), "duplicate kept index");
+        assert_eq!(
+            bounded.len(),
+            OWNER_INDEX_BOUNDED.len(),
+            "duplicate bounded owner predicate"
+        );
+        assert!(
+            kept.is_disjoint(&bounded),
+            "a predicate cannot be both kept and bounded"
+        );
+
+        let mut known = registry_owner_predicates();
+        known.extend(
+            JOINED_CHILD_SPECS
+                .iter()
+                .filter(|spec| spec.child_parent_field != "_id")
+                .map(|spec| (spec.child, spec.child_parent_field)),
+        );
+        for predicate in owner_index_manifest_predicates() {
+            assert!(
+                known.contains(&predicate),
+                "owner-index manifest predicate is not in the registry or joined-child specs: {predicate:?}"
+            );
+        }
+    }
+
+    async fn assert_owner_prefix_coverage(db: &mongodb::Database) {
+        let mut missing: Vec<(&str, &str)> = Vec::new();
+        for &(collection, field) in OWNER_INDEX_GAPS {
+            let covered = index_models(db, collection)
+                .await
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|first| first == field));
             if !covered {
                 missing.push((collection, field));
             }
         }
-
-        for spec in JOINED_CHILD_SPECS {
-            let covered = if spec.child_parent_field == "_id" {
-                true
-            } else {
-                index_models(db, spec.child).await.iter().any(|index| {
-                    index
-                        .keys
-                        .keys()
-                        .next()
-                        .is_some_and(|first| first == spec.child_parent_field)
-                })
-            };
-            if !covered {
-                missing.push((spec.child, spec.child_parent_field));
-            }
+        for &(collection, field, _) in OWNER_INDEX_BOUNDED {
+            let covered = index_models(db, collection)
+                .await
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|first| first == field));
+            assert!(
+                !covered,
+                "bounded owner predicate unexpectedly received an index: {collection}.{field}"
+            );
         }
         assert!(
             missing.is_empty(),
@@ -3508,15 +3806,20 @@ mod tests {
             .unwrap();
         let origin = index_snapshot(&db).await;
 
-        // The checked-in gap manifest is complete relative to the origin/main
-        // fixture: every uncovered registry/join predicate appears once, and
-        // no manifest entry redundantly duplicates an origin index.
+        // The checked-in classification is complete relative to the
+        // origin/main fixture: every uncovered registry/join predicate is
+        // either a kept large-stream index or an explicitly bounded drop.
         for (collection, field) in registry_owner_predicates() {
             let covered = field == "_id" || snapshot_has_prefix(&origin[collection], field);
-            assert_eq!(
-                covered,
-                !OWNER_INDEX_GAPS.contains(&(collection, field)),
-                "owner-index manifest drift for {collection}.{field}"
+            let classified = OWNER_INDEX_GAPS.contains(&(collection, field))
+                || owner_index_bounded_predicates().contains(&(collection, field));
+            assert!(
+                covered || classified,
+                "unclassified origin/main owner gap for {collection}.{field}"
+            );
+            assert!(
+                !covered || !classified,
+                "owner-index classification redundantly covers existing index for {collection}.{field}"
             );
         }
         for spec in JOINED_CHILD_SPECS {
@@ -3524,10 +3827,18 @@ mod tests {
                 continue;
             }
             let covered = snapshot_has_prefix(&origin[spec.child], spec.child_parent_field);
-            assert_eq!(
-                covered,
-                !OWNER_INDEX_GAPS.contains(&(spec.child, spec.child_parent_field)),
-                "joined-child index manifest drift for {}.{}",
+            let classified = OWNER_INDEX_GAPS.contains(&(spec.child, spec.child_parent_field))
+                || owner_index_bounded_predicates()
+                    .contains(&(spec.child, spec.child_parent_field));
+            assert!(
+                covered || classified,
+                "unclassified origin/main joined-child gap for {}.{}",
+                spec.child,
+                spec.child_parent_field
+            );
+            assert!(
+                !covered || !classified,
+                "joined-child classification redundantly covers existing index for {}.{}",
                 spec.child,
                 spec.child_parent_field
             );
@@ -3538,11 +3849,17 @@ mod tests {
         crate::services::personal_erasure_service::ensure_startup_indexes(&db)
             .await
             .unwrap();
+        let first_branch = index_snapshot(&db).await;
         crate::services::personal_erasure_service::ensure_startup_indexes(&db)
             .await
             .unwrap();
         let branch = index_snapshot(&db).await;
+        assert_eq!(
+            first_branch, branch,
+            "second branch startup changed indexes"
+        );
         assert_origin_indexes_untouched(&origin, &branch);
+        assert_only_manifest_indexes_added(&origin, &branch);
         assert_no_duplicate_keys(&branch);
         assert_owner_prefix_coverage(&db).await;
 
@@ -3555,6 +3872,10 @@ mod tests {
         let mixed = index_snapshot(&db).await;
         assert_origin_indexes_untouched(&origin, &mixed);
         assert_no_duplicate_keys(&mixed);
+        assert_eq!(
+            branch, mixed,
+            "old-fleet restart changed the branch index set"
+        );
     }
 
     #[test]
