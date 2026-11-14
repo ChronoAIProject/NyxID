@@ -1271,6 +1271,7 @@ pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<Accoun
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::user::UserType;
     use std::str::FromStr;
     #[test]
     fn recursive_values_preserve_documents_arrays_and_decimal_strings() {
@@ -1425,5 +1426,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn put_owner(document: &mut Document, path: &str, owner: &str) {
+        let mut segments = path.split('.').peekable();
+        let Some(first) = segments.next() else {
+            return;
+        };
+        if segments.peek().is_none() {
+            document.insert(first, owner);
+            return;
+        }
+        let rest = segments.collect::<Vec<_>>().join(".");
+        let child = document
+            .entry(first.to_owned())
+            .or_insert_with(|| Bson::Document(Document::new()));
+        if let Bson::Document(child) = child {
+            put_owner(child, &rest, owner);
+        }
+    }
+
+    /// Mongo-backed sentinel coverage for the complete registry export map.
+    /// Every source collection gets a target and bystander document; secret
+    /// and binary fields are populated even though they are outside the
+    /// allowlists. This exercises the real projection and recursive encoder.
+    #[tokio::test]
+    async fn export_sentinel_isolates_owner_rows_and_values() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("account_export_sentinel").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let bystander = uuid::Uuid::new_v4().to_string();
+        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                crate::test_utils::test_user(&owner, UserType::Person),
+                crate::test_utils::test_user(&bystander, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        let mut seeded = BTreeSet::new();
+        for entry in personal_data_registry::entries() {
+            let personal_data_registry::Export::Section(_) = entry.export else {
+                continue;
+            };
+            let personal_data_registry::OwnerSelector::Fields(fields) = entry.owner else {
+                continue;
+            };
+            if entry.collection == crate::models::user::COLLECTION_NAME
+                || fields.is_empty()
+                || !seeded.insert(entry.collection)
+            {
+                continue;
+            }
+            let target_id = if fields.iter().all(|field| *field == "_id") {
+                owner.clone()
+            } else {
+                format!("target-{}", entry.collection)
+            };
+            let bystander_id = if fields.iter().all(|field| *field == "_id") {
+                bystander.clone()
+            } else {
+                format!("bystander-{}", entry.collection)
+            };
+            let mut target = doc! {
+                "_id": &target_id,
+                "password_hash": "EXPORT_SECRET_SENTINEL",
+                "token_value": "EXPORT_SECRET_SENTINEL",
+                "ciphertext": "EXPORT_SECRET_SENTINEL",
+                "payload_encrypted": Bson::Binary(bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: vec![0xde, 0xad, 0xbe, 0xef],
+                }),
+                "amount": Bson::Decimal128("17.25".parse().unwrap()),
+                "created_at": bson::DateTime::now(),
+                "updated_at": bson::DateTime::now(),
+            };
+            let mut other = target.clone();
+            other.insert("_id", &bystander_id);
+            for field in fields {
+                if *field == "_id" {
+                    continue;
+                }
+                put_owner(&mut target, field, &owner);
+                put_owner(&mut other, field, &bystander);
+            }
+            db.collection::<Document>(entry.collection)
+                .insert_many([target, other])
+                .await
+                .unwrap();
+        }
+        let export = build(&db, &owner).await.unwrap();
+        let bytes = serde_json::to_vec(&export).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("EXPORT_SECRET_SENTINEL"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("bystander-"));
+        for entry in personal_data_registry::entries() {
+            let personal_data_registry::Export::Section(section) = entry.export else {
+                continue;
+            };
+            let Some(spec) = explicit_export_spec(entry.collection) else {
+                continue;
+            };
+            if entry.collection == crate::models::user::COLLECTION_NAME {
+                continue;
+            }
+            let subsection = export.sections[section]
+                .get(spec.subsection)
+                .unwrap_or_else(|| panic!("missing subsection {}", spec.subsection));
+            assert!(
+                subsection.total_count > 0,
+                "seeded owner row missing from {}.{}",
+                section,
+                spec.subsection
+            );
+        }
+        db.drop().await.unwrap();
     }
 }
