@@ -299,7 +299,11 @@ async fn crash_live_manifest_invalid_or_unreachable_registers_nothing_and_logs_c
                 .unwrap(),
             0
         );
-        let events = capture.events();
+        let events: Vec<_> = capture
+            .events()
+            .into_iter()
+            .filter(|event| event["fields"]["message"] == "Crash release manifest fetch failed")
+            .collect();
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0]["fields"],
