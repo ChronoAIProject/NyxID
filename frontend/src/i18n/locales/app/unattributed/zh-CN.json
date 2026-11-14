@@ -364,6 +364,7 @@
   "Enable mock scenarios": "启用模拟场景",
   "Enable personal access independently while public access is unavailable. Each person still signs in, reviews consent and confirms in the same private chat.": "在公共访问不可用时，可单独启用个人访问。每个人仍需在同一个私聊中登录、查看同意内容并确认。",
   "Enable personal access only": "仅启用个人访问权限",
+  "Enable policy-2 crash diagnostics for the acting person.": "为当前用户启用需确认第 2 版政策的崩溃诊断。",
   "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.": "启用全局审批开关。默认情况下，请求将需要你的批准；除非你为某个服务添加了明确的策略，否则自动连接的服务仍然可用。",
   "Enable {{id}} scenario": "启用 {{id}} 场景",
   "Enabled capabilities and specialist assignment do not authorize every caller. Agent permissions are configured separately. External OAuth and Agent Key tools remain limited to authorized Commands and Files.": "已启用的功能和专属智能体分配并不会授权每个调用方。智能体权限单独配置。外部 OAuth 和智能体密钥工具仍仅限于已授权的“命令”和“文件”。",

@@ -364,6 +364,7 @@
   "Enable mock scenarios": "啟用模擬場景",
   "Enable personal access independently while public access is unavailable. Each person still signs in, reviews consent and confirms in the same private chat.": "在公開存取無法使用時，可單獨啟用個人存取。每個人仍需在同一個私人對話中登入、檢視同意內容並確認。",
   "Enable personal access only": "僅啟用個人存取",
+  "Enable policy-2 crash diagnostics for the acting person.": "為目前使用者啟用需確認第 2 版政策的當機診斷。",
   "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.": "啟用全域核准開關。預設情況下，請求將需要你的核准；除非你為某個服務新增了明確的原則，否則自動連線的服務仍然可用。",
   "Enable {{id}} scenario": "啟用 {{id}} 場景",
   "Enabled capabilities and specialist assignment do not authorize every caller. Agent permissions are configured separately. External OAuth and Agent Key tools remain limited to authorized Commands and Files.": "已啟用的功能和專屬代理程式指派並不會授權每個呼叫端。代理程式權限單獨設定。外部 OAuth 和代理程式金鑰工具仍僅限於已授權的「指令」和「檔案」。",

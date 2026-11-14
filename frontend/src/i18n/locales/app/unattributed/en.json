@@ -364,6 +364,7 @@
   "Enable mock scenarios": "Enable mock scenarios",
   "Enable personal access independently while public access is unavailable. Each person still signs in, reviews consent and confirms in the same private chat.": "Enable personal access independently while public access is unavailable. Each person still signs in, reviews consent and confirms in the same private chat.",
   "Enable personal access only": "Enable personal access only",
+  "Enable policy-2 crash diagnostics for the acting person.": "Enable policy-2 crash diagnostics for the acting person.",
   "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.": "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.",
   "Enable {{id}} scenario": "Enable {{id}} scenario",
   "Enabled capabilities and specialist assignment do not authorize every caller. Agent permissions are configured separately. External OAuth and Agent Key tools remain limited to authorized Commands and Files.": "Enabled capabilities and specialist assignment do not authorize every caller. Agent permissions are configured separately. External OAuth and Agent Key tools remain limited to authorized Commands and Files.",

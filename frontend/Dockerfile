@@ -34,7 +34,7 @@ COPY tools/crash-artifacts/ /build/tools/crash-artifacts/
 RUN npm ci --prefix /build/tools/crash-artifacts
 # Optional JSON secret: build-only CRASH_ARTIFACTS_SENTRY_* configuration.
 RUN --mount=type=secret,id=crash_artifacts_sentry \
-    node -e 'const fs=require("fs"),cp=require("child_process");const p="/run/secrets/crash_artifacts_sentry";const v=fs.existsSync(p)?JSON.parse(fs.readFileSync(p,"utf8")):{};const keys=["CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN","CRASH_ARTIFACTS_SENTRY_ORG","CRASH_ARTIFACTS_SENTRY_PROJECT_WEB"];if(Object.keys(v).some(k=>!keys.includes(k)||typeof v[k]!=="string"))throw Error("Invalid artifact secret");const r=cp.spawnSync("npm",["run","build"],{stdio:"inherit",env:{...process.env,...v}});process.exit(r.status??1);'
+    node /build/tools/crash-artifacts/build-web.mjs
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM nginxinc/nginx-unprivileged:1.27-alpine

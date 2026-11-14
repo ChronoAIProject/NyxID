@@ -31,7 +31,6 @@ export async function readAnalyticsConsent(accountId: string): Promise<Analytics
 /** A deliberate choice changes account permission and this device's restriction. */
 export async function saveAnalyticsConsent(accountId: string, enabled: boolean, acknowledged: 1|2 = 1): Promise<AnalyticsConsent> {
   const guard = accountGuard(accountId);
-  const policy = acknowledged === 2 && (await readAnalyticsConsent(accountId)).current_policy_version === "2" ? 2 : 1;
   guard();
   // Failed withdrawal must still stop this device immediately. Opt-in waits for
   // durable acknowledgement and cannot inherit a previous account's preference.
@@ -44,6 +43,8 @@ export async function saveAnalyticsConsent(accountId: string, enabled: boolean, 
       throw new Error('Analytics choice changed; try again from the current settings.');
     }
   };
+  const policy = acknowledged === 2 && (await readAnalyticsConsent(accountId)).current_policy_version === "2" ? 2 : 1;
+  intentGuard();
   const result = await apiClient<AnalyticsConsent>('/users/me/preferences/analytics', {
     method: 'PUT', body: { account_id: accountId, enabled, ...(policy === 2 ? { policy_version: "2" } : {}) }, authorityGuard: intentGuard,
   });

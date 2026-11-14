@@ -820,9 +820,9 @@ function FlagTableRows({
               </div>
               <p
                 className="line-clamp-1 break-words text-14 text-muted-foreground"
-                title={flag.description}
+                title={translateUi(flag.description)}
               >
-                {flag.description}
+                {translateUi(flag.description)}
               </p>
             </div>
           </DataTableCellShell>
@@ -1143,7 +1143,7 @@ function FlagMetadataEditor({
       <dl className="space-y-2 text-14">
         <div className="space-y-0.5">
           <dt className="text-13 text-muted-foreground">{translateUi("Description")}</dt>
-          <dd className="text-foreground">{flag.description}</dd>
+          <dd className="text-foreground">{translateUi(flag.description)}</dd>
         </div>
         <div className="space-y-0.5">
           <dt className="text-13 text-muted-foreground">{translateUi("Owner")}</dt>

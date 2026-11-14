@@ -57,3 +57,30 @@ it('rejects an acknowledgement that contradicts withdrawal', async () => {
   await expect(saveAnalyticsConsent('account-a', false)).rejects.toThrow('did not match');
   expect(state.enabled).toBe(false);
 });
+
+it.each(['1', '2', undefined])('negotiates policy 2 against advertised policy %s without changing legacy requests', async (current) => {
+  state.api.mockResolvedValueOnce({ ...result, current_policy_version: current }).mockResolvedValueOnce(result);
+  await saveAnalyticsConsent('account-a', true, 2);
+  expect(state.api.mock.calls[1]![1].body).toEqual({ account_id: 'account-a', enabled: true, ...(current === '2' ? { policy_version: '2' } : {}) });
+  expect(state.choose).toHaveBeenLastCalledWith(true, current === '2' ? 2 : 1);
+});
+
+it('a newer device withdrawal fences the policy negotiation before any PUT', async () => {
+  let release!: (value: typeof result & { current_policy_version: string }) => void;
+  state.api.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const pending = saveAnalyticsConsent('account-a', true, 2);
+  state.choose(false);
+  release({ ...result, current_policy_version: '2' });
+  await expect(pending).rejects.toThrow('Analytics choice changed');
+  expect(state.api).toHaveBeenCalledOnce();
+  expect(state.enabled).toBe(false);
+});
+
+it('withdrawal stops immediately even when policy negotiation fails', async () => {
+  state.enabled = true;
+  state.api.mockRejectedValueOnce(new Error('offline'));
+  const pending = saveAnalyticsConsent('account-a', false, 2);
+  expect(state.enabled).toBe(false);
+  expect(state.disable).toHaveBeenCalledOnce();
+  await expect(pending).rejects.toThrow('offline');
+});
