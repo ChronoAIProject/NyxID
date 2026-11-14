@@ -150,3 +150,53 @@ async fn policy_two_put_requires_an_offer_and_legacy_put_stays_policy_one() {
     let (_, axum::Json(new)) = put(Some("2")).await.unwrap();
     assert_eq!(new.diagnostics_status, DiagnosticsStatus::Available);
 }
+
+#[tokio::test]
+async fn rollout_summary_distinguishes_off_cohort_global_and_killed() {
+    let (db, id, _) = tests::account("crash_rollout_states").await;
+    assert_eq!(admin::rollout(&db).await.unwrap(), admin::Rollout::Off);
+    readiness::ready_test_replica(&db).await;
+    flags::set_platform_override(&db, FLAG, &FlagTarget::User(id.clone()), true, &id)
+        .await
+        .unwrap();
+    assert_eq!(admin::rollout(&db).await.unwrap(), admin::Rollout::Cohort);
+    flags::set_platform_override(&db, FLAG, &FlagTarget::Global, true, &id)
+        .await
+        .unwrap();
+    assert_eq!(admin::rollout(&db).await.unwrap(), admin::Rollout::Global);
+    flags::set_platform_override(&db, FLAG, &FlagTarget::Global, false, &id)
+        .await
+        .unwrap();
+    assert_eq!(admin::rollout(&db).await.unwrap(), admin::Rollout::Killed);
+}
+
+#[tokio::test]
+async fn admin_rollout_write_invalidates_the_negative_scope_cache() {
+    use crate::services::{audit_service::AuditActor, feature_flag_admin_service as admin_flags};
+    init_test_audit_chain_hmac_key();
+    let (db, id, _) = tests::account("crash_admin_cache").await;
+    assert_eq!(eligibility(&db, &id).await, DiagnosticsStatus::NotOffered);
+    readiness::ready_test_replica(&db).await;
+    admin_flags::mutate(
+        &db,
+        FLAG,
+        admin_flags::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::User,
+            target_id: Some(id.clone()),
+            enabled: Some(true),
+        },
+        &AuditActor {
+            user_id: id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        eligibility(&db, &id).await,
+        DiagnosticsStatus::ConsentRequired
+    );
+}

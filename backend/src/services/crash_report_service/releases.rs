@@ -131,7 +131,12 @@ pub async fn auto_register_web(
             let mut gates = FLIGHTS.lock().expect("manifest flights");
             // Evict only idle entries; active waiters keep their single-flight identity.
             if gates.len() >= 1024 {
-                gates.retain(|_, g| Arc::strong_count(g) > 1);
+                gates.retain(|_, g| {
+                    Arc::strong_count(g) > 1
+                        || g.try_lock().map_or(true, |at| {
+                            at.is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+                        })
+                });
             }
             if gates.len() >= 1024 && !gates.contains_key(&key) {
                 return;
@@ -169,13 +174,11 @@ pub async fn auto_register_web(
                     && manifest.artifact_id == report.artifact_id.as_deref().unwrap_or_default()
                     && manifest.app_version == report.app_version
                     && manifest.app_build == report.app_build
-                {
-                    if register(db, &identity, ReleaseSource::FrontendManifest, None)
+                    && register(db, &identity, ReleaseSource::FrontendManifest, None)
                         .await
                         .is_ok()
-                    {
-                        return;
-                    }
+                {
+                    return;
                 }
             }
             *failure = Some(Instant::now());

@@ -229,11 +229,12 @@ pub async fn mutate(
             security_readiness_service::require_flag_enable(db, key).await?;
         }
     }
+    let crash_cache_db = (key == flags::CRASH_REPORTS_FLAG_KEY).then(|| db.clone());
     let db = db.clone();
     let key = key.to_owned();
     let actor = actor.clone();
     let mut session = db.client().start_session().await?;
-    session
+    let result = session
         .start_transaction()
         .write_concern(WriteConcern::majority())
         .and_run2(async move |session| {
@@ -251,7 +252,13 @@ pub async fn mutate(
             )
         })
         .await
-        .map_err(key_mutations::map_transaction_error)
+        .map_err(key_mutations::map_transaction_error);
+    if result.is_ok()
+        && let Some(db) = crash_cache_db
+    {
+        super::crash_report_service::invalidate_rollout_cache(&db);
+    }
+    result
 }
 
 async fn mutate_in_session(

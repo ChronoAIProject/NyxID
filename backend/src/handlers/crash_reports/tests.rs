@@ -515,3 +515,29 @@ async fn release_registration_is_admin_only_first_party_validated_and_metadata_a
     ));
     assert!(serde_json::from_value::<service::releases::RegisterRelease>(serde_json::json!({"platform":"ios","app_version":"1","app_build":"1","message":"SECRET_SENTINEL"})).is_err());
 }
+
+#[tokio::test]
+async fn default_off_ingestion_never_performs_an_unthrottled_counter_write() {
+    let (db, id, rev) = account("crash_off_no_writes").await;
+    let state = test_app_state(db.clone());
+    for _ in 0..10 {
+        assert!(matches!(
+            ingest(
+                State(state.clone()),
+                test_auth_user(&id),
+                no_peer(),
+                device(&id),
+                Ok(body(&id, &rev))
+            )
+            .await,
+            Err(AppError::CrashReportingUnavailable)
+        ));
+    }
+    assert_eq!(
+        db.collection::<bson::Document>(COUNTERS)
+            .count_documents(bson::doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
