@@ -1847,6 +1847,7 @@ pub async fn update_broker_settings(
     require_admin(&state, &auth_user).await?;
 
     let changed_fields = broker_settings_changed_fields(&body);
+    let verified_at = tokio::time::Instant::now();
     let settings = platform_settings_service::update_broker_settings(
         &state.db,
         platform_settings_service::BrokerSettingsPatch {
@@ -1856,7 +1857,7 @@ pub async fn update_broker_settings(
     )
     .await?;
     let policy = platform_settings_service::BrokerPolicy::from_settings(&state.config, &settings);
-    state.set_broker_policy_if_fresh(policy);
+    state.set_broker_policy_verified_at(policy, verified_at);
 
     if !changed_fields.is_empty() {
         audit_service::log_for_user(
@@ -2372,7 +2373,7 @@ pub async fn create_oauth_client(
     Ok(Json(oauth_client_response(
         client,
         raw_secret,
-        state.broker_require_admin_capability(),
+        state.broker_policy().broker_require_admin_capability,
     )))
 }
 
@@ -2503,7 +2504,7 @@ pub async fn update_oauth_client(
     Ok(Json(oauth_client_response(
         updated,
         None,
-        state.broker_require_admin_capability(),
+        state.broker_policy().broker_require_admin_capability,
     )))
 }
 
@@ -4275,8 +4276,8 @@ mod operator_route_tests {
         .expect("admin can update broker settings");
         assert!(updated.0.broker_require_sender_constraint.effective);
         assert!(!updated.0.broker_require_admin_capability.effective);
-        assert!(state.broker_require_sender_constraint());
-        assert!(!state.broker_require_admin_capability());
+        assert!(state.broker_require_sender_constraint().await.unwrap());
+        assert!(!state.broker_require_admin_capability().await.unwrap());
         let current_policy = state.broker_policy();
         let stale_policy = platform_settings_service::BrokerPolicy {
             revision: current_policy.revision - 1,
@@ -4312,8 +4313,8 @@ mod operator_route_tests {
         .expect("admin can clear broker settings");
         assert!(!cleared.0.broker_require_sender_constraint.effective);
         assert!(cleared.0.broker_require_admin_capability.effective);
-        assert!(!state.broker_require_sender_constraint());
-        assert!(state.broker_require_admin_capability());
+        assert!(!state.broker_require_sender_constraint().await.unwrap());
+        assert!(state.broker_require_admin_capability().await.unwrap());
 
         let stored = db
             .collection::<mongodb::bson::Document>(PLATFORM_SETTINGS)
@@ -4395,7 +4396,7 @@ mod operator_route_tests {
         )
         .await
         .expect("admin can enable runtime admin-capability requirement");
-        assert!(state.broker_require_admin_capability());
+        assert!(state.broker_require_admin_capability().await.unwrap());
 
         let response = crate::handlers::oauth::register_client(
             State(state),
