@@ -899,7 +899,7 @@ describe.each(["/settings", "/assistant"] as const)(
           "download",
           "account.json",
         );
-        await new Promise((resolve) => window.setTimeout(resolve, 0));
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
         expect(revokeObjectUrl).toHaveBeenCalledWith("blob:account-export");
       } finally {
         if (oldCreateObjectUrl)

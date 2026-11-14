@@ -1220,7 +1220,7 @@ function PrivacyTab() {
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       toast.success(translateUi("Your data export is ready."));
     } catch (error) {
       if (error instanceof ApiError) {
