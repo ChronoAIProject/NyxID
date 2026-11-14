@@ -34,28 +34,35 @@ async fn until_source_removed(state: &crate::AppState, owner: &str) {
     );
 }
 
-fn replace_owner(value: &mut bson::Bson, owner: &str) {
+fn replace_owner(value: &mut bson::Bson, source_owner: &str, target_owner: &str) {
     match value {
-        bson::Bson::String(value) if value == owner => {}
+        bson::Bson::String(value) if value == source_owner => {
+            *value = target_owner.to_owned();
+        }
         bson::Bson::Document(document) => {
             let keys = document.keys().cloned().collect::<Vec<_>>();
             for key in keys {
                 if let Some(value) = document.get_mut(&key) {
-                    replace_owner(value, owner);
+                    replace_owner(value, source_owner, target_owner);
                 }
             }
         }
         bson::Bson::Array(values) => {
             for value in values {
-                replace_owner(value, owner);
+                replace_owner(value, source_owner, target_owner);
             }
         }
         _ => {}
     }
 }
 
-fn seed_from_inventory_filter(filter: &Document, owner: &str, id: &str) -> Document {
-    fn copy(document: &Document, owner: &str) -> Document {
+fn seed_from_inventory_filter(
+    filter: &Document,
+    source_owner: &str,
+    target_owner: &str,
+    id: &str,
+) -> Document {
+    fn copy(document: &Document, source_owner: &str, target_owner: &str) -> Document {
         let mut output = Document::new();
         for (key, value) in document {
             if key.starts_with('$') {
@@ -63,7 +70,7 @@ fn seed_from_inventory_filter(filter: &Document, owner: &str, id: &str) -> Docum
                     continue;
                 };
                 if let Some(bson::Bson::Document(first)) = values.first() {
-                    output.extend(copy(first, owner));
+                    output.extend(copy(first, source_owner, target_owner));
                 }
                 continue;
             }
@@ -90,19 +97,19 @@ fn seed_from_inventory_filter(filter: &Document, owner: &str, id: &str) -> Docum
                     } else if let Some(value) = operators.get("$eq") {
                         value.clone()
                     } else {
-                        bson::Bson::Document(copy(operators, owner))
+                        bson::Bson::Document(copy(operators, source_owner, target_owner))
                     }
                 }
                 value => value.clone(),
             };
             let mut value = value;
-            replace_owner(&mut value, owner);
+            replace_owner(&mut value, source_owner, target_owner);
             output.insert(key, value);
         }
         output
     }
 
-    let mut row = copy(filter, owner);
+    let mut row = copy(filter, source_owner, target_owner);
     row.insert("_id", id);
     row.insert("fixture_marker", "registry-table");
     row
@@ -177,8 +184,8 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
     for (index, (collection, filter)) in super::local::inventory(&owner).into_iter().enumerate() {
         let target_id = format!("registry-target-{index}");
         let bystander_id = format!("registry-bystander-{index}");
-        let target = seed_from_inventory_filter(&filter, &owner, &target_id);
-        let bystander = seed_from_inventory_filter(&filter, &other, &bystander_id);
+        let target = seed_from_inventory_filter(&filter, &owner, &owner, &target_id);
+        let bystander = seed_from_inventory_filter(&filter, &owner, &other, &bystander_id);
         // `_id` owner selectors intentionally use the account id. Keep the
         // generated ids for every other collection so repeated inventory
         // predicates cannot collide.
@@ -198,11 +205,11 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         };
         let org_row = if filter_has_owner_id(&filter, &owner) {
             let mut row =
-                seed_from_inventory_filter(&filter, &org, &format!("registry-org-{index}"));
+                seed_from_inventory_filter(&filter, &owner, &org, &format!("registry-org-{index}"));
             row.insert("_id", org.clone());
             row
         } else {
-            seed_from_inventory_filter(&filter, &org, &format!("registry-org-{index}"))
+            seed_from_inventory_filter(&filter, &owner, &org, &format!("registry-org-{index}"))
         };
         let target_key = target.get_str("_id").unwrap_or(&target_id).to_owned();
         if seen.insert((collection, target_key)) {
