@@ -18,6 +18,7 @@ mod plan_sync;
 pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
+pub(crate) mod rate_cache;
 pub mod reconcile;
 pub mod reservation;
 pub mod route_context;

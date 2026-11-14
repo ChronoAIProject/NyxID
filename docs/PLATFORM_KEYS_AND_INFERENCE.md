@@ -329,6 +329,16 @@ row. Catalog reads select billing-bearing services and recorded intent owners.
 Unrelated Lago charges and existing charge IDs are preserved; plan updates
 never send tax assignments back to Lago.
 
+Periodic rate-cache refresh captures a singleton generation before reading Lago.
+Each bounded publication transaction advances that exact generation before
+changing diagnostics, rejected rates or cached values. Explicit cache writers
+advance the same generation in their cache transaction. An intervening write
+discards the remaining fetched snapshot; the next scheduled pass fetches again.
+Periodic refresh preserves retired historical rows, including when Lago still
+lists the charge; only explicit re-sync clears retirement. The epoch is separate
+coordination metadata, with no price-row or admission-reader changes. Complete
+ordering requires every cache writer to be upgraded; old writers ignore it.
+
 Clean matching audits perform only reads, including no tax invalidation. Charge
 comparison uses numeric amount and economic flags, tolerating absent defaults
 and presentation metadata. Per-code failures do not block other repairs. Each

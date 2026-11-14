@@ -374,13 +374,7 @@ impl BillingService {
                         synced_at: Utc::now(),
                         retired_at: None,
                     };
-                    self.db
-                        .collection::<BillingRateCache>(
-                            crate::models::billing_rate_cache::COLLECTION_NAME,
-                        )
-                        .replace_one(doc! {"_id":&cache.id}, cache)
-                        .upsert(true)
-                        .await?;
+                    super::rate_cache::replace(&self.db, &cache).await?;
                 }
                 Ok(true)
             }

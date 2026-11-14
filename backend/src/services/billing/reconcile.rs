@@ -379,6 +379,7 @@ impl BillingReconciler {
         lago: &dyn LagoApi,
         stats: &mut ReconcileStats,
     ) -> AppResult<()> {
+        let mut captured = super::rate_cache::capture(&self.db).await?;
         let plan = match lago.plan_rates(&self.config.lago_plan_code).await {
             Ok(plan) => plan,
             Err(error) => {
@@ -394,33 +395,7 @@ impl BillingReconciler {
             return Ok(());
         }
         let rejected = plan.rejected;
-        let diagnostics = self.db.collection::<Document>("billing_rate_diagnostics");
-        diagnostics
-            .update_one(
-                doc! { "_id": &self.config.lago_plan_code },
-                doc! {
-                    "$set": {
-                        "rejected_metrics": &rejected,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    },
-                },
-            )
-            .upsert(true)
-            .await?;
-        if !rejected.is_empty() {
-            self.db
-                .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .delete_many(doc! { "lago_metric_code": { "$in": &rejected } })
-                .await?;
-        }
-        if plan.rates.is_empty() {
-            tracing::warn!(
-                plan_code = %self.config.lago_plan_code,
-                "Billing rate cache refresh found no standard charges; keeping existing rates"
-            );
-            return Ok(());
-        }
-
+        let empty = plan.rates.is_empty();
         let mut by_code: BTreeMap<String, (i64, Option<i64>)> = plan
             .rates
             .into_iter()
@@ -431,40 +406,61 @@ impl BillingReconciler {
                 )
             })
             .collect();
-        for metric_code in [
-            super::meter::PLATFORM_REQUESTS_METRIC_CODE,
-            super::meter::PLATFORM_BYTES_METRIC_CODE,
-            super::meter::PLATFORM_TOKENS_METRIC_CODE,
-        ] {
-            if !rejected.iter().any(|code| code == metric_code) {
-                by_code
-                    .entry(metric_code.to_string())
-                    .or_insert((0, Some(0)));
+        if !empty {
+            for metric_code in [
+                super::meter::PLATFORM_REQUESTS_METRIC_CODE,
+                super::meter::PLATFORM_BYTES_METRIC_CODE,
+                super::meter::PLATFORM_TOKENS_METRIC_CODE,
+            ] {
+                if !rejected.iter().any(|code| code == metric_code) {
+                    by_code
+                        .entry(metric_code.to_owned())
+                        .or_insert((0, Some(0)));
+                }
             }
         }
-
         let now = Utc::now();
-        let collection = self
-            .db
-            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
-        for (metric_code, (credits_per_unit_micros, credits_per_unit_pico)) in by_code {
-            if !continue_reconcile() {
-                break;
-            }
-            let row = BillingRateCache {
+        let rows: Vec<_> = by_code
+            .into_iter()
+            .map(|(metric_code, (micros, pico))| BillingRateCache {
                 id: BillingRateCache::cache_id(&metric_code, None),
                 lago_metric_code: metric_code,
                 model: None,
-                credits_per_unit_micros,
-                credits_per_unit_pico,
+                credits_per_unit_micros: micros,
+                credits_per_unit_pico: pico,
                 synced_at: now,
                 retired_at: None,
+            })
+            .collect();
+        let size = super::rate_cache::PUBLICATION_BATCH_SIZE;
+        let chunks = rows.len().max(rejected.len()).div_ceil(size).max(1);
+        for index in 0..chunks {
+            if !continue_reconcile() {
+                break;
+            }
+            let start = index * size;
+            let chunk = super::rate_cache::Chunk {
+                captured,
+                plan: &self.config.lago_plan_code,
+                diagnostics: (index == 0).then_some(rejected.as_slice()),
+                rejected: &rejected[start.min(rejected.len())..(start + size).min(rejected.len())],
+                rows: &rows[start.min(rows.len())..(start + size).min(rows.len())],
             };
-            collection
-                .replace_one(doc! { "_id": &row.id }, &row)
-                .upsert(true)
-                .await?;
-            stats.rate_cache_refreshes += 1;
+            let Some((next, written)) = super::rate_cache::publish_chunk(&self.db, chunk).await?
+            else {
+                // Never reuse this provider response with a newly read epoch.
+                return Ok(());
+            };
+            captured = next;
+            stats.rate_cache_refreshes += written;
+            #[cfg(test)]
+            rate_ordering_tests::after_publication(stats.rate_cache_refreshes).await;
+        }
+        if empty {
+            tracing::warn!(
+                plan_code = %self.config.lago_plan_code,
+                "Billing rate cache refresh found no standard charges; keeping existing rates"
+            );
         }
         Ok(())
     }
@@ -919,6 +915,10 @@ fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "rate_ordering_tests.rs"]
+pub(super) mod rate_ordering_tests;
 
 #[cfg(test)]
 #[path = "reconcile_cma_tests.rs"]
