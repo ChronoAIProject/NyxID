@@ -189,6 +189,7 @@ export function useServiceOAuth(
     if (!current()) return;
     setBanner(undefined);
     browserOpen.current = true;
+    let browserStarted = false;
     try {
       const response = await servicesApi.initiateOAuth(
         entry.provider_config_id,
@@ -199,8 +200,10 @@ export function useServiceOAuth(
         repairing ? reconnectScopeOverride(connection, entry) : undefined,
       );
       if (!current()) return;
+      const authorizationUrl = validateBrowserUrl(response.authorization_url);
+      browserStarted = true;
       const result = await WebBrowser.openAuthSessionAsync(
-        validateBrowserUrl(response.authorization_url),
+        authorizationUrl,
         serviceOAuthReturnUri(),
       );
       if (!current()) return;
@@ -209,6 +212,11 @@ export function useServiceOAuth(
         if (hint) recordServiceOAuthReturn(hint);
       }
     } catch (error) {
+      if (!browserStarted) {
+        await clearServiceOAuth(attempt);
+        if (current()) setBanner({ attempt, outcome: "failed" });
+        throw error;
+      }
       // A browser-launch error may follow a completed provider callback; retain
       // the attempt and read the server before deciding what happened.
       if (__DEV__)

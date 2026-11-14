@@ -162,6 +162,19 @@ test("success URL still needs a changed active server connection", async () => {
   await unmount();
 });
 
+test("provider setup errors before browser launch stay actionable and clear the pending attempt", async () => {
+  jest.mocked(servicesApi.initiateOAuth).mockRejectedValueOnce(new Error("Configure the OAuth app first"));
+  const { result, unmount } = await renderHook(() => useServiceOAuth(true, changed));
+  await flush();
+  await act(async () => {
+    await expect(result.current.start(connection, entry)).rejects.toThrow("Configure the OAuth app first");
+  });
+  expect(result.current.banner?.outcome).toBe("failed");
+  expect(await loadServiceOAuth()).toBeNull();
+  expect(WebBrowser.openAuthSessionAsync).not.toHaveBeenCalled();
+  await unmount();
+});
+
 test("relaunch recovers a persisted attempt; foreground refresh resolves it", async () => {
   await saveServiceOAuth(pending());
   const handlers: ((state: AppStateStatus) => void)[] = [];
