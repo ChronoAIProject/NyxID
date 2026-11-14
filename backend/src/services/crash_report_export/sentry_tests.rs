@@ -1,3 +1,6 @@
+fn test_exporter(dsn: &str) -> Result<SentryExporter, &'static str> {
+    SentryExporter::new(&crate::config::CrashDestinationConfig::for_test(dsn)?)
+}
 use super::*;
 use crate::services::crash_report_service::tests::report;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -12,9 +15,11 @@ fn startup_dsn_validation_rejects_paths_queries_credentials_and_insecure_hosts()
         "https://example.test/1",
         "https://key@example.test/",
     ] {
-        assert!(SentryExporter::new(dsn).is_err());
+        assert!(crate::config::CrashDestinationConfig::parse(dsn).is_err());
     }
-    assert!(SentryExporter::new("https://publickey@example.test/123").is_ok());
+    assert!(
+        crate::config::CrashDestinationConfig::parse("https://publickey@example.test/123").is_ok()
+    );
 }
 #[tokio::test]
 async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_context() {
@@ -23,10 +28,7 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let exporter = SentryExporter::parse(
-        &(server.uri().replace("http://", "http://publickey@") + "/123"),
-        true,
-    );
+    let exporter = test_exporter(&(server.uri().replace("http://", "http://publickey@") + "/123"));
     let exporter = exporter.unwrap();
     // Contaminate fields belonging to local ownership and export bookkeeping.
     // The transport must receive only the closed report projection.
@@ -43,7 +45,7 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
         report: r,
         environment: "test".into(),
         severity: "error".into(),
-        fingerprint: "abc".into(),
+        fingerprint: "local-only".into(),
         received_at: now,
         expires_at: now + chrono::Duration::days(30),
         export: Export {
@@ -62,7 +64,6 @@ async fn exported_bytes_and_headers_have_no_personal_sentinels_or_request_contex
         report: &row.report,
         environment: &row.environment,
         severity: &row.severity,
-        fingerprint: &row.fingerprint,
     };
     assert_eq!(exporter.submit(&safe).await, SubmitOutcome::Exported);
     let requests = server.received_requests().await.unwrap();
@@ -116,11 +117,8 @@ async fn native_export_uses_image_mapping_and_relative_offsets_without_absolute_
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let exporter = SentryExporter::parse(
-        &(server.uri().replace("http://", "http://publickey@") + "/456"),
-        true,
-    )
-    .unwrap();
+    let exporter =
+        test_exporter(&(server.uri().replace("http://", "http://publickey@") + "/456")).unwrap();
     let mut r = report();
     r.platform = Platform::Ios;
     r.kind = Kind::NativeCrash;
@@ -150,7 +148,6 @@ async fn native_export_uses_image_mapping_and_relative_offsets_without_absolute_
                 report: &r,
                 environment: "test",
                 severity: "fatal",
-                fingerprint: "abc"
             })
             .await,
         SubmitOutcome::Exported
@@ -205,11 +202,8 @@ async fn retry_unknown_rejection_and_connect_outcomes_are_distinct() {
             .respond_with(ResponseTemplate::new(status).insert_header("Retry-After", "20"))
             .mount(&server)
             .await;
-        let exporter = SentryExporter::parse(
-            &(server.uri().replace("http://", "http://publickey@") + "/1"),
-            true,
-        )
-        .unwrap();
+        let exporter =
+            test_exporter(&(server.uri().replace("http://", "http://publickey@") + "/1")).unwrap();
         let r = report();
         assert_eq!(
             exporter
@@ -217,13 +211,12 @@ async fn retry_unknown_rejection_and_connect_outcomes_are_distinct() {
                     report: &r,
                     environment: "test",
                     severity: "error",
-                    fingerprint: "abc"
                 })
                 .await,
             outcome
         );
     }
-    let exporter = SentryExporter::parse("http://publickey@127.0.0.1:1/1", true).unwrap();
+    let exporter = test_exporter("http://publickey@127.0.0.1:1/1").unwrap();
     let r = report();
     assert!(matches!(
         exporter
@@ -231,7 +224,6 @@ async fn retry_unknown_rejection_and_connect_outcomes_are_distinct() {
                 report: &r,
                 environment: "test",
                 severity: "error",
-                fingerprint: "abc"
             })
             .await,
         SubmitOutcome::Retry {
@@ -248,11 +240,8 @@ async fn timeout_after_dispatch_is_unknown_and_never_a_connect_retry() {
         .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(11)))
         .mount(&server)
         .await;
-    let exporter = SentryExporter::parse(
-        &(server.uri().replace("http://", "http://publickey@") + "/1"),
-        true,
-    )
-    .unwrap();
+    let exporter =
+        test_exporter(&(server.uri().replace("http://", "http://publickey@") + "/1")).unwrap();
     let r = report();
     assert_eq!(
         exporter
@@ -260,10 +249,57 @@ async fn timeout_after_dispatch_is_unknown_and_never_a_connect_retry() {
                 report: &r,
                 environment: "test",
                 severity: "error",
-                fingerprint: "abc"
             })
             .await,
         SubmitOutcome::Unknown
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[test]
+fn sentry_uses_symbolicated_grouping_platform_releases_and_standard_contexts() {
+    use crate::models::client_error_report::{Platform, Runtime, RuntimeName};
+    for platform in [Platform::Web, Platform::Ios, Platform::Android] {
+        let mut report = report();
+        report.platform = platform;
+        report.runtime = if platform == Platform::Web {
+            Some(Runtime {
+                name: RuntimeName::Chrome,
+                major: 123,
+            })
+        } else {
+            None
+        };
+        let bytes = envelope(&SanitizedReport {
+            report: &report,
+            environment: "test",
+            severity: "error",
+        });
+        let text = String::from_utf8(bytes).unwrap();
+        let event: serde_json::Value = serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
+        assert!(event.get("fingerprint").is_none());
+        if platform == Platform::Web {
+            assert!(event["release"].as_str().unwrap().starts_with("nyxid-web@"));
+            assert!(event["contexts"]["os"].get("name").is_none());
+            assert_eq!(event["contexts"]["browser"]["name"], "chrome");
+            assert!(event["contexts"].get("runtime").is_none());
+        } else {
+            assert!(
+                event["release"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("nyxid-{}@", platform.as_str()))
+            );
+            assert_eq!(
+                event["contexts"]["os"]["name"],
+                if platform == Platform::Ios {
+                    "iOS"
+                } else {
+                    "Android"
+                }
+            );
+            assert!(event["contexts"].get("runtime").is_none());
+            assert!(event["contexts"].get("browser").is_none());
+        }
+    }
 }

@@ -21,33 +21,50 @@ pub async fn global_killed(db: &Database) -> AppResult<bool> {
         "flag_key": FLAG, "definition_id": null, "org_user_id": null, "target_kind": "global", "target_key": null, "enabled": false
     }).await?.is_some())
 }
-pub async fn available(db: &Database, actor: &str) -> bool {
-    if !matches!(global_killed(db).await, Ok(false)) {
+async fn offered_with_readiness(db: &Database, actor: &str, serving: bool) -> bool {
+    if !serving {
         return false;
     }
-    if !matches!(
-        super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await,
-        Ok(true)
-    ) {
-        return false;
-    }
-    super::security_readiness_service::require_serving(db, FLAG)
+    // Resolve the flag directly: personal_flag_enabled also performs diagnostic
+    // readiness reads, which this caller has already completed.
+    if !super::feature_flag_service::resolve_personal_features(db, actor)
         .await
-        .is_ok()
+        .is_ok_and(|flags| flags.iter().any(|flag| flag == FLAG))
+    {
+        return false;
+    }
+    matches!(global_killed(db).await, Ok(false))
+}
+pub async fn available(db: &Database, actor: &str) -> bool {
+    let serving = super::security_readiness_service::require_serving(db, FLAG)
+        .await
+        .is_ok();
+    offered_with_readiness(db, actor, serving).await
+}
+async fn bounded_policy_status(
+    check: impl std::future::Future<Output = (bool, bool)>,
+) -> (&'static str, bool, bool) {
+    let (offered, available) = tokio::time::timeout(Duration::from_millis(250), check)
+        .await
+        .unwrap_or((false, false));
+    (if offered { "2" } else { "1" }, offered, available)
 }
 pub async fn policy_status(
     db: &Database,
     actor: &str,
     value: &crate::models::user::AnalyticsConsent,
-) -> (&'static str, bool) {
-    let serving = super::security_readiness_service::require_serving(db, FLAG)
-        .await
-        .is_ok();
-    let diagnostics = serving
-        && value.enabled
-        && value.policy_version.as_deref() == Some(consent::POLICY_VERSION_DIAGNOSTICS)
-        && available(db, actor).await;
-    (if serving { "2" } else { "1" }, diagnostics)
+) -> (&'static str, bool, bool) {
+    bounded_policy_status(async {
+        let serving = super::security_readiness_service::require_serving(db, FLAG)
+            .await
+            .is_ok();
+        let offered = offered_with_readiness(db, actor, serving).await;
+        let available = offered
+            && value.enabled
+            && value.policy_version.as_deref() == Some(consent::POLICY_VERSION_DIAGNOSTICS);
+        (offered, available)
+    })
+    .await
 }
 pub async fn rate_limits(db: &Database, actor: &str, ip: Option<&str>) -> AppResult<()> {
     let limits = [

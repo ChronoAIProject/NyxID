@@ -116,22 +116,12 @@ static WARN_AFTER: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 fn warn(endpoint: Endpoint, status: StatusCode, code: &str) {
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let slot = &WARN_AFTER[endpoint as usize];
-    let mut until = slot.load(Ordering::Relaxed);
-    let admitted = loop {
-        if now < until {
-            break false;
-        }
-        match slot.compare_exchange_weak(
-            until,
-            now.saturating_add(60),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break true,
-            Err(current) => until = current,
-        }
-    };
-    if admitted {
+    if slot
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |until| {
+            (now >= until).then_some(now.saturating_add(60))
+        })
+        .is_ok()
+    {
         tracing::warn!(
             endpoint = endpoint.name(),
             status = status.as_u16(),

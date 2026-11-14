@@ -23,18 +23,16 @@ pub type BrowserError = std::io::Error;
 /// fallback (e.g. a `sudo` shell that dropped the session env), the
 /// kernel release string carries `microsoft` under both WSL 1 and WSL 2.
 pub fn is_wsl() -> bool {
-    let environment_hint =
-        std::env::var_os("WSL_INTEROP").is_some() || std::env::var_os("WSL_DISTRO_NAME").is_some();
+    if std::env::var_os("WSL_INTEROP").is_some() || std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        return true;
+    }
     #[cfg(target_os = "linux")]
     {
-        environment_hint
-            || std::fs::read_to_string("/proc/sys/kernel/osrelease")
-                .is_ok_and(|osrelease| osrelease.to_ascii_lowercase().contains("microsoft"))
+        if let Ok(osrelease) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+            return osrelease.to_ascii_lowercase().contains("microsoft");
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        environment_hint
-    }
+    false
 }
 
 /// Open `url` in the user's default browser.

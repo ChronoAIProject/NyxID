@@ -16,7 +16,7 @@ pub(crate) async fn account(name: &str) -> (Database, String, String) {
         .insert_one(test_user(&id, UserType::Person))
         .await
         .unwrap();
-    let revision = consent::set(&db, &id, true, consent::PolicyVersion::Diagnostics)
+    let revision = consent::set_acknowledging(&db, &id, true, consent::PolicyVersion::Diagnostics)
         .await
         .unwrap()
         .revision;
@@ -150,9 +150,13 @@ async fn consent_matrix_storage_duplicate_ttl_and_expired_reads() {
         consent::PolicyVersion::V1,
         consent::PolicyVersion::Diagnostics,
     ] {
-        let disabled = consent::set(&db, &id, false, policy).await.unwrap();
+        let disabled = consent::set_acknowledging(&db, &id, false, policy)
+            .await
+            .unwrap();
         assert!(!consent::permits_diagnostics(&db, &id, &disabled.revision).await);
-        let enabled = consent::set(&db, &id, true, policy).await.unwrap();
+        let enabled = consent::set_acknowledging(&db, &id, true, policy)
+            .await
+            .unwrap();
         assert!(consent::permits_dispatch(&db, &id, &enabled.revision).await);
         assert_eq!(
             consent::permits_diagnostics(&db, &id, &enabled.revision).await,
@@ -286,7 +290,7 @@ use futures::TryStreamExt;
 #[tokio::test]
 async fn diagnostics_gate_requires_a_policy_acknowledgement_without_changing_analytics() {
     let (db, id, _) = account("crash_policy_gate").await;
-    let permission = consent::set(&db, &id, true, consent::PolicyVersion::V1)
+    let permission = consent::set_acknowledging(&db, &id, true, consent::PolicyVersion::V1)
         .await
         .unwrap();
     assert!(consent::permits_dispatch(&db, &id, &permission.revision).await);
@@ -321,4 +325,14 @@ async fn simultaneous_first_counter_writes_preserve_every_outcome() {
             .sum::<i64>(),
         32
     );
+}
+
+#[tokio::test]
+async fn policy_status_timeout_fails_closed_without_failing_consent() {
+    let start = std::time::Instant::now();
+    assert_eq!(
+        bounded_policy_status(std::future::pending()).await,
+        ("1", false, false)
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
 }

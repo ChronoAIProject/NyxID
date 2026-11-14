@@ -789,22 +789,12 @@ mod tests {
                         serde_json::from_slice::<Value>(&request.body).unwrap(),
                         controls::schema()
                     );
-                    let mut remaining = failures.load(Ordering::SeqCst);
-                    let failed = loop {
-                        let Some(next) = remaining.checked_sub(1) else {
-                            break false;
-                        };
-                        match failures.compare_exchange_weak(
-                            remaining,
-                            next,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        ) {
-                            Ok(_) => break true,
-                            Err(current) => remaining = current,
-                        }
-                    };
-                    if failed {
+                    if failures
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            remaining.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
                         return ResponseTemplate::new(503);
                     }
                     assert!(

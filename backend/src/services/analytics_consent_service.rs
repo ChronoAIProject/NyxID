@@ -63,7 +63,11 @@ pub async fn read(db: &Database, user_id: &str) -> AppResult<AnalyticsConsent> {
         .ok_or_else(|| AppError::NotFound("Active personal account not found".into()))
 }
 
-pub async fn set(
+pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<AnalyticsConsent> {
+    set_acknowledging(db, user_id, enabled, PolicyVersion::V1).await
+}
+
+pub async fn set_acknowledging(
     db: &Database,
     user_id: &str,
     enabled: bool,
@@ -185,7 +189,7 @@ mod tests {
         assert!(absent.revision.is_empty());
         for enabled in [true, false] {
             let before = db.run_command(doc! {"hello": 1}).await.unwrap();
-            let saved = set(&db, &id, enabled, PolicyVersion::V1).await.unwrap();
+            let saved = set(&db, &id, enabled).await.unwrap();
             let after = db.run_command(doc! {"hello": 1}).await.unwrap();
             assert_eq!(saved.enabled, enabled);
             assert_eq!(saved.policy_version.as_deref(), Some(POLICY_VERSION));
@@ -222,7 +226,7 @@ mod tests {
         let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&id));
         for choice in [None, Some(false), Some(true), Some(false)] {
             if let Some(enabled) = choice {
-                set(&db, &id, enabled, PolicyVersion::V1).await.unwrap();
+                set(&db, &id, enabled).await.unwrap();
             }
             audit_service::log_actor_event(
                 db.clone(),
@@ -280,7 +284,7 @@ mod tests {
             .await
             .unwrap();
         commands.lock().unwrap().clear();
-        let consent = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
+        let consent = set(&db, &id, true).await.unwrap();
         assert!(permits_dispatch(&db, &id, &consent.revision).await);
         let recorded = commands.lock().unwrap();
         let write = recorded
@@ -346,11 +350,11 @@ mod tests {
                 .is_none()
         );
         assert!(permitted_revision(&db, "pre-login").await.is_none());
-        let first = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
+        let first = set(&db, &id, true).await.unwrap();
         assert!(permits_dispatch(&db, &id, &first.revision).await);
-        set(&db, &id, false, PolicyVersion::V1).await.unwrap();
+        set(&db, &id, false).await.unwrap();
         assert!(!permits_dispatch(&db, &id, &first.revision).await);
-        let second = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
+        let second = set(&db, &id, true).await.unwrap();
         assert_ne!(first.revision, second.revision);
         assert!(!permits_dispatch(&db, &id, &first.revision).await);
         assert!(permits_dispatch(&db, &id, &second.revision).await);
@@ -362,16 +366,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!permits_dispatch(&db, &id, &second.revision).await);
-        assert!(set(&db, &id, true, PolicyVersion::V1).await.is_err());
+        assert!(set(&db, &id, true).await.is_err());
     }
 
     #[tokio::test]
     async fn clock_skew_and_same_timestamp_do_not_resurrect_old_permission() {
         let (db, id) = account().await;
-        let first = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
+        let first = set(&db, &id, true).await.unwrap();
         for millis in [0_i64, i64::MAX / 2, 0] {
-            set(&db, &id, false, PolicyVersion::V1).await.unwrap();
-            let current = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
+            set(&db, &id, false).await.unwrap();
+            let current = set(&db, &id, true).await.unwrap();
             db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id": &id}, doc! {"$set": {"profile_config.analytics.changed_at": bson::DateTime::from_millis(millis)}}).await.unwrap();
             assert!(!permits_dispatch(&db, &id, &first.revision).await);
             assert!(permits_dispatch(&db, &id, &current.revision).await);
@@ -381,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn reads_override_inherited_secondary_only_preference() {
         let (db, id) = account().await;
-        let current = set(&db, &id, true, PolicyVersion::V1).await.unwrap();
+        let current = set(&db, &id, true).await.unwrap();
         let secondary_only = db.client().database_with_options(
             db.name(),
             mongodb::options::DatabaseOptions::builder()
@@ -405,10 +409,8 @@ mod tests {
             .insert_one(test_user(&other, UserType::Person))
             .await
             .unwrap();
-        let choices = futures::future::join_all(
-            (0..16).map(|index| set(&db, &id, index % 2 == 0, PolicyVersion::V1)),
-        )
-        .await;
+        let choices =
+            futures::future::join_all((0..16).map(|index| set(&db, &id, index % 2 == 0))).await;
         let mut revisions = std::collections::HashSet::new();
         for choice in choices {
             assert!(revisions.insert(choice.unwrap().revision));

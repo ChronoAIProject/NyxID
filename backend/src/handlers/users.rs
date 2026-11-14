@@ -1866,6 +1866,7 @@ pub struct AnalyticsConsentRequest {
 #[derive(serde::Serialize)]
 pub struct AnalyticsConsentResponse {
     pub current_policy_version: String,
+    pub diagnostics_offered: bool,
     pub diagnostics_available: bool,
     pub account_id: String,
     pub policy_version: Option<String>,
@@ -1879,7 +1880,7 @@ async fn analytics_consent_response(
     account_id: &str,
     value: crate::models::user::AnalyticsConsent,
 ) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
-    let (current, diagnostics) =
+    let (current, offered, diagnostics) =
         crate::services::crash_report_service::policy_status(db, account_id, &value).await;
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1890,6 +1891,7 @@ async fn analytics_consent_response(
         headers,
         Json(AnalyticsConsentResponse {
             current_policy_version: current.into(),
+            diagnostics_offered: offered,
             diagnostics_available: diagnostics,
             account_id: account_id.to_owned(),
             policy_version: value.policy_version,
@@ -1926,20 +1928,12 @@ pub async fn set_analytics_consent(
             "Account changed; reload before changing analytics permission".into(),
         ));
     }
-    Ok(analytics_consent_response(
-        &state.db,
-        &actor,
-        crate::services::analytics_consent_service::set(
-            &state.db,
-            &actor,
-            body.enabled,
-            crate::services::analytics_consent_service::PolicyVersion::parse(
-                body.policy_version.as_deref(),
-            )?,
-        )
-        .await?,
-    )
-    .await)
+    use crate::services::analytics_consent_service::{self as consent, PolicyVersion};
+    let value = match PolicyVersion::parse(body.policy_version.as_deref())? {
+        PolicyVersion::V1 => consent::set(&state.db, &actor, body.enabled).await?,
+        policy => consent::set_acknowledging(&state.db, &actor, body.enabled, policy).await?,
+    };
+    Ok(analytics_consent_response(&state.db, &actor, value).await)
 }
 
 #[cfg(test)]
@@ -1961,22 +1955,8 @@ mod analytics_tests {
                 .await
                 .unwrap();
         }
-        let a = consent::set(
-            &db,
-            &first,
-            false,
-            crate::services::analytics_consent_service::PolicyVersion::V1,
-        )
-        .await
-        .unwrap();
-        let b = consent::set(
-            &db,
-            &second,
-            false,
-            crate::services::analytics_consent_service::PolicyVersion::V1,
-        )
-        .await
-        .unwrap();
+        let a = consent::set(&db, &first, false).await.unwrap();
+        let b = consent::set(&db, &second, false).await.unwrap();
         let state = test_app_state(db.clone());
         assert!(
             set_analytics_consent(

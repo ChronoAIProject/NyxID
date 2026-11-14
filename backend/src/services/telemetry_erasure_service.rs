@@ -1203,14 +1203,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let permission = consent::set(
-            &db,
-            &user,
-            true,
-            crate::services::analytics_consent_service::PolicyVersion::V1,
-        )
-        .await
-        .unwrap();
+        let permission = consent::set(&db, &user, true).await.unwrap();
         // `begin` is a majority-write transaction bounded by its production
         // 250 ms deadline; require a responsive server before measuring it.
         crate::test_utils::await_responsive_majority_io(&db).await;
@@ -1365,14 +1358,9 @@ mod tests {
             .insert_one(test_user(&user, UserType::Person))
             .await
             .unwrap();
-        super::super::analytics_consent_service::set(
-            &db,
-            &user,
-            true,
-            crate::services::analytics_consent_service::PolicyVersion::V1,
-        )
-        .await
-        .unwrap();
+        super::super::analytics_consent_service::set(&db, &user, true)
+            .await
+            .unwrap();
         let (clients, server) = test_support::clients().await;
         register_destinations(&db, &clients).await.unwrap();
         server.state.hold_capture.store(true, Ordering::SeqCst);

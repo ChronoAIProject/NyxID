@@ -8,7 +8,6 @@ pub struct SanitizedReport<'a> {
     pub report: &'a CrashReportV1,
     pub environment: &'a str,
     pub severity: &'a str,
-    pub fingerprint: &'a str,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum SubmitOutcome {
@@ -40,35 +39,16 @@ impl Default for CrashConfig {
     }
 }
 impl CrashConfig {
-    pub fn from_env() -> Result<Self, &'static str> {
-        let destination = |key| -> Result<Option<Arc<dyn CrashReportExporter>>, &'static str> {
-            match std::env::var(key) {
-                Ok(value) if !value.is_empty() => {
-                    Ok(Some(Arc::new(sentry::SentryExporter::new(&value)?)))
-                }
-                Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
-                Err(_) => Err("Invalid crash destination configuration"),
-            }
+    pub fn from_config(config: &crate::config::AppConfig) -> Result<Self, &'static str> {
+        let value = &config.crash_reporting;
+        let destination = |v: &Option<crate::config::CrashDestinationConfig>| -> Result<Option<Arc<dyn CrashReportExporter>>, &'static str> {
+            v.as_ref().map(|v| sentry::SentryExporter::new(v).map(|e| Arc::new(e) as Arc<dyn CrashReportExporter>)).transpose()
         };
-        let retention_days = std::env::var("CRASH_REPORTS_RETENTION_DAYS")
-            .unwrap_or_else(|_| "30".into())
-            .parse::<u32>()
-            .map_err(|_| "Invalid crash retention")?;
-        if !(1..=30).contains(&retention_days) {
-            return Err("Crash retention must be 1–30 days");
-        }
-        let interval = std::env::var("CRASH_REPORTS_EXPORT_INTERVAL_SECS")
-            .unwrap_or_else(|_| "10".into())
-            .parse::<u64>()
-            .map_err(|_| "Invalid crash export interval")?;
-        if interval > 86400 {
-            return Err("Crash export interval exceeds one day");
-        }
         Ok(Self {
-            web: destination("CRASH_REPORTS_SENTRY_DSN_WEB")?,
-            mobile: destination("CRASH_REPORTS_SENTRY_DSN_MOBILE")?,
-            retention_days,
-            interval: Duration::from_secs(interval),
+            web: destination(&value.web)?,
+            mobile: destination(&value.mobile)?,
+            retention_days: value.retention_days,
+            interval: Duration::from_secs(value.export_interval_secs),
         })
     }
     pub fn destination(&self, platform: Platform) -> Option<&dyn CrashReportExporter> {

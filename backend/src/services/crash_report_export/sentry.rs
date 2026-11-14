@@ -15,35 +15,8 @@ impl std::fmt::Debug for SentryExporter {
     }
 }
 impl SentryExporter {
-    pub fn new(dsn: &str) -> Result<Self, &'static str> {
-        Self::parse(dsn, false)
-    }
-    fn parse(dsn: &str, allow_test_http: bool) -> Result<Self, &'static str> {
-        let mut endpoint = url::Url::parse(dsn).map_err(|_| "Invalid crash DSN")?;
-        let project = endpoint
-            .path()
-            .strip_prefix('/')
-            .ok_or("Invalid crash DSN project")?
-            .to_owned();
-        let key = endpoint.username().to_owned();
-        if (endpoint.scheme() != "https"
-            && !(allow_test_http
-                && endpoint.scheme() == "http"
-                && endpoint.host_str() == Some("127.0.0.1")))
-            || endpoint.host_str().is_none()
-            || endpoint.password().is_some()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-            || project.is_empty()
-            || !project.bytes().all(|b| b.is_ascii_digit())
-            || key.is_empty()
-            || key.len() > 128
-            || !key.bytes().all(|b| b.is_ascii_alphanumeric())
-        {
-            return Err("Invalid crash DSN");
-        }
-        endpoint.set_username("").map_err(|_| "Invalid crash DSN")?;
-        endpoint.set_path(&format!("/api/{project}/envelope/"));
+    pub fn new(config: &crate::config::CrashDestinationConfig) -> Result<Self, &'static str> {
+        let endpoint = config.endpoint.clone();
         let id = hex::encode(Sha256::digest(endpoint.as_str().as_bytes()));
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -55,7 +28,7 @@ impl SentryExporter {
         Ok(Self {
             client,
             endpoint,
-            auth: format!("Sentry sentry_version=7,sentry_key={key}"),
+            auth: config.auth.clone(),
             id,
         })
     }
@@ -86,20 +59,35 @@ pub fn envelope(safe: &SanitizedReport<'_>) -> Vec<u8> {
             r.artifact_id.as_deref().unwrap_or("unknown")
         )
     } else {
-        format!("nyxid-mobile@{}+{}", r.app_version, r.app_build)
+        format!(
+            "nyxid-{}@{}+{}",
+            r.platform.as_str(),
+            r.app_version,
+            r.app_build
+        )
     };
     let mut event = json!({
         "event_id": event_id, "timestamp": r.captured_at, "level": safe.severity,
         "platform": if native {"cocoa"} else {"javascript"}, "release": release, "dist": r.app_build,
-        "environment": safe.environment, "fingerprint": [safe.fingerprint],
+        "environment": safe.environment,
         "exception": {"values": [{"type": r.native_signal.map(|s| s.as_str()).unwrap_or(r.exception_class.as_str()),
             "mechanism": {"type": r.kind.as_str(), "handled": matches!(r.kind, Kind::RenderError | Kind::RecoverableError | Kind::ResourceError)},
             "stacktrace": {"frames": frames}}]},
         "contexts": {"os": {"version": r.os_version}}, "tags": {"kind": r.kind.as_str(), "platform": r.platform.as_str()}
     });
+    if r.platform != Platform::Web {
+        event["contexts"]["os"]["name"] = json!(if r.platform == Platform::Ios {
+            "iOS"
+        } else {
+            "Android"
+        });
+    }
     if let Some(runtime) = &r.runtime {
-        event["contexts"]["runtime"] =
-            json!({"name": runtime.name.as_str(), "version": runtime.major.to_string()});
+        event["contexts"][if r.platform == Platform::Web {
+            "browser"
+        } else {
+            "runtime"
+        }] = json!({"name": runtime.name.as_str(), "version": runtime.major.to_string()});
     }
     if native {
         event["debug_meta"] = json!({"images": r.native_images.iter().map(|i| json!({"type": "macho", "debug_id": i.uuid, "image_addr": "0x0", "image_size": i.size, "code_file": i.name})).collect::<Vec<_>>()});

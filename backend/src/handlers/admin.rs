@@ -3233,14 +3233,9 @@ mod operator_route_tests {
             crate::test_utils::connect_transaction_test_database("analytics_operator_repair").await;
         let user = insert_user(&db, false, false).await;
         let operator = insert_user(&db, false, true).await;
-        let consent = crate::services::analytics_consent_service::set(
-            &db,
-            &user,
-            true,
-            crate::services::analytics_consent_service::PolicyVersion::V1,
-        )
-        .await
-        .unwrap();
+        let consent = crate::services::analytics_consent_service::set(&db, &user, true)
+            .await
+            .unwrap();
         // Repair starts from durable transport uncertainty; the separate
         // bounded analytics admission path is not this permission test's setup.
         let dispatch = Uuid::new_v4().to_string();

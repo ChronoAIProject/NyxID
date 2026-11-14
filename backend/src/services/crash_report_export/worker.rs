@@ -113,7 +113,6 @@ async fn dispatch(
         report: &row.report,
         environment: &row.environment,
         severity: &row.severity,
-        fingerprint: &row.fingerprint,
     };
     let outcome = destination
         .expect("checked destination")
@@ -237,14 +236,24 @@ mod tests {
             let (db, actor, _, id, config, exporter) = setup("crash_worker_denials", 0).await;
             match mode {
                 "withdraw" => {
-                    consent::set(&db, &actor, false, consent::PolicyVersion::Diagnostics)
-                        .await
-                        .unwrap();
+                    consent::set_acknowledging(
+                        &db,
+                        &actor,
+                        false,
+                        consent::PolicyVersion::Diagnostics,
+                    )
+                    .await
+                    .unwrap();
                 }
                 "regrant" => {
-                    consent::set(&db, &actor, true, consent::PolicyVersion::Diagnostics)
-                        .await
-                        .unwrap();
+                    consent::set_acknowledging(
+                        &db,
+                        &actor,
+                        true,
+                        consent::PolicyVersion::Diagnostics,
+                    )
+                    .await
+                    .unwrap();
                 }
                 "deleted" => {
                     db.collection::<Document>(crate::models::user::COLLECTION_NAME)

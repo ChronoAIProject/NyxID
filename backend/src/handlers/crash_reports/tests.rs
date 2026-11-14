@@ -114,7 +114,7 @@ async fn ingestion_auth_consent_device_readiness_kill_and_encoding_matrix() {
             StatusCode::ACCEPTED
         );
     }
-    consent::set(&db, &id, false, consent::PolicyVersion::Diagnostics)
+    consent::set_acknowledging(&db, &id, false, consent::PolicyVersion::Diagnostics)
         .await
         .unwrap();
     assert!(matches!(
@@ -350,4 +350,77 @@ async fn sentinel_ingress_storage_and_tracing_never_retain_untrusted_text() {
             .unwrap();
         assert!(!format!("{stored:?}").contains(text));
     }
+}
+
+#[tokio::test]
+async fn serving_readiness_with_flag_off_does_not_offer_diagnostics_or_fail_consent() {
+    let (db, id, _) = account("crash_not_offered").await;
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    let state = test_app_state(db.clone());
+    let (_, Json(response)) =
+        super::super::users::get_analytics_consent(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+    assert_eq!(response.current_policy_version, "1");
+    assert!(!response.diagnostics_offered);
+    assert!(!response.diagnostics_available);
+    crate::services::feature_flag_service::set_platform_override(
+        &db,
+        service::FLAG,
+        &crate::services::feature_flag_service::FlagTarget::User(id.clone()),
+        true,
+        &id,
+    )
+    .await
+    .unwrap();
+    let (_, Json(response)) =
+        super::super::users::get_analytics_consent(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+    assert_eq!(response.current_policy_version, "2");
+    assert!(response.diagnostics_offered);
+    crate::services::feature_flag_service::set_platform_override(
+        &db,
+        service::FLAG,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        false,
+        &id,
+    )
+    .await
+    .unwrap();
+    let (_, Json(response)) =
+        super::super::users::get_analytics_consent(State(state), test_auth_user(&id))
+            .await
+            .unwrap();
+    assert_eq!(response.current_policy_version, "1");
+    assert!(!response.diagnostics_offered);
+}
+
+#[tokio::test]
+async fn crash_status_lookup_failures_do_not_fail_consent_get_or_put() {
+    let (db, id, _) = account("crash_status_failure").await;
+    readiness::ready_test_replica(&db).await;
+    db.collection::<bson::Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .insert_one(bson::doc! {"_id":uuid::Uuid::new_v4().to_string(),"org_user_id":null,"enabled":"invalid"}).await.unwrap();
+    let state = test_app_state(db.clone());
+    let (_, Json(response)) =
+        super::super::users::get_analytics_consent(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+    assert_eq!(response.current_policy_version, "1");
+    assert!(!response.diagnostics_offered);
+    let (_, Json(response)) = super::super::users::set_analytics_consent(
+        State(state),
+        test_auth_user(&id),
+        Json(super::super::users::AnalyticsConsentRequest {
+            account_id: id.clone(),
+            enabled: false,
+            policy_version: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!response.enabled);
+    assert!(!response.diagnostics_offered);
+    assert_eq!(response.policy_version.as_deref(), Some("1"));
 }

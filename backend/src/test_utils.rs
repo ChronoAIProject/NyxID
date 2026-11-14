@@ -1856,6 +1856,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 /// config's side-effect-free fields (encryption key, limits, feature flags).
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
+        crash_reporting: crate::config::CrashReportingConfig::default(),
         port: 3001,
         shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
         auth_device_eight_char_codes: false,

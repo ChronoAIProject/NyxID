@@ -1185,7 +1185,7 @@ async fn server_run(cli: Cli) {
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     let crash_reports = Arc::new(
-        services::crash_report_export::CrashConfig::from_env()
+        services::crash_report_export::CrashConfig::from_config(&config)
             .expect("Invalid crash reporting configuration"),
     );
     let state = AppState {
