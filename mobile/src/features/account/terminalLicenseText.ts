@@ -16,7 +16,15 @@ export function reflowTerminalLicenses(raw: string): TerminalLicenseNotice[] {
       const text = bodyLines
         .join("\n")
         .split(/\n{2,}/)
-        .map((paragraph) => paragraph.split("\n").join(" "))
+        .map((paragraph) =>
+          paragraph
+            .split("\n")
+            .map((line) => line.trim())
+            .reduce(
+              (text, line) =>
+                `${text}${/^copyright/i.test(line) ? "\n" : " "}${line}`,
+            ),
+        )
         .join("\n\n");
       return { packageName, text };
     });

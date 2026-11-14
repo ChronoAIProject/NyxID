@@ -1,4 +1,4 @@
-import { ScrollView, StyleSheet } from "react-native";
+import { ScrollView, StyleSheet, View } from "react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { SettingsPage } from "../../components/settings/SettingsList";
@@ -18,18 +18,19 @@ export function OpenSourceNoticesScreen(
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator
       >
-        <Text selectable style={[styles.text, { color: colors.textPrimary }]}>
-          {reflowTerminalLicenses(terminalLicenses).map(
-            (notice, index, notices) => (
-              <Text key={notice.packageName} style={styles.notice}>
-                <Text style={styles.heading}>{notice.packageName}</Text>
-                {"\n"}
-                {notice.text}
-                {index < notices.length - 1 ? "\n\n" : null}
-              </Text>
-            ),
-          )}
-        </Text>
+        {reflowTerminalLicenses(terminalLicenses).map((notice) => (
+          <View key={notice.packageName} style={styles.notice}>
+            <Text
+              accessibilityRole="header"
+              style={[styles.heading, { color: colors.textPrimary }]}
+            >
+              {notice.packageName}
+            </Text>
+            <Text selectable style={[styles.text, { color: colors.textPrimary }]}>
+              {notice.text}
+            </Text>
+          </View>
+        ))}
       </ScrollView>
     </SettingsPage>
   );
@@ -39,6 +40,6 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   content: { padding: spacing.md, gap: spacing.md },
   text: { ...typeScale.mono, fontFamily: fonts.mono, lineHeight: 20 },
-  notice: { ...typeScale.mono, fontFamily: fonts.mono, lineHeight: 20 },
-  heading: { fontSize: 13, lineHeight: 18, fontWeight: "600" },
+  notice: { gap: spacing.sm },
+  heading: { ...typeScale.small, letterSpacing: 0.6 },
 });
