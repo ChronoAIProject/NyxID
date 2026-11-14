@@ -245,6 +245,18 @@ rows (which TTL-expire), and stores new rows as disabled even with a DSN.
 The admin health explicitly shows Export disabled. Stale workers cannot settle successor claims. Missing platform DSN stores
 reports with export disabled, with no backlog awaiting later configuration.
 
+The exporter runs under the process shutdown runtime. Each admitted pass holds
+one background-work guard from the interval tick through the stale-lease sweep,
+claim, send and fenced settlement. A draining replica checks before every
+further claim in the sixteen-row batch and finishes its current send and
+settlement before releasing that guard. A send completed during the drain
+settles normally, including `exported` on success. The HTTP timeout is ten
+seconds; the default shutdown budget is 600 seconds with five seconds reserved
+for cleanup, leaving a 595-second work deadline. If a shorter configured budget
+or second signal aborts an in-flight send, its persisted `dispatching` intent
+and lease remain. A later expired-lease sweep marks it `unknown` and never
+resends it. An expired or superseded lease cannot settle a report.
+
 ## Sentry configuration and erasure acceptance
 
 Before configuring either server DSN, the owner must accept this erasure
@@ -357,6 +369,10 @@ rate. Ingestion never waits for these requests. Each failed fetch emits one
 metadata-only warning with a closed reason code (`transport`, `status`,
 `oversize`, `invalid_json` or `mismatch`) and the origin host only; report fields,
 artifact IDs, response bodies and URL paths/queries never enter that warning.
+
+The request registers this background task as detached shutdown work before it
+starts. Ingestion still returns without waiting for manifest I/O, while a
+process drain waits for an in-flight registration within its work deadline.
 
 An administrator registers each TestFlight/Play build using the Unverified
 releases action in `/admin/crash-reports`, or admin-only first-party-human

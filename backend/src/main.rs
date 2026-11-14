@@ -1379,7 +1379,11 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
-    services::crash_report_export::worker::spawn(db.clone(), crash_reports);
+    services::shutdown::process().spawn_worker(services::crash_report_export::worker::run(
+        db.clone(),
+        crash_reports,
+        services::shutdown::process(),
+    ));
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(

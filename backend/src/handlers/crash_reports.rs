@@ -114,7 +114,7 @@ pub async fn ingest(
             if platform == Platform::Web {
                 let db = state.db.clone();
                 let config = state.config.clone();
-                tokio::spawn(async move {
+                state.shutdown.spawn(async move {
                     service::releases::auto_register_web(&db, &config, &release).await;
                 });
             }

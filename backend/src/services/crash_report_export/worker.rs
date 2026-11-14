@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     errors::AppResult,
     models::client_error_report::{COLLECTION_NAME, ClientErrorReport, ExportStatus},
-    services::{analytics_consent_service, crash_report_service},
+    services::{analytics_consent_service, crash_report_service, shutdown::Runtime},
 };
 use mongodb::{
     Database,
@@ -10,22 +10,19 @@ use mongodb::{
     options::ReturnDocument,
 };
 
-pub fn spawn(db: Database, config: Arc<CrashConfig>) {
+pub async fn run(db: Database, config: Arc<CrashConfig>, shutdown: Runtime) {
     if config.interval.is_zero() {
         return;
     }
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(config.interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if tick(&db, &config).await.is_err() {
-                tracing::warn!(outcome = "worker_unavailable", "Crash export sweep");
-            }
+    let mut interval = tokio::time::interval(config.interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    while let Some(_work) = shutdown.tick(&mut interval).await {
+        if tick(&db, &config, &shutdown).await.is_err() {
+            tracing::warn!(outcome = "worker_unavailable", "Crash export sweep");
         }
-    });
+    }
 }
-pub async fn tick(db: &Database, config: &CrashConfig) -> AppResult<()> {
+async fn tick(db: &Database, config: &CrashConfig, shutdown: &Runtime) -> AppResult<()> {
     if config.interval.is_zero() {
         return Ok(());
     }
@@ -51,6 +48,9 @@ pub async fn tick(db: &Database, config: &CrashConfig) -> AppResult<()> {
         )
         .await?;
     for _ in 0..16 {
+        if shutdown.is_draining() {
+            break;
+        }
         let lease = uuid::Uuid::new_v4().to_string();
         let row = db
             .collection::<ClientErrorReport>(COLLECTION_NAME)
@@ -250,6 +250,13 @@ mod tests {
         security_readiness_service as readiness,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn tick(db: &Database, config: &CrashConfig) -> AppResult<()> {
+        let shutdown = Runtime::default();
+        let _work = shutdown.background().unwrap();
+        super::tick(db, config, &shutdown).await
+    }
+
     struct Exporter {
         calls: AtomicUsize,
         outcome: u8,
