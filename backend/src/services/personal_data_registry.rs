@@ -2753,10 +2753,7 @@ mod tests {
                     })
                     .unwrap_or_default();
                 if !values.is_empty() {
-                    global
-                        .entry(alias.clone())
-                        .or_default()
-                        .extend(values);
+                    global.entry(alias.clone()).or_default().extend(values);
                 }
             }
         }
@@ -2906,7 +2903,10 @@ mod tests {
                 .into_iter()
                 .filter(|error| error.starts_with("unregistered collection:"))
                 .collect();
-            assert!(unregistered.is_empty(), "unregistered collection calls: {unregistered:?}");
+            assert!(
+                unregistered.is_empty(),
+                "unregistered collection calls: {unregistered:?}"
+            );
         }
         let inventory_names: BTreeSet<_> =
             crate::services::personal_erasure_service::local::inventory("source-scan-owner")
@@ -2916,7 +2916,10 @@ mod tests {
         let covered: BTreeSet<_> = source_seen.union(&inventory_names).cloned().collect();
         let stale: Vec<_> = ENTRIES
             .iter()
-            .filter(|entry| !source_seen.contains(entry.collection) && !inventory_names.contains(entry.collection))
+            .filter(|entry| {
+                !source_seen.contains(entry.collection)
+                    && !inventory_names.contains(entry.collection)
+            })
             .map(|entry| entry.collection)
             .collect();
         assert!(stale.is_empty(), "stale registry entry: {stale:?}");
@@ -2925,7 +2928,10 @@ mod tests {
             .filter(|collection| !registered.contains(collection.as_str()))
             .cloned()
             .collect();
-        assert!(missing.is_empty(), "unregistered collection calls: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "unregistered collection calls: {missing:?}"
+        );
     }
 
     #[test]
