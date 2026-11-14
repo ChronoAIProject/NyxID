@@ -40,6 +40,7 @@ function setup(initialAccount: string | null = null) {
   const token = (sub: string, revision = 0) =>
     `e30.${Buffer.from(JSON.stringify({ sub, revision })).toString("base64url")}.sig`;
   const telemetry: any[] = [];
+  const browsers: string[] = [];
   let state: any = { ...fixture(), routes: [{ name: "Auth" }] };
   const guards = { current: new Set<symbol>() };
   const actions: any[] = [];
@@ -78,10 +79,14 @@ function setup(initialAccount: string | null = null) {
         },
       },
     },
+    "../features/services/serviceOAuthStore": { recordServiceOAuthReturn: () => {} },
+    "expo-web-browser": { openBrowserAsync: async (url: string) => { browsers.push(url); return { type: "dismiss" }; } },
     "../lib/env": {
+      getFrontendUrl: () => "https://nyx.example",
       NYXID_APP_SCHEME: "nyxid",
       NYXID_TRUSTED_FRONTEND_URLS: ["https://nyx.example"],
-      NYXID_TRUSTED_API_BASE_URLS: [],
+      NYXID_TRUSTED_API_BASE_URLS: ["https://api.nyx.example/api/v1"],
+      NYXID_UNIVERSAL_LINK_HOST: "nyx.onelink.me",
       IS_DEV_BUILD: false,
     },
     "../lib/linkingPrefixes": {
@@ -149,6 +154,7 @@ function setup(initialAccount: string | null = null) {
     invalidations,
     failRead: () => { failRead = true; },
     telemetry,
+    browsers,
     cached,
     linking,
     directLink: (url: string) => {
@@ -608,3 +614,28 @@ for (const trigger of [
     f.h.unmount();
   });
 }
+
+
+test("service OAuth returns never navigate or supersede a queued notification, warm or cold", async () => {
+  const f = setup();
+  await f.signIn();
+  const guard = Symbol();
+  f.guards.current.add(guard);
+  f.tap(response({ conversation_id: "queued-thread" }));
+  const beforeTelemetry = [...f.telemetry];
+  const routed: string[] = [];
+  let direct = 0;
+  const stop = f.linking.subscribeDirectLinkOpened(() => direct++);
+  const unsubscribe = f.linking.appLinking.subscribe((url: string) => routed.push(url));
+  f.directLink("nyxid://services/oauth-return?status=success");
+  f.setInitialUrl("nyxid://services/oauth-return?status=error&code=access_denied");
+  assert.equal(await f.linking.appLinking.getInitialURL(), null);
+  assert.deepEqual(routed, []);
+  assert.equal(direct, 0);
+  assert.deepEqual(f.telemetry, beforeTelemetry);
+  f.guards.current.delete(guard);
+  f.h.value().flush();
+  assert.equal(f.actions.length, 1);
+  assert.match(JSON.stringify(f.actions[0]), /queued-thread/);
+  stop(); unsubscribe(); f.h.unmount();
+});

@@ -2,6 +2,11 @@ import {
   getStateFromPath,
   type LinkingOptions,
 } from "@react-navigation/native";
+import {
+  isServiceOAuthReturn,
+  parseServiceOAuthReturn,
+} from "../features/services/serviceOAuthModel";
+import { recordServiceOAuthReturn } from "../features/services/serviceOAuthStore";
 import * as Notifications from "expo-notifications";
 import { Linking } from "react-native";
 import type { RootStackParamList } from "./navigationTypes";
@@ -33,6 +38,13 @@ export const notificationLinkConfig = {
       : []),
   ],
 };
+
+function consumeServiceOAuthReturn(url: string): boolean {
+  if (!isServiceOAuthReturn(url, NYXID_APP_SCHEME)) return false;
+  const result = parseServiceOAuthReturn(url, NYXID_APP_SCHEME);
+  if (result) recordServiceOAuthReturn(result);
+  return true;
+}
 
 const directLinkListeners = new Set<() => void>();
 
@@ -181,6 +193,11 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
     try {
       const directUrl = await Linking.getInitialURL();
       if (directUrl) {
+        if (
+          consumeServiceOAuthReturn(directUrl) ||
+          consumeWebFallback(directUrl)
+        )
+          return null;
         reportDirectLinkOpened(directUrl);
         return rewriteChallengeUrl(directUrl);
       }
@@ -196,6 +213,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
 
     try {
       linkingSubscription = Linking.addEventListener("url", ({ url }) => {
+        if (consumeServiceOAuthReturn(url)) return;
         reportDirectLinkOpened(url);
         listener(rewriteChallengeUrl(url));
       });

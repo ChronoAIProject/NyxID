@@ -47,9 +47,12 @@ import {
   describeConnection,
   isSavedCredential,
   isOAuthConnection,
-  reconnectScopeOverride,
 } from "./connectionPresentation";
 import { PluginConnectionHistory } from "../plugins/PluginConnectionHistory";
+
+import { useServiceOAuth } from "./useServiceOAuth";
+import { oauthOutcomeCopy } from "./serviceOAuthModel";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 
 const ROOT = ["workspace", "services"] as const;
 const MANAGEMENT_TABS = ["overview", "advanced", "history"] as const;
@@ -68,6 +71,7 @@ export function ServicesScreen({
   onClose?: () => void;
 } = {}) {
   const { colors } = useTheme();
+  const { t } = useAppLanguage();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
   const queryClient = useQueryClient();
@@ -212,39 +216,37 @@ export function ServicesScreen({
     }
   }
 
-  async function authorize(
-    connection: ServiceConnection,
-    entry: CatalogEntry,
-    repairing = false,
-  ) {
-    if (!entry.provider_config_id)
-      throw new Error("This service has no OAuth provider configured.");
-    const org =
-      connection.credential_source?.type === "org"
-        ? connection.credential_source.org_id
-        : undefined;
-    const response = await servicesApi.initiateOAuth(
-      entry.provider_config_id,
-      connection.id,
-      org,
-      repairing ? reconnectScopeOverride(connection, entry) : undefined,
-    );
-    await WebBrowser.openBrowserAsync(
-      validateBrowserUrl(response.authorization_url),
-    );
-    await reload();
-    const latest = await servicesApi.connection(connection.id);
-    queryClient.setQueryData([...ROOT, "connection", connection.id], latest);
-    const authorized =
-      latest.status === "active" &&
-      (connection.status !== "active" ||
-        latest.last_authorized_at !== connection.last_authorized_at);
-    setNotice(
-      authorized
-        ? "Authorization completed. Your connection is ready."
-        : "Authorization has not completed yet. Finish it in the browser, then check again.",
-    );
-  }
+  const oauthFlow = useServiceOAuth(focused, reload);
+  const oauthBanner = oauthFlow.banner && (
+    <SettingsGroup
+      inset={false}
+      footer={t(oauthOutcomeCopy[oauthFlow.banner.outcome])}
+    >
+      <SettingsRow label={oauthFlow.banner.attempt.catalogName} />
+      {oauthFlow.banner.outcome !== "success" && (
+        <>
+          <SettingsRow
+            label={t("Check again")}
+            tone="action"
+            disabled={busy || oauthFlow.checking}
+            onPress={() => void run(oauthFlow.check)}
+          />
+          <SettingsRow
+            label={t(
+              oauthFlow.banner.outcome === "pending" ||
+                oauthFlow.banner.outcome === "unconfirmed"
+                ? "Continue authorization"
+                : "Retry authorization",
+            )}
+            tone="action"
+            disabled={busy || oauthFlow.checking}
+            onPress={() => void run(oauthFlow.retry)}
+          />
+        </>
+      )}
+    </SettingsGroup>
+  );
+  const authorize = oauthFlow.start;
 
   async function remove(connection: ServiceConnection) {
     try {
@@ -404,12 +406,15 @@ export function ServicesScreen({
           ? editable
             ? "This connection is paused. Turn on Connection enabled above before using it in Chat."
             : "This connection is paused. Ask its administrator to enable it before using it in Chat."
-          : isSavedCredential(connection) && connection.status === "active" && !connection.credential_missing
-              && connection.credential_verification?.state !== "verified" && connection.credential_verification?.state !== "rejected"
+          : isSavedCredential(connection) &&
+              connection.status === "active" &&
+              !connection.credential_missing &&
+              connection.credential_verification?.state !== "verified" &&
+              connection.credential_verification?.state !== "rejected"
             ? "You can try this saved connection in Chat. Provider authentication has not been verified, and the agent still needs permission to use it."
-          : health?.tone === "error" || health?.tone === "warning"
-            ? "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection."
-            : `Ask your agent to use ${providerName}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.`;
+            : health?.tone === "error" || health?.tone === "warning"
+              ? "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection."
+              : `Ask your agent to use ${providerName}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.`;
     return (
       <WorkspacePage
         title="Manage connection"
@@ -449,6 +454,7 @@ export function ServicesScreen({
           }}
           style={styles.tabs}
         />
+        {oauthBanner}
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {managementTab !== "history" && detail.isPending && (
@@ -903,6 +909,7 @@ export function ServicesScreen({
       showHeading={false}
       contentStyle={styles.grouped}
     >
+      {oauthBanner}
       {notice && <Notice message={notice} tone="success" />}
       {error && <Notice message={error} tone="error" />}
       <View style={[styles.search, { backgroundColor: colors.card }]}>
@@ -947,7 +954,9 @@ export function ServicesScreen({
       )}
       {listed ? (
         <SettingsGroup
-          title={tab === "connected" ? "Connected services" : "Available to add"}
+          title={
+            tab === "connected" ? "Connected services" : "Available to add"
+          }
         >
           {tab === "connected"
             ? filteredConnections.map((connection) => (
@@ -995,7 +1004,9 @@ export function ServicesScreen({
                   }
                   accessibilityLabel={`Connect ${entry.name}`}
                   onPress={() => {
-                    navigation.push("ServiceSetup", { catalogSlug: entry.slug });
+                    navigation.push("ServiceSetup", {
+                      catalogSlug: entry.slug,
+                    });
                   }}
                 />
               ))}
@@ -1281,7 +1292,9 @@ function ConnectForm({
             tone="action"
             disabled={busy || linkBusy || !focused || !foreground}
             accessory={
-              linkBusy ? <ActivityIndicator color={colors.primary} /> : undefined
+              linkBusy ? (
+                <ActivityIndicator color={colors.primary} />
+              ) : undefined
             }
             onPress={() => void openWebSetup()}
           />

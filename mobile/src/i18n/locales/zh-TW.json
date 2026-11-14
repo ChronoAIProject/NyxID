@@ -335,5 +335,14 @@
   "Unable to open link": "無法開啟連結",
   "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。",
   "An organization admin can change these settings.": "組織管理員可以變更這些設定。",
-  "Set up organization billing to serve guests.": "設定組織帳單以服務訪客。"
+  "Set up organization billing to serve guests.": "設定組織帳單以服務訪客。",
+  "Authorization completed. Your connection is ready.": "授權已完成，連線已就緒。",
+  "Authorization isn't finished. Continue authorization or check again.": "授權尚未完成。請繼續授權或再次檢查。",
+  "We couldn't confirm authorization yet. Check again in a moment.": "暫時無法確認授權。請稍後再次檢查。",
+  "Authorization was declined. Retry when you're ready to grant access.": "授權已被拒絕。準備好授予存取權限後，請重試。",
+  "Authorization failed. Try authorizing this connection again.": "授權失敗。請重新授權此連線。",
+  "Your browser is signed in to a different NyxID account. Sign out of NyxID in that browser, then retry with this account.": "瀏覽器登入了另一個 NyxID 帳號。請在該瀏覽器中登出 NyxID，然後使用目前帳號重試。",
+  "Check again": "再次檢查",
+  "Continue authorization": "繼續授權",
+  "Retry authorization": "重試授權"
 }

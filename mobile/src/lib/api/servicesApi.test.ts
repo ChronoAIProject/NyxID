@@ -28,6 +28,7 @@ function loadServicesApi(requestJson: (path: string) => Promise<unknown>) {
       exports,
       URLSearchParams,
       require: (name: string) => {
+        if (name === "../env") return { NYXID_APP_SCHEME: "nyxid" };
         if (name === "./http") return { requestJson };
         if (name === "../../features/services/serviceContracts")
           return { catalogEntrySchema, serviceConnectionSchema };
@@ -88,6 +89,7 @@ test("OAuth creation without an override keeps the existing provider-default con
   await api.initiateOAuth("provider", "new-connection");
   const url = new URL(requestedPath, "https://nyxid.example");
   assert.equal(url.searchParams.get("key_id"), "new-connection");
+  assert.equal(url.searchParams.get("app_return_uri"), "nyxid://services/oauth-return");
   assert.equal(url.searchParams.has("scope_override"), false);
 });
 

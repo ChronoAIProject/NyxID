@@ -186,6 +186,10 @@ function setup({
       }),
     },
     "expo-web-browser": {
+      openAuthSessionAsync: async (url: string) => {
+        browsers.push(url);
+        return { type: "dismiss" };
+      },
       openBrowserAsync: async (url: string) => {
         browsers.push(url);
         await pendingAction;
@@ -242,7 +246,7 @@ function setup({
         },
       },
     },
-    "../../lib/env": { getFrontendUrl: () => "https://nyxid.example" },
+    "../../lib/env": { NYXID_APP_SCHEME: "nyxid", getFrontendUrl: () => "https://nyxid.example" },
     "../../app/WorkspaceHeader": {
       useWorkspaceBack: (input: { disabled: boolean }) => {
         navigationDisabled = input.disabled;
@@ -256,6 +260,15 @@ function setup({
       PluginConnectionHistory: "PluginConnectionHistory",
     },
   });
+  let pending: string | null = null;
+  harness.mock("@react-native-async-storage/async-storage", { default: {
+    getItem: async () => pending,
+    setItem: async (_key: string, value: string) => { pending = value; },
+    removeItem: async () => { pending = null; },
+  }, __esModule: true });
+  harness.mock("../../lib/auth/authAccount", { getAuthAccountId: () => "account", subscribeAuthAccount: () => () => {} });
+  harness.mock("./serviceOAuthStore", harness.load(fileURLToPath(new URL("./serviceOAuthStore.ts", import.meta.url))));
+  harness.mock("./useServiceOAuth", harness.load(fileURLToPath(new URL("./useServiceOAuth.ts", import.meta.url))));
   const { ServicesScreen } = harness.load(
     fileURLToPath(new URL("./ServicesScreen.tsx", import.meta.url)),
   ) as { ServicesScreen: (props: unknown) => Element };
@@ -411,8 +424,8 @@ test("repair authorizes the existing organization connection and preserves its g
   assert.ok(
     elements(env.harness.flush()).some(
       (item) =>
-        item.type === "Notice" &&
-        item.props.message ===
+        item.type === "SettingsGroup" &&
+        item.props.footer ===
           "Authorization completed. Your connection is ready.",
     ),
   );
