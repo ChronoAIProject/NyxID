@@ -14,6 +14,7 @@ pub mod model_tariffs;
 pub mod model_usage;
 pub mod owner_resolver;
 pub mod periods;
+mod plan_sync;
 pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
@@ -125,6 +126,30 @@ pub async fn startup_diagnostics(
                 .map(|value| value.to_chrono())
                 .unwrap_or_else(|_| Utc::now()),
         });
+    }
+    let mut repairs = db
+        .collection::<Document>(crate::models::billing_plan_sync::CHARGE_COLLECTION)
+        .find(doc! {"repair_failed_at":{"$type":"date"}})
+        .await?;
+    while let Some(repair) = repairs.try_next().await? {
+        if let (Ok(id), Ok(plan), Ok(metric), Ok(detected)) = (
+            repair.get_str("_id"),
+            repair.get_str("plan_code"),
+            repair.get_str("metric_code"),
+            repair.get_datetime("repair_failed_at"),
+        ) {
+            let reason = match repair.get_str("repair_reason") {
+                Ok("cache_write_failed") => "cache_write_failed",
+                _ => "provider_repair_unverified",
+            };
+            items.push(BillingStartupDiagnostic {
+                code: format!("billing_plan_repair:{id}"),
+                summary: "A managed Lago plan charge could not be repaired".into(),
+                detail: format!("Plan {plan}; metric {metric}; reason {reason}"),
+                remediation: "Check the managed charge and database; automatic retries back off to one day. An explicit price sync resets the retry delay".into(),
+                detected_at: detected.to_chrono(),
+            });
+        }
     }
     let mut rates = db
         .collection::<Document>("billing_rate_diagnostics")
@@ -1391,6 +1416,8 @@ mod tests {
                 .sync_status,
             PricingSyncStatus::Failed
         );
+        // Advance the fixture to the next pass after the uncertain plan lease expires.
+        crate::services::billing::plan_writers_tests::expire_plan_lease(&db, "standard").await;
         lago.fail_price_sync.store(false, Ordering::SeqCst);
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
@@ -2468,3 +2495,6 @@ pub mod summaries;
 
 #[cfg(test)]
 mod allocation_policy_tests;
+
+#[cfg(test)]
+mod plan_writers_tests;

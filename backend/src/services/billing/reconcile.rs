@@ -330,6 +330,11 @@ impl BillingReconciler {
             return Ok(stats);
         }
         stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        super::plan_sync::repair_other_plans(&self.db, lago.as_ref(), &self.config.lago_plan_code)
+            .await?;
         // Price synchronization invalidates affected profiles. Refresh those
         // within this pass; admissions also refresh individually on demand.
         if !continue_reconcile() {

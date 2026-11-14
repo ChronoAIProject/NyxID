@@ -231,6 +231,12 @@ pub trait LagoApi: Send + Sync {
                 .await,
         )
     }
+    /// Complete charges, including flags and per-charge filters, for plan repair.
+    async fn plan_charges(&self, _plan_code: &str) -> AppResult<Vec<Value>> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago plan readback is not supported".into(),
+        ))
+    }
     /// Create or update a NyxID-owned sum metric and its standard charge on
     /// the configured plan. Fakes opt out unless a pricing test needs it.
     async fn sync_standard_charge(
@@ -353,6 +359,9 @@ fn plan_update_with_standard_charge(
             object.insert("invoiceable".to_string(), Value::Bool(true));
             object.insert("pay_in_advance".to_string(), Value::Bool(false));
             object.insert("prorated".to_string(), Value::Bool(false));
+            object.insert("filters".to_string(), json!([]));
+            object.insert("group_properties".to_string(), json!([]));
+            object.insert("min_amount_cents".to_string(), json!(0));
             object.insert(
                 "properties".to_string(),
                 json!({ "amount": input.credits_per_unit }),
@@ -368,6 +377,9 @@ fn plan_update_with_standard_charge(
             "invoiceable": true,
             "pay_in_advance": false,
             "prorated": false,
+            "filters": [],
+            "group_properties": [],
+            "min_amount_cents": 0,
             "properties": { "amount": input.credits_per_unit },
         }));
     }
@@ -489,6 +501,68 @@ fn charge_matches_metric(charge: &Value, metric_id: Option<&str>, metric_code: &
             .and_then(|metric| value_string(metric, &["code"]))
             .as_deref()
             == Some(metric_code)
+}
+
+/// Compare the published economics, not serializer shape. Lago 1.50 emits
+/// default booleans, but missing defaults and presentation metadata are harmless.
+pub(super) fn standard_charge_matches(
+    charges: &[Value],
+    code: &str,
+    desired: Option<&ServicePriceSync>,
+) -> bool {
+    let matches: Vec<_> = charges
+        .iter()
+        .filter(|c| charge_matches_metric(c, None, code))
+        .collect();
+    let Some(desired) = desired else {
+        return matches.is_empty();
+    };
+    if matches.len() != 1 {
+        return false;
+    }
+    let charge = matches[0];
+    let price = desired
+        .credits_per_unit
+        .parse::<crate::models::credits::Credits>()
+        .ok()
+        .map(|value| value.pico());
+    let properties = &charge["properties"];
+    charge.get("charge_model").and_then(Value::as_str) == Some("standard")
+        && default_flag_matches(charge.get("invoiceable"), true)
+        && default_flag_matches(charge.get("pay_in_advance"), false)
+        && default_flag_matches(charge.get("prorated"), false)
+        && price.is_some()
+        && properties.get("amount").and_then(decimal_value) == price
+        && ["filters", "group_properties"].iter().all(|field| empty_property(charge.get(field)))
+        && ["pricing_group_keys", "grouped_by", "group_properties"].iter()
+            .all(|field| empty_property(properties.get(field)))
+        && charge.get("min_amount_cents").is_none_or(|v| v.is_null() || decimal_value(v).is_some_and(|n| n <= 0))
+        // A custom currency conversion changes the price independently of amount.
+        && charge.get("applied_pricing_unit").is_none_or(|v| v.is_null()
+            || v.get("conversion_rate").and_then(decimal_value) == Some(1_000_000_000_000))
+}
+
+fn default_flag_matches(value: Option<&Value>, expected: bool) -> bool {
+    value.is_none_or(|v| v.is_null() || v.as_bool() == Some(expected))
+}
+
+fn empty_property(value: Option<&Value>) -> bool {
+    value.is_none_or(|v| {
+        v.is_null()
+            || v.as_array().is_some_and(Vec::is_empty)
+            || v.as_object().is_some_and(serde_json::Map::is_empty)
+    })
+}
+
+fn decimal_value(value: &Value) -> Option<i128> {
+    let raw = match value {
+        Value::String(value) => std::borrow::Cow::Borrowed(value.as_str()),
+        Value::Number(value) => std::borrow::Cow::Owned(value.to_string()),
+        _ => return None,
+    };
+    raw.parse::<crate::models::credits::Credits>()
+        .ok()
+        .map(|value| value.pico())
 }
 
 impl LagoClient {
@@ -1321,6 +1395,27 @@ impl LagoApi for LagoClient {
         Ok(PlanRates { rates, rejected })
     }
 
+    async fn plan_charges(&self, plan_code: &str) -> AppResult<Vec<Value>> {
+        let response = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!("plans/{}", urlencoding::encode(plan_code)),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        response
+            .get("plan")
+            .and_then(|plan| plan.get("charges"))
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago plan readback has no charge array".into(),
+                )
+            })
+    }
+
     async fn sync_standard_charge(
         &self,
         plan_code: &str,
@@ -1397,6 +1492,12 @@ impl LagoApi for LagoClient {
         self.json_request(reqwest::Method::PUT, &plan_path, Some(body))
             .await
             .map_err(lago_error_to_app)?;
+        let charges = self.plan_charges(plan_code).await?;
+        if !standard_charge_matches(&charges, &input.metric_code, Some(input)) {
+            return Err(AppError::Conflict(
+                "Lago plan charge readback disagrees with the desired price; retry pending".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1412,6 +1513,12 @@ impl LagoApi for LagoClient {
         self.json_request(reqwest::Method::PUT, &plan_path, Some(body))
             .await
             .map_err(lago_error_to_app)?;
+        let charges = self.plan_charges(plan_code).await?;
+        if !standard_charge_matches(&charges, metric_code, None) {
+            return Err(AppError::Conflict(
+                "Lago plan removal readback still contains the charge; retry pending".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -2462,7 +2569,14 @@ mod tests {
         async fn update_metric() -> axum::Json<serde_json::Value> {
             axum::Json(json!({ "billable_metric": { "lago_id": "metric-1" } }))
         }
-        async fn get_plan() -> axum::Json<serde_json::Value> {
+        async fn get_plan(
+            axum::extract::State(saved): axum::extract::State<
+                std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+            >,
+        ) -> axum::Json<serde_json::Value> {
+            if let Some(value) = saved.lock().unwrap().clone() {
+                return axum::Json(value);
+            }
             axum::Json(plan_response(json!([{
                 "lago_id": "legacy-charge-id",
                 "lago_billable_metric_id": "legacy-metric-id",
@@ -2474,6 +2588,9 @@ mod tests {
             }])))
         }
         async fn update_plan(
+            axum::extract::State(saved): axum::extract::State<
+                std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+            >,
             axum::Json(body): axum::Json<serde_json::Value>,
         ) -> axum::Json<serde_json::Value> {
             let plan = &body["plan"];
@@ -2498,7 +2615,14 @@ mod tests {
             assert_eq!(charges[1]["billable_metric_id"], "metric-1");
             assert_eq!(charges[1]["charge_model"], "standard");
             assert_eq!(charges[1]["properties"]["amount"], "0.000000250001");
-            axum::Json(plan_response(Value::Array(charges.clone())))
+            let mut response = plan_response(Value::Array(charges.clone()));
+            for charge in response["plan"]["charges"].as_array_mut().unwrap() {
+                if charge["billable_metric_id"] == "metric-1" {
+                    charge["billable_metric_code"] = json!("platform_svc_llm-openai");
+                }
+            }
+            *saved.lock().unwrap() = Some(response.clone());
+            axum::Json(response)
         }
 
         let base_url = spawn_lago_mock(
@@ -2514,7 +2638,8 @@ mod tests {
                 .route(
                     "/api/v1/plans/standard",
                     axum::routing::get(get_plan).put(update_plan),
-                ),
+                )
+                .with_state(std::sync::Arc::new(std::sync::Mutex::new(None::<Value>))),
         )
         .await;
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
@@ -2546,7 +2671,14 @@ mod tests {
             assert_eq!(body["billable_metric"]["name"], "OpenAI platform usage");
             axum::Json(json!({ "billable_metric": { "lago_id": "metric-1" } }))
         }
-        async fn get_plan() -> axum::Json<serde_json::Value> {
+        async fn get_plan(
+            axum::extract::State(saved): axum::extract::State<
+                std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+            >,
+        ) -> axum::Json<serde_json::Value> {
+            if let Some(value) = saved.lock().unwrap().clone() {
+                return axum::Json(value);
+            }
             axum::Json(plan_response(json!([
                 {
                     "id": "unrelated-charge-id",
@@ -2566,6 +2698,9 @@ mod tests {
             ])))
         }
         async fn update_plan(
+            axum::extract::State(saved): axum::extract::State<
+                std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+            >,
             axum::Json(body): axum::Json<serde_json::Value>,
         ) -> axum::Json<serde_json::Value> {
             let plan = &body["plan"];
@@ -2578,7 +2713,14 @@ mod tests {
             assert_eq!(charges[1]["id"], "existing-charge-id");
             assert_eq!(charges[1]["properties"]["amount"], "0.125");
             assert_eq!(charges[1]["invoiceable"], true);
-            axum::Json(plan_response(Value::Array(charges.clone())))
+            let mut response = plan_response(Value::Array(charges.clone()));
+            for charge in response["plan"]["charges"].as_array_mut().unwrap() {
+                if charge["billable_metric_id"] == "metric-1" {
+                    charge["billable_metric_code"] = json!("platform_svc_llm-openai");
+                }
+            }
+            *saved.lock().unwrap() = Some(response.clone());
+            axum::Json(response)
         }
 
         let base_url = spawn_lago_mock(
@@ -2590,7 +2732,8 @@ mod tests {
                 .route(
                     "/api/v1/plans/standard",
                     axum::routing::get(get_plan).put(update_plan),
-                ),
+                )
+                .with_state(std::sync::Arc::new(std::sync::Mutex::new(None::<Value>))),
         )
         .await;
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
@@ -2603,7 +2746,14 @@ mod tests {
 
     #[tokio::test]
     async fn service_price_removal_preserves_unrelated_plan_charges() {
-        async fn get_plan() -> axum::Json<serde_json::Value> {
+        async fn get_plan(
+            axum::extract::State(saved): axum::extract::State<
+                std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+            >,
+        ) -> axum::Json<serde_json::Value> {
+            if let Some(value) = saved.lock().unwrap().clone() {
+                return axum::Json(value);
+            }
             axum::Json(plan_response(json!([
                 {
                     "lago_id": "legacy-charge-id",
@@ -2620,6 +2770,9 @@ mod tests {
             ])))
         }
         async fn update_plan(
+            axum::extract::State(saved): axum::extract::State<
+                std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+            >,
             axum::Json(body): axum::Json<serde_json::Value>,
         ) -> axum::Json<serde_json::Value> {
             let plan = &body["plan"];
@@ -2629,12 +2782,23 @@ mod tests {
             assert_eq!(charges.len(), 1);
             assert_eq!(charges[0]["id"], "legacy-charge-id");
             assert_eq!(charges[0]["billable_metric_code"], "platform_tokens");
-            axum::Json(plan_response(Value::Array(charges.clone())))
+            let mut response = plan_response(Value::Array(charges.clone()));
+            for charge in response["plan"]["charges"].as_array_mut().unwrap() {
+                if charge["billable_metric_id"] == "metric-1" {
+                    charge["billable_metric_code"] = json!("platform_svc_llm-openai");
+                }
+            }
+            *saved.lock().unwrap() = Some(response.clone());
+            axum::Json(response)
         }
-        let base_url = spawn_lago_mock(axum::Router::new().route(
-            "/api/v1/plans/standard",
-            axum::routing::get(get_plan).put(update_plan),
-        ))
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/plans/standard",
+                    axum::routing::get(get_plan).put(update_plan),
+                )
+                .with_state(std::sync::Arc::new(std::sync::Mutex::new(None::<Value>))),
+        )
         .await;
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
 

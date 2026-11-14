@@ -299,6 +299,8 @@ async fn assert_sync_pass(mode: u8, reject_sync_marker: bool) {
                 .await
                 .unwrap();
         }
+        // Advance the fixture to the next pass after the uncertain plan lease expires.
+        crate::services::billing::plan_writers_tests::expire_plan_lease(&f.db, "standard").await;
         f.provider.mode.store(SUCCESS, Ordering::SeqCst);
         let recovered = f.reconciler.run_once().await.unwrap();
         assert_eq!(

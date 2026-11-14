@@ -106,12 +106,36 @@ pub async fn sync_service_price(
     }) {
         return Ok(changed);
     }
-    changed |= cleanup_components(db, lago, plan_code, service).await?;
-    changed |= sync_legacy_price(db, lago, plan_code, service).await?;
-    for field in ["byok_pricing", "platform_key_pricing"] {
-        changed |= sync_lane_price(db, lago, plan_code, service, field).await?;
+    let Some(billing) = &service.billing else {
+        return Ok(changed);
+    };
+    if billing.platform_pricing.is_none()
+        && billing.byok_pricing.is_none()
+        && billing.platform_key_pricing.is_none()
+        && billing.platform_pricing_cleanup_metric_code.is_none()
+        && billing.byok_pricing_cleanup_metric_code.is_none()
+        && billing.platform_key_pricing_cleanup_metric_code.is_none()
+        && billing.component_cleanup_metric_codes.is_empty()
+    {
+        return Ok(changed);
     }
-    Ok(changed)
+    super::plan_sync::run(
+        db,
+        plan_code,
+        Some(&service.id),
+        super::plan_sync::CacheWrite::Rate,
+        async {
+            let mut synced = changed;
+            synced |= cleanup_components(db, lago, plan_code, service).await?;
+            synced |= sync_legacy_price(db, lago, plan_code, service).await?;
+            for field in ["byok_pricing", "platform_key_pricing"] {
+                synced |= sync_lane_price(db, lago, plan_code, service, field).await?;
+            }
+            Ok(synced)
+        },
+    )
+    .await
+    .map(|result| result.unwrap_or(changed))
 }
 
 pub fn normalize_lane_pricing(
@@ -522,9 +546,12 @@ async fn sync_lane_component(
         metric_description: format!("NyxID {field} usage for {}", service.slug),
         credits_per_unit: lane.credits_per_unit.clone(),
     };
-    let synced = super::taxes::sync_charge(db, lago, plan_code, &input)
-        .await
-        .is_ok();
+    let result = super::taxes::sync_charge(db, lago, plan_code, &input).await;
+    let synced = result.is_ok();
+    let pending = matches!(result, Err(AppError::Conflict(_)));
+    if !synced && super::plan_sync::lost() {
+        return Ok(false);
+    }
     // Include the unit: identical prices in a different unit are different charges.
     let mut filter = doc! { "_id": &service.id,
         format!("{path}.lago_metric_code"): &lane.lago_metric_code,
@@ -557,7 +584,7 @@ async fn sync_lane_component(
             .await?;
     }
     let result = collection.update_one(filter, doc! { "$set": {
-        format!("{path}.sync_status"): if synced { "synced" } else { "failed" },
+        format!("{path}.sync_status"): if synced { "synced" } else if pending { "pending" } else { "failed" },
         format!("{path}.sync_error"): if synced { bson::Bson::Null } else { bson::Bson::String("Lago price synchronization failed; reconciliation will retry".to_string()) },
     } }).await?;
     if result.matched_count == 0 {
@@ -732,13 +759,20 @@ async fn sync_legacy_price(
             Ok(true)
         }
         Err(error) => {
+            if super::plan_sync::lost() {
+                return Ok(false);
+            }
             let public_error = "Lago price synchronization failed; the reconcile sweep will retry";
             set_sync_state(
                 db,
                 &service.id,
                 &pricing.lago_metric_code,
                 &pricing.credits_per_unit,
-                PricingSyncStatus::Failed,
+                if matches!(error, AppError::Conflict(_)) {
+                    PricingSyncStatus::Pending
+                } else {
+                    PricingSyncStatus::Failed
+                },
                 Some(public_error),
             )
             .await?;
@@ -795,6 +829,13 @@ pub async fn retry_pending_service_prices(
     lago: &dyn LagoApi,
     plan_code: &str,
 ) -> AppResult<u64> {
+    if let Err(error) = super::plan_sync::repair(db, lago, plan_code, plan_code).await {
+        tracing::warn!(
+            plan_code,
+            error_code = error.error_code(),
+            "Plan repair will retry"
+        );
+    }
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
