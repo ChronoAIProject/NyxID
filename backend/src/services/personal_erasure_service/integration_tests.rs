@@ -317,8 +317,18 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         } else {
             format!("registry-joined-child-{index}")
         };
+        let parent_owner_field = crate::services::personal_data_registry::find(parent)
+            .and_then(|entry| match entry.owner {
+                crate::services::personal_data_registry::OwnerSelector::Fields(fields) => {
+                    fields.first().copied()
+                }
+                crate::services::personal_data_registry::OwnerSelector::NotPersonal => None,
+            })
+            .unwrap_or("user_id");
+        let mut parent_row = doc! {"_id": &parent_id};
+        parent_row.insert(parent_owner_field, &owner);
         db.collection::<Document>(parent)
-            .insert_one(doc! {"_id": &parent_id, "user_id": &owner})
+            .insert_one(parent_row)
             .await
             .unwrap();
         let mut child_row = doc! {"_id": &child_id, "fixture_marker": "registry-joined"};

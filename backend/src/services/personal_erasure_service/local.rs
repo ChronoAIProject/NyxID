@@ -857,11 +857,30 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
             m::user_service::COLLECTION_NAME,
             &[(m::service_change_event::HEADS_COLLECTION_NAME, "_id")],
         ),
+        (
+            "platform_bot_installations",
+            &[("platform_delivery_tests", "installation_id")],
+        ),
+        (
+            "platform_setups",
+            &[
+                ("platform_setup_notices", "setup_id"),
+                ("platform_setup_steps", "setup_id"),
+            ],
+        ),
     ];
     for (parent, children) in specs {
+        let owner_field = crate::services::personal_data_registry::find(parent)
+            .and_then(|entry| match entry.owner {
+                crate::services::personal_data_registry::OwnerSelector::Fields(fields) => {
+                    fields.first().copied()
+                }
+                crate::services::personal_data_registry::OwnerSelector::NotPersonal => None,
+            })
+            .unwrap_or("user_id");
         if let Some(row) = db
             .collection::<Document>(parent)
-            .find_one(doc! {"user_id":target})
+            .find_one(doc! {owner_field:target})
             .projection(doc! {"_id":1})
             .sort(doc! {"_id":1})
             .await?
@@ -901,7 +920,7 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
                 }
                 if db.collection::<Document>(m::channel_send_claim::COLLECTION_NAME).find_one(doc! {"_id":{"$regex":format!("^{}:",regex::escape(id))},"status":{"$ne":"sent"}}).await?.is_some() {return Err(AppError::Conflict("An external channel send still needs reconciliation".into()));}
             }
-            erase_page(db, &job.user_id, parent, doc! {"_id":id,"user_id":target}).await?;
+            erase_page(db, &job.user_id, parent, doc! {"_id":id,owner_field:target}).await?;
             return Ok(true);
         }
     }
