@@ -1,5 +1,28 @@
 import Foundation
 
+// Regression: real RCTFatal/SIGSEGV reports were ~375 KB, above the old raw cap.
+assert(crashRawReportMaxBytes == 4 * 1024 * 1024)
+assert(crashRawReportMaxBytes >= 2 * 1024 * 1024)
+assert(crashRawReportMaxBytes > 375_464)
+assert(crashRawReportMaxBytes > 373_327)
+assert(
+  nativeCrashThreadIndex([
+    (crashed: false, frameAddresses: [0x10]),
+    (crashed: true, frameAddresses: [0x20]),
+  ], faultAddress: 0x10) == 1)
+assert(
+  nativeCrashThreadIndex([
+    (crashed: false, frameAddresses: [0x10]),
+    (crashed: false, frameAddresses: [0x20, 0x30]),
+  ], faultAddress: 0x30) == 1)
+assert(
+  nativeCrashThreadIndex([
+    (crashed: false, frameAddresses: [0x10]),
+    (crashed: false, frameAddresses: [0x20]),
+  ], faultAddress: 0x40) == 0)
+assert(nativeCrashThreadIndex([(crashed: false, frameAddresses: [])], faultAddress: 0) == 0)
+assert(nativeCrashThreadIndex([], faultAddress: 0) == nil)
+
 let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: directory) }
@@ -68,4 +91,4 @@ for value in [
   "SECRET_SENTINEL", "Bearer", "person@", "/Users", "eyJ", "reason", "registers", "message",
   "customData", "function",
 ] { assert(!bytes.contains(value)) }
-print("Native crash decision, JS fatal rejection and native allowlist proofs passed")
+print("Native crash raw cap, thread selection, decision, JS fatal rejection and native allowlist proofs passed")

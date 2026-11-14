@@ -26,7 +26,8 @@ public class NyxCrashReporterModule: Module {
       attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
     guard let config = PLCrashReporterConfig(
       signalHandlerType: .BSD, symbolicationStrategy: [],
-      shouldRegisterUncaughtExceptionHandler: false, basePath: raw.path, maxReportBytes: 256 * 1024) else { return nil }
+      shouldRegisterUncaughtExceptionHandler: false, basePath: raw.path,
+      maxReportBytes: UInt(crashRawReportMaxBytes)) else { return nil }
     return PLCrashReporter(configuration: config)
   }()
   private var bindingURL: URL { directory.appendingPathComponent("binding.json") }
@@ -121,6 +122,21 @@ public class NyxCrashReporterModule: Module {
         "event-\(Int(Date().timeIntervalSince1970*1000))-\(event).json"))
     trim()
   }
+  private func loadPendingRaw(_ reporter: PLCrashReporter) -> PLCrashReport? {
+    guard let data = reporter.loadPendingCrashReportData() else {
+      NSLog("nyx-crash: raw report discarded (unparseable)")
+      return nil
+    }
+    guard data.count <= crashRawReportMaxBytes else {
+      NSLog("nyx-crash: raw report discarded (oversize)")
+      return nil
+    }
+    guard let crash = try? PLCrashReport(data: data) else {
+      NSLog("nyx-crash: raw report discarded (unparseable)")
+      return nil
+    }
+    return crash
+  }
   /// All processing is invoked from JS, with no AppDelegate/SceneDelegate hooks.
   private func collect() -> [String] {
     defer { purgePendingRaw() }  // Explicit purge point 2: success, mismatch, corrupt, oversized and JS-duplicate paths.
@@ -129,8 +145,7 @@ public class NyxCrashReporterModule: Module {
       return []
     }
     if let reporter, reporter.hasPendingCrashReport() {
-      if let data = reporter.loadPendingCrashReportData(), data.count <= 256 * 1024,
-        let crash = try? PLCrashReport(data: data),
+      if let crash = loadPendingRaw(reporter),
         let custom = crash.customData,
         let token = (try? JSONSerialization.jsonObject(with: custom)) as? [String: String],
         pendingCrashDecision(
@@ -160,8 +175,15 @@ public class NyxCrashReporterModule: Module {
   }
   /// Never access exceptionInfo, registers, processInfo, machineInfo or symbols.
   private func sanitize(_ crash: PLCrashReport) -> [String: Any]? {
-    guard let thread = (crash.threads as? [PLCrashReportThreadInfo])?.first(where: { $0.crashed })
+    let threads = (crash.threads as? [PLCrashReportThreadInfo]) ?? []
+    guard let threadIndex = nativeCrashThreadIndex(
+      threads.map { thread in
+        (crashed: thread.crashed,
+         frameAddresses: (thread.stackFrames as? [PLCrashReportStackFrameInfo] ?? [])
+          .map { $0.instructionPointer })
+      }, faultAddress: crash.signalInfo.address)
     else { return nil }
+    let thread = threads[threadIndex]
     let allImages = (crash.images as? [PLCrashReportBinaryImageInfo]) ?? []
     var selected: [PLCrashReportBinaryImageInfo] = []
     var images: [[String: Any]] = []

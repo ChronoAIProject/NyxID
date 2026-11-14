@@ -101,7 +101,13 @@ never adopted as records. The Swift filesystem proof checks this cleanup while
 preserving committed records and the raw-report directory for its explicit purge.
 
 PLCrashReporter uses a BSD signal handler, no symbolication and
-`shouldRegisterUncaughtExceptionHandler = false`, with a 256 KiB raw report cap.
+`shouldRegisterUncaughtExceptionHandler = false`, with a 4 MiB raw report cap
+shared by capture and parsing (`crashRawReportMaxBytes`). Real Release simulator
+reports measured about 375 KB; the raw cap provides headroom and is separate
+from the sanitized buffer's 32 KiB per record / three records / 256 KiB total /
+24-hour limits. Oversized or unreadable/unparseable raw reports emit only the
+fixed log codes `nyx-crash: raw report discarded (oversize)` or
+`nyx-crash: raw report discarded (unparseable)`, without report data or identifiers.
 The raw file can contain crashed-thread register values inside the protected app
 sandbox until the next launch. Registers never enter the sanitized buffer,
 NyxID or Sentry. The process signal handler is enabled once; disarming clears
@@ -114,6 +120,10 @@ sanitized records. This covers successful parsing, epoch mismatch, corrupt or
 oversized data and a JS fatal duplicate. No binding calls `disarm`, which purges
 the raw file unread. `disarm` also purges binding and all sanitized records.
 These are the container-inspection purge points for simulator/device review.
+Native sanitization selects the thread marked `crashed`. If an externally
+delivered signal leaves no crash marker, it selects the thread whose frames
+contain the signal's faulting address, then falls back to the first thread.
+The fault address is used only for local selection and never enters the record.
 
 React Native's previous ErrorUtils fatal handler runs after synchronous
 sanitization and `recordFatalJs`. That write sets custom data `{e, j: eventId}`.
@@ -125,7 +135,9 @@ do not invoke RN's development rejection logging/native-exception path.
 
 Automated proofs run in `pnpm test`: `native-crash.test.js` compiles/runs the
 production Swift decision and sanitizer functions with sentinel-laden inputs.
-It tests match/mismatch/no-binding/JS-duplicate decisions, rejects JS message,
+It checks the raw cap against the observed report sizes and a 2 MiB minimum,
+tests marked/fault-address/first/empty thread selection and
+match/mismatch/no-binding/JS-duplicate decisions, rejects JS message,
 reason, registers, customData, absolute paths and extra keys, and proves native
 output is a closed allowlist. `crashReporting.test.ts` tests native-record JS
 revalidation, Hermes/JSC parsing, request bodies, fatal-handler ordering,

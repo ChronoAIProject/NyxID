@@ -1,5 +1,18 @@
 import Foundation
 
+// Real iOS simulator reports measured ~375 KB (375,464 bytes for RCTFatal).
+// This raw parsing/capture cap is separate from the 256 KiB sanitized buffer.
+let crashRawReportMaxBytes = 4 * 1024 * 1024
+
+/// Prefer the crash marker; externally delivered signals may leave every thread unmarked.
+func nativeCrashThreadIndex(
+  _ threads: [(crashed: Bool, frameAddresses: [UInt64])], faultAddress: UInt64
+) -> Int? {
+  threads.firstIndex(where: { $0.crashed })
+    ?? threads.firstIndex(where: { $0.frameAddresses.contains(faultAddress) })
+    ?? threads.indices.first
+}
+
 func crashCaptureCanArm(reporterAvailable: Bool, enabled: Bool) -> Bool {
   reporterAvailable && enabled
 }

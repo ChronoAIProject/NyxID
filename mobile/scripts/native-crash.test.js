@@ -4,7 +4,7 @@ const { execFileSync } = require("node:child_process");
 const { mkdtempSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
-test("Swift decision drops mismatched/no binding and RN SIGABRT duplicate; sanitizers never emit private fields", () => {
+test("Swift raw cap fits real reports, thread selection falls back, decisions drop mismatched/no binding and RN SIGABRT duplicate; sanitizers never emit private fields", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "nyx-crash-swift-"));
   try {
     const source = path.resolve(__dirname, "../modules/nyx-crash-reporter");
