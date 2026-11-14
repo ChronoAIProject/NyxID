@@ -35,13 +35,12 @@ export function PrivacySettingsScreen(
     return () => clearTimeout(timer);
   }, [toast]);
   const deviceConsent = useMobileConsent();
-  const accountId = getAuthAccountId();
   const analyticsPermission = useQuery({
-    queryKey: ["analytics-consent", accountId],
-    enabled: Boolean(accountId),
+    queryKey: ["analytics-consent", deviceConsent.accountId],
+    enabled: Boolean(deviceConsent.accountId),
     staleTime: 0,
     queryFn: async () => {
-      if (!accountId) throw new Error("auth_session_missing");
+      const accountId = deviceConsent.accountId!;
       const permission = await requestJson<AnalyticsPermission>(
         "/users/me/preferences/analytics",
         { expectedAccountId: accountId },
@@ -54,7 +53,7 @@ export function PrivacySettingsScreen(
   const saveAnalytics = useMutation({
     mutationFn: (enabled: boolean) =>
       saveAnalyticsPermission(
-        accountId!,
+        deviceConsent.accountId!,
         enabled,
         requestJson,
         analyticsConsentState.getSnapshot,
