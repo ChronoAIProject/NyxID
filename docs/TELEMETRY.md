@@ -102,3 +102,5 @@ Vendor events carry no account/user/IP/UA/cookie identifiers. NyxID's local rows
 are the only event-to-person link and personal erasure deletes them. Exported
 events expire under vendor retention; no supported per-event deletion guarantee
 is assumed. These deployed operator settings require direct verification.
+
+Withdrawing permission stops new reports and pending exports; reports NyxID has already received remain for up to 30 days unless the account is deleted, and exported vendor copies expire under vendor retention.

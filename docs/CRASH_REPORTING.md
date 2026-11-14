@@ -9,7 +9,7 @@ complete incident coverage.
 
 ## Coverage and consent
 
-Web automatically observes window errors, resource failures, unhandled promise
+Web automatically observes window errors, same-origin app script/stylesheet/modulepreload failures, unhandled promise
 rejections, React root callbacks and router render failures. Existing browser
 error handling, React fallback rendering and chunk-recovery reloads continue.
 Cancellation, handled asset recovery and API refusals below HTTP 500 are excluded.
@@ -32,9 +32,15 @@ account/session/device generations, then submits the exact revision. The server
 checks that revision on admission and again immediately before each export.
 An already dispatched vendor request cannot be recalled.
 
+Withdrawing permission stops new reports and pending exports; reports NyxID has already received remain for up to 30 days unless the account is deleted, and exported vendor copies expire under vendor retention.
+
 Policy-1 users keep categorical analytics. Legacy stored device choices mean
 policy 1; a PUT without `policy_version` still records `1`. New clients negotiate
-`current_policy_version` before sending `2`. Web offers the updated consent
+`current_policy_version` before sending `2`. The additive `diagnostics_offered`
+field requires serving readiness, the acting person’s flag and no global kill
+switch; only then is current policy 2 advertised and diagnostic UI displayed.
+The entire display-status computation is bounded to 250 ms and fails closed.
+Web offers the updated consent
 banner and a Privacy review dialog. Mobile offers an account-bound one-time
 Review / Not now alert and a Privacy review row. Not now retains the old choice.
 Local withdrawal remains usable during network failures.
@@ -71,7 +77,13 @@ hooks, so app-delegate and UIScene lifecycles use the same path.
 After auth restoration and device-choice hydration, a fresh permission read
 selects a binding `{accountId, revision, epochId}`. A matching stored binding keeps
 its epoch and re-enables the reporter in the new process. Other bindings are
-purged before a fresh epoch is armed. Logout, account switch, withdrawal, remote
+purged before a fresh epoch is armed. A transport failure during permission
+refresh pauses capture without deleting the binding or pending records. Pause
+clears native capture authority and custom data even in an already-enabled
+process. On iOS it also converts any matching capture-time raw report locally
+and purges the raw file through `collect`; only bounded sanitized records survive
+an offline launch. A later successful refresh can re-arm the same revision and drain
+retained records within the existing bounds. Explicit denial still purges. Logout, account switch, withdrawal, remote
 denial, kill switch or unavailable diagnostics disarms and purges. A→B→A and
 withdrawal/regrant cannot adopt a predecessor's records.
 
@@ -107,7 +119,9 @@ React Native's previous ErrorUtils fatal handler runs after synchronous
 sanitization and `recordFatalJs`. That write sets custom data `{e, j: eventId}`.
 RN's subsequent RCTFatal SIGABRT therefore carries `j` and the pure decision
 function drops its native report, preventing double counting. Nonfatal errors
-and RN/Hermes unhandled-rejection callbacks chain the existing handlers.
+and development RN/Hermes unhandled-rejection callbacks chain the existing handlers.
+Release Hermes and fallback rejection trackers use capture-only callbacks; they
+do not invoke RN's development rejection logging/native-exception path.
 
 Automated proofs run in `pnpm test`: `native-crash.test.js` compiles/runs the
 production Swift decision and sanitizer functions with sentinel-laden inputs.
@@ -134,6 +148,10 @@ Retention is 1–30 days (default 30); every read filters live expiry as well as
 Mongo TTL. Personal erasure deletes these owner-linked rows through the existing
 erasure inventory and admission barrier. `client_error_report_counters` retains
 only anonymous hourly platform/outcome counts, with a 30-day TTL.
+
+NyxID keeps its fingerprint for local grouping only; Sentry receives no custom
+fingerprint, preserving symbolicated grouping. Web uses the browser context;
+iOS/Android include OS names. Mobile omits an unavailable Hermes version.
 
 The exporter claims batches of at most sixteen using database-time leases and
 random fences. It rechecks readiness, flag, revision and the 24-hour export
@@ -168,7 +186,8 @@ Web Vite builds generate a random artifact UUID, package version and build ID,
 and hidden source maps. The build collector moves all maps out of dist into
 `crash-artifacts/web/<artifact>/`, copies matching assets, writes a manifest and
 fails if a map or sourceMappingURL remains public. nginx also rejects `.map`.
-The runtime image copies only dist. Optional Docker secret
+The runtime image copies only dist. The builder installs the artifact uploader
+only when the optional secret file is present and nonempty. Optional Docker secret
 `crash_artifacts_sentry` is a JSON object of the three web build-only variables
 listed in ENV.md. No token uses a VITE prefix or enters a runtime layer.
 
@@ -184,7 +203,7 @@ Reports use installed native version/build, not package metadata or an OTA label
 the auth token, organization and matching project are configured together; a
 partial configuration fails the build. It uploads release/dist source maps and
 iOS debug files without echoing credentials. Sentry releases are
-`nyxid-web@<version>+<artifact>` and `nyxid-mobile@<version>+<build>`. Keep the tools
+`nyxid-web@<version>+<artifact>` and `nyxid-ios@<version>+<build>` or `nyxid-android@<version>+<build>`. Keep the tools
 package installed before a mobile build (`npm ci --prefix tools/crash-artifacts`).
 
 ## Rollout and rollback
@@ -192,7 +211,8 @@ package installed before a mobile build (`npm ci --prefix tools/crash-artifacts`
 Deploy all backend readers/workers, then web and the new mobile binary. Verify
 `diagnostics:crash-reports` serving readiness, enable a staff cohort, verify
 counts/details and health, and widen. Policy 2 is advertised only when readiness
-serves. Provisioning Sentry, owner acceptance, vendor settings, App Store crash
+serves, the acting person's flag is enabled and the global kill switch is inactive.
+Provisioning Sentry, owner acceptance, vendor settings, App Store crash
 data disclosure and a TestFlight device proof are release-operator prerequisites.
 
 An explicit global flag override off is the kill switch, including narrower
@@ -209,3 +229,21 @@ migration of existing analytics consent is performed.
 - **@sentry/cli 3.8.2**, Sentry, package.json SPDX **FSL-1.1-MIT**.
   Upstream: <https://github.com/getsentry/sentry-cli>. Build-tool dependency only;
   the package license is FSL with its stated future MIT conversion, not BSD.
+
+## Linux portability proof
+
+The same production `CrashDecision.swift` and test executable pass with
+swift-corelibs-foundation in the official `swift:6.0` Linux container:
+
+```sh
+docker run --rm -v "$PWD/mobile:/w:ro" -w /w swift:6.0 bash -lc \
+  'swiftc modules/nyx-crash-reporter/ios/CrashDecision.swift modules/nyx-crash-reporter/tests/main.swift -o /tmp/nyx-crash-proof && /tmp/nyx-crash-proof'
+```
+
+`pnpm test` always runs the Swift proof; it never skips for a missing compiler.
+The GitHub-hosted image inventory lists Swift 6.4.2 for both
+[Ubuntu 24.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md#language-and-runtime)
+and [Ubuntu 26.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2604-Readme.md#language-and-runtime).
+The [runner image label table](https://github.com/actions/runner-images#available-images)
+maps `ubuntu-latest` to the hosted Ubuntu image; both sides of the November 2026
+label transition include the Swift compiler.
