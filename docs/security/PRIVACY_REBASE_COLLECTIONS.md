@@ -152,7 +152,7 @@ services/shutdown/tests.rs:194: ...collection::<Document>("shutdown_claims")
 ```
 
 The probe's sole writer is `plan_writers_tests.rs:622` (a test transaction's commit marker);
-`:661` reads its counter. `billing/mod.rs:2508-2509` declares that whole module
+`:661` reads its counter. `billing/mod.rs:2522-2523` declares that whole module
 under `#[cfg(test)]`. There is no constant resolving to `cache_unit_probe`, and
 no non-test read/write or startup use in `main.rs`, `db.rs`, services, or handlers.
 The shutdown test writes at `shutdown/tests.rs:177`, supplies a dynamic test
