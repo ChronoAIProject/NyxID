@@ -168,6 +168,14 @@ Node-key command execution uses:
 
 The browser terminal reuses `web_terminal_open` with `auth_mode: "node_key"` and the same `web_terminal_data`, `web_terminal_resize`, and `web_terminal_closed` stream frames as cert-mode terminals.
 
+Interactive browser and mobile terminals stay open while idle. Their downstream
+SSH sessions send a keepalive every 15 seconds, allow at most three unanswered
+keepalives, and detect a dead peer within about 60 seconds. They have no inactivity
+timeout. Exec, connection tests and other noninteractive paths retain their
+existing timeouts without keepalives. Upgrade `nyxid node` to receive this fix;
+older nodes still close idle terminals after 30 seconds. This rollout requires
+no server or API change.
+
 ### NyxBot execution
 
 Assistant chat credentials use bounded SSH exec with exact connection, command,
