@@ -14,6 +14,7 @@ use crate::{
 };
 
 const PAGE: i64 = 64;
+const APPLY_BATCH: usize = 64;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct OrphanCandidate {
@@ -244,49 +245,57 @@ pub async fn apply(
             item.owner_ids.push(candidate.owner_id.clone());
         }
     }
-    for (candidate, id, field, disposition) in candidates {
-        let mut filter = doc! {"_id": id};
-        if field.ends_with("_ids") {
-            filter.insert(field, doc! {"$in": [candidate.owner_id.as_str()]});
-        } else {
-            filter.insert(field, candidate.owner_id.as_str());
-        }
-        match disposition {
-            Erasure::Redacted => {
-                if candidate.collection == "service_change_events" && field == "owner_id" {
+    for batch in candidates.chunks(APPLY_BATCH) {
+        for (candidate, id, field, disposition) in batch {
+            // The owner may have been recreated after the reviewed dry run.
+            // Recheck immediately before each mutation so a live person,
+            // organization user, or service account is always protected.
+            if owner_is_live(db, &candidate.owner_id).await? {
+                continue;
+            }
+            let mut filter = doc! {"_id": id.clone()};
+            if field.ends_with("_ids") {
+                filter.insert(*field, doc! {"$in": [candidate.owner_id.as_str()]});
+            } else {
+                filter.insert(*field, candidate.owner_id.as_str());
+            }
+            match disposition {
+                Erasure::Redacted => {
+                    if candidate.collection == "service_change_events" && *field == "owner_id" {
+                        db.collection::<Document>(&candidate.collection)
+                            .delete_one(filter)
+                            .await?;
+                        continue;
+                    }
+                    if candidate.collection == "invite_codes" && *field == "usages.user_id" {
+                        db.collection::<Document>(&candidate.collection)
+                            .update_one(
+                                filter,
+                                doc! {"$pull": {"usages": {"user_id": candidate.owner_id.as_str()}}},
+                            )
+                            .await?;
+                        continue;
+                    }
+                    let update = if candidate.collection == "service_change_events"
+                        && *field == "actor.person_id"
+                    {
+                        doc! {"$set": {"actor.name": "Deleted account", "actor.person_id": Bson::Null, "actor.api_key_id": Bson::Null, "actor.app_id": Bson::Null}}
+                    } else {
+                        let mut set = Document::new();
+                        set.insert(*field, Bson::Null);
+                        doc! {"$set": set}
+                    };
+                    db.collection::<Document>(&candidate.collection)
+                        .update_one(filter, update)
+                        .await?;
+                }
+                Erasure::LocalInventory => {
                     db.collection::<Document>(&candidate.collection)
                         .delete_one(filter)
                         .await?;
-                    continue;
                 }
-                if candidate.collection == "invite_codes" && field == "usages.user_id" {
-                    db.collection::<Document>(&candidate.collection)
-                        .update_one(
-                            filter,
-                            doc! {"$pull": {"usages": {"user_id": candidate.owner_id.as_str()}}},
-                        )
-                        .await?;
-                    continue;
-                }
-                let update = if candidate.collection == "service_change_events"
-                    && field == "actor.person_id"
-                {
-                    doc! {"$set": {"actor.name": "Deleted account", "actor.person_id": Bson::Null, "actor.api_key_id": Bson::Null, "actor.app_id": Bson::Null}}
-                } else {
-                    let mut set = Document::new();
-                    set.insert(field, Bson::Null);
-                    doc! {"$set": set}
-                };
-                db.collection::<Document>(&candidate.collection)
-                    .update_one(filter, update)
-                    .await?;
+                _ => {}
             }
-            Erasure::LocalInventory => {
-                db.collection::<Document>(&candidate.collection)
-                    .delete_one(filter)
-                    .await?;
-            }
-            _ => {}
         }
     }
     crate::services::audit_service::log_actor_event(
