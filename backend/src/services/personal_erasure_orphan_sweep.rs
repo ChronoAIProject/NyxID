@@ -185,7 +185,7 @@ async fn live_owner_ids(
             .max_time(AGGREGATE_TIMEOUT)
             .await?;
         while let Some(row) = cursor.try_next().await? {
-            if let Some(id) = row.get_str("_id").ok() {
+            if let Ok(id) = row.get_str("_id") {
                 live.insert(id.to_owned());
             }
         }
@@ -198,7 +198,7 @@ async fn live_owner_ids(
         .max_time(AGGREGATE_TIMEOUT)
         .await?;
     while let Some(row) = jobs.try_next().await? {
-        if let Some(id) = row.get_str("user_id").ok() {
+        if let Ok(id) = row.get_str("user_id") {
             live.insert(id.to_owned());
         }
     }

@@ -2698,16 +2698,15 @@ mod tests {
             // imports that the focused expression above does not match.
             for captures in use_statements.captures_iter(source) {
                 let statement = captures[1].trim();
-                if let Some(open) = statement.find('{') {
-                    if let Some(close) = statement.rfind('}')
-                        && close > open
-                    {
-                        collect_imports(
-                            &(statement[..open].trim().trim_end_matches("::").to_owned() + "::"),
-                            &statement[open + 1..close],
-                            &mut this_aliases,
-                        );
-                    }
+                if let Some(open) = statement.find('{')
+                    && let Some(close) = statement.rfind('}')
+                    && close > open
+                {
+                    collect_imports(
+                        &(statement[..open].trim().trim_end_matches("::").to_owned() + "::"),
+                        &statement[open + 1..close],
+                        &mut this_aliases,
+                    );
                 }
             }
             for (alias, path) in &this_aliases {
@@ -2729,9 +2728,8 @@ mod tests {
 
         let mut seen = BTreeSet::new();
         let mut errors = Vec::new();
-        for ((label, source), (this, this_aliases)) in sources
-            .iter()
-            .zip(local.into_iter().zip(aliases.into_iter()))
+        for ((label, source), (this, this_aliases)) in
+            sources.iter().zip(local.into_iter().zip(aliases))
         {
             for call in calls.captures_iter(source) {
                 let argument = call[1].trim();
