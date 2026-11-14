@@ -1932,3 +1932,230 @@ mod analytics_ingress_tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
+
+#[cfg(test)]
+mod export_http_tests {
+    use super::*;
+    use crate::{
+        crypto::{jwt, token::hash_token},
+        models::user::{User, UserType},
+        services::service_account_service,
+        test_utils::{connect_transaction_test_database, test_app_state, test_user},
+    };
+    use axum::{
+        Router,
+        body::to_bytes,
+        http::{Request, StatusCode},
+    };
+    use mongodb::bson::{Document, doc};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    struct Fixture {
+        state: AppState,
+        app: Router,
+        owner: String,
+        human_token: String,
+    }
+
+    impl Fixture {
+        async fn new(label: &str) -> Self {
+            let db = connect_transaction_test_database(label).await;
+            crate::test_utils::init_test_audit_chain_hmac_key();
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<User>(crate::models::user::COLLECTION_NAME)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let state = test_app_state(db);
+            let human_token = jwt::generate_access_token(
+                &state.jwt_keys,
+                &state.config,
+                &Uuid::parse_str(&owner).unwrap(),
+                "openid account:read",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let (public, private) = crate::routes::build_router_with_state(state.clone());
+            Self {
+                state: state.clone(),
+                app: public.merge(private).with_state(state),
+                owner,
+                human_token,
+            }
+        }
+
+        async fn request(&self, headers: &[(&str, String)]) -> (StatusCode, HeaderMap, Vec<u8>) {
+            let mut request = Request::post("/api/v1/users/me/export");
+            for (name, value) in headers {
+                request = request.header(*name, value);
+            }
+            let response = self
+                .app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = to_bytes(response.into_body(), 64 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec();
+            (status, headers, body)
+        }
+    }
+
+    fn bearer(token: &str) -> (&'static str, String) {
+        ("authorization", format!("Bearer {token}"))
+    }
+
+    #[tokio::test]
+    async fn export_http_human_response_headers_and_credential_refusals() {
+        let fixture = Fixture::new("account_export_http").await;
+        let (status, headers, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("content-type").unwrap(), "application/json");
+        assert!(
+            headers
+                .get("content-disposition")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("attachment; filename=\"nyxid-account-export-")
+        );
+        assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["format"],
+            "nyxid.account-export"
+        );
+
+        let raw_key = format!("nyxid_{}", Uuid::new_v4().simple());
+        let key_id = Uuid::new_v4().to_string();
+        fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &key_id,
+                "user_id": &fixture.owner,
+                "name": "export test key",
+                "key_prefix": "nyxid_test",
+                "key_hash": hash_token(&raw_key),
+                "scopes": "account:read",
+                "is_active": true,
+                "created_at": mongodb::bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        let delegated = jwt::generate_delegated_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(&fixture.owner).unwrap(),
+            "account:read",
+            "export-client",
+            60,
+            None,
+        )
+        .unwrap();
+        let relay = jwt::generate_relay_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(&fixture.owner).unwrap(),
+            "account:read",
+            None,
+            &jwt::RelayAgentScope {
+                api_key_id: key_id,
+                api_key_name: "export test key".into(),
+                allowed_service_ids: vec![],
+                allowed_node_ids: vec![],
+                allow_all_services: true,
+                allow_all_nodes: true,
+            },
+        )
+        .unwrap();
+        let oauth = jwt::generate_oauth_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(&fixture.owner).unwrap(),
+            "account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "export-oauth-client",
+        )
+        .unwrap();
+        let refused = [
+            ("api_key", vec![("x-api-key", raw_key)]),
+            ("delegated", vec![bearer(&delegated)]),
+            ("relay", vec![bearer(&relay)]),
+            ("oauth_client", vec![bearer(&oauth)]),
+        ];
+        for (kind, headers) in refused {
+            let (status, _, _) = fixture.request(&headers).await;
+            assert!(
+                matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+                "{kind} unexpectedly reached export: {status}"
+            );
+        }
+
+        let (service_account, secret) = service_account_service::create_service_account(
+            &fixture.state.db,
+            "export test service account",
+            None,
+            "account:read",
+            &[],
+            None,
+            &fixture.owner,
+        )
+        .await
+        .unwrap();
+        let service_token = service_account_service::authenticate_client_credentials(
+            &fixture.state.db,
+            &fixture.state.config,
+            &fixture.state.jwt_keys,
+            &service_account.client_id,
+            &secret,
+            Some("account:read"),
+        )
+        .await
+        .unwrap()
+        .access_token;
+        let (status, _, _) = fixture.request(&[bearer(&service_token)]).await;
+        assert!(matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+    }
+
+    #[tokio::test]
+    async fn export_http_busy_does_not_consume_rate_limit_budget() {
+        let fixture = Fixture::new("account_export_busy").await;
+        let permit_a = fixture
+            .state
+            .account_export_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let permit_b = fixture
+            .state
+            .account_export_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        drop((permit_a, permit_b));
+        let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
