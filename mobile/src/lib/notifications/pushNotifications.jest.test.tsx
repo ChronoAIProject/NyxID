@@ -93,6 +93,7 @@ test("every logout clears tray and badge, including no token and successful unbi
 });
 test("native invalidation failure is guarded and still clears cached registration", async () => {
   mockStore.set("nyxid.push.device_token", "native-token");
+  const warning = jest.spyOn(console, "warn").mockImplementation(() => {});
   jest
     .mocked(mobileApi.unregisterPushToken)
     .mockRejectedValueOnce(new Error("offline"));
@@ -100,6 +101,8 @@ test("native invalidation failure is guarded and still clears cached registratio
     .mocked(Notifications.unregisterForNotificationsAsync)
     .mockRejectedValueOnce(new Error("unsupported runtime"));
   await expect(deactivatePushOnLogout()).resolves.toBe(false);
+  expect(warning).toHaveBeenCalledWith("[push] native unregister unavailable");
+  warning.mockRestore();
   expect(mockStore.has("nyxid.push.device_token")).toBe(false);
 });
 test("runtime token refresh does no API work while signed out; next login registers it", async () => {

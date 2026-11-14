@@ -31,6 +31,8 @@ export type WorkspaceParamList = {
   Plugins: { tab?: "connectors" | "skills"; agentId?: string } | undefined;
   Agents: { tab?: "agents" | "groups" } | undefined;
   Activity: { challengeId?: string } | undefined;
+  /** Stacked approval inbox used while a terminal remains pending. */
+  ActivityReview: undefined;
   /** The owner's durable notification feed (bell); hidden while the flag is off. */
   Notifications: undefined;
   AccountSettings:
@@ -184,6 +186,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "SshTerminal",
   "Machines",
   "Activity",
+  "ActivityReview",
   "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",

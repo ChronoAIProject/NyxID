@@ -62,6 +62,7 @@ const serverMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string().max(8192) }),
   z.object({ type: z.literal("closed"), reason: z.string().optional() }),
 ]);
+const TERMINAL_BACKGROUND_GRACE_MS = 15_000;
 export function SshTerminalScreen({
   route,
 }: {
@@ -95,6 +96,9 @@ export function SshTerminalScreen({
     undefined,
   );
   const waitingTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const backgroundTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
   const html = useMemo(
@@ -214,6 +218,8 @@ export function SshTerminalScreen({
       output.clear();
       clearTimeout(resizeTimer.current);
       clearTimeout(waitingTimer.current);
+      clearTimeout(backgroundTimer.current);
+      backgroundTimer.current = undefined;
       setWaiting(false);
       const ws = socket.current;
       socket.current = null;
@@ -350,8 +356,15 @@ export function SshTerminalScreen({
     void connect();
     const appState = AppState.addEventListener("change", (value) => {
       if (value === "background") {
-        close();
-        setState("Disconnected");
+        clearTimeout(backgroundTimer.current);
+        backgroundTimer.current = setTimeout(() => {
+          backgroundTimer.current = undefined;
+          close();
+          setState("Disconnected");
+        }, TERMINAL_BACKGROUND_GRACE_MS);
+      } else if (value === "active") {
+        clearTimeout(backgroundTimer.current);
+        backgroundTimer.current = undefined;
       }
     });
     const accountSubscription = subscribeAuthAccount(() => {
@@ -520,6 +533,7 @@ export function SshTerminalScreen({
               </Pressable>
             ) : null}
             <Text
+              accessibilityRole={error ? "alert" : undefined}
               accessibilityLiveRegion="polite"
               style={[styles.status, { color: colors.textSecondary }]}
               numberOfLines={2}
@@ -529,18 +543,30 @@ export function SshTerminalScreen({
             {(state === "Disconnected" ||
               state === "Closed by remote host" ||
               Boolean(error)) && (
-              <SettingsRow
-                label={t("Reconnect")}
-                tone="action"
+              <Pressable
+                accessibilityRole="button"
                 onPress={reconnect}
-              />
+                style={styles.statusAction}
+              >
+                <Text
+                  style={[styles.statusActionText, { color: colors.primary }]}
+                >
+                  {t("Reconnect")}
+                </Text>
+              </Pressable>
             )}
             {waiting && (
-              <SettingsRow
-                label={t("Review approvals")}
-                tone="action"
-                onPress={() => navigation.navigate("Activity", undefined)}
-              />
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => navigation.push("ActivityReview", undefined)}
+                style={styles.statusAction}
+              >
+                <Text
+                  style={[styles.statusActionText, { color: colors.primary }]}
+                >
+                  {t("Review approvals")}
+                </Text>
+              </Pressable>
             )}
           </View>
           {principalPickerOpen && principals.length > 0 ? (
@@ -700,6 +726,12 @@ const styles = StyleSheet.create({
   chipText: { ...typeScale.label },
   terminal: { flex: 1, minHeight: 100, backgroundColor: "#0f172a" },
   status: { ...typeScale.label, flex: 1 },
+  statusAction: {
+    flexShrink: 0,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: spacing.xs,
+  },
+  statusActionText: { ...typeScale.label, fontWeight: "600" },
   keys: { flexGrow: 0, maxHeight: 48 },
   key: {
     borderWidth: 1,

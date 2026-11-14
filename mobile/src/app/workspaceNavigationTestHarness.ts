@@ -23,6 +23,7 @@ export const contentNames = [
   "SshTerminal",
   "Machines",
   "Activity",
+  "ActivityReview",
   "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",

@@ -502,6 +502,11 @@ function WorkspaceNavigator() {
         options={{ title: t("Active grants") }}
       />
       <ContentStack.Screen
+        name="ActivityReview"
+        component={ActivityScreen}
+        options={{ title: t("Activity") }}
+      />
+      <ContentStack.Screen
         name="MachinePolicy"
         component={MachinePolicyScreen}
         options={{

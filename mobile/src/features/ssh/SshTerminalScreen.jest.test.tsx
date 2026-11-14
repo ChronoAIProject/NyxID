@@ -1,5 +1,5 @@
 import React from "react";
-import { act, fireEvent, render } from "@testing-library/react-native";
+import { act, fireEvent, render, waitFor } from "@testing-library/react-native";
 import { AppState, type AppStateStatus } from "react-native";
 import { SshTerminalScreen } from "./SshTerminalScreen";
 import { servicesApi } from "../../lib/api/servicesApi";
@@ -7,7 +7,11 @@ import { refreshAccessTokenIfNeeded } from "../../lib/api/http";
 import * as Clipboard from "expo-clipboard";
 const mockInject = jest.fn();
 let mockFocused = true;
-const mockNavigation = { setOptions: jest.fn(), navigate: jest.fn() };
+const mockNavigation = {
+  setOptions: jest.fn(),
+  navigate: jest.fn(),
+  push: jest.fn(),
+};
 const mockAppHandlers: ((value: AppStateStatus) => void)[] = [];
 jest.mock("@react-navigation/native", () => ({
   useIsFocused: () => mockFocused,
@@ -133,11 +137,19 @@ afterEach(() => {
   jest.restoreAllMocks();
   mockAppHandlers.length = 0;
 });
-const message = (view: any, data: unknown) =>
-  fireEvent(view, "message", { nativeEvent: { data: JSON.stringify(data) } });
+const message = async (view: any, data: unknown) => {
+  await act(async () => {
+    view.props.onMessage({ nativeEvent: { data: JSON.stringify(data) } });
+  });
+};
+const renderTerminal = async (element: React.ReactElement) => {
+  return render(element);
+};
+const waitForSocket = () =>
+  waitFor(() => expect(Socket.instances.length).toBeGreaterThan(0));
 
 test("bearer stays in the RN socket header; inline HTML, bridge and every injected script stay token-free", async () => {
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
@@ -147,9 +159,8 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   expect(view.props.allowFileAccess).toBe(false);
   expect(view.props.hideKeyboardAccessoryView).toBe(true);
   expect(view.props.keyboardDisplayRequiresUserAction).toBe(true);
-  await act(async () => {
-    message(view, { type: "ready" });
-  });
+  await message(view, { type: "ready" });
+  await waitForSocket();
   const socket = Socket.instances[0]!;
   expect(socket.options).toEqual({
     headers: {
@@ -160,9 +171,7 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   });
   expect(socket.url).toContain("/ssh/catalog/terminal?");
   expect(socket.url).not.toContain("SENTINEL");
-  await act(async () => {
-    message(view, { type: "input", data: "ls\r" });
-  });
+  await message(view, { type: "input", data: "ls\r" });
   expect(socket.send).toHaveBeenCalled();
   expect(typeof socket.send.mock.calls[0]![0]).not.toBe("string");
   await fireEvent.press(screen.getByLabelText("Up arrow"));
@@ -187,13 +196,13 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   expect(socket.close).toHaveBeenCalledWith(1000);
 });
 
-test("background closes the socket while inactive and blur keep it alive; 401 retries once", async () => {
-  const screen = await render(
+test("background grace keeps the socket for 15 seconds while inactive stays harmless; 401 retries once", async () => {
+  jest.useFakeTimers();
+  const screen = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
-  await act(async () => {
-    message(screen.getByTestId("terminal-webview"), { type: "ready" });
-  });
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
   await act(async () => {
     Socket.instances[0]!.onerror?.({});
     expect(Socket.instances.length).toBe(1);
@@ -217,6 +226,10 @@ test("background closes the socket while inactive and blur keep it alive; 401 re
   await act(async () => {
     mockAppHandlers.forEach((handler) => handler("background"));
   });
+  expect(Socket.instances[2]!.close).not.toHaveBeenCalled();
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(15_000);
+  });
   expect(Socket.instances[2]!.close).toHaveBeenCalledWith(1000);
   expect(screen.getByText("Disconnected")).toBeTruthy();
   await act(async () => {
@@ -228,24 +241,113 @@ test("background closes the socket while inactive and blur keep it alive; 401 re
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   await screen.unmount();
+  jest.useRealTimers();
 });
 
-test("a pending approval gets a review action without closing on route blur", async () => {
+test("background grace restarts after an active return and unmount clears it", async () => {
   jest.useFakeTimers();
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen
       route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
     />,
   );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
   await act(async () => {
-    message(screen.getByTestId("terminal-webview"), { type: "ready" });
+    await jest.advanceTimersByTimeAsync(2000);
   });
+  expect(screen.getByText("Waiting for approval or the node…")).toBeTruthy();
+  mockAppHandlers.forEach((handler) => handler("background"));
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(10_000);
+  });
+  mockAppHandlers.forEach((handler) => handler("active"));
+  mockAppHandlers.forEach((handler) => handler("background"));
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(14_999);
+  });
+  expect(socket.close).not.toHaveBeenCalled();
+  await screen.unmount();
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(1);
+  });
+  expect(socket.close).toHaveBeenCalledWith(1000);
+  expect(socket.close).toHaveBeenCalledTimes(1);
+  jest.useRealTimers();
+});
+
+test("approval review returns to the same waiting terminal and an approval unblock continues it", async () => {
+  jest.useFakeTimers();
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  const view = screen.getByTestId("terminal-webview");
+  await message(view, { type: "ready" });
+  await waitForSocket();
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(2000);
+  });
+  await fireEvent.press(screen.getByText("Review approvals"));
+  expect(mockNavigation.push).toHaveBeenCalledWith("ActivityReview", undefined);
+  const socket = Socket.instances[0]!;
+  await act(async () => {
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "connected", cols: 80, rows: 24 }),
+    });
+  });
+  expect(Socket.instances).toHaveLength(1);
+  expect(screen.getByText("Connected")).toBeTruthy();
+  expect(
+    mockInject.mock.calls.some(([script]) => script.includes('"type":"reset"')),
+  ).toBe(true);
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test.each([
+  "Approval was denied by the account owner.",
+  "This approval expired before the terminal opened.",
+])(
+  "approval closure keeps the server message and reconnect action: %s",
+  async (detail) => {
+    const screen = await renderTerminal(
+      <SshTerminalScreen
+        route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+      />,
+    );
+    const view = screen.getByTestId("terminal-webview");
+    await message(view, { type: "ready" });
+    await waitForSocket();
+    const socket = Socket.instances[0]!;
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({ type: "error", message: detail }),
+      });
+    });
+    expect(screen.getByText(detail)).toBeTruthy();
+    expect(screen.getByText("Reconnect")).toBeTruthy();
+    await screen.unmount();
+  },
+);
+
+test("a pending approval gets a review action without closing on route blur", async () => {
+  jest.useFakeTimers();
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
   await act(async () => {
     await jest.advanceTimersByTimeAsync(2000);
   });
   expect(screen.getByText("Waiting for approval or the node…")).toBeTruthy();
   await fireEvent.press(screen.getByText("Review approvals"));
-  expect(mockNavigation.navigate).toHaveBeenCalledWith("Activity", undefined);
+  expect(mockNavigation.push).toHaveBeenCalledWith("ActivityReview", undefined);
   mockFocused = false;
   await screen.rerender(
     <SshTerminalScreen
@@ -258,36 +360,30 @@ test("a pending approval gets a review action without closing on route blur", as
 });
 
 test("sticky Ctrl-C sends a binary interrupt once and releases the selected key", async () => {
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
-  await act(async () => {
-    message(view, { type: "ready" });
-  });
+  await message(view, { type: "ready" });
+  await waitForSocket();
   await fireEvent.press(screen.getByLabelText("Control"));
   expect(screen.getByLabelText("Control (armed)").props.accessibilityState.selected).toBe(true);
-  await act(async () => {
-    message(view, { type: "input", data: "c" });
-  });
+  await message(view, { type: "input", data: "c" });
   expect([...Socket.instances[0]!.send.mock.calls[0]![0]]).toEqual([3]);
   expect(screen.getByLabelText("Control").props.accessibilityState.selected).toBe(false);
-  await act(async () => {
-    message(view, { type: "input", data: "c" });
-  });
+  await message(view, { type: "input", data: "c" });
   expect([...Socket.instances[0]!.send.mock.calls[1]![0]]).toEqual([99]);
   await screen.unmount();
 });
 
 test("a terminated renderer gets a fresh inline document and navigation allowance", async () => {
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const first = screen.getByTestId("terminal-webview");
   first.props.onLoadStart();
-  await act(async () => {
-    message(first, { type: "ready" });
-  });
+  await message(first, { type: "ready" });
+  await waitForSocket();
   expect(Socket.instances.length).toBe(1);
   await act(async () => {
     first.props.onContentProcessDidTerminate();
@@ -297,9 +393,7 @@ test("a terminated renderer gets a fresh inline document and navigation allowanc
   expect(replacement.props.onShouldStartLoadWithRequest({ url: "about:blank", navigationType: "other" })).toBe(true);
   expect(replacement.props.onShouldStartLoadWithRequest({ url: "about:blank" })).toBe(false);
   expect(Socket.instances.length).toBe(1);
-  await act(async () => {
-    message(replacement, { type: "ready" });
-  });
+  await message(replacement, { type: "ready" });
   expect(Socket.instances.length).toBe(2);
   await screen.unmount();
 });
@@ -307,12 +401,11 @@ test("a terminated renderer gets a fresh inline document and navigation allowanc
 test.each(["The credential node is offline", "SSH host key mismatch"])(
   "server errors retain actionable node/host messages: %s",
   async (detail) => {
-    const screen = await render(
+    const screen = await renderTerminal(
       <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
     );
-    await act(async () => {
-      message(screen.getByTestId("terminal-webview"), { type: "ready" });
-    });
+    await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+    await waitForSocket();
     const socket = Socket.instances[0]!;
     await act(async () => {
       socket.onmessage?.({
@@ -342,22 +435,19 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
 
 test("remote close and invalid bridge data never replay shell input; resizing is debounced", async () => {
   jest.useFakeTimers();
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
-  await act(async () => {
-    message(view, { type: "ready" });
-  });
+  await message(view, { type: "ready" });
+  await waitForSocket();
   const socket = Socket.instances[0]!;
-  await act(async () => {
-    message(view, { type: "input", data: "bad", url: "https://evil.example" });
-    message(view, { type: "resize", cols: 1, rows: 2 });
-  });
+  await message(view, { type: "input", data: "bad", url: "https://evil.example" });
+  await message(view, { type: "resize", cols: 1, rows: 2 });
   expect(socket.send).not.toHaveBeenCalled();
+  await message(view, { type: "resize", cols: 80, rows: 24 });
+  await message(view, { type: "resize", cols: 120, rows: 40 });
   await act(async () => {
-    message(view, { type: "resize", cols: 80, rows: 24 });
-    message(view, { type: "resize", cols: 120, rows: 40 });
     await jest.advanceTimersByTimeAsync(99);
   });
   expect(socket.send).not.toHaveBeenCalled();
@@ -382,12 +472,10 @@ test("several principals require selection; a clipboard read resolving after blu
     ...connection,
     ssh_allowed_principals: ["ops", "deploy"],
   });
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
   );
-  await act(async () => {
-    message(screen.getByTestId("terminal-webview"), { type: "ready" });
-  });
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
   expect(Socket.instances.length).toBe(0);
   expect(screen.getByText("Choose an SSH principal to connect.")).toBeTruthy();
   await fireEvent.press(screen.getByText("deploy"));
@@ -416,18 +504,17 @@ test("several principals require selection; a clipboard read resolving after blu
 });
 
 test("a catalog deep link resolves the active connection, while an unknown catalog is actionable", async () => {
-  const deep = await render(
+  const deep = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "catalog" } }} />,
   );
-  await act(async () => {
-    message(deep.getByTestId("terminal-webview"), { type: "ready" });
-  });
+  await message(deep.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
   expect(Socket.instances[0]!.url).toContain("/ssh/catalog/terminal?");
   await deep.unmount();
 
   Socket.instances = [];
   jest.mocked(servicesApi.connections).mockResolvedValue([]);
-  const unknown = await render(
+  const unknown = await renderTerminal(
     <SshTerminalScreen route={{ params: { serviceId: "missing-catalog" } }} />,
   );
   await act(async () => {
@@ -445,7 +532,7 @@ test("a catalog deep link resolves the active connection, while an unknown catal
 
 test("a connection load failure has an unavailable state without terminal chrome", async () => {
   jest.mocked(servicesApi.connection).mockRejectedValueOnce(new Error("offline"));
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen
       route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
     />,
@@ -460,7 +547,7 @@ test("a connection load failure has an unavailable state without terminal chrome
 });
 
 test("a disallowed deep-link principal shows the picker instead of hanging", async () => {
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen
       route={{ params: { serviceId: "catalog", principal: "forbidden" } }}
     />,
@@ -491,7 +578,7 @@ test.each([
     ssh_auth_mode: mode,
     ...(mode === "cert" ? { is_active: false } : {}),
   });
-  const screen = await render(
+  const screen = await renderTerminal(
     <SshTerminalScreen
       route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
     />,
