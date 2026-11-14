@@ -5504,6 +5504,7 @@ async fn responses_with_producers_impl(
     if !valid_partition(&partition) || row.status != "active" {
         return problem(StatusCode::NOT_FOUND, "conversation_not_found");
     }
+    provider_refusal::partition(&partition);
     match state
         .db
         .collection::<NyxbotThread>(THREADS)

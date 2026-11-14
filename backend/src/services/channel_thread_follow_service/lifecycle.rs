@@ -416,13 +416,14 @@ pub async fn carry_over_in_session(
         .collect();
     let source: Vec<bson::Document> = documents
         .find(doc! {"channel_id":from,"user_id":owner,"partition":&stable})
-        .projection(doc! {"partition":1,"_id":0})
+        .projection(super::super::nyxbot_thread_mutation::projection())
         .session(&mut *session)
         .await?
         .stream(&mut *session)
         .try_collect()
         .await?;
     let mut partitions = Vec::new();
+    let mut identities = Vec::new();
     let mut kept_conflicting = 0;
     for row in &source {
         if let Ok(partition) = row.get_str("partition") {
@@ -430,17 +431,21 @@ pub async fn carry_over_in_session(
                 kept_conflicting += 1;
             } else {
                 partitions.push(partition);
+                identities.push(super::super::nyxbot_thread_mutation::observed(row)?);
             }
         }
     }
-    let moved = rows
-        .update_many(
-            doc! {"channel_id":from,"user_id":owner,"partition":{"$in":&partitions}},
-            doc! {"$set":{"channel_id":to}},
-        )
-        .session(&mut *session)
-        .await?
-        .modified_count;
+    let mut moved = 0;
+    for batch in identities.chunks(128) {
+        let result = rows
+            .update_many(doc! {"$or":batch}, doc! {"$set":{"channel_id":to}})
+            .session(&mut *session)
+            .await?;
+        if result.matched_count != batch.len() as u64 {
+            return Err(not_found());
+        }
+        moved += result.modified_count;
+    }
     for field in ["channel", "reply_channel"] {
         db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
             .update_many(doc! {"user_id":owner,format!("{field}.nyxbot_channel_id"):from,format!("{field}.partition"): {"$in":&partitions}},

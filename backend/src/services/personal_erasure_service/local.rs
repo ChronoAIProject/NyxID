@@ -469,10 +469,16 @@ async fn erase_page(
                 "Personal cleanup admission is unavailable".into(),
             ));
         }
+        let deleting_threads = collection == crate::models::nyxbot_channel::THREADS_COLLECTION_NAME;
+        let projection = if deleting_threads {
+            super::super::nyxbot_thread_mutation::projection()
+        } else {
+            doc! {"_id":1}
+        };
         let mut cursor = db
             .collection::<Document>(collection)
             .find(filter.clone())
-            .projection(doc! {"_id":1})
+            .projection(projection)
             .sort(doc! {"_id":1})
             .limit(PAGE)
             .session(&mut tx)
@@ -480,6 +486,10 @@ async fn erase_page(
         let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
         if rows.is_empty() {
             return Ok(false);
+        }
+        if deleting_threads {
+            super::super::nyxbot_thread_mutation::delete_observed(db, &mut tx, &rows).await?;
+            return Ok(true);
         }
         let ids: Vec<bson::Bson> = rows
             .into_iter()
