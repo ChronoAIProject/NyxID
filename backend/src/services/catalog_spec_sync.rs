@@ -72,12 +72,21 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
             }
         };
 
+        #[cfg(test)]
+        if let Ok((arrived, resume)) = tests::OVERLAY_GATE.try_with(Clone::clone) {
+            arrived.wait().await;
+            resume.notified().await;
+        }
         let count = inputs.len();
-        commit_spec_inputs(
+        commit_mutation(
             db,
             &service,
-            inputs,
-            super::audit_service::audit_chain_hmac_key(),
+            None,
+            Mutation::Reconcile {
+                inputs,
+                authoritative: false,
+            },
+            require_audit_key(super::audit_service::audit_chain_hmac_key())?,
         )
         .await?;
         super::credential_verification::seed_declaration(db, &service).await?;
@@ -155,12 +164,45 @@ pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
 /// Additive Tool sync or zero-row-guarded legacy discovery. Logs and returns on any
 /// failure instead of erroring so callers (startup sweep, admin handlers)
 /// are never blocked by a broken spec URL.
+enum SpecSyncAttempt {
+    Complete,
+    ParentChanged,
+}
+
 async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &DownstreamService) {
+    let mut observed = service.clone();
+    for attempt in 0..=2 {
+        if matches!(
+            sync_spec_attempt(db, &observed).await,
+            SpecSyncAttempt::Complete
+        ) {
+            return;
+        }
+        if attempt == 2 {
+            tracing::warn!(service_id = %observed.id, "Spec endpoint sync: parent changed on all three attempts");
+            return;
+        }
+        observed = match db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id": &observed.id, "is_active": true})
+            .await
+        {
+            Ok(Some(current)) => current,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(service_id = %observed.id, %error, "Spec endpoint sync: failed to reload changed parent");
+                return;
+            }
+        };
+    }
+}
+
+async fn sync_spec_attempt(db: &mongodb::Database, service: &DownstreamService) -> SpecSyncAttempt {
     if !should_auto_sync_service_endpoints(service) {
-        return;
+        return SpecSyncAttempt::Complete;
     }
     let Some(spec_url) = service.openapi_spec_url.as_deref() else {
-        return;
+        return SpecSyncAttempt::Complete;
     };
 
     let existing_rows = match db
@@ -173,12 +215,12 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
         Ok(count) => count,
         Err(error) => {
             tracing::warn!(slug = %service.slug, %error, "Spec endpoint sync: failed to count endpoints");
-            return;
+            return SpecSyncAttempt::Complete;
         }
     };
     let is_tool = service.offering_kind == crate::models::downstream_service::OfferingKind::Tool;
     if existing_rows > 0 && !is_tool {
-        return; // Legacy discovery leaves existing curated services alone.
+        return SpecSyncAttempt::Complete; // Legacy discovery leaves existing curated services alone.
     }
 
     let spec = match crate::services::api_docs_service::fetch_spec_json(spec_url).await {
@@ -190,7 +232,7 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
                 %error,
                 "Spec endpoint sync: failed to fetch OpenAPI spec; run discover-endpoints manually"
             );
-            return;
+            return SpecSyncAttempt::Complete;
         }
     };
 
@@ -211,24 +253,35 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
         Ok(inputs) if !inputs.is_empty() => inputs,
         Ok(_) => {
             tracing::warn!(slug = %service.slug, "Spec endpoint sync: spec contained no operations");
-            return;
+            return SpecSyncAttempt::Complete;
         }
         Err(error) => {
             tracing::warn!(slug = %service.slug, %error, "Spec endpoint sync: spec failed validation");
-            return;
+            return SpecSyncAttempt::Complete;
         }
     };
 
+    #[cfg(test)]
+    if let Ok((arrived, resume, first)) = tests::FETCH_GATE.try_with(Clone::clone)
+        && first.swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        arrived.wait().await;
+        resume.notified().await;
+    }
+    #[cfg(test)]
+    tests::change_parent_after_fetch(db, service).await;
     let count = inputs.len();
     match commit_spec_inputs(
         db,
         service,
         inputs,
+        !is_tool,
         super::audit_service::audit_chain_hmac_key(),
     )
     .await
     {
-        Ok(_) => {
+        Ok(false) => return SpecSyncAttempt::ParentChanged,
+        Ok(true) => {
             tracing::info!(
                 slug = %service.slug,
                 service_id = %service.id,
@@ -240,6 +293,7 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
             tracing::warn!(slug = %service.slug, %error, "Spec endpoint sync: failed to upsert endpoints");
         }
     }
+    SpecSyncAttempt::Complete
 }
 
 pub fn should_auto_sync_service_endpoints(service: &DownstreamService) -> bool {
@@ -260,25 +314,25 @@ async fn commit_spec_inputs(
     db: &mongodb::Database,
     observed: &DownstreamService,
     inputs: Vec<EndpointInput>,
+    require_empty: bool,
     audit_key: Option<&[u8]>,
-) -> AppResult<()> {
-    let key = audit_key.filter(|key| key.len() == 32).ok_or_else(|| {
+) -> AppResult<bool> {
+    super::service_endpoint_service::commit_spec_sync(
+        db,
+        observed,
+        inputs,
+        require_empty,
+        require_audit_key(audit_key)?,
+    )
+    .await
+}
+
+fn require_audit_key(audit_key: Option<&[u8]>) -> AppResult<&[u8]> {
+    audit_key.filter(|key| key.len() == 32).ok_or_else(|| {
         crate::errors::AppError::Internal(
             "Catalog spec sync requires the initialized audit-chain key".into(),
         )
-    })?;
-    commit_mutation(
-        db,
-        observed,
-        None,
-        Mutation::Reconcile {
-            inputs,
-            authoritative: false,
-        },
-        key,
-    )
-    .await?;
-    Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -490,6 +544,261 @@ fn endpoint_inputs_from_spec_url(
 
 #[cfg(test)]
 mod tests {
+    tokio::task_local! {
+        pub(super) static OVERLAY_GATE: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Notify>);
+        pub(super) static PARENT_EDITS: (String, std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    }
+
+    pub(super) async fn change_parent_after_fetch(
+        db: &mongodb::Database,
+        service: &DownstreamService,
+    ) {
+        let Ok((mode, attempts)) = PARENT_EDITS.try_with(Clone::clone) else {
+            return;
+        };
+        let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt > 0 && mode != "churn" {
+            return;
+        }
+        let mut fields = doc! {"updated_at": mongodb::bson::DateTime::from_chrono(service.updated_at + chrono::Duration::seconds(1))};
+        if mode == "url" {
+            fields.insert(
+                "openapi_spec_url",
+                format!("https://example.com/{}/new.json", service.id),
+            );
+        }
+        if mode == "inactive" {
+            fields.insert("is_active", false);
+        }
+        if mode == "no_url" {
+            fields.insert("openapi_spec_url", mongodb::bson::Bson::Null);
+        }
+        if mode == "rows" {
+            let input = endpoint_inputs_from_spec_url(&serde_json::json!({"openapi":"3.1.0","info":{"title":"Curated","version":"1"},"paths":{
+                "/curated":{"get":{"operationId":"curated","responses":{"200":{"description":"ok"}}}}
+            }}),service.openapi_spec_url.as_deref().unwrap()).unwrap().remove(0);
+            commit_mutation(db, service, None, Mutation::Create(input), &[2; 32])
+                .await
+                .unwrap();
+        }
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(doc! {"_id":&service.id}, doc! {"$set":fields})
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_overlay_sync_survives_unrelated_parent_update() {
+        Box::pin(async {
+            let db = crate::test_utils::connect_transaction_test_database("overlay_parent_edit").await;
+            super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2;32]));
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string(); service.slug = "api-lark-bot".into(); service.created_by = "system".into();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES).insert_one(&service).await.unwrap();
+            let expected = hosted_endpoint_inputs(&service).unwrap().len();
+            let gate = (std::sync::Arc::new(tokio::sync::Barrier::new(2)), std::sync::Arc::new(tokio::sync::Notify::new()));
+            let (result, ()) = tokio::join!(OVERLAY_GATE.scope(gate.clone(), sync_seeded_service_endpoints(&db)), async {
+                gate.0.wait().await;
+                db.collection::<DownstreamService>(DOWNSTREAM_SERVICES).update_one(doc!{"_id":&service.id},
+                    doc!{"$set":{"updated_at":mongodb::bson::DateTime::from_chrono(service.updated_at+chrono::Duration::seconds(1))}}).await.unwrap();
+                gate.1.notify_one();
+            });
+            result.unwrap();
+            let rows = super::super::service_endpoint_service::list_all_endpoints(&db,&service.id).await.unwrap();
+            assert_eq!(rows.len(),expected,"an embedded overlay remains valid after an unrelated parent write");
+            db.drop().await.unwrap();
+        }).await;
+    }
+
+    async fn spec_retry_case(mode: &str) {
+        let db = crate::test_utils::connect_transaction_test_database("spec_retry").await;
+        let _cache = super::super::api_docs_service::SpecCacheTestGuard::acquire();
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = "retry-spec".into();
+        service.openapi_spec_url = Some(format!("https://example.com/{}/old.json", service.id));
+        let spec = |path: &str| {
+            serde_json::json!({"openapi":"3.1.0","info":{"title":"Retry","version":"1"},
+            "paths":{path:{"get":{"operationId":"read_item","responses":{"200":{"description":"ok"}}}}}})
+        };
+        super::super::api_docs_service::cache_test_spec(
+            service.openapi_spec_url.as_ref().unwrap(),
+            None,
+            spec("/old"),
+        );
+        super::super::api_docs_service::cache_test_spec(
+            &format!("https://example.com/{}/new.json", service.id),
+            None,
+            spec("/new"),
+        );
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        PARENT_EDITS
+            .scope(
+                (mode.into(), attempts.clone()),
+                sync_service_endpoints_from_spec_url(&db, &service),
+            )
+            .await;
+        let rows = super::super::service_endpoint_service::list_all_endpoints(&db, &service.id)
+            .await
+            .unwrap();
+        if matches!(mode, "inactive" | "no_url" | "rows") {
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+            if mode == "rows" {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].path, "/curated");
+            } else {
+                assert!(rows.is_empty());
+            }
+        } else if mode == "churn" {
+            assert!(rows.is_empty(), "no stale rows may be written");
+            assert_eq!(
+                attempts.load(std::sync::atomic::Ordering::SeqCst),
+                3,
+                "one attempt and two bounded retries"
+            );
+        } else {
+            assert_eq!(
+                rows.len(),
+                1,
+                "the same sync call must retry the changed parent"
+            );
+            assert_eq!(rows[0].path, if mode == "url" { "/new" } else { "/old" });
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_spec_sync_retries_unrelated_parent_edit() {
+        Box::pin(spec_retry_case("unrelated")).await;
+    }
+    #[tokio::test]
+    async fn round2_spec_sync_retries_new_url_in_same_call() {
+        Box::pin(spec_retry_case("url")).await;
+    }
+    #[tokio::test]
+    async fn round2_spec_sync_stops_after_two_retries() {
+        Box::pin(spec_retry_case("churn")).await;
+    }
+    #[tokio::test]
+    async fn spec_retry_stops_when_parent_is_inactive_url_is_gone_or_rows_exist() {
+        for mode in ["inactive", "no_url", "rows"] {
+            Box::pin(spec_retry_case(mode)).await;
+        }
+    }
+
+    tokio::task_local! {
+        pub(super) static FETCH_GATE: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+    }
+
+    async fn spec_sync_race(mode: &str) {
+        let curated = mode == "curated";
+        use crate::models::downstream_service::OfferingKind;
+        use std::sync::Arc;
+        use tokio::sync::{Barrier, Notify};
+        let db = crate::test_utils::connect_transaction_test_database("spec_fetch_race").await;
+        let _cache = super::super::api_docs_service::SpecCacheTestGuard::acquire();
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = "race-spec".into();
+        service.offering_kind = if curated {
+            OfferingKind::AiService
+        } else {
+            OfferingKind::Tool
+        };
+        let old_url = format!("https://example.com/{}/old.json", service.id);
+        let new_url = if mode == "same_url" {
+            old_url.clone()
+        } else {
+            format!("https://example.com/{}/new.json", service.id)
+        };
+        service.openapi_spec_url = Some(old_url.clone());
+        let spec = |path: &str| {
+            serde_json::json!({"openapi":"3.1.0","info":{"title":"Race","version":"1"},
+            "paths":{path:{"get":{"operationId":"read_item","responses":{"200":{"description":"ok"}}}}}})
+        };
+        super::super::api_docs_service::cache_test_spec(&old_url, None, spec("/old"));
+        if mode != "same_url" {
+            super::super::api_docs_service::cache_test_spec(&new_url, None, spec("/new"));
+        }
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id":&service.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let arrived = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Notify::new());
+        tokio::join!(
+            FETCH_GATE.scope(
+                (
+                    arrived.clone(),
+                    resume.clone(),
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
+                ),
+                sync_service_endpoints_from_spec_url(&db, &service)
+            ),
+            async {
+                arrived.wait().await;
+                if curated {
+                    let input = endpoint_inputs_from_spec_url(&spec("/curated"), &old_url)
+                        .unwrap()
+                        .remove(0);
+                    commit_mutation(&db, &service, None, Mutation::Create(input), &[2; 32])
+                        .await
+                        .unwrap();
+                } else {
+                    super::super::api_docs_service::cache_test_spec(&new_url, None, spec("/new"));
+                    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES).update_one(doc!{"_id":&service.id},
+                    doc!{"$set":{"openapi_spec_url":&new_url,"updated_at":mongodb::bson::DateTime::from_chrono(service.updated_at+chrono::Duration::seconds(1))}}).await.unwrap();
+                    let newer = db
+                        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                        .find_one(doc! {"_id":&service.id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    sync_service_endpoints_from_spec_url(&db, &newer).await;
+                }
+                resume.notify_one();
+            }
+        );
+        let rows = super::super::service_endpoint_service::list_all_endpoints(&db, &service.id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].path,
+            if curated { "/curated" } else { "/new" },
+            "late discovery must preserve the newer commit"
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spec_sync_rejects_changed_parent_with_same_url() {
+        Box::pin(spec_sync_race("same_url")).await;
+    }
+
+    #[tokio::test]
+    async fn superseded_spec_fetch_cannot_overwrite_newer_endpoints() {
+        Box::pin(spec_sync_race("url")).await;
+    }
+
+    #[tokio::test]
+    async fn initial_spec_discovery_cannot_overwrite_concurrent_curated_endpoint() {
+        Box::pin(spec_sync_race("curated")).await;
+    }
+
     use super::*;
 
     #[test]
@@ -973,7 +1282,7 @@ mod tests {
         .unwrap();
         inputs[0].description = Some("changed contract".into());
         assert!(matches!(
-            commit_spec_inputs(&db, &service, inputs, None).await,
+            commit_spec_inputs(&db, &service, inputs, false, None).await,
             Err(crate::errors::AppError::Internal(_))
         ));
         assert_eq!(

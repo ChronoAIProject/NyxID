@@ -1332,6 +1332,10 @@ and easier than accumulating old images. This is explicit owner consent; existin
 machines remain off until the owner enables it. Both server and node check that
 there are no running jobs, active turns, desktop sessions or owner control before
 an automatic upgrade. The owner receives update and outcome notifications.
+Progress advances within the exact attempt from queued through verifying,
+downloading and restarting; a delayed observation cannot move it backwards or
+reopen connected, failed or rolled-back completion. Native updates may skip
+phases. The existing idle and reconnect-watch rules still apply.
 
 The official Docker setup command includes the optional shell-free
 `nyxid-machine-updater` companion. It mounts the Docker socket and one private
