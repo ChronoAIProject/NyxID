@@ -893,6 +893,8 @@
   "Your CLI wants to add {{service}} to NyxID. Confirm the details here.": "Your CLI wants to add {{service}} to NyxID. Confirm the details here.",
   "Your approval preference is still on, but no enabled notification channel is available. Connect or re-enable Telegram or push notifications and protection will resume automatically.": "Your approval preference is still on, but no enabled notification channel is available. Connect or re-enable Telegram or push notifications and protection will resume automatically.",
   "Your approval preference remains on. Connect or re-enable Telegram or push notifications and protection will resume automatically.": "Your approval preference remains on. Connect or re-enable Telegram or push notifications and protection will resume automatically.",
+  "Your data export is rate limited. Try again in 1 minute.": "Your data export is rate limited. Try again in 1 minute.",
+  "Your data export is rate limited. Try again in {{minutes}} minutes.": "Your data export is rate limited. Try again in {{minutes}} minutes.",
   "Your last use {{time}}": "Your last use {{time}}",
   "Your personal agent. It has full access and remembers across all its threads and chat apps.": "Your personal agent. It has full access and remembers across all its threads and chat apps.",
   "Your {{name}} account has been connected successfully.": "Your {{name}} account has been connected successfully.",

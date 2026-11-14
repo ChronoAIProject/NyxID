@@ -1228,12 +1228,24 @@ function PrivacyTab() {
           const minutes = error.retryAfter
             ? Math.max(1, Math.ceil(error.retryAfter / 60))
             : undefined;
-          const retry = minutes
-            ? ` ${minutes === 1 ? translateUi("Try again in 1 minute.") : translateUi("Try again in {{minutes}} minutes.", { minutes })}`
-            : "";
-          toast.error(
-            `${translateUi("Your data export is temporarily rate limited.")}${retry}`,
-          );
+          if (minutes === undefined) {
+            toast.error(
+              translateUi("Your data export is temporarily rate limited."),
+            );
+          } else if (minutes === 1) {
+            toast.error(
+              translateUi(
+                "Your data export is temporarily rate limited. Try again in 1 minute.",
+              ),
+            );
+          } else {
+            toast.error(
+              translateUi(
+                "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
+                { minutes },
+              ),
+            );
+          }
         } else if (error.status === 404 || error.status === 405) {
           toast.error(
             translateUi("Data export is not available on this server yet."),

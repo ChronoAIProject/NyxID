@@ -185,6 +185,8 @@
   "Your data": "你的数据",
   "Your data export is ready.": "你的数据导出已准备好。",
   "Your data export is temporarily rate limited.": "你的数据导出暂时受到频率限制。",
+  "Your data export is temporarily rate limited. Try again in 1 minute.": "你的数据导出暂时受到频率限制。请在 1 分钟后重试。",
+  "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.": "你的数据导出暂时受到频率限制。请在 {{minutes}} 分钟后重试。",
   "Your name": "你的姓名",
   "chrome": "chrome",
   "iphone": "iPhone",

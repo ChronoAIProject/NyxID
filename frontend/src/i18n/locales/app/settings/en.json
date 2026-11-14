@@ -185,6 +185,8 @@
   "Your data": "Your data",
   "Your data export is ready.": "Your data export is ready.",
   "Your data export is temporarily rate limited.": "Your data export is temporarily rate limited.",
+  "Your data export is temporarily rate limited. Try again in 1 minute.": "Your data export is temporarily rate limited. Try again in 1 minute.",
+  "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.": "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
   "Your name": "Your name",
   "chrome": "chrome",
   "iphone": "iphone",
