@@ -1091,6 +1091,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let admin_routes = model_contract_metadata_routes!(register_billing_routes, Router::new())
         .route(
+            "/personal-erasure/orphans",
+            post(handlers::admin_personal_erasure::orphan_sweep),
+        )
+        .route(
             "/platform-models/credentials",
             get(handlers::platform_models::credentials::list)
                 .post(handlers::platform_models::credentials::create_request),

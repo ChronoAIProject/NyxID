@@ -7,6 +7,19 @@ establish completion, and a scan for `user_id` alone cannot establish ownership.
 The [coverage limits below](#coverage-limits-and-follow-up-tests) distinguish
 the implemented cleanup from the remaining completeness and recovery tests.
 
+## Pre-job orphan sweep
+
+Rows left by account deletions that predate durable erasure jobs can be reviewed
+by an administrator with `POST /api/v1/admin/personal-erasure/orphans`. The
+request is a dry-run by default and returns candidate counts, orphan owner IDs,
+and a SHA-256 digest over the canonical sorted candidate set. An apply request
+must include that digest; the server recomputes it and refuses to mutate if the
+set changed. Only registry entries classified as `LocalInventory` or
+`Redacted` are considered. An owner still present in `users` or
+`service_accounts` is live and is never touched. Deletes and redactions are
+bounded and repeatable, and the completed set is recorded in the chained audit
+log as metadata (counts, digest, and actor only).
+
 ## Acceptance before account fencing
 
 Only `UserType::Person` uses personal erasure. Organization users must use the
