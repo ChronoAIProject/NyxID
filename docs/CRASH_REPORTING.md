@@ -128,8 +128,10 @@ both the binding and the closed record before upload. Successful sends remove
 the record. Only a 4xx with a NyxID JSON error envelope and numeric code can
 authoritatively reject that record, except 429 (retry later), 13401 (pause and
 keep) and 13400 (disarm/purge). Envelope-less proxy/captive-portal 4xx responses
-pause and retain the record. Other failed sends may survive only
-within that consent-bound buffer and its limits.
+pause and retain the record. Diagnostics requests do not trigger authentication
+refresh or session invalidation, so a proxy 401 cannot indirectly purge the
+buffer. Other failed sends may survive only within that consent-bound buffer
+and its limits.
 Interrupted atomic-write staging files are deleted on the next buffer trim or
 disarm, including iOS temporary files and Android AtomicFile sidecars. They are
 never adopted as records. The Swift filesystem proof checks this cleanup while

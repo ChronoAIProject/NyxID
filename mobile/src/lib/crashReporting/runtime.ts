@@ -19,7 +19,13 @@ export const crashLifecycle =
     ? createCrashLifecycle({
         native,
         snapshot: analyticsConsentState.getSnapshot,
-        request: requestJson,
+        request: (path, options) =>
+          requestJson(path, {
+            ...options,
+            // A diagnostics refusal must not turn a proxy 401 into sign-out.
+            retryOnAuthFailure: false,
+            invalidateSessionOnAuthFailure: false,
+          }),
         uuid: Crypto.randomUUID,
         platform: Platform.OS === "ios" ? "ios" : "android",
         osVersion: () =>
