@@ -596,6 +596,7 @@ function postLoginSession(env: ReturnType<typeof setup>) {
         },
       },
       "./approvalRefreshSignal": {},
+      "../auth/authAccount": { getAuthAccountId: () => accountId },
     },
     { __DEV__: false },
   );

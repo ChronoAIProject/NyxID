@@ -1,3 +1,4 @@
+import { getAuthAccountId } from "../auth/authAccount";
 import { notificationDestination } from "./notificationDestination";
 import {
   NYXID_APP_SCHEME,
@@ -589,14 +590,9 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
     );
 
     tokenSubscription = safeAddPushTokenListener((devicePushToken) => {
+      if (!getAuthAccountId()) return;
       const token = normalizeDeviceToken(devicePushToken);
-      if (!token) return;
-
-      void syncTokenWithBackend(token, false).then((result) => {
-        if (__DEV__) {
-          console.log("[push] sync after runtime token refresh", result);
-        }
-      });
+      if (token) void syncTokenWithBackend(token, false);
     });
   } catch (error) {
     if (__DEV__) console.warn("[push] initialize runtime failed", error);
@@ -628,28 +624,34 @@ export async function clearPendingPushSyncSignal(): Promise<void> {
 }
 
 export async function deactivatePushOnLogout(): Promise<boolean> {
-  const token = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
-  if (!token) {
-    return true;
-  }
-
-  const platform = resolvePlatform();
-  if (platform !== "ios" && platform !== "android") {
-    return true;
-  }
-
-  const provider = resolveProvider(platform);
+  let unbound = false;
   try {
-    await mobileApi.unregisterPushToken({
-      token,
-      provider,
-      platform,
-    });
-    return true;
-  } catch (error) {
-    if (__DEV__) console.warn("[push] unregister on logout failed", error);
-    return false;
+    const token = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
+    const platform = resolvePlatform();
+    if (token && (platform === "ios" || platform === "android")) {
+      await mobileApi.unregisterPushToken({ token, provider: resolveProvider(platform), platform });
+    }
+    unbound = true;
+  } catch {
+    // Invalidate delivery locally when server unbind is unavailable. The next
+    // login obtains a native token and force-registers even if it is unchanged.
+    try {
+      if (Platform.OS !== "web" && typeof Notifications.unregisterForNotificationsAsync === "function")
+        await Notifications.unregisterForNotificationsAsync();
+    } catch {
+      if (__DEV__) console.warn("[push] native unregister unavailable");
+    }
+  } finally {
+    // Each cleanup is independent: a badge failure must not retain tray entries
+    // or a cached registration that could skip the next account's bind.
+    await Promise.allSettled([
+      Promise.resolve().then(() => Notifications.dismissAllNotificationsAsync()),
+      Promise.resolve().then(() => Notifications.setBadgeCountAsync(0)),
+      Promise.resolve().then(() => Notifications.clearLastNotificationResponseAsync()),
+      clearLocalPushRegistrationState(),
+    ]);
   }
+  return unbound;
 }
 
 export async function activatePushAfterLogin(
@@ -699,7 +701,9 @@ async function syncTokenWithBackend(
   token: string,
   forceRegister: boolean
 ): Promise<PushActivateResult> {
+  const accountId = getAuthAccountId();
   const previousToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
+  if (!accountId || accountId !== getAuthAccountId()) return { permission: "granted", token, registered: false, mode: "none", reason: "register_failed" };
   const platform = resolvePlatform();
   if (platform !== "ios" && platform !== "android") {
     return {
@@ -720,7 +724,7 @@ async function syncTokenWithBackend(
         provider,
         platform,
       });
-      await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+      if (accountId === getAuthAccountId()) await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
       return {
         permission: "granted",
         token,
@@ -737,7 +741,7 @@ async function syncTokenWithBackend(
         provider,
         platform,
       });
-      await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
+      if (accountId === getAuthAccountId()) await SecureStore.setItemAsync(PUSH_TOKEN_STORE_KEY, token);
       return {
         permission: "granted",
         token,
