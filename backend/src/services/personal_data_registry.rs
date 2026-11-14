@@ -2677,7 +2677,7 @@ pub(crate) async fn ensure_owner_index_gaps(
 mod tests {
     use super::*;
     use futures::TryStreamExt;
-    use std::{collections::BTreeSet, fs, path::Path};
+    use std::{collections::{BTreeMap, BTreeSet}, fs, path::Path};
 
     #[test]
     fn registry_has_unique_collection_names() {
@@ -3275,6 +3275,202 @@ mod tests {
         cursor.try_collect().await.unwrap()
     }
 
+    fn affected_collections() -> BTreeSet<&'static str> {
+        let mut collections = registry_owner_predicates()
+            .into_iter()
+            .map(|(collection, _)| collection)
+            .collect::<BTreeSet<_>>();
+        collections.extend(JOINED_CHILD_SPECS.iter().map(|spec| spec.child));
+        collections
+    }
+
+    async fn index_snapshot(
+        db: &mongodb::Database,
+    ) -> BTreeMap<String, Vec<mongodb::bson::Document>> {
+        let mut snapshot = BTreeMap::new();
+        for collection in affected_collections() {
+            let mut definitions = index_models(db, collection)
+                .await
+                .into_iter()
+                .map(|index| bson::to_document(&index).expect("serialize index fixture"))
+                .collect::<Vec<_>>();
+            definitions.sort_by_key(|definition| bson::to_vec(definition).unwrap());
+            snapshot.insert(collection.to_owned(), definitions);
+        }
+        snapshot
+    }
+
+    fn index_identity(definition: &mongodb::bson::Document) -> Vec<u8> {
+        // MongoDB 8.0 permits same-key indexes distinguished by collation,
+        // partialFilterExpression, unique or sparse; name, hidden and TTL do
+        // not distinguish them. The manual documents these options in:
+        // https://www.mongodb.com/docs/v8.0/reference/command/createIndexes/#index-options
+        // https://www.mongodb.com/docs/v8.0/core/index-partial/#restrictions
+        // https://www.mongodb.com/docs/v8.0/core/index-unique/#basic-and-unique-indexes-with-duplicate-key-patterns
+        // The unique-index page also covers differing sparse options. The live
+        // coexistence test below pins the option list against the server.
+        // IndexModel.options is serde(flatten): its partialFilterExpression,
+        // collation, unique and sparse fields serialize beside key, not inside
+        // an options document. listIndexes normalizes the stored definitions.
+        let mut identity = bson::doc! {
+            "key": definition.get_document("key").expect("index fixture key").clone(),
+            "unique": definition.get_bool("unique").unwrap_or(false),
+            "sparse": definition.get_bool("sparse").unwrap_or(false),
+        };
+        for option in ["partialFilterExpression", "collation"] {
+            if let Some(value) = definition.get(option) {
+                identity.insert(option, value.clone());
+            }
+        }
+        bson::to_vec(&identity).expect("serialize index identity")
+    }
+
+    fn index_identity_probe_cases() -> [(&'static str, bson::Document, bool); 7] {
+        [
+            ("name", bson::doc! {}, false),
+            (
+                "partialFilterExpression",
+                bson::doc! {"partialFilterExpression":{"value":{"$type":"date"}}},
+                true,
+            ),
+            ("collation", bson::doc! {"collation":{"locale":"en"}}, true),
+            ("unique", bson::doc! {"unique":true}, true),
+            ("sparse", bson::doc! {"sparse":true}, true),
+            ("hidden", bson::doc! {"hidden":true}, false),
+            (
+                "expireAfterSeconds",
+                bson::doc! {"expireAfterSeconds":60_i32},
+                false,
+            ),
+        ]
+    }
+
+    fn serialized_index(name: &str, options: bson::Document) -> bson::Document {
+        let mut definition = bson::doc! {"key":{"value":1},"name":name};
+        definition.extend(options);
+        let model: mongodb::IndexModel = bson::from_document(definition).unwrap();
+        bson::to_document(&model).unwrap()
+    }
+
+    #[test]
+    fn index_identity_distinguishes_only_coexisting_options() {
+        let base = serialized_index("base", bson::doc! {});
+        for (option, options, distinct) in index_identity_probe_cases() {
+            let candidate = serialized_index("candidate", options.clone());
+            for (field, value) in options {
+                assert_eq!(candidate.get(&field), Some(&value), "flattened {option}");
+            }
+            assert_eq!(
+                index_identity(&base) != index_identity(&candidate),
+                distinct,
+                "{option}"
+            );
+        }
+        assert_eq!(
+            index_identity(&base),
+            index_identity(&serialized_index(
+                "explicit-defaults",
+                bson::doc! {"unique":false,"sparse":false}
+            )),
+        );
+        // Differing partial filters can coexist, but cannot hide a changed or
+        // missing origin index; preservation still compares full definitions.
+        let first = serialized_index(
+            "first",
+            bson::doc! {"partialFilterExpression":{"value":{"$gt":0}}},
+        );
+        let second = serialized_index(
+            "second",
+            bson::doc! {"partialFilterExpression":{"value":{"$gt":1}}},
+        );
+        let before = BTreeMap::from([("usage_meter".into(), vec![first.clone(), second.clone()])]);
+        assert_no_duplicate_keys(&before);
+        assert_origin_indexes_untouched(&before, &before);
+        let missing = BTreeMap::from([("usage_meter".into(), vec![second])]);
+        assert!(
+            std::panic::catch_unwind(|| assert_origin_indexes_untouched(&before, &missing))
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate index identity in usage_meter")]
+    fn duplicate_index_identity_rejects_same_partial_filter_under_another_name() {
+        let options = bson::doc! {"partialFilterExpression":{"value":{"$gt":0}}};
+        let snapshot = BTreeMap::from([(
+            "usage_meter".into(),
+            vec![
+                serialized_index("first", options.clone()),
+                serialized_index("second", options),
+            ],
+        )]);
+        assert_no_duplicate_keys(&snapshot);
+    }
+
+    #[tokio::test]
+    async fn index_identity_matches_mongodb_same_key_coexistence() {
+        let db = crate::test_utils::connect_transaction_test_database("index_identity_coexistence")
+            .await;
+        for (option, options, accepted) in index_identity_probe_cases() {
+            let collection = db.collection::<bson::Document>(option);
+            let base = serialized_index("base", bson::doc! {});
+            collection
+                .create_index(bson::from_document(base).unwrap())
+                .await
+                .unwrap();
+            let candidate = serialized_index("candidate", options);
+            let result = collection
+                .create_index(bson::from_document(candidate).unwrap())
+                .await;
+            if accepted {
+                result.unwrap_or_else(|error| panic!("{option} must permit coexistence: {error}"));
+            } else {
+                let error = result.expect_err("equivalent index must be refused");
+                assert!(
+                    matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 85),
+                    "{option}: {error}"
+                );
+            }
+            let definitions = index_models(&db, option)
+                .await
+                .into_iter()
+                .map(|index| bson::to_document(&index).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), if accepted { 3 } else { 2 }, "{option}");
+            assert_no_duplicate_keys(&BTreeMap::from([(option.to_owned(), definitions)]));
+        }
+        db.drop().await.unwrap();
+    }
+
+    fn assert_origin_indexes_untouched(
+        before: &BTreeMap<String, Vec<mongodb::bson::Document>>,
+        after: &BTreeMap<String, Vec<mongodb::bson::Document>>,
+    ) {
+        for (collection, definitions) in before {
+            let after_definitions = after
+                .get(collection)
+                .unwrap_or_else(|| panic!("missing collection {collection} after startup"));
+            for definition in definitions {
+                assert!(
+                    after_definitions.contains(definition),
+                    "origin/main index changed or disappeared in {collection}: {definition:?}"
+                );
+            }
+        }
+    }
+
+    fn assert_no_duplicate_keys(snapshot: &BTreeMap<String, Vec<mongodb::bson::Document>>) {
+        for (collection, definitions) in snapshot {
+            let mut keys = BTreeSet::new();
+            for definition in definitions {
+                assert!(
+                    keys.insert(index_identity(definition)),
+                    "duplicate index identity in {collection}: {definition:?}"
+                );
+            }
+        }
+    }
+
     fn registry_owner_predicates() -> BTreeSet<(&'static str, &'static str)> {
         ENTRIES
             .iter()
@@ -3343,6 +3539,45 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("startup indexes second run: {error}"));
         assert_owner_prefix_coverage(&db).await;
+    }
+
+    #[tokio::test]
+    async fn origin_main_indexes_survive_branch_startup_and_old_fleet_restart() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "privacy_startup_upgrade_indexes",
+        )
+        .await;
+
+        // Checked-in origin/main fixture: db::ensure_indexes plus the exact
+        // security and personal-erasure calls that origin/main runs at startup.
+        crate::db::ensure_indexes(&db).await.unwrap();
+        crate::services::personal_erasure_service::ensure_origin_main_indexes_for_test(&db)
+            .await
+            .unwrap();
+        let origin = index_snapshot(&db).await;
+
+        // The branch must be safe for an existing deployment and idempotent
+        // when both a new and an old replica restart during the rollout.
+        crate::services::personal_erasure_service::ensure_startup_indexes(&db)
+            .await
+            .unwrap();
+        crate::services::personal_erasure_service::ensure_startup_indexes(&db)
+            .await
+            .unwrap();
+        let branch = index_snapshot(&db).await;
+        assert_origin_indexes_untouched(&origin, &branch);
+        assert_no_duplicate_keys(&branch);
+        assert_owner_prefix_coverage(&db).await;
+
+        // A mixed fleet still invokes origin/main's sequence after the branch
+        // has added its indexes; no old index may conflict with the additions.
+        crate::db::ensure_indexes(&db).await.unwrap();
+        crate::services::personal_erasure_service::ensure_origin_main_indexes_for_test(&db)
+            .await
+            .unwrap();
+        let mixed = index_snapshot(&db).await;
+        assert_origin_indexes_untouched(&origin, &mixed);
+        assert_no_duplicate_keys(&mixed);
     }
 
     #[test]

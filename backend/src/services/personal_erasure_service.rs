@@ -32,7 +32,7 @@ const DOMAINS: &[&str] = &[
     "vendor",
 ];
 
-pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
+async fn ensure_erasure_indexes_without_owner_gaps(db: &Database) -> AppResult<()> {
     let durable = super::transaction_service::durable_database(db);
     let db = &durable;
     db.collection::<Document>(JOBS)
@@ -57,10 +57,14 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
         ])
         .await?;
     super::personal_erasure_registry::ensure_indexes(db).await?;
-    super::personal_data_registry::ensure_owner_index_gaps(db).await?;
     preparation::ensure_indexes(db).await?;
     issuance::ensure_indexes(db).await?;
     Ok(())
+}
+
+pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
+    ensure_erasure_indexes_without_owner_gaps(db).await?;
+    super::personal_data_registry::ensure_owner_index_gaps(db).await
 }
 
 /// Run the late startup index groups in the same order as the server.
@@ -71,6 +75,16 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
 pub async fn ensure_startup_indexes(db: &Database) -> AppResult<()> {
     super::security_readiness_service::ensure_indexes(db).await?;
     ensure_indexes(db).await
+}
+
+/// Checked-in upgrade fixture: origin/main's startup sequence before the
+/// privacy registry's owner-index additions. Keeping this exact call path in
+/// the test binary lets the existing-deployment and mixed-fleet tests replay
+/// the old index set without dropping or renaming any definition.
+#[cfg(test)]
+pub(crate) async fn ensure_origin_main_indexes_for_test(db: &Database) -> AppResult<()> {
+    super::security_readiness_service::ensure_indexes(db).await?;
+    ensure_erasure_indexes_without_owner_gaps(db).await
 }
 
 pub async fn status(db: &Database, user_id: &str) -> AppResult<Option<PersonalErasureJob>> {

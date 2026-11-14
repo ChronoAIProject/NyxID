@@ -7,6 +7,90 @@ establish completion, and a scan for `user_id` alone cannot establish ownership.
 The registry and inventory drift tests described below keep the cleanup map
 reviewable as collections change.
 
+## Owner-index rollout
+
+The startup sequence never drops, renames, or rebuilds an existing index. It
+reuses any existing index whose first key is the erasure owner predicate and
+adds only the audited gaps below. The names are stable, so a rolling deploy
+can run old and new replicas against the same database. These indexes support
+bounded owner scans for account erasure and the pre-job orphan sweep; they do
+not change retention or ownership decisions.
+
+The checked-in origin/main startup fixture in the registry tests is generated
+from `db::ensure_indexes` plus origin/main's security-readiness and personal
+erasure index calls. The upgrade tests run that fixture first, run the branch
+sequence twice, and then replay the fixture to prove mixed-fleet compatibility.
+
+| Collection | Key | New index name |
+| --- | --- | --- |
+| `agent_key_login_requests` | `approved_user_id` | `personal_erasure_owner_agent_key_login_requests_approved_user_id` |
+| `assistant_agent_consents` | `owner_id` | `personal_erasure_owner_assistant_agent_consents_owner_id` |
+| `assistant_agent_learning_members` | `member_user_id` | `personal_erasure_owner_assistant_agent_learning_members_member_user_id` |
+| `assistant_agent_learning_runs` | `owner_id` | `personal_erasure_owner_assistant_agent_learning_runs_owner_id` |
+| `assistant_agent_learning_skill_roots` | `owner_id` | `personal_erasure_owner_assistant_agent_learning_skill_roots_owner_id` |
+| `assistant_agent_private_notes` | `actor_user_id` | `personal_erasure_owner_assistant_agent_private_notes_actor_user_id` |
+| `assistant_agent_shares` | `owner_id` | `personal_erasure_owner_assistant_agent_shares_owner_id` |
+| `assistant_agent_sharing` | `owner_id` | `personal_erasure_owner_assistant_agent_sharing_owner_id` |
+| `assistant_async_quotas` | `user_id` | `personal_erasure_owner_assistant_async_quotas_user_id` |
+| `assistant_checkpoints` | `user_id` | `personal_erasure_owner_assistant_checkpoints_user_id` |
+| `assistant_group_agent_access` | `owner_id` | `personal_erasure_owner_assistant_group_agent_access_owner_id` |
+| `assistant_group_agent_proposals` | `proposed_by` | `personal_erasure_owner_assistant_group_agent_proposals_proposed_by` |
+| `assistant_group_invites` | `accepted_by_user_id` | `personal_erasure_owner_assistant_group_invites_accepted_by_user_id` |
+| `assistant_group_invites` | `intended_user_id` | `personal_erasure_owner_assistant_group_invites_intended_user_id` |
+| `assistant_group_invites` | `issuer_user_id` | `personal_erasure_owner_assistant_group_invites_issuer_user_id` |
+| `assistant_group_mention_notifications` | `user_id` | `personal_erasure_owner_assistant_group_mention_notifications_user_id` |
+| `assistant_group_messages` | `user_id` | `personal_erasure_owner_assistant_group_messages_user_id` |
+| `assistant_group_read_states` | `user_id` | `personal_erasure_owner_assistant_group_read_states_user_id` |
+| `assistant_group_requests` | `user_id` | `personal_erasure_owner_assistant_group_requests_user_id` |
+| `assistant_learning_migrations` | `owner_id` | `personal_erasure_owner_assistant_learning_migrations_owner_id` |
+| `assistant_skill_draft_attempts` | `user_id` | `personal_erasure_owner_assistant_skill_draft_attempts_user_id` |
+| `assistant_voice_announcements` | `user_id` | `personal_erasure_owner_assistant_voice_announcements_user_id` |
+| `assistant_voice_windows` | `user_id` | `personal_erasure_owner_assistant_voice_windows_user_id` |
+| `assistant_wire_logs` | `user_id` | `personal_erasure_owner_assistant_wire_logs_user_id` |
+| `auth_device_codes` | `approved_user_id` | `personal_erasure_owner_auth_device_codes_approved_user_id` |
+| `auth_device_codes_v2` | `approved_user_id` | `personal_erasure_owner_auth_device_codes_v2_approved_user_id` |
+| `authorization_codes` | `user_id` | `personal_erasure_owner_authorization_codes_user_id` |
+| `channel_adapter_accounts` | `user_id` | `personal_erasure_owner_channel_adapter_accounts_user_id` |
+| `channel_adapter_allocations` | `user_id` | `personal_erasure_owner_channel_adapter_allocations_user_id` |
+| `channel_adapter_events` | `user_id` | `personal_erasure_owner_channel_adapter_events_user_id` |
+| `channel_delivery_receipts` | `user_id` | `personal_erasure_owner_channel_delivery_receipts_user_id` |
+| `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` |
+| `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` |
+| `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` |
+| `channel_email_subscriptions` | `user_id` | `personal_erasure_owner_channel_email_subscriptions_user_id` |
+| `channel_reply_deliveries` | `user_id` | `personal_erasure_owner_channel_reply_deliveries_user_id` |
+| `device_codes` | `approved_by_user_id` | `personal_erasure_owner_device_codes_approved_by_user_id` |
+| `encrypted_record_migration_findings` | `owner_uuid` | `personal_erasure_owner_encrypted_record_migration_findings_owner_uuid` |
+| `encrypted_record_migration_runs` | `owner_uuid` | `personal_erasure_owner_encrypted_record_migration_runs_owner_uuid` |
+| `feature_flag_overrides` | `target_key` | `personal_erasure_owner_feature_flag_overrides_target_key` |
+| `invite_codes` | `usages.user_id` | `personal_erasure_owner_invite_codes_usages_user_id` |
+| `invocation_diagnostics` | `actor_user_id` | `personal_erasure_owner_invocation_diagnostics_actor_user_id` |
+| `login_approvals` | `user_id` | `personal_erasure_owner_login_approvals_user_id` |
+| `mcp_session_notifications` | `user_id` | `personal_erasure_owner_mcp_session_notifications_user_id` |
+| `mfa_challenges` | `user_id` | `personal_erasure_owner_mfa_challenges_user_id` |
+| `nyxbot_events` | `user_id` | `personal_erasure_owner_nyxbot_events_user_id` |
+| `oauth_consent_requests` | `user_id` | `personal_erasure_owner_oauth_consent_requests_user_id` |
+| `openclaw_channel_mappings` | `user_id` | `personal_erasure_owner_openclaw_channel_mappings_user_id` |
+| `org_invites` | `created_by` | `personal_erasure_owner_org_invites_created_by` |
+| `platform_guide_selections` | `user_id` | `personal_erasure_owner_platform_guide_selections_user_id` |
+| `platform_native_replies` | `user_id` | `personal_erasure_owner_platform_native_replies_user_id` |
+| `platform_onboarding_binding_requests` | `user_id` | `personal_erasure_owner_platform_onboarding_binding_requests_user_id` |
+| `platform_personal_decision_spacing` | `user_id` | `personal_erasure_owner_platform_personal_decision_spacing_user_id` |
+| `platform_personal_setup_selections` | `user_id` | `personal_erasure_owner_platform_personal_setup_selections_user_id` |
+| `refresh_tokens` | `user_id` | `personal_erasure_owner_refresh_tokens_user_id` |
+| `service_account_key_read_grants` | `owner_id` | `personal_erasure_owner_service_account_key_read_grants_owner_id` |
+| `service_change_events` | `actor.person_id` | `personal_erasure_owner_service_change_events_actor_person_id` |
+| `service_pool_member_health` | `owner_id` | `personal_erasure_owner_service_pool_member_health_owner_id` |
+| `telegram_bot_claims` | `owner_user_id` | `personal_erasure_owner_telegram_bot_claims_owner_user_id` |
+| `telegram_bot_requests` | `user_id` | `personal_erasure_owner_telegram_bot_requests_user_id` |
+| `telegram_managed_bot_events` | `user_id` | `personal_erasure_owner_telegram_managed_bot_events_user_id` |
+| `trigger_deliveries` | `user_id` | `personal_erasure_owner_trigger_deliveries_user_id` |
+| `trigger_work` | `user_id` | `personal_erasure_owner_trigger_work_user_id` |
+| `channel_send_claims` | `conversation_id` | `personal_erasure_owner_channel_send_claims_conversation_id` |
+| `platform_delivery_tests` | `installation_id` | `personal_erasure_owner_platform_delivery_tests_installation_id` |
+| `platform_setup_steps` | `setup_id` | `personal_erasure_owner_platform_setup_steps_setup_id` |
+| `service_pool_health_observations` | `pool_id` | `personal_erasure_owner_service_pool_health_observations_pool_id` |
+
 ## Pre-job orphan sweep
 
 Rows left by account deletions that predate durable erasure jobs can be reviewed
