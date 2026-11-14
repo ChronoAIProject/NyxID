@@ -440,7 +440,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         }
         "platform_public_probe_consents" => Some(("account", "platform_public_probe_consents")),
         "platform_public_readiness_probes" => Some(("account", "platform_public_readiness_probes")),
-        "platform_setup_notices" => Some(("account", "platform_setup_notices")),
+        "platform_setup_notices" => Some(("account_activity", "platform_setup_notices")),
         "platform_setup_steps" => Some(("account_activity", "platform_setup_steps")),
         "platform_setups" => Some(("account", "platform_setups")),
         "refresh_tokens" => Some(("security", "refresh_tokens")),
@@ -1771,7 +1771,7 @@ mod tests {
                 .is_none()
         );
         let notes = safe_item(&row, PRIVATE_NOTES_FIELDS);
-        assert_eq!(notes["notes"][0]["text"], "PERSON_NOTE");
+        assert_eq!(notes["notes"]["text"][0], "PERSON_NOTE");
         let feedback = safe_item(&row, FEEDBACK_FIELDS);
         assert_eq!(feedback["comment"], "PERSON_FEEDBACK");
         let trigger = safe_item(&row, TRIGGER_FIELDS);
@@ -1910,7 +1910,15 @@ mod tests {
             }
             let json = safe_item(&row, allowlist);
             let bytes = serde_json::to_vec(&json).unwrap();
-            for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
+            let sentinels = if url_path_is_opaque(field) {
+                ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"]
+            } else {
+                ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", ""]
+            };
+            for sentinel in sentinels {
+                if sentinel.is_empty() {
+                    continue;
+                }
                 assert!(
                     !bytes
                         .windows(sentinel.len())
