@@ -509,7 +509,7 @@ GCP_KMS_KEY_NAME= / GCP_KMS_KEY_NAME_PREVIOUS=
 
 # Defaults provided
 PORT=3001
-SHUTDOWN_DRAIN_TIMEOUT_SECS=600     # Hard exit budget; includes up to 5s cleanup (10% for short budgets); 0 = legacy immediate exit
+SHUTDOWN_DRAIN_TIMEOUT_SECS=25      # Fits Kubernetes default 30s grace; includes 2.5s cleanup; extended grace >= budget + 30s; 0 = legacy immediate exit
 BASE_URL=http://localhost:3001
 FRONTEND_URL=http://localhost:3000
 JWT_PRIVATE_KEY_PATH=keys/private.pem

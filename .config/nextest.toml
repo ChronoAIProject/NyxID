@@ -97,3 +97,9 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_actual_server_idle_node_and_subscriptions_exit_idle_after_grace)"
 threads-required = "num-cpus"
+
+# The default-budget process test proves real settlement, claim release and exit
+# before 25s. Keep unrelated fixture churn outside that observation window.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_default_actual_server_settles_stream_turn_and_held_claim_before_25_seconds)"
+threads-required = "num-cpus"

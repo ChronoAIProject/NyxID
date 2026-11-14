@@ -1039,6 +1039,14 @@ fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange>
     ips
 }
 
+pub(crate) const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 25;
+
+fn shutdown_drain_timeout(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS)
+}
+
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
@@ -1073,10 +1081,9 @@ impl AppConfig {
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
-            shutdown_drain_timeout_secs: env::var("SHUTDOWN_DRAIN_TIMEOUT_SECS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(600),
+            shutdown_drain_timeout_secs: shutdown_drain_timeout(
+                env::var("SHUTDOWN_DRAIN_TIMEOUT_SECS").ok().as_deref(),
+            ),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1880,6 +1887,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shutdown_default_fits_kubernetes_and_explicit_budgets_are_preserved() {
+        assert_eq!(shutdown_drain_timeout(None), 25);
+        assert_eq!(shutdown_drain_timeout(Some("invalid")), 25);
+        for budget in [0, 1, 10, 25, 30, 600, u64::MAX] {
+            assert_eq!(shutdown_drain_timeout(Some(&budget.to_string())), budget);
+        }
+    }
+
+    #[test]
     fn internal_advertise_url_prefers_explicit_url() {
         let resolved = resolve_internal_advertise_url(
             Some("https://backend-1.internal:9443"),
@@ -1955,7 +1971,7 @@ mod tests {
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
         AppConfig {
             port: 3001,
-            shutdown_drain_timeout_secs: 600,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),

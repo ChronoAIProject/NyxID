@@ -1,4 +1,7 @@
 //! Process-local work accounting. Draining stops pullers, never request admission.
+pub(crate) mod diagnostics;
+#[cfg(test)]
+mod diagnostics_tests;
 pub mod drain;
 #[cfg(test)]
 mod inventory_tests;
@@ -40,6 +43,7 @@ pub struct Runtime(Arc<Inner>);
 #[derive(Default)]
 struct Inner {
     state: Mutex<State>,
+    http: Mutex<diagnostics::Registry>,
     requests: AtomicUsize,
     streams: AtomicUsize,
     subscriptions: AtomicUsize,
@@ -262,12 +266,15 @@ impl Runtime {
         }
         let id = state.next_id;
         state.next_id += 1;
+        let diagnostic = matches!(kind, Kind::Upgrade | Kind::CompletionUpgrade)
+            .then(|| self.http().insert("stream"));
         state.work.insert(id, kind);
         self.0.changed.notify_waiters();
         (
             Work {
                 runtime: self.clone(),
                 registration: Registration::Mapped(id),
+                diagnostic,
             },
             id,
         )
@@ -294,6 +301,11 @@ impl Runtime {
         Work {
             runtime: self.clone(),
             registration: Registration::Counted(kind),
+            diagnostic: match kind {
+                Counter::Request => Some(self.http().insert("request")),
+                Counter::Stream => Some(self.http().insert("stream")),
+                Counter::Subscription => None,
+            },
         }
     }
 
@@ -669,6 +681,17 @@ impl Runtime {
         }
     }
 
+    fn http(&self) -> MutexGuard<'_, diagnostics::Registry> {
+        self.0
+            .http
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub fn open_http(&self) -> diagnostics::OpenHttp {
+        self.http().snapshot()
+    }
+
     pub fn counts(&self) -> Counts {
         self.snapshot(&self.state())
     }
@@ -759,6 +782,7 @@ enum Registration {
 pub struct Work {
     runtime: Runtime,
     registration: Registration,
+    diagnostic: Option<usize>,
 }
 
 impl Work {
@@ -787,6 +811,9 @@ impl Work {
 
 impl Drop for Work {
     fn drop(&mut self) {
+        if let Some(index) = self.diagnostic {
+            self.runtime.http().remove(index);
+        }
         match self.registration {
             Registration::Mapped(id) => {
                 let mut state = self.runtime.state();

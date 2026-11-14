@@ -432,12 +432,41 @@ can consume the full work-wait budget. Once work is idle, Axum finishes accepted
 retaining the bound sockets. If an accepted request starts more work at that
 boundary, both listeners resume serving until that work finishes.
 
-`SHUTDOWN_DRAIN_TIMEOUT_SECS` defaults to 600. It is the total process budget:
-the smaller of five seconds or 10% is reserved for cleanup, so the default work
-wait ends at 595 seconds. The process exits earlier when work finishes. A second
-SIGTERM or ctrl-c skips the remaining wait and begins the same bounded cleanup.
-`0` restores the old immediate-exit path, including its existing ten-second
-Discord cancellation allowance.
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` defaults to **25 seconds**. The default fits
+Kubernetes' default 30-second termination grace period and needs no setting.
+The budget includes cleanup and the finish audit: the smaller of five seconds
+or 10% is reserved for cleanup. At the default, subscriptions end at five seconds,
+the work wait ends at 22.5 seconds, and remaining turns are interrupted with
+`turn_lost` / `shutdown`. Remaining local execution and response streams stop
+after at most another 0.5 seconds of ordinary settlement. Fenced settlement,
+release and the finish audit share the 2.5-second cleanup reserve; the process
+exits by the 25-second deadline, leaving five seconds for signal delivery,
+scheduling and process teardown before Kubernetes kills it. The asynchronous
+start audit has its own 1.25-second bound within this budget, not extra exit time.
+A blocking preStop hook must not consume the five-second margin.
+
+Work that needs longer than the budget when a deploy starts is ended and recorded
+as interrupted by shutdown. To let that work finish across a deploy, raise both
+values together: for an extended budget, the termination grace period must exceed
+the drain budget by at least 30 seconds. For example, set
+`SHUTDOWN_DRAIN_TIMEOUT_SECS=600` and use this Deployment fragment:
+
+```yaml
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 630
+      containers:
+        - name: nyxid
+          env:
+            - name: SHUTDOWN_DRAIN_TIMEOUT_SECS
+              value: "600"
+```
+
+The process exits earlier when work finishes. A second SIGTERM or ctrl-c skips
+the remaining wait and begins the same bounded cleanup. Explicit timeout values
+retain their existing behavior; `0` restores the old immediate-exit path,
+including its existing ten-second Discord cancellation allowance.
 
 At the end, runners settle remaining turns through the existing fenced path
 with stable code `turn_lost` and stage `shutdown`. Cleanup cancels remaining local
@@ -456,7 +485,22 @@ The chained, metadata-only `backend_shutdown_drain_started` and
 records the budget, cleanup reserve and in-flight counts, including node operations.
 A start without a finish indicates the process was killed before the drain
 completed (a failed finish audit can also leave only a start); compare `budget_secs`
-with the platform's termination grace period. `0` emits neither event.
+with the platform's termination grace period. `0` emits no drain events.
+
+Start and finish records also include `open_http_at_start` and, at finish,
+`open_http_at_finish`: the largest 20 route-template/method/kind groups, their
+counts and oldest ages in whole seconds, plus `other_count` for omitted units.
+Kinds distinguish pending requests from response bodies/upgraded streams; age
+starts when that kind is registered. Raw paths, IDs, queries, headers and extension
+methods are never captured (`<unmatched>` / `OTHER` are fixed fallbacks).
+Detached/background guards have no static labels, so retain aggregate counts.
+While draining, `backend_shutdown_drain_progress` records elapsed time, counts,
+node operations and the same `open_http` summary at 10, 25, 60 and 300 seconds,
+skipping points at or beyond the budget (only 10 seconds applies by default).
+These at-most-four chained appends use
+the start audit's time bound and are cancelled before finish; they cannot keep
+work non-idle or extend cleanup. The last successful checkpoint bounds how far
+a killed drain got, though an audit failure can also explain a missing checkpoint.
 
 Cleanup does not clear uncertain provider-send barriers, wallet locks or
 purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
@@ -471,8 +515,9 @@ ledger appends, remain tracked while execution is stopped.
 
 Operators must match these settings in their platform's rollout configuration:
 
-- Termination grace period at least `SHUTDOWN_DRAIN_TIMEOUT_SECS` plus scheduling
-  and signal-delivery margin; allow the legacy Discord allowance when using `0`.
+- The default 25-second drain fits Kubernetes' default 30-second grace period.
+  For an extended drain budget, set the grace period at least 30 seconds higher;
+  allow the legacy Discord allowance when using `0`.
 - Readiness probe on `/ready`; liveness probe on `/health`.
 - Replace one replica at a time with surge capacity, allowing the successor to
   become ready before terminating another replica.

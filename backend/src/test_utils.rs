@@ -1857,7 +1857,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
-        shutdown_drain_timeout_secs: 600,
+        shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
         auth_device_eight_char_codes: false,
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),

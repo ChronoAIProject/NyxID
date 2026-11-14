@@ -1987,35 +1987,42 @@ async fn server_run(cli: Cli) {
         // ten percent; ordinary budgets reserve at most five seconds.
         let reserve = drain.cleanup_reserve();
         let work_deadline = drain.work_deadline();
-        let end = loop {
-            let end = tokio::select! {
-                () = servers.failed() => End::ListenerFailure,
-                end = drain.wait(&shutdown_state, work_deadline, signals.next()) => end,
+        let finish = async {
+            let end = loop {
+                let end = tokio::select! {
+                    () = servers.failed() => End::ListenerFailure,
+                    end = drain.wait(&shutdown_state, work_deadline, signals.next()) => end,
+                };
+                if end != End::Idle {
+                    break end;
+                }
+                let idle = tokio::select! {
+                    biased;
+                    signal = signals.next() => break drain.second_signal(signal),
+                    () = tokio::time::sleep_until(work_deadline) => break End::Deadline,
+                    idle = servers.finish_idle() => idle,
+                };
+                if idle {
+                    break End::Idle;
+                }
+                servers.resume();
             };
-            if end != End::Idle {
-                break end;
-            }
-            let idle = tokio::select! {
-                biased;
-                signal = signals.next() => break drain.second_signal(signal),
-                () = tokio::time::sleep_until(work_deadline) => break End::Deadline,
-                idle = servers.finish_idle() => idle,
-            };
-            if idle {
-                break End::Idle;
-            }
-            servers.resume();
+            servers.quiesce();
+            let cleanup_deadline = drain.deadline.min(tokio::time::Instant::now() + reserve);
+            finish_shutdown(
+                &shutdown_state,
+                &drain,
+                end,
+                &discord_shutdown,
+                cleanup_deadline,
+            )
+            .await;
         };
-        servers.quiesce();
-        let cleanup_deadline = drain.deadline.min(tokio::time::Instant::now() + reserve);
-        finish_shutdown(
-            &shutdown_state,
-            &drain,
-            end,
-            &discord_shutdown,
-            cleanup_deadline,
-        )
-        .await;
+        tokio::select! {
+            biased;
+            () = finish => {},
+            never = drain.progress(&shutdown_state) => match never {},
+        }
         return;
     }
     // Zero preserves the old signal path: no drain state, settlement or release
