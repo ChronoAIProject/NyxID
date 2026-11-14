@@ -21,6 +21,13 @@ use std::collections::BTreeMap;
 
 const INLINE_BACKOFF_SECS: i64 = 30;
 const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+// Both inline attempts share the five-second deadline. Allow one more second
+// for publication or the existing provider-failure backoff write to complete.
+const INLINE_COMPLETION_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+mod ordering;
+#[cfg(test)]
+mod ordering_tests;
 
 const PROFILE_REQUIRED: &str = "Fresh Lago tax configuration is required for wallet funding";
 fn unavailable() -> AppError {
@@ -142,6 +149,7 @@ pub fn resolve_config(
         serde_json::to_vec(&(&default, &metrics)).map_err(|e| AppError::Internal(e.to_string()))?,
     ));
     Ok(BillingTaxProfile {
+        revision: 0,
         id: uuid::Uuid::new_v4().to_string(),
         owner_id: owner.into(),
         subscription_id: subscription.into(),
@@ -186,36 +194,83 @@ fn fresh(profile: &BillingTaxProfile, wallet: &BillingWallet, ttl: u64) -> bool 
         && profile.fetched_at
             >= Utc::now() - Duration::seconds(ttl.min(i64::MAX as u64 / 1000) as i64)
 }
+async fn load_profile(db: &Database, owner: &str) -> AppResult<Option<BillingTaxProfile>> {
+    Ok(db
+        .collection::<BillingTaxProfile>(COLLECTION_NAME)
+        .find_one(doc! {"owner_id":owner})
+        .await?)
+}
+
 pub async fn refresh(
     db: &Database,
     lago: &dyn LagoApi,
     wallet: &BillingWallet,
+    ttl: u64,
 ) -> AppResult<BillingTaxProfile> {
+    let captured = load_profile(db, &wallet.owner_id).await?;
+    if let Some(profile) = captured.as_ref().filter(|p| fresh(p, wallet, ttl)) {
+        return Ok(profile.clone());
+    }
+    refresh_captured(db, lago, wallet, ttl, captured, None)
+        .await?
+        .ok_or_else(unavailable)
+}
+
+fn refresh_timeout() -> AppError {
+    AppError::BillingProviderUnavailable("Lago tax configuration timed out".into())
+}
+
+async fn refresh_captured(
+    db: &Database,
+    lago: &dyn LagoApi,
+    wallet: &BillingWallet,
+    ttl: u64,
+    captured: Option<BillingTaxProfile>,
+    provider_deadline: Option<tokio::time::Instant>,
+) -> AppResult<Option<BillingTaxProfile>> {
     let subscription = wallet
         .lago_subscription_id
         .as_deref()
         .ok_or_else(unavailable)?;
-    let result = tokio::time::timeout(REFRESH_TIMEOUT, async {
+    let epoch = ordering::capture_plan_epoch(db).await?;
+    #[cfg(test)]
+    ordering_tests::point(ordering_tests::Phase::Captured).await;
+    let deadline =
+        provider_deadline.unwrap_or_else(|| tokio::time::Instant::now() + REFRESH_TIMEOUT);
+    if tokio::time::Instant::now() >= deadline {
+        // Capture used the remaining budget; no provider call failed.
+        return Err(refresh_timeout());
+    }
+    let result = tokio::time::timeout_at(deadline, async {
         let config = lago
             .tax_config(&wallet.lago_customer_id, subscription)
             .await?;
         resolve_config(&wallet.owner_id, subscription, &config)
     })
     .await
-    .unwrap_or_else(|_| {
-        Err(AppError::BillingProviderUnavailable(
-            "Lago tax configuration timed out".into(),
-        ))
-    });
+    .unwrap_or_else(|_| Err(refresh_timeout()));
     match result {
         Ok(profile) => {
-            store_profile(db, &profile).await?;
-            Ok(profile)
+            #[cfg(test)]
+            ordering_tests::point(ordering_tests::Phase::ProviderReturned).await;
+            #[cfg(test)]
+            ordering_tests::point(ordering_tests::Phase::BeforePublication).await;
+            if let Some(published) =
+                ordering::publish(db, wallet, captured.as_ref(), epoch, profile).await?
+            {
+                return Ok(Some(published));
+            }
+            // None is an ordering loss, distinct from a provider/DB error.
+            // Only inline admission may recapture and try once more.
+            Ok(load_profile(db, &wallet.owner_id)
+                .await?
+                .filter(|p| fresh(p, wallet, ttl)))
         }
         Err(error) => {
             // Empty fingerprint is an unverified cold-cache failure marker,
             // never a zero-tax profile. Preserve any previously verified data.
             let mut initial = bson::to_document(&BillingTaxProfile {
+                revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 owner_id: wallet.owner_id.clone(),
                 subscription_id: String::new(),
@@ -252,7 +307,8 @@ pub async fn refresh(
     }
 }
 
-async fn store_profile(db: &Database, profile: &BillingTaxProfile) -> AppResult<()> {
+#[cfg(test)]
+async fn store_test_profile(db: &Database, profile: &BillingTaxProfile) -> AppResult<()> {
     let mut fields = bson::to_document(profile).map_err(|e| AppError::Internal(e.to_string()))?;
     fields.remove("_id");
     let collection = db.collection::<Document>(COLLECTION_NAME);
@@ -279,23 +335,62 @@ pub async fn ensure_fresh(
     wallet: &BillingWallet,
     ttl: u64,
 ) -> AppResult<BillingTaxProfile> {
-    if let Some(profile) = db
-        .collection::<BillingTaxProfile>(COLLECTION_NAME)
-        .find_one(doc! {"owner_id": &wallet.owner_id})
-        .await?
-    {
-        if fresh(&profile, wallet, ttl) {
-            return Ok(profile);
+    let provider_deadline = tokio::time::Instant::now() + REFRESH_TIMEOUT;
+    let inline_refresh = async {
+        let mut retry_wallet = None;
+        for attempt in 0..2 {
+            let current_wallet = retry_wallet.as_ref().unwrap_or(wallet);
+            let captured = load_profile(db, &wallet.owner_id).await?;
+            if let Some(profile) = &captured {
+                if fresh(profile, current_wallet, ttl) {
+                    return Ok(profile.clone());
+                }
+                if profile.refresh_failed_at.is_some_and(|failed| {
+                    failed > Utc::now() - Duration::seconds(INLINE_BACKOFF_SECS)
+                }) {
+                    return Err(unavailable());
+                }
+            }
+            if let Some(profile) = refresh_captured(
+                db,
+                lago,
+                current_wallet,
+                ttl,
+                captured,
+                Some(provider_deadline),
+            )
+            .await?
+            {
+                return Ok(profile);
+            }
+            if attempt == 0 {
+                if tokio::time::Instant::now() >= provider_deadline {
+                    return Err(refresh_timeout());
+                }
+                // Recapture the owner counter, but never silently switch the
+                // request to a different wallet/provider binding.
+                retry_wallet = Some(
+                    db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+                        .find_one(doc! {
+                            "_id": &wallet.id,
+                            "owner_id": &wallet.owner_id,
+                            "lago_customer_id": &wallet.lago_customer_id,
+                            "lago_subscription_id": &wallet.lago_subscription_id,
+                            "lago_wallet_id": &wallet.lago_wallet_id,
+                        })
+                        .await?
+                        .ok_or_else(unavailable)?,
+                );
+            }
         }
-        if profile
-            .refresh_failed_at
-            .is_some_and(|failed| failed > Utc::now() - Duration::seconds(INLINE_BACKOFF_SECS))
-        {
-            return Err(unavailable());
-        }
-    }
-    refresh(db, lago, wallet).await
+        // Two ordering losses are not a provider failure or a backoff signal.
+        Err(unavailable())
+    };
+    tokio::time::timeout_at(provider_deadline + INLINE_COMPLETION_GRACE, inline_refresh)
+        .await
+        .unwrap_or_else(|_| Err(refresh_timeout()))
 }
+
 pub async fn reserve_gross_in_session(
     db: &Database,
     session: &mut ClientSession,
@@ -368,13 +463,17 @@ pub async fn remove_charge(
     result
 }
 pub async fn invalidate_plan(db: &Database, plan: &str) -> AppResult<()> {
-    db.collection::<Document>(COLLECTION_NAME)
-        .update_many(
-            doc! {"plan_code": plan},
-            doc! {"$set": {"fetched_at": bson::DateTime::from_millis(0)}, "$unset": {"refresh_failed_at": ""}},
-        )
-        .await?;
-    Ok(())
+    ordering::invalidate_plan(db, plan).await
+}
+pub async fn invalidate_owner(db: &Database, owner: &str) -> AppResult<Option<BillingWallet>> {
+    ordering::invalidate_owner(db, owner).await
+}
+pub(super) async fn repair_subscription(
+    db: &Database,
+    wallet: &BillingWallet,
+    subscription: &str,
+) -> AppResult<()> {
+    ordering::repair_subscription(db, wallet, subscription).await
 }
 /// Missing profiles sort first, then oldest fetched_at. Bounded each sweep.
 pub async fn reconcile(db: &Database, lago: &dyn LagoApi, ttl: u64) -> AppResult<()> {
@@ -395,6 +494,8 @@ pub async fn reconcile(db: &Database, lago: &dyn LagoApi, ttl: u64) -> AppResult
         .await?;
     // Tax reads must not hold up usage emission for an entire customer batch
     // during a provider outage. The next sweep resumes from oldest profiles.
+    #[cfg(test)]
+    ordering_tests::point(ordering_tests::Phase::SweepSelected).await;
     let total = rows.len();
     let mut attempted = 0;
     let mut completed = 0;
@@ -407,7 +508,7 @@ pub async fn reconcile(db: &Database, lago: &dyn LagoApi, ttl: u64) -> AppResult
             let wallet: BillingWallet =
                 bson::from_document(row).map_err(|e| AppError::Internal(e.to_string()))?;
             // Forced refresh bypasses the inline negative-cache backoff.
-            if let Err(error) = refresh(db, lago, &wallet).await {
+            if let Err(error) = refresh(db, lago, &wallet, ttl).await {
                 tracing::warn!(owner_id = %wallet.owner_id, %error, "Lago tax profile refresh failed");
             }
             completed += 1;
@@ -471,7 +572,7 @@ pub async fn seed_test_profiles(db: &Database) {
             &zero_config(),
         )
         .unwrap();
-        store_profile(db, &profile).await.unwrap();
+        store_test_profile(db, &profile).await.unwrap();
     }
 }
 

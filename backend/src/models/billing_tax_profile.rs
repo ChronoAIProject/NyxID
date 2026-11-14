@@ -30,6 +30,9 @@ pub struct BillingTaxProfile {
     #[serde(rename = "_id")]
     pub id: String,
     pub owner_id: String,
+    /// Accepted publications and completed row invalidations advance this fence.
+    #[serde(default)]
+    pub revision: i64,
     pub subscription_id: String,
     pub plan_code: String,
     pub billing_entity_code: String,

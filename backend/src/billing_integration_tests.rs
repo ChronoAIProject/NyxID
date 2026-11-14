@@ -211,6 +211,7 @@ pub(crate) struct FakeLago {
     tax_unavailable: bool,
     tax_delay: Option<std::time::Duration>,
     tax_fetches: AtomicUsize,
+    tax_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     bill_data: Option<serde_json::Value>,
     invoice_data: Option<serde_json::Value>,
     invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
@@ -246,7 +247,13 @@ impl LagoApi for FakeLago {
         _: &str,
         _: &str,
     ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
-        self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0
+            && let Some((entered, resume)) = &self.tax_read_gate
+        {
+            entered.notify_one();
+            resume.notified().await;
+        }
         if let Some(delay) = self.tax_delay {
             tokio::time::sleep(delay).await;
         }

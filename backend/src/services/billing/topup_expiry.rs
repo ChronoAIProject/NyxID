@@ -1334,6 +1334,8 @@ mod tests {
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: "wallet-1".to_string(),
                 owner_id: "owner-1".to_string(),
                 lago_customer_id: "customer-1".to_string(),
@@ -1467,6 +1469,8 @@ mod tests {
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: "wallet-recover".to_string(),
                 owner_id: "owner-recover".to_string(),
                 lago_customer_id: "customer-recover".to_string(),
@@ -1539,6 +1543,8 @@ mod tests {
         db.collection::<BillingWallet>(BILLING_WALLETS)
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: "wallet-race".to_string(),
                 owner_id: "owner-race".to_string(),
                 lago_customer_id: "customer-race".to_string(),

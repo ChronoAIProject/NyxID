@@ -1131,6 +1131,7 @@ pub async fn lago_webhook(
         lago.as_deref(),
         event_type,
         &payload,
+        state.config.billing_rate_cache_ttl_secs,
     )
     .await?;
 

@@ -507,6 +507,7 @@ async fn customer_webhook_resolves_tax_owner_by_wallet_customer_identity() {
         Some(&lago),
         "customer.updated",
         &serde_json::json!({"customer":{"external_id":customer}}),
+        900,
     )
     .await
     .unwrap();

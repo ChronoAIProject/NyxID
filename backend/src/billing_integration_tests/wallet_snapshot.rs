@@ -79,6 +79,7 @@ async fn snapshot_order_wallet_command_counts() {
         Some(lago.as_ref()),
         "wallet.updated",
         &serde_json::json!({"wallet":{"external_customer_id":saved.lago_customer_id}}),
+        900,
     )
     .await
     .unwrap();
@@ -98,7 +99,7 @@ async fn snapshot_order_wallet_settlements_do_not_starve_refresh_or_break_accoun
     };
     let payload = serde_json::json!({"wallet":{"external_customer_id":&owner}});
     let (result, ()) = tokio::join!(
-        webhook::handle_lago_webhook_event(&db, Some(&provider), "wallet.updated", &payload),
+        webhook::handle_lago_webhook_event(&db, Some(&provider), "wallet.updated", &payload, 900),
         async {
             entered.notified().await;
             let generation = wallet(&db, &owner).await.snapshot_generation;
@@ -144,5 +145,149 @@ async fn snapshot_order_wallet_settlements_do_not_starve_refresh_or_break_accoun
         "{:?}",
         status.break_detail
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tax_ordering_inline_command_counts() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = commands.clone();
+    let handler = EventHandler::<CommandEvent>::callback(move |event| {
+        if let CommandEvent::Started(event) = event {
+            let collection = event.command.get_str(&event.command_name).unwrap_or("");
+            recorded
+                .lock()
+                .unwrap()
+                .push(format!("{}:{}", event.command_name, collection));
+        }
+    });
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "tax_order_counts",
+        handler,
+    )
+    .await;
+    let (db, owner, lago, service) = fixture_on_db(db).await;
+    let warm = service
+        .open(&request(&owner, "warmup-tax-count"))
+        .await
+        .unwrap();
+    service.fail(&warm, "warmup").await.unwrap();
+    for state in ["warm", "stale", "cold"] {
+        let profiles =
+            db.collection::<bson::Document>(crate::models::billing_tax_profile::COLLECTION_NAME);
+        if state == "stale" {
+            profiles
+                .update_many(
+                    doc! {},
+                    doc! {"$set":{"fetched_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+        } else if state == "cold" {
+            profiles.delete_many(doc! {}).await.unwrap();
+        }
+        commands.lock().unwrap().clear();
+        lago.tax_fetches.store(0, Ordering::SeqCst);
+        let meter = service.open(&request(&owner, state)).await.unwrap();
+        let captured = std::mem::take(&mut *commands.lock().unwrap());
+        println!("TAX_COMMANDS {state}: {captured:?}");
+        assert_eq!(
+            lago.tax_fetches.load(Ordering::SeqCst),
+            usize::from(state != "warm")
+        );
+        let expected = match state {
+            "warm" => 18,
+            "stale" => 20,
+            "cold" => 23,
+            _ => unreachable!(),
+        };
+        assert_eq!(captured.len(), expected, "{state}: {captured:?}");
+        service.fail(&meter, "cleanup").await.unwrap();
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn tax_ordering_retry_admission_command_counts() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = commands.clone();
+    let handler = EventHandler::<CommandEvent>::callback(move |event| {
+        if let CommandEvent::Started(event) = event {
+            let collection = event.command.get_str(&event.command_name).unwrap_or("");
+            recorded
+                .lock()
+                .unwrap()
+                .push(format!("{}:{}", event.command_name, collection));
+        }
+    });
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "tax_retry_counts",
+        handler,
+    )
+    .await;
+    let (db, owner, _, initial_service) = fixture_on_db(db).await;
+    let warm = initial_service
+        .open(&request(&owner, "retry-warmup"))
+        .await
+        .unwrap();
+    initial_service.fail(&warm, "cleanup").await.unwrap();
+    for (state, expected) in [("stale", 25), ("cold", 30)] {
+        let profiles = db.collection::<bson::Document>("billing_tax_profiles");
+        let plan = profiles
+            .find_one(doc! {"owner_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let plan = plan.get_str("plan_code").unwrap().to_owned();
+        if state == "stale" {
+            profiles
+                .update_many(
+                    doc! {},
+                    doc! {"$set":{"fetched_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+        } else {
+            profiles.delete_many(doc! {}).await.unwrap();
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let lago = Arc::new(FakeLago {
+            tax_rate: Some("9".into()),
+            tax_read_gate: Some((entered.clone(), resume.clone())),
+            ..Default::default()
+        });
+        let service = billing_service(&db, lago.clone(), 1);
+        commands.lock().unwrap().clear();
+        let ctx = request(&owner, state);
+        let (result, before_invalidation) = tokio::join!(service.open(&ctx), async {
+            entered.notified().await;
+            let before = std::mem::take(&mut *commands.lock().unwrap());
+            // Admission is paused at its provider read: exclude only the
+            // administrator's two invalidation commands from its count.
+            crate::services::billing::taxes::invalidate_plan(&db, &plan)
+                .await
+                .unwrap();
+            let invalidation = std::mem::take(&mut *commands.lock().unwrap());
+            assert_eq!(invalidation.len(), 2, "{invalidation:?}");
+            resume.notify_one();
+            before
+        });
+        let mut captured = before_invalidation;
+        captured.extend(std::mem::take(&mut *commands.lock().unwrap()));
+        let calls = lago.tax_fetches.load(Ordering::SeqCst);
+        println!("TAX_RETRY_COMMANDS {state}: provider_reads={calls}, {captured:?}");
+        if let Ok(meter) = &result {
+            service.fail(meter, "cleanup").await.unwrap();
+        }
+        if result.is_err() || calls != 2 || captured.len() != expected {
+            db.drop().await.unwrap();
+        }
+        result.expect("admission must survive one tax invalidation");
+        assert_eq!(calls, 2);
+        assert_eq!(captured.len(), expected, "{state}: {captured:?}");
+    }
     db.drop().await.unwrap();
 }
