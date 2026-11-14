@@ -47,6 +47,20 @@ export const terminalKeys = [
   "-",
 ] as const;
 export type TerminalKey = (typeof terminalKeys)[number];
+export const TERMINAL_PASTE_MAX_CHARS = 65_536;
+
+/** Truncate UTF-16 clipboard text without leaving a dangling surrogate. */
+export function truncateTerminalPaste(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  if (text.length <= TERMINAL_PASTE_MAX_CHARS)
+    return { text, truncated: false };
+  let value = text.slice(0, TERMINAL_PASTE_MAX_CHARS);
+  const last = value.charCodeAt(value.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) value = value.slice(0, -1);
+  return { text: value, truncated: true };
+}
 export function terminalKeyInput(
   key: TerminalKey,
   applicationCursorKeys: boolean,
@@ -100,7 +114,12 @@ export const terminalCommandSchema = z.discriminatedUnion("type", [
     })
     .strict(),
   z.object({ type: z.literal("key"), key: z.enum(terminalKeys) }).strict(),
-  z.object({ type: z.literal("paste"), text: z.string().max(65536) }).strict(),
+  z
+    .object({
+      type: z.literal("paste"),
+      text: z.string().max(TERMINAL_PASTE_MAX_CHARS),
+    })
+    .strict(),
   z.object({ type: z.literal("reset") }).strict(),
   z
     .object({
@@ -127,7 +146,7 @@ export const terminalUpgradeError = (
     ? "Your session expired. Sign in again to open the terminal."
     : status === 403
       ? waitingForApproval
-        ? "This session wasn't approved — the request was denied or expired. Reconnect to ask again."
+        ? "The server refused this session. An approval may have been denied or expired, or you may no longer have access. Reconnect to try again."
         : "You don't have permission to open this terminal."
       : status === 404
         ? "This SSH connection is no longer available."

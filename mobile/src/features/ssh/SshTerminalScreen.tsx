@@ -42,6 +42,7 @@ import {
   terminalUpgradeError,
   terminalUpgradeStatus,
   terminalUrl,
+  truncateTerminalPaste,
   type TerminalCommand,
 } from "./terminalModel";
 import { TerminalOutput } from "./terminalOutput";
@@ -67,7 +68,12 @@ export function SshTerminalScreen({
   route,
 }: {
   route: {
-    params: { serviceId: string; connectionId?: string; principal?: string };
+    params: {
+      serviceId: string;
+      connectionId?: string;
+      principal?: string;
+      autoConnect?: boolean;
+    };
   };
 }) {
   const { serviceId, connectionId } = route.params;
@@ -91,6 +97,9 @@ export function SshTerminalScreen({
   const sessionEndedRef = useRef(false);
   const [ctrl, setCtrl] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [connectRequested, setConnectRequested] = useState(
+    route.params.autoConnect === true,
+  );
   const [documentVersion, setDocumentVersion] = useState(0);
   const web = useRef<WebView>(null);
   const socket = useRef<WebSocket | null>(null);
@@ -105,6 +114,7 @@ export function SshTerminalScreen({
   const backgroundTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+  const backgroundStartedAt = useRef<number | undefined>(undefined);
   const html = useMemo(
     () => terminalDocument(),
     [],
@@ -135,12 +145,10 @@ export function SshTerminalScreen({
     () =>
       new TerminalOutput(
         (data, id) => send({ type: "output", data, id }),
-        () => {
-          endSession();
-          socket.current?.close(1000);
-          setError("Terminal output is too far behind. Reconnect to continue.");
-          setState("Disconnected");
-        },
+        () =>
+          new TextEncoder().encode(
+            `\x18\x1b[0m\r\n${translateRef.current("Output skipped.")}\r\n`,
+          ),
       ),
     [],
   );
@@ -152,6 +160,9 @@ export function SshTerminalScreen({
   useEffect(() => {
     focusedRef.current = focused;
   }, [focused]);
+  useEffect(() => {
+    setConnectRequested(route.params.autoConnect === true);
+  }, [connectionId, route.params.autoConnect, serviceId]);
   useEffect(() => {
     navigation.setOptions({ title: t("SSH terminal") });
   }, [navigation, t]);
@@ -223,6 +234,7 @@ export function SshTerminalScreen({
     const account = getAuthAccountId();
     if (
       !ready ||
+      !connectRequested ||
       !eligible ||
       !principal ||
       !account ||
@@ -241,6 +253,7 @@ export function SshTerminalScreen({
       clearTimeout(resizeTimer.current);
       clearTimeout(backgroundTimer.current);
       backgroundTimer.current = undefined;
+      backgroundStartedAt.current = undefined;
       stopWaiting();
       const ws = socket.current;
       socket.current = null;
@@ -394,14 +407,29 @@ export function SshTerminalScreen({
     const appState = AppState.addEventListener("change", (value) => {
       if (value === "background") {
         clearTimeout(backgroundTimer.current);
+        backgroundStartedAt.current = Date.now();
         backgroundTimer.current = setTimeout(() => {
           backgroundTimer.current = undefined;
+          backgroundStartedAt.current = undefined;
           close(translateRef.current("Connection closed."));
           setState("Disconnected");
         }, TERMINAL_BACKGROUND_GRACE_MS);
       } else if (value === "active") {
-        clearTimeout(backgroundTimer.current);
-        backgroundTimer.current = undefined;
+        const startedAt = backgroundStartedAt.current;
+        if (
+          startedAt !== undefined &&
+          Date.now() - startedAt >= TERMINAL_BACKGROUND_GRACE_MS
+        ) {
+          clearTimeout(backgroundTimer.current);
+          backgroundTimer.current = undefined;
+          backgroundStartedAt.current = undefined;
+          close(translateRef.current("Connection closed."));
+          setState("Disconnected");
+        } else {
+          clearTimeout(backgroundTimer.current);
+          backgroundTimer.current = undefined;
+          backgroundStartedAt.current = undefined;
+        }
       }
     });
     const accountSubscription = subscribeAuthAccount(() => {
@@ -416,6 +444,7 @@ export function SshTerminalScreen({
     };
   }, [
     ready,
+    connectRequested,
     eligible,
     principal,
     serviceId,
@@ -471,6 +500,7 @@ export function SshTerminalScreen({
     return () => subscriptions.forEach((subscription) => subscription.remove());
   }, []);
   const reconnect = () => {
+    setConnectRequested(true);
     endSession();
     generation.current++;
     const ws = socket.current;
@@ -491,16 +521,34 @@ export function SshTerminalScreen({
     const account = getAuthAccountId();
     try {
       const text = await Clipboard.getStringAsync();
+      const pasted = truncateTerminalPaste(text);
       if (
         focusedRef.current &&
         epoch === generation.current &&
         account === getAuthAccountId()
       )
-        send({ type: "paste", text: text.slice(0, 65536) });
+        send({ type: "paste", text: pasted.text });
+      if (pasted.truncated) setError(t("Only the first 65,536 characters were pasted."));
     } catch {
       if (epoch === generation.current)
         setError("Couldn't read the clipboard. Try again.");
     }
+  };
+  const handleRendererTerminated = () => {
+    const ws = socket.current;
+    socket.current = null;
+    if (ws) {
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.close(1000);
+    }
+    output.clear();
+    stopWaiting();
+    endSession();
+    setState("Disconnected");
+    setReady(false);
+    setDocumentVersion((value) => value + 1);
   };
   const principals = connection?.ssh_allowed_principals ?? [];
   const invalidPrincipal = Boolean(
@@ -548,6 +596,36 @@ export function SshTerminalScreen({
                   ? "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer."
                   : "Enable this connection to open the terminal.",
             )}
+          />
+        </View>
+      ) : connection && eligible && !connectRequested ? (
+        <View style={styles.preconnect}>
+          <Notice
+            message={t("Ready to open the terminal for {{connection}} as {{principal}}.", {
+              connection: connection.label,
+              principal: principal ?? t("Choose principal"),
+            })}
+          />
+          {principalPickerOpen && principals.length > 0 ? (
+            <SettingsGroup title={t("SSH principal")}>
+              {principals.map((value) => (
+                <SettingsRow
+                  key={value}
+                  label={value}
+                  value={principal === value ? t("Selected") : undefined}
+                  onPress={() => {
+                    setPrincipal(value);
+                    setPrincipalPickerOpen(false);
+                  }}
+                />
+              ))}
+            </SettingsGroup>
+          ) : null}
+          <SettingsRow
+            label={t("Connect")}
+            tone="action"
+            disabled={!principal}
+            onPress={() => setConnectRequested(true)}
           />
         </View>
       ) : (
@@ -649,19 +727,8 @@ export function SshTerminalScreen({
               thirdPartyCookiesEnabled={false}
               domStorageEnabled={false}
               onMessage={bridge}
-              onContentProcessDidTerminate={() => {
-                const ws = socket.current;
-                socket.current = null;
-                if (ws) {
-                  ws.onmessage = null;
-                  ws.onclose = null;
-                  ws.onerror = null;
-                  ws.close(1000);
-                }
-                setState("Disconnected");
-                setReady(false);
-                setDocumentVersion((value) => value + 1);
-              }}
+              onContentProcessDidTerminate={handleRendererTerminated}
+              onRenderProcessGone={handleRendererTerminated}
               style={{ backgroundColor: "#0f172a" }}
             />
           </View>
@@ -755,6 +822,7 @@ const styles = StyleSheet.create({
   page: { padding: spacing.sm, gap: spacing.sm, flex: 1 },
   keyboardAvoiding: { flex: 1, gap: spacing.xs },
   unavailable: { gap: spacing.sm },
+  preconnect: { gap: spacing.sm },
   statusBar: {
     minHeight: 38,
     flexDirection: "row",

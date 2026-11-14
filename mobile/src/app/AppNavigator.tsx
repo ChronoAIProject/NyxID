@@ -94,6 +94,7 @@ import {
 } from "../features/plugins/PluginsScreen";
 import { TermsOfServiceScreen } from "../features/legal/TermsOfServiceScreen";
 import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
+import { OpenSourceNoticesScreen } from "../features/account/OpenSourceNoticesScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
 import { useReducedMotion } from "../lib/accessibility/useReducedMotion";
 import {
@@ -792,6 +793,11 @@ function SettingsSheetRoute({
             name="PrivacyPolicy"
             component={PrivacyPolicyScreen}
             options={{ title: t("Privacy Policy") }}
+          />
+          <SheetStack.Screen
+            name="OpenSourceNotices"
+            component={OpenSourceNoticesScreen}
+            options={{ title: t("Open-source notices") }}
           />
           <SheetStack.Screen
             name="DeviceLogin"

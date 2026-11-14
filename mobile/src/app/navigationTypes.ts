@@ -57,6 +57,7 @@ export type AuthoredSkillPageParams = {
 type SharedEntryParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
+  OpenSourceNotices: undefined;
   DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
   AgentKeyLogin:
     | { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean }
@@ -86,6 +87,8 @@ export type WorkspaceContentParamList = Omit<
     /** Exact UserService connection id when opened from Services/Plugins. */
     connectionId?: string;
     principal?: string;
+    /** Only Services/Plugins may set this boolean; link parsing never does. */
+    autoConnect?: boolean;
   };
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
@@ -230,4 +233,5 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "AgentKeyLogin",
   "TermsOfService",
   "PrivacyPolicy",
+  "OpenSourceNotices",
 ];

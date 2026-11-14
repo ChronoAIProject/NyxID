@@ -12,6 +12,7 @@ import {
   terminalUrl,
   controlInput,
   inlineTerminalNavigation,
+  truncateTerminalPaste,
 } from "./terminalModel";
 import { terminalDocument } from "./terminalDocument";
 import { TerminalOutput } from "./terminalOutput";
@@ -168,17 +169,16 @@ test("upgrade status copy distinguishes auth, permissions, missing service, capa
   assert.equal(messages[1], "You don't have permission to open this terminal.");
   assert.equal(
     terminalUpgradeError(403, true),
-    "This session wasn't approved — the request was denied or expired. Reconnect to ask again.",
+    "The server refused this session. An approval may have been denied or expired, or you may no longer have access. Reconnect to try again.",
   );
   for (const status of [401, 404, 429, 503, 400])
     assert.equal(terminalUpgradeError(status, true), terminalUpgradeError(status));
 });
 test("output batches preserve binary bytes and wait for acknowledgements; queue overflow is bounded", async () => {
   const sent: { data: string; id: number }[] = [];
-  let overflow = 0;
   const output = new TerminalOutput(
     (data, id) => sent.push({ data, id }),
-    () => overflow++,
+    () => Uint8Array.from([24, 27, 91, 48, 109, 13, 10]),
   );
   output.push(Uint8Array.from([0, 27, 255, 195, 169]).buffer);
   await new Promise((resolve) => setTimeout(resolve, 25));
@@ -197,14 +197,54 @@ test("output batches preserve binary bytes and wait for acknowledgements; queue 
   assert.equal(sent.length, 2);
   assert.equal(Buffer.from(sent[1]!.data, "base64").length, 65536);
   output.push(new Uint8Array(4 * 1024 * 1024 + 1).buffer);
-  assert.equal(overflow, 1);
+  assert.ok(output.queuedBytes <= 4 * 1024 * 1024);
+  output.clear();
+});
+
+test("output overflow drops queued oldest bytes and emits one gap marker before newest data", async () => {
+  const marker = Uint8Array.from([24, 27, 91, 48, 109, 13, 10]);
+  const sent: { data: string; id: number }[] = [];
+  const output = new TerminalOutput(
+    (data, id) => sent.push({ data, id }),
+    () => marker,
+  );
+  const first = new Uint8Array(65_536).fill(1);
+  output.push(first.buffer);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const newest = new Uint8Array(65_536).fill(2);
+  for (let index = 0; index < 65; index += 1) output.push(newest.buffer.slice(0));
+  output.push(Uint8Array.of(9).buffer);
+  assert.ok(output.queuedBytes <= 4 * 1024 * 1024);
+
+  const delivered: number[] = [];
+  let acknowledged = 0;
+  while (acknowledged < sent.length || output.queuedBytes > 0) {
+    const batch = sent[acknowledged];
+    if (batch) {
+      delivered.push(...Buffer.from(batch.data, "base64"));
+      output.ack(batch.id);
+      acknowledged += 1;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const markerAt = delivered.findIndex((value, index) =>
+    marker.every((byte, offset) => delivered[index + offset] === byte),
+  );
+  assert.ok(markerAt >= 0);
+  assert.equal(
+    delivered.filter((_, index) =>
+      marker.every((byte, offset) => delivered[index + offset] === byte),
+    ).length,
+    1,
+  );
+  assert.equal(delivered.at(-1), 9);
   output.clear();
 });
 
 test("native output encoding works without the browser btoa global", async () => {
   const original = globalThis.btoa;
   const sent: string[] = [];
-  const output = new TerminalOutput((data) => sent.push(data), () => assert.fail("unexpected overflow"));
+  const output = new TerminalOutput((data) => sent.push(data), () => Uint8Array.of(24));
   try {
     Object.defineProperty(globalThis, "btoa", { configurable: true, writable: true, value: undefined });
     const bytes = Uint8Array.from([0, 27, 255, 195, 169]);
@@ -217,9 +257,22 @@ test("native output encoding works without the browser btoa global", async () =>
   }
 });
 
+test("clipboard truncation preserves code points and reports a boundary", () => {
+  const exact = "a".repeat(65_536);
+  assert.deepEqual(truncateTerminalPaste(exact), { text: exact, truncated: false });
+  const split = "a".repeat(65_535) + "😀" + "tail";
+  const result = truncateTerminalPaste(split);
+  assert.equal(result.truncated, true);
+  assert.equal(result.text, "a".repeat(65_535));
+  assert.doesNotMatch(result.text, /\uD800|\uDC00/);
+});
+
 test("empty terminal frames cannot create an endless acknowledged output loop", async () => {
   const sent: { data: string; id: number }[] = [];
-  const output = new TerminalOutput((data, id) => sent.push({ data, id }), () => assert.fail("unexpected overflow"));
+  const output = new TerminalOutput(
+    (data, id) => sent.push({ data, id }),
+    () => Uint8Array.of(24),
+  );
   try {
     output.push(new ArrayBuffer(0));
     await new Promise((resolve) => setTimeout(resolve, 25));

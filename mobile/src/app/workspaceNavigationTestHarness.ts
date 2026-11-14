@@ -70,6 +70,7 @@ export const settingsNames = [
   "AgentKeyLogin",
   "TermsOfService",
   "PrivacyPolicy",
+  "OpenSourceNotices",
 ];
 export const rootNames = [
   "Workspace",

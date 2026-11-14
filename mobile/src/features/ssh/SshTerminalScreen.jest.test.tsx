@@ -143,6 +143,17 @@ const message = async (view: any, data: unknown) => {
   });
 };
 const renderTerminal = async (element: React.ReactElement) => {
+  const route = (element.props as any).route;
+  if (route?.params && route.params.autoConnect === undefined) {
+    return render(
+      React.cloneElement(element, {
+        route: {
+          ...route,
+          params: { ...route.params, autoConnect: true },
+        },
+      } as any),
+    );
+  }
   return render(element);
 };
 const waitForSocket = () =>
@@ -150,7 +161,7 @@ const waitForSocket = () =>
 
 test("bearer stays in the RN socket header; inline HTML, bridge and every injected script stay token-free", async () => {
   const screen = await renderTerminal(
-    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
   expect(view.props.source.html).not.toContain("SENTINEL_BEARER_TOKEN");
@@ -199,7 +210,7 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
 test("background grace keeps the socket for 15 seconds while inactive stays harmless; 401 retries once", async () => {
   jest.useFakeTimers();
   const screen = await renderTerminal(
-    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
   );
   await message(screen.getByTestId("terminal-webview"), { type: "ready" });
   await waitForSocket();
@@ -238,7 +249,7 @@ test("background grace keeps the socket for 15 seconds while inactive stays harm
   expect(Socket.instances.length).toBe(3);
   mockFocused = false;
   await screen.rerender(
-    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
   );
   await screen.unmount();
   jest.useRealTimers();
@@ -248,7 +259,7 @@ test("background grace restarts after an active return and unmount clears it", a
   jest.useFakeTimers();
   const screen = await renderTerminal(
     <SshTerminalScreen
-      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }}
     />,
   );
   await message(screen.getByTestId("terminal-webview"), { type: "ready" });
@@ -277,6 +288,31 @@ test("background grace restarts after an active return and unmount clears it", a
   jest.useRealTimers();
 });
 
+test.each([
+  [14_999, false],
+  [15_000, true],
+])("wall-clock background grace at %s ms is enforced when timers do not run", async (elapsed, closes) => {
+  jest.useFakeTimers();
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }}
+    />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
+  const startedAt = Date.now();
+  await act(async () => {
+    mockAppHandlers.forEach((handler) => handler("background"));
+    jest.setSystemTime(startedAt + elapsed);
+    mockAppHandlers.forEach((handler) => handler("active"));
+  });
+  expect(socket.close).toHaveBeenCalledTimes(closes ? 1 : 0);
+  if (!closes) expect(Socket.instances).toHaveLength(1);
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
 test("a 403 after the upgrade entered approval wait explains denial or expiry", async () => {
   jest.useFakeTimers();
   const screen = await renderTerminal(
@@ -298,7 +334,7 @@ test("a 403 after the upgrade entered approval wait explains denial or expiry", 
   });
   expect(
     screen.getByText(
-      "This session wasn't approved — the request was denied or expired. Reconnect to ask again.",
+      "The server refused this session. An approval may have been denied or expired, or you may no longer have access. Reconnect to try again.",
     ),
   ).toBeTruthy();
   expect(screen.queryByText("You don't have permission to open this terminal.")).toBeNull();
@@ -320,7 +356,7 @@ test("an immediate 403 retains the permission guidance", async () => {
   expect(screen.getByText("You don't have permission to open this terminal.")).toBeTruthy();
   expect(
     screen.queryByText(
-      "This session wasn't approved — the request was denied or expired. Reconnect to ask again.",
+      "The server refused this session. An approval may have been denied or expired, or you may no longer have access. Reconnect to try again.",
     ),
   ).toBeNull();
   await screen.unmount();
@@ -400,7 +436,7 @@ test("a pending approval gets a review action without closing on route blur", as
   mockFocused = false;
   await screen.rerender(
     <SshTerminalScreen
-      route={{ params: { serviceId: "catalog", connectionId: "connection" } }}
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }}
     />,
   );
   expect(Socket.instances[0]!.close).not.toHaveBeenCalled();
@@ -410,7 +446,7 @@ test("a pending approval gets a review action without closing on route blur", as
 
 test("sticky Ctrl-C sends a binary interrupt once and releases the selected key", async () => {
   const screen = await renderTerminal(
-    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
   );
   const view = screen.getByTestId("terminal-webview");
   await message(view, { type: "ready" });
@@ -578,7 +614,7 @@ test("several principals require selection; a clipboard read resolving after blu
   await fireEvent.press(screen.getByLabelText("Paste"));
   mockFocused = false;
   await screen.rerender(
-    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
   );
   const injections = mockInject.mock.calls.length;
   await act(async () => {
@@ -591,8 +627,11 @@ test("several principals require selection; a clipboard read resolving after blu
 
 test("a catalog deep link resolves the active connection, while an unknown catalog is actionable", async () => {
   const deep = await renderTerminal(
-    <SshTerminalScreen route={{ params: { serviceId: "catalog" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", autoConnect: false } }} />,
   );
+  expect(deep.getByText("Connect")).toBeTruthy();
+  expect(Socket.instances.length).toBe(0);
+  await fireEvent.press(deep.getByText("Connect"));
   await message(deep.getByTestId("terminal-webview"), { type: "ready" });
   await waitForSocket();
   expect(Socket.instances[0]!.url).toContain("/ssh/catalog/terminal?");
@@ -601,7 +640,7 @@ test("a catalog deep link resolves the active connection, while an unknown catal
   Socket.instances = [];
   jest.mocked(servicesApi.connections).mockResolvedValue([]);
   const unknown = await renderTerminal(
-    <SshTerminalScreen route={{ params: { serviceId: "missing-catalog" } }} />,
+    <SshTerminalScreen route={{ params: { serviceId: "missing-catalog", autoConnect: false } }} />,
   );
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
