@@ -79,14 +79,14 @@ private func emitPendingRawLog(_ line: String) {
   NSLog("%@", line)
 }
 
-private func consumePendingRawCore(
+func consumePendingRaw(
   source: PendingRawSource,
   bindingEpoch: String?,
   authorityEpoch: String?,
   now: Date,
   parse: (Data) -> ParsedPendingRaw?,
-  beforePurge: (([String: Any]?) -> Void)?,
-  emit: (String) -> Void
+  persist: ([String: Any]) -> Void,
+  emit: (String) -> Void = emitPendingRawLog
 ) -> [String: Any]? {
   guard source.hasPending else {
     source.purge()
@@ -138,69 +138,17 @@ private func consumePendingRawCore(
   case .continueParsing:
     break
   }
-  let record = sanitizedNativeCrash(
+  guard let record = sanitizedNativeCrash(
     parsed.crash,
     eventId: UUID().uuidString.lowercased(),
     now: now,
     fallbackCapturedAt: modificationDate ?? now)
-  if record == nil {
+  else {
     emit(crashDiscardLogLine(reason: .unparseable, byteCount: byteCount))
+    return nil
   }
-  beforePurge?(record)
+  persist(record)
   return record
-}
-
-func consumePendingRaw(
-  source: PendingRawSource,
-  bindingEpoch: String?,
-  authorityEpoch: String?,
-  now: Date,
-  parse: (Data) -> ParsedPendingRaw?
-) -> [String: Any]? {
-  consumePendingRaw(
-    source: source,
-    bindingEpoch: bindingEpoch,
-    authorityEpoch: authorityEpoch,
-    now: now,
-    parse: parse,
-    emit: nil)
-}
-
-func consumePendingRaw(
-  source: PendingRawSource,
-  bindingEpoch: String?,
-  authorityEpoch: String?,
-  now: Date,
-  parse: (Data) -> ParsedPendingRaw?,
-  emit: ((String) -> Void)?
-) -> [String: Any]? {
-  consumePendingRawCore(
-    source: source,
-    bindingEpoch: bindingEpoch,
-    authorityEpoch: authorityEpoch,
-    now: now,
-    parse: parse,
-    beforePurge: nil,
-    emit: emit ?? emitPendingRawLog)
-}
-
-func consumePendingRaw(
-  source: PendingRawSource,
-  bindingEpoch: String?,
-  authorityEpoch: String?,
-  now: Date,
-  parse: (Data) -> ParsedPendingRaw?,
-  beforePurge: @escaping ([String: Any]?) -> Void,
-  emit: ((String) -> Void)? = nil
-) -> [String: Any]? {
-  consumePendingRawCore(
-    source: source,
-    bindingEpoch: bindingEpoch,
-    authorityEpoch: authorityEpoch,
-    now: now,
-    parse: parse,
-    beforePurge: beforePurge,
-    emit: emit ?? emitPendingRawLog)
 }
 
 struct NativeCrashImage { var uuid: String; var name: String; var size: UInt64 }

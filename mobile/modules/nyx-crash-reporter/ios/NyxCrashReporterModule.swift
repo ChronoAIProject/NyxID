@@ -159,10 +159,6 @@ public class NyxCrashReporterModule: Module {
     else { return nil }
     return value
   }
-  private func pendingRawAge(_ reporter: PLCrashReporter) -> TimeInterval? {
-    guard let modified = pendingRawModificationDate(reporter) else { return nil }
-    return Date().timeIntervalSince(modified)
-  }
   private func pendingRawModificationDate(_ reporter: PLCrashReporter) -> Date? {
     guard let path = reporter.crashReportPath(),
       let attributes = try? FileManager.default.attributesOfItem(atPath: path),
@@ -181,6 +177,7 @@ public class NyxCrashReporterModule: Module {
     else { return nil }
     return token["j"]
   }
+  /// Never access exceptionInfo, registers, processInfo, machineInfo or symbols.
   private func parsePendingRaw(_ data: Data) -> ParsedPendingRaw? {
     guard let crash = try? PLCrashReport(data: data),
       let signal = crash.signalInfo,
@@ -222,8 +219,8 @@ public class NyxCrashReporterModule: Module {
       authorityEpoch: rawAuthorityEpoch(),
       now: now,
       parse: { [weak self] data in self?.parsePendingRaw(data) },
-      beforePurge: { [weak self] record in
-        guard let self, let record else { return }
+      persist: { [weak self] record in
+        guard let self else { return }
         try? self.persist(record, bound: bound)
       })
   }

@@ -21,6 +21,8 @@ test("Swift real-size native mapping, raw-size decisions and typed discard logs 
     );
     const output = execFileSync(binary, { encoding: "utf8" });
     assert.match(output, /proofs passed/);
+    const outputLines = output.trimEnd().split(/\r?\n/);
+    assert.equal(outputLines.at(-1), "Shared pending-raw consume proof passed");
     t.diagnostic(output.trim());
   } finally {
     rmSync(directory, { recursive: true, force: true });
