@@ -19,6 +19,10 @@ const AGGREGATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 const APPLY_BATCH: usize = 64;
 const OWNER_ID_REPORT_CAP: usize = 128;
 
+fn candidate_owner_id(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok()
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct OrphanCollectionReport {
     pub collection: String,
@@ -148,7 +152,7 @@ async fn aggregate_groups(
         let Ok(owner_id) = row.get_str("_id") else {
             continue;
         };
-        if Uuid::parse_str(owner_id).is_err() {
+        if !candidate_owner_id(owner_id) {
             continue;
         }
         let row_ids = row.get_array("row_ids").cloned().unwrap_or_default();
@@ -200,7 +204,7 @@ async fn aggregate_joined_children(
         let Ok(parent_id) = row.get_str("_id") else {
             continue;
         };
-        if Uuid::parse_str(parent_id).is_err() {
+        if !candidate_owner_id(parent_id) {
             continue;
         }
         let parent_exists = db
@@ -650,8 +654,9 @@ mod tests {
 
     #[test]
     fn sentinel_and_non_uuid_owners_are_not_candidates() {
-        assert!(Uuid::parse_str("system").is_err());
-        assert!(Uuid::parse_str("00000000-0000-0000-0000-000000000001").is_ok());
+        assert!(!candidate_owner_id("system"));
+        assert!(!candidate_owner_id("service-account"));
+        assert!(candidate_owner_id("00000000-0000-0000-0000-000000000001"));
     }
 
     #[test]
@@ -675,5 +680,87 @@ mod tests {
         assert_eq!(count, OWNER_ID_REPORT_CAP + 1);
         assert_eq!(reports[0].owner_ids.len(), OWNER_ID_REPORT_CAP);
         assert!(reports[0].owner_ids_truncated);
+    }
+
+    #[tokio::test]
+    async fn sweep_preserves_live_person_org_and_service_account_and_is_idempotent() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("orphan_sweep_behavior").await;
+        let person = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        let service_account = Uuid::new_v4().to_string();
+        let orphan = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                crate::test_utils::test_user(&person, crate::models::user::UserType::Person),
+                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::service_account::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &service_account})
+            .await
+            .unwrap();
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_many([
+                doc! {"_id": "live-person", "user_id": &person},
+                doc! {"_id": "live-org", "user_id": &org},
+                doc! {"_id": "live-service", "user_id": &service_account},
+                doc! {"_id": "orphan", "user_id": &orphan},
+            ])
+            .await
+            .unwrap();
+        let orphan_child = Uuid::new_v4().to_string();
+        db.collection::<Document>("service_history_heads")
+            .insert_one(doc! {"_id": &orphan_child, "fixture_marker": "orphan-child"})
+            .await
+            .unwrap();
+        let report = scan(&db).await.unwrap();
+        let wire = report
+            .collections
+            .iter()
+            .find(|item| item.collection == "assistant_wire_logs")
+            .expect("wire log candidate report");
+        assert_eq!(wire.candidate_count, 1);
+        assert_eq!(wire.owner_ids, vec![orphan.clone()]);
+        assert!(
+            report
+                .collections
+                .iter()
+                .any(|item| item.collection == "service_history_heads")
+        );
+        assert!(matches!(
+            apply(&db, &person, "wrong-digest").await,
+            Err(AppError::Conflict(_))
+        ));
+        let applied = apply(&db, &person, &report.digest).await.unwrap();
+        assert_eq!(applied.candidate_count, report.candidate_count);
+        for id in ["live-person", "live-org", "live-service"] {
+            assert!(
+                db.collection::<Document>("assistant_wire_logs")
+                    .find_one(doc! {"_id": id})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id": "orphan"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<Document>("service_history_heads")
+                .find_one(doc! {"_id": &orphan_child})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let second = apply(&db, &person, &report.digest).await.unwrap();
+        assert_eq!(second.candidate_count, 0);
+        assert!(db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type": "user.account.erasure_orphan_sweep", "event_data.digest": &report.digest}).await.unwrap().is_some());
+        db.drop().await.unwrap();
     }
 }
