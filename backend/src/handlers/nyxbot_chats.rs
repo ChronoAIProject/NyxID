@@ -66,63 +66,13 @@ pub(super) async fn adopt_relay_chat(
         )
         .await;
     }
-    let threads = state.db.collection::<NyxbotThread>(THREADS);
-    let Some(legacy) = threads
-        .find_one(doc! {"channel_id": &row.id, "$or": [
-        {"partition": &relay_partition}, {"relay_partition": &relay_partition, "kind": "private"}]})
-        .await?
-    else {
-        return Ok(());
-    };
-    let legacy = legacy.partition;
-    // The gateway conversation carries no chat of its own yet (only its
-    // placeholder from `put_conversation`).
-    if threads
-        .find_one(doc! {"channel_id": &row.id, "partition": partition,
-        "kind": {"$ne": null}})
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-    // The gateway may re-create its placeholder in between: once more then.
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        threads
-            .delete_one(doc! {"channel_id": &row.id, "partition": partition, "kind": null})
-            .await?;
-        match threads
-            .update_one(
-                doc! {"channel_id": &row.id, "partition": &legacy},
-                doc! {"$set": {"partition": partition, "relay_partition": &relay_partition,
-                "updated_at": bson::DateTime::now()}},
-            )
-            .await
-        {
-            Ok(moved) if moved.matched_count == 1 => break,
-            // Another message of the chat got there first.
-            Ok(_) => return Ok(()),
-            Err(error) if super::is_duplicate(&error) && attempts < 2 => continue,
-            Err(error) if super::is_duplicate(&error) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let conversations = state
-        .db
-        .collection::<crate::models::assistant_conversation::AssistantConversation>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        );
-    for field in ["channel", "reply_channel"] {
-        conversations
-            .update_many(
-                doc! {"user_id": &row.user_id, format!("{field}.nyxbot_channel_id"): &row.id,
-                format!("{field}.partition"): &legacy},
-                doc! {"$set": {format!("{field}.partition"): partition}},
-            )
-            .await?;
-    }
-    Ok(())
+    crate::services::nyxbot_thread_mutation::adopt_personal(
+        &state.db,
+        row,
+        &relay_partition,
+        partition,
+    )
+    .await
 }
 
 /// Reuse a gateway-era private chat only with the exact sender/chat/topic
@@ -372,30 +322,24 @@ pub(super) async fn record_chat_with_relay(
             );
         }
     }
-    let threads = state.db.collection::<NyxbotThread>(THREADS);
-    // Before NyxID passed each message's own chat type on, a group reached
-    // through a default route looked like private chats (one per member):
-    // those records go once the group is seen as a group.
-    if facts.kind != "private" {
-        threads
-            .delete_many(doc! {"channel_id": &row.id, "kind": "private",
-            "platform_chat_id": &facts.chat_id, "partition": {"$ne": partition}})
-            .await?;
-    }
-    threads
-        .find_one_and_update(
-            doc! {"channel_id": &row.id, "partition": partition},
-            crate::services::nyxbot_chat_settings_service::record_update(
-                row,
-                facts.kind == "private" && facts.thread_id.is_none(),
-                set,
-                now,
-            ),
-        )
-        .upsert(true)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
+    let obsolete = (facts.kind != "private").then(|| {
+        doc! {
+            "channel_id":&row.id,"kind":"private","platform_chat_id":&facts.chat_id,
+            "partition":{"$ne":partition}
+        }
+    });
+    crate::services::nyxbot_thread_mutation::record(
+        &state.db,
+        doc! {"channel_id":&row.id,"partition":partition},
+        crate::services::nyxbot_chat_settings_service::record_update(
+            row,
+            facts.kind == "private" && facts.thread_id.is_none(),
+            set,
+            now,
+        ),
+        obsolete,
+    )
+    .await
 }
 
 /// A private chat's name: "You" for the owner, else the sender's name (never

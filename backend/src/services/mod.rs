@@ -557,6 +557,7 @@ pub(crate) mod nyxbot_chat_settings_service;
 pub(crate) mod nyxbot_event_binding_service;
 pub(crate) mod nyxbot_gateway_host_move;
 pub(crate) mod nyxbot_gateway_release_service;
+pub(crate) mod nyxbot_thread_mutation;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;

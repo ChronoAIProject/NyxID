@@ -585,6 +585,15 @@ target boundary and recovery contract.
   relay preserves that chat's history and settings across repeated moves.
   Legacy gateway history without this mapping stays isolated until a verified
   provider event establishes it; NyxID never guesses a sender's history.
+  Personal and organization private adoption replace the destination placeholder
+  and move history in one transaction. Moves and removals bind the observed
+  row ID, partition, kind and relay alias; a reused partition is not the same row.
+  Adoption still removes its old source registration, and group rediscovery
+  still deletes stale private registrations. Group recording first probes for
+  stale rows and otherwise uses a single atomic upsert; personal adoption opens
+  a transaction only when a source and an unclassified destination need a move.
+  The gateway must PUT a missing
+  partition before replaying a request refused with `conversation_not_found`.
 - **Organization bots.** An owner can link bots of organizations they
   administer (the rule for managing org bots), found by id or label:
   `nyxid__list_channel_bots` and the route tools cover personal and administered
@@ -871,6 +880,13 @@ partitioning by conversation and sender, every sender's gateway conversation in
 a group maps onto the group's one thread. Group titles come from the platform
 payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 `im/v1/chats`).
+
+On throttled missing-partition refusals, audit metadata includes a keyed
+`partition_correlation_hash` and `partition_history`. `retained_event` proves
+that a prior request passed the registration check; `no_retained_event` is
+inconclusive because events expire, and `unavailable` means the bounded lookup
+failed. The diagnostic does not add a read to successful provider requests or
+store message text or the raw provider partition.
 
 **Per-chat settings** (the owner, via NyxBot's `nyxid__list_channel_chats` and
 `nyxid__update_channel_chat`, or the chats list under each connected bot):

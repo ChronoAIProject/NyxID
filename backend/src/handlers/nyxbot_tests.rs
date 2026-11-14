@@ -11,6 +11,9 @@ use axum::{Router, response::sse::Event, routing::post};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[path = "nyxbot_fence_tests.rs"]
+mod fence_tests;
+
 #[path = "nyxbot_provider_refusal_tests.rs"]
 mod provider_refusal_tests;
 

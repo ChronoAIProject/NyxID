@@ -212,10 +212,28 @@ pub(crate) async fn remove_thread(
             }
             if let Some(thread) = db
                 .collection::<crate::models::nyxbot_channel::NyxbotThread>(THREADS)
-                .find_one_and_delete(doc! {"channel_id":&row.id,"partition":partition})
+                .find_one(doc! {"channel_id":&row.id,"partition":partition})
                 .session(&mut *tx)
                 .await?
             {
+                let filter = super::nyxbot_thread_mutation::exact(&thread);
+                #[cfg(test)]
+                super::nyxbot_thread_mutation::pause::after_read(
+                    "provider_delete",
+                    std::slice::from_ref(&filter),
+                    None,
+                )
+                .await;
+                if db
+                    .collection::<Document>(THREADS)
+                    .delete_one(filter)
+                    .session(&mut *tx)
+                    .await?
+                    .deleted_count
+                    != 1
+                {
+                    return Err(AppError::Conflict("Chat identity changed".into()));
+                }
                 let mut cursor = db
                     .collection::<Document>(crate::models::org_channel::LANES)
                     .find(doc! {"channel_id":&row.id,"partition":partition})
