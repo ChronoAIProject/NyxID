@@ -822,12 +822,13 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
         Ok(other.as_str())
     );
 
-    assert!(db
-        .collection::<Document>("service_change_events")
-        .find_one(doc! {"_id": "personal-history"})
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        db.collection::<Document>("service_change_events")
+            .find_one(doc! {"_id": "personal-history"})
+            .await
+            .unwrap()
+            .is_none()
+    );
     let org_history = db
         .collection::<Document>("service_change_events")
         .find_one(doc! {"_id": "org-history"})
@@ -837,9 +838,21 @@ async fn shared_redactions_remove_invite_identity_and_preserve_org_history() {
     assert_eq!(org_history.get_i64("sequence"), Ok(7));
     let actor = org_history.get_document("actor").unwrap();
     assert_eq!(actor.get_str("name"), Ok("Deleted account"));
-    assert!(actor.get("person_id").is_some_and(|value| value.as_null().is_some()));
-    assert!(actor.get("api_key_id").is_some_and(|value| value.as_null().is_some()));
-    assert!(actor.get("app_id").is_some_and(|value| value.as_null().is_some()));
+    assert!(
+        actor
+            .get("person_id")
+            .is_some_and(|value| value.as_null().is_some())
+    );
+    assert!(
+        actor
+            .get("api_key_id")
+            .is_some_and(|value| value.as_null().is_some())
+    );
+    assert!(
+        actor
+            .get("app_id")
+            .is_some_and(|value| value.as_null().is_some())
+    );
     db.drop().await.unwrap();
 }
 
