@@ -221,11 +221,15 @@ it.each([
       const reports = within(
         screen.getByRole(role, { name: "Individual reports" }),
       );
-      expect(
-        reports.getByRole("link", { name: formatDateTime(version.last_seen) }),
-      ).toHaveAttribute("href", "/admin/crash-reports/report-45");
+      const timestamp = reports.getByRole("link", {
+        name: formatDateTime(version.last_seen),
+      });
+      expect(timestamp).toHaveAttribute("href", "/admin/crash-reports/report-45");
+      expect(timestamp).toHaveClass("font-mono");
       expect(reports.getByText("Disabled")).toBeInTheDocument();
-      expect(reports.getByText("Unverified release")).toBeInTheDocument();
+      const badge = reports.getByText("Unverified release");
+      expect(badge).toBeInTheDocument();
+      expect(badge.closest(".font-mono")).toBeNull();
     }
   },
 );

@@ -357,10 +357,10 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
 /// 100 ms. The 150 ms precondition accommodates that cadence while retaining
 /// margin below both production bounds and rejecting stalls lasting seconds.
 /// A CI runner can start such a test while MongoDB is still stalled on its
-/// own journal flushes and the per-test database drop
-/// backlog, which no nextest slot reservation prevents. This establishes the
-/// healthy-server precondition first; the measured call still runs once
-/// against the unchanged production bounds.
+/// own journal flushes and the per-test database drop backlog, which no
+/// nextest slot reservation prevents. This establishes the healthy-server
+/// precondition first; the measured call still runs once against the
+/// unchanged production bounds.
 pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
     const BUDGET: Duration = Duration::from_secs(90);
     const RESPONSIVE: Duration = Duration::from_millis(150);

@@ -452,7 +452,7 @@ export function AdminCrashReportsPage() {
                   <Link
                     to="/admin/crash-reports/$id"
                     params={{ id: r.id }}
-                    className="type-row-title underline"
+                    className="font-mono type-row-title underline"
                   >
                     {formatDateTime(r.captured_at)}
                   </Link>
@@ -502,12 +502,12 @@ export function AdminCrashReportsPage() {
             <TableBody>
               {reports.data?.reports.map((r) => (
                 <TableRow key={r.id}>
-                  <TableCell className="font-mono">
+                  <TableCell>
                     <div className="flex flex-wrap items-center gap-2">
                       <Link
                         to="/admin/crash-reports/$id"
                         params={{ id: r.id }}
-                        className="underline"
+                        className="font-mono underline"
                       >
                         {formatDateTime(r.captured_at)}
                       </Link>
