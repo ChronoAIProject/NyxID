@@ -48,81 +48,166 @@ pub struct AccountExport {
     pub sections: BTreeMap<String, BTreeMap<String, ExportSubsection>>,
 }
 
-fn bson_json(value: &Bson) -> Option<serde_json::Value> {
-    Some(match value {
-        Bson::String(value) => serde_json::Value::String(value.clone()),
-        Bson::Boolean(value) => serde_json::Value::Bool(*value),
-        Bson::Int32(value) => serde_json::json!(*value),
-        Bson::Int64(value) => serde_json::json!(*value),
-        Bson::Double(value) if value.is_finite() => serde_json::json!(*value),
-        Bson::DateTime(value) => serde_json::Value::String(value.to_chrono().to_rfc3339()),
-        Bson::ObjectId(value) => serde_json::Value::String(value.to_hex()),
-        Bson::Decimal128(value) => serde_json::Value::String(value.to_string()),
-        Bson::Null => serde_json::Value::Null,
-        Bson::Document(value) => serde_json::Value::Object(
-            value
-                .iter()
-                .filter(|(key, _)| !forbidden_key(key))
-                .filter_map(|(key, value)| {
-                    let value = bson_json(value)?;
-                    let value = if is_url_field(key) {
-                        sanitize_json_url(value, key)
-                    } else {
-                        value
-                    };
-                    Some((key.clone(), value))
-                })
-                .collect(),
-        ),
-        Bson::Array(values) => {
-            serde_json::Value::Array(values.iter().filter_map(bson_json).collect())
-        }
-        Bson::Binary(_) => return None,
-        _ => return None,
-    })
+#[derive(Debug)]
+struct SanitizedJson {
+    value: serde_json::Value,
+    url_reduced: bool,
 }
 
-/// URLs are exported as origins plus a safe path. Credentials, query values,
-/// and fragments are always removed; fields whose providers commonly put
-/// tokens in path segments opt into `drop_path` at the allowlist boundary.
-fn sanitize_url(value: &str, drop_path: bool) -> String {
-    let Ok(mut parsed) = url::Url::parse(value) else {
-        // An invalid URL cannot be safely decomposed into an origin and path;
-        // omit it rather than returning an opaque value that may contain a
-        // credential or token.
+#[cfg(test)]
+fn bson_json(value: &Bson) -> Option<serde_json::Value> {
+    sanitize_bson(value, "", false).map(|value| value.value)
+}
+
+/// Exported URL values are reduced to their origin. URL paths commonly carry
+/// bot tokens, webhook secrets, or opaque identifiers, so retaining a path is
+/// not a safe representation of the address. Explicit ports remain visible.
+fn sanitize_url(value: &str) -> String {
+    let Ok(parsed) = url::Url::parse(value) else {
         return String::new();
     };
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    if drop_path {
-        parsed.set_path("");
+    let Some(host) = parsed.host_str() else {
+        return String::new();
+    };
+    let host = match parsed.host() {
+        Some(url::Host::Ipv6(_)) => format!("[{host}]"),
+        _ => host.to_owned(),
+    };
+    let mut origin = format!("{}://{host}", parsed.scheme());
+    if let Some(port) = parsed.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
     }
-    parsed.to_string()
+    origin
 }
 
 fn is_url_field(field: &str) -> bool {
-    field == "url"
-        || field == "base_url"
-        || field == "endpoint"
-        || field == "redirect_uris"
-        || field == "delivery.url"
-        || field == "schedule.url"
-        || field.ends_with("_url")
+    let leaf = field.rsplit('.').next().unwrap_or(field);
+    leaf == "url"
+        || leaf == "base_url"
+        || leaf == "endpoint"
+        || leaf == "redirect_uri"
+        || leaf == "redirect_uris"
+        || leaf.ends_with("_url")
 }
 
-fn url_path_is_opaque(field: &str) -> bool {
-    field == "avatar_url"
-        || field == "redirect_uris"
-        || field == "target_url"
-        || field == "project_url"
-        || field == "openapi_spec_url"
-        || field == "page_url"
-        || field == "chatgpt_url"
-        || field == "delivery.url"
-        || field == "schedule.url"
-        || field.ends_with("_webhook_url")
+fn is_free_text_field(field: &str) -> bool {
+    matches!(
+        field.rsplit('.').next().unwrap_or(field),
+        "content"
+            | "text"
+            | "title"
+            | "description"
+            | "persona"
+            | "voice_instructions"
+            | "prompt"
+            | "response"
+            | "instruction"
+            | "instructions"
+            | "memory"
+            | "notes"
+            | "comment"
+            | "reason"
+            | "failure_reason"
+            | "label"
+    )
+}
+
+fn looks_like_absolute_url(value: &str) -> bool {
+    url::Url::parse(value)
+        .map(|url| url.has_host() && !url.scheme().is_empty())
+        .unwrap_or(false)
+}
+
+fn sanitize_bson(value: &Bson, field: &str, preserve_text: bool) -> Option<SanitizedJson> {
+    match value {
+        Bson::String(value) => {
+            let declared_url = is_url_field(field);
+            let should_reduce = !preserve_text && (declared_url || looks_like_absolute_url(value));
+            if should_reduce {
+                let reduced = sanitize_url(value);
+                return Some(SanitizedJson {
+                    url_reduced: reduced != *value || declared_url,
+                    value: serde_json::Value::String(reduced),
+                });
+            }
+            Some(SanitizedJson {
+                value: serde_json::Value::String(value.clone()),
+                url_reduced: false,
+            })
+        }
+        Bson::Boolean(value) => Some(SanitizedJson {
+            value: serde_json::Value::Bool(*value),
+            url_reduced: false,
+        }),
+        Bson::Int32(value) => Some(SanitizedJson {
+            value: serde_json::json!(*value),
+            url_reduced: false,
+        }),
+        Bson::Int64(value) => Some(SanitizedJson {
+            value: serde_json::json!(*value),
+            url_reduced: false,
+        }),
+        Bson::Double(value) if value.is_finite() => Some(SanitizedJson {
+            value: serde_json::json!(*value),
+            url_reduced: false,
+        }),
+        Bson::DateTime(value) => Some(SanitizedJson {
+            value: serde_json::Value::String(value.to_chrono().to_rfc3339()),
+            url_reduced: false,
+        }),
+        Bson::ObjectId(value) => Some(SanitizedJson {
+            value: serde_json::Value::String(value.to_hex()),
+            url_reduced: false,
+        }),
+        Bson::Decimal128(value) => Some(SanitizedJson {
+            value: serde_json::Value::String(value.to_string()),
+            url_reduced: false,
+        }),
+        Bson::Null => Some(SanitizedJson {
+            value: serde_json::Value::Null,
+            url_reduced: false,
+        }),
+        Bson::Document(value) => {
+            let mut result = serde_json::Map::new();
+            let mut url_reduced = false;
+            for (key, value) in value {
+                if forbidden_key(key) {
+                    continue;
+                }
+                let child_text = preserve_text || is_free_text_field(key);
+                let Some(child) = sanitize_bson(value, key, child_text) else {
+                    continue;
+                };
+                url_reduced |= child.url_reduced;
+                result.insert(key.clone(), child.value);
+                if child.url_reduced {
+                    result.insert(format!("{key}_path_omitted"), serde_json::Value::Bool(true));
+                }
+            }
+            Some(SanitizedJson {
+                value: serde_json::Value::Object(result),
+                url_reduced,
+            })
+        }
+        Bson::Array(values) => {
+            let mut items = Vec::with_capacity(values.len());
+            let mut url_reduced = false;
+            for value in values {
+                let Some(child) = sanitize_bson(value, field, preserve_text) else {
+                    continue;
+                };
+                url_reduced |= child.url_reduced;
+                items.push(child.value);
+            }
+            Some(SanitizedJson {
+                value: serde_json::Value::Array(items),
+                url_reduced,
+            })
+        }
+        Bson::Binary(_) => None,
+        _ => None,
+    }
 }
 
 fn forbidden_key(key: &str) -> bool {
@@ -202,29 +287,28 @@ fn insert_path(
     }
 }
 
-fn sanitize_json_url(value: serde_json::Value, field: &str) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(value) if is_url_field(field) => {
-            serde_json::Value::String(sanitize_url(&value, url_path_is_opaque(field)))
-        }
-        serde_json::Value::Array(values) if is_url_field(field) => serde_json::Value::Array(
-            values
-                .into_iter()
-                .map(|value| sanitize_json_url(value, field))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
 fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
     let mut result = serde_json::Map::new();
     for field in fields {
         if *field == "_id" || forbidden_key(field) {
             continue;
         }
-        if let Some(value) = get_path(row, field).as_ref().and_then(bson_json) {
-            insert_path(&mut result, field, sanitize_json_url(value, field));
+        if let Some(value) = get_path(row, field)
+            .as_ref()
+            .and_then(|value| sanitize_bson(value, field, is_free_text_field(field)))
+        {
+            let SanitizedJson {
+                value: sanitized,
+                url_reduced,
+            } = value;
+            insert_path(&mut result, field, sanitized);
+            if url_reduced {
+                insert_path(
+                    &mut result,
+                    &format!("{field}_path_omitted"),
+                    serde_json::Value::Bool(true),
+                );
+            }
         }
     }
     serde_json::Value::Object(result)
@@ -1714,21 +1798,17 @@ mod tests {
     }
 
     #[test]
-    fn url_sanitizer_removes_userinfo_query_fragment_and_opaque_paths() {
+    fn url_sanitizer_reduces_every_url_to_origin() {
         let url = sanitize_url(
             "https://user:URL_USERINFO@api.example.test/v1/PATH_TOKEN?api_key=URL_QUERY#URL_FRAGMENT",
-            true,
         );
-        assert_eq!(url, "https://api.example.test/");
+        assert_eq!(url, "https://api.example.test");
         assert!(!url.contains("URL_USERINFO"));
         assert!(!url.contains("URL_QUERY"));
         assert!(!url.contains("URL_FRAGMENT"));
         assert!(!url.contains("PATH_TOKEN"));
-        let endpoint = sanitize_url(
-            "https://user:pass@api.example.test/v1?token=secret#fragment",
-            false,
-        );
-        assert_eq!(endpoint, "https://api.example.test/v1");
+        let endpoint = sanitize_url("https://user:pass@api.example.test:8443/v1?token=secret#fragment");
+        assert_eq!(endpoint, "https://api.example.test:8443");
     }
 
     #[test]
@@ -1789,7 +1869,8 @@ mod tests {
             "PERSON_TRIGGER_INSTRUCTION"
         );
         let endpoint = safe_item(&row, USER_ENDPOINT_FIELDS);
-        assert_eq!(endpoint["url"], "https://example.test/v1");
+        assert_eq!(endpoint["url"], "https://example.test");
+        assert_eq!(endpoint["url_path_omitted"], true);
         let connection = safe_item(&row, SERVICE_CONNECTION_FIELDS);
         assert_eq!(connection["credential_label"], "PERSON_CONNECTION_LABEL");
         let node = safe_item(&row, NODE_FIELDS);
@@ -1845,6 +1926,7 @@ mod tests {
             "revocation_webhook_url": "https://u:URL_USERINFO@example.test/revoke/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT",
             "redirect_uris": ["https://u:URL_USERINFO@example.test/cb/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"],
             "delivery": {"url": "https://u:URL_USERINFO@example.test/hook/PATH_TOKEN?key=URL_QUERY#URL_FRAGMENT"},
+            "unexpected_link": "https://u:UNEXPECTED_USERINFO@example.test/unexpected/PATH_TOKEN?key=UNEXPECTED_QUERY#UNEXPECTED_FRAGMENT",
         };
         let value = safe_item(
             &row,
@@ -1860,18 +1942,31 @@ mod tests {
                 "revocation_webhook_url",
                 "redirect_uris",
                 "delivery.url",
+                "unexpected_link",
             ],
         );
         let bytes = serde_json::to_vec(&value).unwrap();
-        for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
+        for sentinel in [
+            "URL_USERINFO",
+            "URL_QUERY",
+            "URL_FRAGMENT",
+            "PATH_TOKEN",
+            "UNEXPECTED_USERINFO",
+            "UNEXPECTED_QUERY",
+            "UNEXPECTED_FRAGMENT",
+        ] {
             assert!(
                 !bytes
                     .windows(sentinel.len())
                     .any(|window| window == sentinel.as_bytes())
             );
         }
-        assert_eq!(value["url"], "https://example.test/v1/safe-path");
-        assert_eq!(value["delivery"]["url"], "https://example.test/");
+        assert_eq!(value["url"], "https://example.test");
+        assert_eq!(value["url_path_omitted"], true);
+        assert_eq!(value["delivery"]["url"], "https://example.test");
+        assert_eq!(value["delivery"]["url_path_omitted"], true);
+        assert_eq!(value["unexpected_link"], "https://example.test");
+        assert_eq!(value["unexpected_link_path_omitted"], true);
         for field in [
             "avatar_url",
             "openapi_spec_url",
@@ -1882,7 +1977,11 @@ mod tests {
             "connection_webhook_url",
             "revocation_webhook_url",
         ] {
-            assert_eq!(value[field], "https://example.test/");
+            assert_eq!(value[field], "https://example.test");
+            assert_eq!(
+                value.get(format!("{field}_path_omitted")).unwrap(),
+                &serde_json::Value::Bool(true)
+            );
         }
     }
 
@@ -1917,15 +2016,7 @@ mod tests {
             }
             let json = safe_item(&row, allowlist);
             let bytes = serde_json::to_vec(&json).unwrap();
-            let sentinels = if url_path_is_opaque(field) {
-                ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"]
-            } else {
-                ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", ""]
-            };
-            for sentinel in sentinels {
-                if sentinel.is_empty() {
-                    continue;
-                }
+            for sentinel in ["URL_USERINFO", "URL_QUERY", "URL_FRAGMENT", "PATH_TOKEN"] {
                 assert!(
                     !bytes
                         .windows(sentinel.len())
@@ -1933,6 +2024,16 @@ mod tests {
                     "{field} leaked {sentinel}"
                 );
             }
+            let marker = if let Some((parent, child)) = field.split_once('.') {
+                format!("{parent}.{child}_path_omitted")
+            } else {
+                format!("{field}_path_omitted")
+            };
+            let mut marker_value = &json;
+            for part in marker.split('.') {
+                marker_value = &marker_value[part];
+            }
+            assert_eq!(marker_value, true, "{field} omission marker missing");
         }
     }
 

@@ -258,11 +258,15 @@ bookkeeping, and retained financial or integrity content. MCP session IDs are
 credentials and are excluded. Decimal128 values are emitted as decimal strings;
 BSON documents and arrays are converted recursively, dates are RFC3339 strings,
 and BSON binary values are omitted. Every URL-valued allowlist field uses one
-sanitizer: userinfo, query strings, and fragments are removed. URL kinds where
-providers may embed credentials in path segments (avatar, redirect, webhook,
-target, project, schedule, OpenAPI, browser and worker URLs) also omit the
-path; ordinary endpoint base URLs retain only their scheme, host, port, and
-non-sensitive path. Instructions and memory export only the requesting
+sanitizer: every value is reduced to `scheme://host[:port]`, removing userinfo,
+path, query, and fragment. Whenever a URL is reduced, the export emits a sibling
+`<field>_path_omitted: true` marker (for nested fields, the marker sits beside
+the nested URL; arrays use the URL field's marker). The path is omitted because
+providers commonly put access tokens or webhook secrets in path segments. Full
+endpoint, webhook, trigger-destination, redirect-URI, and profile avatar
+addresses remain visible in the web and mobile controls where those values are
+managed; operational Oracle browser/worker addresses are not claimed to have a
+full-address account view. Instructions and memory export only the requesting
 person's authored text; shared/team memory, system-injected instructions, and
 messages authored by other people are omitted. The successful response emits a chained
 metadata-only `user.data_exported` audit event containing format/version,

@@ -32,7 +32,7 @@ The information processed depends on the features you use and their configuratio
 
 **Device information (mobile)**
 
-- Push notification token (FCM on Android, APNs on iOS), device platform, and app identifier — used to deliver approval challenges
+- Push notification token (FCM on Android, APNs on iOS), device platform, and app identifier — used to deliver enabled approval challenges and optional NyxBot notifications
 
 **Usage data**
 
@@ -65,7 +65,7 @@ Servers receive technical metadata with HTTPS requests for security and audit. O
 
 - Authenticate your identity and manage your sessions
 - Provide single sign-on (SSO) to connected services
-- Deliver push notifications for time-sensitive approval challenges (mobile)
+- Deliver enabled push notifications for time-sensitive approval challenges and optional NyxBot notifications (mobile)
 - Process your approval, denial, and revocation decisions
 - Register and manage your device for push delivery
 - Enforce security policies (rate limiting, anomaly detection)
@@ -162,9 +162,9 @@ You have the right to:
 - Remove connected service authorizations in AI Services where the provider supports revocation
 - Revoke any active approval grants
 - Disable push notifications through your device settings
-- Manage optional NyxBot push notifications where available in the web Settings → Notifications and mobile Settings → Notifications controls
+- Manage optional NyxBot push notifications where available in the web notification settings page or assistant notifications dialog, and in mobile Settings → Notifications (`NyxBotPushSwitches`)
 
-You can download a self-service JSON export from **Settings → Privacy → Download your data** on the web or **Settings → Privacy → Export my data** in the mobile app. The export is in `nyxid.account-export` version 1 format and includes account profile and organisation memberships, service connections, security/session metadata, your authored assistant and channel content, account activity, machine metadata, audit event metadata and your billing wallet, grants and usage rollups where available. Shared or team memory, system-injected instructions, and content authored by other people in shared agents or groups are excluded. Each source collection is a separate subsection with newest-first rows, a total count and a truncation flag. Uploaded and generated files are represented by metadata (name, MIME type, size, creation time and expiry), never by raw file payloads. Every URL-valued field uses the same sanitizer: userinfo, query strings and fragments are removed; URL kinds that may carry credentials in path segments (including avatar, redirect, webhook, target, project, schedule, OpenAPI, browser and worker URLs) also omit the path, while ordinary endpoint base URLs retain only a safe path. Exports exclude passwords, hashes, tokens, keys, secrets, ciphertext, signatures, raw file payloads, transient coordination and lease records, erasure bookkeeping, and raw retained ledger or integrity records; audit event metadata and billing summaries remain included. The serialized export is limited to 32 MiB, each subsection has a bounded row count, and the top-level `truncated_sections` list identifies capped subsections. You may request up to three exports per hour. Contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun) for other access or correction requests.
+You can download a self-service JSON export from **Settings → Privacy → Download your data** on the web or **Settings → Privacy → Export my data** in the mobile app. The export is in `nyxid.account-export` version 1 format and includes account profile and organisation memberships, service connections, security/session metadata, your authored assistant and channel content, account activity, machine metadata, audit event metadata and your billing wallet, grants and usage rollups where available. Shared or team memory, system-injected instructions, and content authored by other people in shared agents or groups are excluded. Each source collection is a separate subsection with newest-first rows, a total count and a truncation flag. Uploaded and generated files are represented by metadata (name, MIME type, size, creation time and expiry), never by raw file payloads. Connection and webhook addresses are exported as `scheme://host[:port]` only because URL paths can contain access tokens; every reduced URL has a sibling `<field>_path_omitted: true` marker. Full endpoint, webhook, trigger-destination, redirect-URI, and profile avatar addresses remain visible in the web or mobile controls where those values are managed; operational Oracle browser/worker addresses are not presented as full-address account data. Exports exclude passwords, hashes, tokens, keys, secrets, ciphertext, signatures, raw file payloads, transient coordination and lease records, erasure bookkeeping, and raw retained ledger or integrity records; audit event metadata and billing summaries remain included. The serialized export is limited to 32 MiB, each subsection has a bounded row count, and the top-level `truncated_sections` list identifies capped subsections. You may request up to three exports per hour. Contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun) for other access or correction requests.
 
 ## 8. Cookies, Local Storage, and Telemetry
 
