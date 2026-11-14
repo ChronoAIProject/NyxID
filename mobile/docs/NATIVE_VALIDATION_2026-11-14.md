@@ -27,3 +27,19 @@
 - Real APNs and FCM delivery (requires the push credentials listed in [NATIVE_INTEGRATION.md](NATIVE_INTEGRATION.md)).
 - Real OAuth providers (requires each provider's application credentials and registered callback).
 - Terminal paste on a device.
+
+## Re-verification after review fixes
+
+Code under test: mobile and `nyxid node` at `978881414`, backend at `24d989b7a` (no backend changes after it). Same simulator, local backend and SSH target as above.
+
+| Area | Steps | Result |
+| --- | --- | --- |
+| Service OAuth return destination | Initiated OAuth through the API with exact, near-miss and foreign `app_return_uri` values, with `MOBILE_APP_RETURN_SCHEMES` unset and then set to `nyxidws3`. | Only the exact `<scheme>://services/oauth-return` is accepted, for `nyxid` and configured schemes. Query, trailing slash, other paths, `exp://`, `https://` and `javascript:` values are rejected with 400. |
+| Custom app scheme fallback | Built the app with `APP_SCHEME=nyxidws3` against a backend without that scheme, then reconnected an OAuth connection. | The first initiate was rejected (400 `Invalid app_return_uri`). The app retried without the return destination, the provider authorization completed on the server, and after the browser closed the app read the connection as Connected. With `MOBILE_APP_RETURN_SCHEMES=nyxidws3` the first initiate succeeded and the browser returned to the app automatically. |
+| Push pending unbind | Signed out with the backend stopped; sent an approval push in the foreground and the background; tapped the notification; started the backend and signed in as a second account. | Foreground: no banner and no in-app notice. Tapping opened the app without navigation. After sign-in the server showed the previous account with no devices and the new account bound to the device; the operating system issued a new token, so the stored token was rebound first and then rotated. Foreground notifications were presented again afterwards. A background `simctl push` still showed a system banner: `simctl` injects notifications without APNs or a device token, so this does not show whether APNs delivery stops after native unregistration. That needs a team-signed device build. |
+| SSH terminal entry by link | Opened `nyxid://ssh/<catalog id>/terminal` and the same link with `?autoConnect=true`. | Both show a pre-connect screen with no target session: a principal row and a disabled Connect button until a principal is chosen, then "Connect to … as …?". Connect, then approval, connected. Reconnect keeps the selected principal. |
+| SSH terminal lifecycle | Background for 6 s and for 20 s with output running; denial of the approval; idle terminal with the branch-built `nyxid node`. | 6 s kept the same target session; 20 s closed it from the client at about 15.6 s. Denial shows the non-asserting refusal message. An idle terminal stayed connected for 150 s (same target process) and accepted input afterwards; a desktop WebSocket client stayed open for about 174 s. With node 0.78.0 both closed after 30 s idle. |
+| SSH terminal output | `yes \| head -c 4000000` (6.0 MB after line-ending conversion). | Rendered completely; the prompt returned and the session stayed open. |
+| Open-source notices | Settings → Support → Open-source notices. | xterm.js, the fit addon and JetBrains Mono notices with package headings, one copyright holder per line, selectable text. |
+
+Server-side limit found during this run (not changed here): a node-routed web terminal is dropped when the server's per-session receive buffer fills (`node_ws_manager.rs`, "Dropping web terminal due to full receive buffer"). A fast desktop client lost a 20 MB flood after 4.4 MB, so very large floods end the session regardless of the client. The mobile client's bounded output queue (drop oldest, one "Output skipped." marker) is covered by unit tests.
