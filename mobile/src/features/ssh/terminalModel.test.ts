@@ -14,7 +14,11 @@ import {
   inlineTerminalNavigation,
   truncateTerminalPaste,
 } from "./terminalModel";
-import { terminalDocument } from "./terminalDocument";
+import {
+  escapeInlineScript,
+  terminalBridgeScript,
+  terminalDocument,
+} from "./terminalDocument";
 import { TerminalOutput } from "./terminalOutput";
 
 test("terminal URL uses API scheme, preserves exact target and encodes principal with bounded dimensions", () => {
@@ -117,6 +121,20 @@ test("bridge messages are strict and bounded; command serialization cannot injec
     terminalScript({ type: "output", data: "';alert(1)", id: 1 }),
   );
 });
+test("inline script escaping neutralizes closing tags without changing other text", () => {
+  for (const [value, expected] of [
+    ["</script>", "<\\/script>"],
+    ["</SCRIPT>", "<\\/SCRIPT>"],
+    ["</ScRiPt", "<\\/ScRiPt"],
+    ["İ </ScRiPt> </div> </SCRIPT>", "İ <\\/ScRiPt> </div> <\\/SCRIPT>"],
+    [
+      "plain text <script> </style> < /script>",
+      "plain text <script> </style> < /script>",
+    ],
+    ["", ""],
+  ] as const)
+    assert.equal(escapeInlineScript(value), expected);
+});
 test("offline WebView has no network permissions, navigation or external assets", () => {
   const html = terminalDocument({
     background: "#000000",
@@ -127,7 +145,25 @@ test("offline WebView has no network permissions, navigation or external assets"
     html,
     /default-src 'none'; connect-src 'none'; img-src 'none'; font-src data:/,
   );
-  assert.doesNotMatch(html, /<(?:script|img|iframe)[^>]+src=|<link[^>]+href=/i);
+  const lowercaseHtml = html.toLowerCase();
+  for (const [tag, attribute] of [
+    ["script", "src="],
+    ["img", "src="],
+    ["iframe", "src="],
+    ["link", "href="],
+  ] as const) {
+    let from = 0;
+    for (
+      let start = lowercaseHtml.indexOf(`<${tag}`, from);
+      start !== -1;
+      start = lowercaseHtml.indexOf(`<${tag}`, from)
+    ) {
+      const end = lowercaseHtml.indexOf(">", start);
+      assert.notEqual(end, -1);
+      assert.equal(lowercaseHtml.slice(start, end).includes(attribute), false);
+      from = end + 1;
+    }
+  }
   assert.match(html, /window\.fetch=undefined/);
   assert.match(html, /window\.WebSocket=undefined/);
   assert.match(html, /window\.open=undefined/);
@@ -295,7 +331,7 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
     foreground: "#ffffff",
     cursor: "#9775fa",
   });
-  const code = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)![1]!;
+  assert.equal(html.includes("<script>" + terminalBridgeScript + "</script>"), true);
   const posted: unknown[] = [];
   const inputs: string[] = [];
   const pastes: string[] = [];
@@ -371,7 +407,7 @@ test("the executed offline bridge emits real escape keys, uses xterm paste, and 
     setTimeout() {},
     atob,
   };
-  runInNewContext(code, context);
+  runInNewContext(terminalBridgeScript, context);
   for (const [key, expected] of [
     ["Esc", "\x1b"],
     ["Tab", "\t"],
