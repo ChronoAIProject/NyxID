@@ -897,3 +897,10 @@ publish immutable future rate versions without redeployment. No new wallet is
 introduced. Upgrade all API readers and billing workers before enabling the
 three Sandbox metrics; old enum readers are unsafe
 once those units have been persisted. See [CMA billing](CMA_BILLING.md).
+
+
+## Android App Links
+
+`ANDROID_APP_PACKAGE` is the Android application id (for example `fun.chronoai.nyxid`). `ANDROID_APP_SHA256_CERT_FINGERPRINTS` is a comma-separated list of SHA-256 signing-certificate fingerprints, each exactly 32 colon-delimited hexadecimal bytes (`AA:BB:…`). Surrounding whitespace is trimmed and fingerprints are normalized to uppercase and deduplicated. Malformed nonempty values fail startup, consistent with other validated configuration. Missing either value makes `GET /.well-known/assetlinks.json` return 404. With both configured, it returns standard Digital Asset Links JSON with `application/json` and `Cache-Control: public, max-age=300`. These values are public identity metadata.
+
+Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every associated API origin before enabling the profile-local `DEV_ANDROID_API_APP_LINKS=true` or `PROD_ANDROID_API_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
