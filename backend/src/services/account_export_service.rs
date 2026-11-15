@@ -328,7 +328,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "assistant_acknowledgements" => Some(("assistant", "assistant_acknowledgements")),
         "assistant_action_receipts" => Some(("account_activity", "assistant_action_receipts")),
         "assistant_agent_consents" => Some(("assistant", "assistant_agent_consents")),
-        "assistant_agent_credentials" => Some(("assistant", "assistant_agent_credentials")),
         "assistant_agent_learning" => Some(("assistant", "assistant_agent_learning")),
         "assistant_agent_learning_members" => {
             Some(("assistant", "assistant_agent_learning_members"))
@@ -373,7 +372,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "assistant_group_messages" => Some(("assistant", "assistant_group_messages")),
         "assistant_group_read_states" => Some(("assistant", "assistant_group_read_states")),
         "assistant_group_requests" => Some(("assistant", "assistant_group_requests")),
-        "assistant_group_transfers" => Some(("account_activity", "assistant_group_transfers")),
         "assistant_groups" => Some(("assistant", "assistant_groups")),
         "assistant_invocation_turns" => Some(("assistant", "assistant_invocation_turns")),
         "assistant_invocations" => Some(("assistant", "assistant_invocations")),
@@ -427,7 +425,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "channel_messages" => Some(("channels", "channel_messages")),
         "channel_reply_deliveries" => Some(("channels", "channel_reply_deliveries")),
         "channel_text_deliveries" => Some(("channels", "channel_text_deliveries")),
-        "channel_webhook_rejections" => Some(("channels", "channel_webhook_rejections")),
         "channel_whatsapp_native" => Some(("channels", "channel_whatsapp_native")),
         "cli_pairings" => Some(("account", "cli_pairings")),
         "connect_links" => Some(("account", "connect_links")),
@@ -452,22 +449,10 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "lark_base_writes" => Some(("account", "lark_base_writes")),
         "login_approvals" => Some(("security", "login_approvals")),
         "login_codes" => Some(("security", "login_codes")),
-        "machine_authority_leases" => Some(("machines", "machine_authority_leases")),
         "machine_confirmations" => Some(("machines", "machine_confirmations")),
-        "machine_contexts" => Some(("machines", "machine_contexts")),
-        "machine_desktops" => Some(("machines", "machine_desktops")),
-        "machine_external_grants" => Some(("machines", "machine_external_grants")),
         "machine_free_slots" => Some(("machines", "machine_free_slots")),
         "machine_jobs" => Some(("machines", "machine_jobs")),
-        "machine_oauth_consent_requests" => Some(("machines", "machine_oauth_consent_requests")),
         "machine_orphan_inventory" => Some(("machines", "machine_orphan_inventory")),
-        "machine_revocations" => Some(("machines", "machine_revocations")),
-        "machine_separation_compatibility" => {
-            Some(("machines", "machine_separation_compatibility"))
-        }
-        "machine_setups" => Some(("machines", "machine_setups")),
-        "machine_update_attempts" => Some(("machines", "machine_update_attempts")),
-        "machine_updates" => Some(("machines", "machine_updates")),
         "mcp_session_notifications" => Some(("account_activity", "mcp_session_notifications")),
         "mcp_session_slots" => Some(("account", "mcp_session_slots")),
         "mfa_challenges" => Some(("account", "mfa_challenges")),
@@ -534,7 +519,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "refresh_tokens" => Some(("security", "refresh_tokens")),
         "saved_logins" => Some(("account", "saved_logins")),
         "service_account_key_read_grants" => Some(("services", "service_account_key_read_grants")),
-        "service_account_tokens" => Some(("services", "service_account_tokens")),
         "service_accounts" => Some(("services", "service_accounts")),
         "service_approval_configs" => Some(("services", "service_approval_configs")),
         "service_change_events" => Some(("account_activity", "service_change_events")),
@@ -575,7 +559,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "platform_personal_link_intents" => {
             Some(("account_activity", "platform_personal_link_intents"))
         }
-        "users" => Some(("account", "users")),
+        "users" => Some(("account", "profile")),
         _ => None,
     }
 }
@@ -625,467 +609,6 @@ fn additional_export_filter(
         }
     }
 }
-const ACCOUNT_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "owner_user_id",
-    "approved_user_id",
-    "member_user_id",
-    "conversation_id",
-    "service_id",
-    "service_slug",
-    "slug",
-    "name",
-    "display_name",
-    "kind",
-    "type",
-    "status",
-    "state",
-    "role",
-    "action",
-    "direction",
-    "content_type",
-    "filename",
-    "size",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-    "deleted_at",
-    "email_verified",
-    "last_login_at",
-    "enabled",
-    "is_active",
-];
-const SERVICE_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "owner_user_id",
-    "service_id",
-    "service_slug",
-    "slug",
-    "name",
-    "display_name",
-    "kind",
-    "type",
-    "status",
-    "state",
-    "enabled",
-    "is_active",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-];
-const ASSISTANT_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "actor_user_id",
-    "actor_id",
-    "subject_id",
-    "conversation_id",
-    "service_id",
-    "service_slug",
-    "name",
-    "display_name",
-    "kind",
-    "type",
-    "role",
-    "status",
-    "state",
-    "action",
-    "content",
-    "text",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-];
-const ASSISTANT_AGENT_FIELDS: &[&str] = &[
-    "user_id",
-    "name",
-    "display_name",
-    "description",
-    "specialty",
-    "persona",
-    "voice_instructions",
-    "memory.text",
-    "created_at",
-    "updated_at",
-];
-const VOICE_SESSION_FIELDS: &[&str] = &[
-    "user_id",
-    "conversation_id",
-    "protocol",
-    "dictation",
-    "measured_ms",
-    "state",
-    "created_at",
-    "deadline",
-    "last_user_at",
-    "closed_at",
-    "observed_seconds",
-    "playback_ms",
-    "final_usage_confirmed",
-    "billing_finalized",
-];
-const ORACLE_SESSION_FIELDS: &[&str] = &[
-    "owner_user_id",
-    "origin",
-    "tag",
-    "turn_count",
-    "last_task_id",
-    "chatgpt_url",
-    "owner_worker_label",
-    "closed_at",
-    "created_at",
-    "updated_at",
-];
-const ORACLE_TASK_FIELDS: &[&str] = &[
-    "submitter_user_id",
-    "kind",
-    "target_url",
-    "prompt",
-    "model_label",
-    "project_url",
-    "tag",
-    "pdf_name",
-    "attachment_name",
-    "status",
-    "conversation_id",
-    "worker_label",
-    "required_worker_label",
-    "phase",
-    "phase_detail",
-    "response",
-    "response_chars",
-    "chatgpt_url",
-    "failure_reason",
-    "observed_model_switcher",
-    "observed_model_effort",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-    "error_code",
-];
-const ORACLE_WORKER_COMMAND_FIELDS: &[&str] = &[
-    "created_by_user_id",
-    "worker_label",
-    "kind",
-    "status",
-    "required_capability",
-    "delivery_count",
-    "result_code",
-    "bundle_version",
-    "delivered_at",
-    "completed_at",
-    "deadline_at",
-    "expires_at",
-    "created_at",
-    "updated_at",
-];
-const ORACLE_WORKER_FIELDS: &[&str] = &[
-    "enrollment.owner_user_id",
-    "worker_label",
-    "generation",
-    "last_seen_at",
-    "current_task_id",
-    "script_version",
-    "page_url",
-    "first_seen_at",
-    "provisioned_at",
-    "platform",
-    "capabilities",
-    "desired_state",
-    "logged_in",
-    "chrome_alive",
-    "last_error",
-    "cooldown_until",
-];
-const ORACLE_LOGIN_SNAPSHOT_FIELDS: &[&str] = &[
-    "created_by_user_id",
-    "format_version",
-    "envelope_size",
-    "created_at",
-    "expires_at",
-];
-const ORG_CHANNEL_LANE_FIELDS: &[&str] = &[
-    "actor_id",
-    "channel_id",
-    "conversation_id",
-    "state",
-    "status",
-    "created_at",
-    "updated_at",
-    "expires_at",
-];
-const ORG_CHANNEL_LINK_FIELDS: &[&str] =
-    &["user_id", "channel_id", "org_id", "active", "created_at"];
-const ORG_CHANNEL_MESSAGE_FIELDS: &[&str] = &[
-    "author_user_id",
-    "actor_id",
-    "channel_id",
-    "conversation_id",
-    "text",
-    "content",
-    "content_type",
-    "created_at",
-];
-const ORG_CHANNEL_CHALLENGE_FIELDS: &[&str] = &[
-    "user_id",
-    "channel_id",
-    "org_id",
-    "state",
-    "created_at",
-    "expires_at",
-];
-const ASSISTANT_CONVERSATION_FIELDS: &[&str] = &[
-    "user_id",
-    "title",
-    "model",
-    "created_at",
-    "updated_at",
-    "message_count",
-];
-const GROUP_MESSAGE_FIELDS: &[&str] = &[
-    "user_id",
-    "group_id",
-    "author_user_id",
-    "role",
-    "text",
-    "created_at",
-];
-const AUTHORED_GROUP_MESSAGE_FIELDS: &[&str] = &["group_id", "role", "text", "created_at"];
-const FEEDBACK_FIELDS: &[&str] = &[
-    "user_id",
-    "message_id",
-    "rating",
-    "comment",
-    "created_at",
-    "updated_at",
-];
-const PRIVATE_NOTES_FIELDS: &[&str] = &[
-    "actor_user_id",
-    "agent_id",
-    "revision",
-    "notes.text",
-    "notes.created_at",
-    "notes.updated_at",
-    "updated_at",
-];
-const TRIGGER_FIELDS: &[&str] = &[
-    "user_id",
-    "label",
-    "status",
-    "source",
-    "schedule.kind",
-    "schedule.expression",
-    "schedule.timezone",
-    "schedule.amount",
-    "schedule.unit",
-    "schedule.anchor",
-    "schedule.at",
-    "schedule.start",
-    "schedule.end",
-    "schedule.max_runs",
-    "schedule.grace_seconds",
-    "schedule_state",
-    "overlap",
-    "delivery.type",
-    "delivery.url",
-    "delivery.conversation_id",
-    "delivery.confirmation_policy",
-    "delivery.agent_id",
-    "delivery.thread_policy",
-    "delivery.instruction",
-    "delivery.deliver_to",
-    "created_at",
-    "updated_at",
-];
-const USER_ENDPOINT_FIELDS: &[&str] = &[
-    "user_id",
-    "label",
-    "url",
-    "catalog_service_id",
-    "openapi_spec_url",
-    "recommended_skills",
-    "created_at",
-    "updated_at",
-];
-const SERVICE_CONNECTION_FIELDS: &[&str] = &[
-    "user_id",
-    "service_id",
-    "credential_type",
-    "credential_label",
-    "metadata",
-    "is_active",
-    "created_at",
-    "updated_at",
-];
-const NODE_FIELDS: &[&str] = &[
-    "user_id",
-    "name",
-    "status",
-    "is_active",
-    "created_at",
-    "updated_at",
-];
-const CHANNEL_BOT_FIELDS: &[&str] = &[
-    "user_id",
-    "label",
-    "platform",
-    "status",
-    "is_active",
-    "created_at",
-    "updated_at",
-];
-const OAUTH_CLIENT_FIELDS: &[&str] = &[
-    "created_by",
-    "client_name",
-    "redirect_uris",
-    "allowed_scopes",
-    "grant_types",
-    "client_type",
-    "is_active",
-    "delegation_scopes",
-    "default_service_catalog_slugs",
-    "broker_capability_enabled",
-    "connection_webhook_url",
-    "revocation_webhook_url",
-    "connection_webhook_enabled",
-    "created_at",
-    "updated_at",
-];
-const SERVICE_ACCOUNT_FIELDS: &[&str] = &[
-    "owner_user_id",
-    "created_by",
-    "name",
-    "description",
-    "role_ids",
-    "allowed_scopes",
-    "is_active",
-    "purpose",
-    "rate_limit_override",
-    "created_at",
-    "updated_at",
-    "last_authenticated_at",
-];
-const CHANNEL_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "conversation_id",
-    "channel_id",
-    "direction",
-    "text",
-    "content",
-    "content_type",
-    "status",
-    "state",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-];
-const ACTIVITY_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "owner_user_id",
-    "actor_user_id",
-    "actor_id",
-    "subject_id",
-    "service_id",
-    "conversation_id",
-    "kind",
-    "type",
-    "action",
-    "status",
-    "state",
-    "name",
-    "display_name",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-    "actor.person_id",
-    "actor.app_id",
-    "actor.name",
-];
-const INVITE_USAGE_FIELDS: &[&str] = &[
-    "used_count",
-    "max_uses",
-    "usages.user_id",
-    "usages.used_at",
-    "created_at",
-    "updated_at",
-    "expires_at",
-];
-const SERVICE_HISTORY_FIELDS: &[&str] = &[
-    "owner_id",
-    "service_id",
-    "event_type",
-    "created_at",
-    "updated_at",
-    "actor.person_id",
-    "actor.app_id",
-    "actor.name",
-];
-const MACHINE_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "owner_user_id",
-    "node_id",
-    "machine_id",
-    "service_id",
-    "kind",
-    "type",
-    "status",
-    "state",
-    "is_active",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-];
-const SECURITY_RECORD_FIELDS: &[&str] = &[
-    "user_id",
-    "owner_id",
-    "approved_user_id",
-    "approved_by_user_id",
-    "service_id",
-    "kind",
-    "type",
-    "status",
-    "state",
-    "enabled",
-    "is_active",
-    "created_at",
-    "updated_at",
-    "completed_at",
-    "expires_at",
-];
-const MESSAGE_FIELDS: &[&str] = &[
-    "user_id",
-    "conversation_id",
-    "role",
-    "content",
-    "created_at",
-];
-const CHANNEL_FIELDS: &[&str] = &[
-    "user_id",
-    "conversation_id",
-    "direction",
-    "text",
-    "created_at",
-];
-const FILE_METADATA_FIELDS: &[&str] = &[
-    "user_id",
-    "filename",
-    "content_type",
-    "size",
-    "created_at",
-    "expires_at",
-];
 const PROFILE_FIELDS: &[&str] = &[
     "email",
     "display_name",
@@ -1102,259 +625,751 @@ const PROFILE_FIELDS: &[&str] = &[
     "profile_config.service_views",
     "profile_config.onboarding.ai_services_completed_at",
 ];
-const BILLING_WALLET_FIELDS: &[&str] = &[
-    "owner_id",
-    "plan_kind",
-    "balance_credits",
-    "reserved_credits",
-    "pending_lago_debits",
-    "pending_topup_expiry_credits",
-    "has_payment_instrument",
-    "overdraft_cap_credits",
-    "suspended",
-    "collection_state",
-    "balance_synced_at",
-    "created_at",
-    "updated_at",
-];
-const CREDIT_GRANT_FIELDS: &[&str] = &[
-    "recipient_user_id",
-    "target_kind",
-    "amount",
-    "remaining",
-    "reserved",
-    "scope",
-    "expires_at",
-    "reason",
-    "status",
-    "created_at",
-    "updated_at",
-    "consumed_at",
-    "expired_at",
-    "revoked_at",
-];
-const USAGE_FIELDS: &[&str] = &[
-    "billing_owner_id",
-    "service_id",
-    "service_slug",
-    "metric",
-    "quantity",
-    "status",
-    "created_at",
-    "settled_at",
-    "wallet_funded",
-    "grant_funded",
-    "allowance_funded",
-    "wallet_charge_credits",
-];
+const AUTHORED_GROUP_MESSAGE_FIELDS: &[&str] = &["group_id", "role", "text", "created_at"];
 
 fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecError> {
-    let fields = match collection {
-        "agent_key_login_requests" => ACCOUNT_RECORD_FIELDS,
-        "agent_service_bindings" => ACCOUNT_RECORD_FIELDS,
-        "api_key_credentials" => SERVICE_RECORD_FIELDS,
-        "api_keys" => SERVICE_RECORD_FIELDS,
-        "approval_grants" => ACCOUNT_RECORD_FIELDS,
-        "approval_requests" => ACCOUNT_RECORD_FIELDS,
-        "assistant_acknowledgements" => ASSISTANT_RECORD_FIELDS,
-        "assistant_action_receipts" => ACTIVITY_RECORD_FIELDS,
-        "assistant_agent_consents" => ASSISTANT_RECORD_FIELDS,
-        "assistant_agent_learning" => ASSISTANT_RECORD_FIELDS,
-        "assistant_agent_learning_members" => ACCOUNT_RECORD_FIELDS,
-        "assistant_agent_learning_proposals" => ACCOUNT_RECORD_FIELDS,
-        "assistant_agent_learning_runs" => ASSISTANT_RECORD_FIELDS,
-        "assistant_agent_learning_skill_roots" => ACCOUNT_RECORD_FIELDS,
-        "assistant_agent_private_notes" => PRIVATE_NOTES_FIELDS,
-        "assistant_agent_shares" => ASSISTANT_RECORD_FIELDS,
-        "assistant_agent_sharing" => ASSISTANT_RECORD_FIELDS,
-        "assistant_agents" => ASSISTANT_AGENT_FIELDS,
-        "assistant_artifact_deliveries" => ASSISTANT_RECORD_FIELDS,
-        "assistant_async_operations" => ASSISTANT_RECORD_FIELDS,
-        "assistant_async_quotas" => ASSISTANT_RECORD_FIELDS,
-        "assistant_attachment_expiry" => ASSISTANT_RECORD_FIELDS,
-        "assistant_attachments" => FILE_METADATA_FIELDS,
-        "assistant_authored_draft_claims" => ASSISTANT_RECORD_FIELDS,
-        "assistant_checkpoints" => ASSISTANT_RECORD_FIELDS,
-        "assistant_cma_agents" => ASSISTANT_RECORD_FIELDS,
-        "assistant_cma_creations" => ASSISTANT_RECORD_FIELDS,
-        "assistant_cma_sandboxes" => ASSISTANT_RECORD_FIELDS,
-        "assistant_cma_session_origins" => ACCOUNT_RECORD_FIELDS,
-        "assistant_conversations" => ASSISTANT_CONVERSATION_FIELDS,
-        "assistant_direct_handoffs" => ASSISTANT_RECORD_FIELDS,
-        "assistant_group_agent_access" => ACCOUNT_RECORD_FIELDS,
-        "assistant_group_agent_proposals" => ASSISTANT_RECORD_FIELDS,
-        "assistant_group_execution_slots" => ACCOUNT_RECORD_FIELDS,
-        "assistant_group_invites" => ASSISTANT_RECORD_FIELDS,
-        "assistant_group_mention_notifications" => ACCOUNT_RECORD_FIELDS,
-        "assistant_group_messages" => GROUP_MESSAGE_FIELDS,
-        "assistant_group_read_states" => ASSISTANT_RECORD_FIELDS,
-        "assistant_group_requests" => ASSISTANT_RECORD_FIELDS,
-        "assistant_groups" => ASSISTANT_RECORD_FIELDS,
-        "assistant_invocation_turns" => ASSISTANT_RECORD_FIELDS,
-        "assistant_invocations" => ASSISTANT_RECORD_FIELDS,
-        "assistant_learning_migrations" => ACCOUNT_RECORD_FIELDS,
-        "assistant_learning_publication_targets" => ACCOUNT_RECORD_FIELDS,
-        "assistant_message_feedback" => FEEDBACK_FIELDS,
-        "assistant_messages" => MESSAGE_FIELDS,
-        "assistant_notification_push_budgets" => ACCOUNT_RECORD_FIELDS,
-        "assistant_notification_push_sources" => ACCOUNT_RECORD_FIELDS,
-        "assistant_notifications" => ASSISTANT_RECORD_FIELDS,
-        "assistant_onboarding" => ASSISTANT_RECORD_FIELDS,
-        "assistant_resources" => ASSISTANT_RECORD_FIELDS,
-        "assistant_service_execution" => ASSISTANT_RECORD_FIELDS,
-        "assistant_settings" => ASSISTANT_RECORD_FIELDS,
-        "assistant_skill_draft_attempts" => ASSISTANT_RECORD_FIELDS,
-        "assistant_tool_results" => ASSISTANT_RECORD_FIELDS,
-        "assistant_voice_announcements" => ASSISTANT_RECORD_FIELDS,
-        "assistant_voice_requests" => ASSISTANT_RECORD_FIELDS,
-        "assistant_voice_windows" => ACTIVITY_RECORD_FIELDS,
-        "assistant_wire_logs" => ACTIVITY_RECORD_FIELDS,
-        "async_service_operation_artifacts" => FILE_METADATA_FIELDS,
-        "auth_device_codes" => ACCOUNT_RECORD_FIELDS,
-        "auth_device_codes_v2" => ACCOUNT_RECORD_FIELDS,
-        "authorization_codes" => ACCOUNT_RECORD_FIELDS,
-        "billing_wallet" => BILLING_WALLET_FIELDS,
-        "catalog_delegation_grants" => SERVICE_RECORD_FIELDS,
-        "channel_activity_notifications" => CHANNEL_RECORD_FIELDS,
-        "channel_adapter_accounts" => ACTIVITY_RECORD_FIELDS,
-        "channel_adapter_allocations" => CHANNEL_RECORD_FIELDS,
-        "channel_adapter_bindings" => CHANNEL_RECORD_FIELDS,
-        "channel_adapter_events" => CHANNEL_RECORD_FIELDS,
-        "channel_adapter_resource_claims" => CHANNEL_RECORD_FIELDS,
-        "channel_adapter_sessions" => CHANNEL_RECORD_FIELDS,
-        "channel_bots" => CHANNEL_BOT_FIELDS,
-        "channel_connect_links" => CHANNEL_RECORD_FIELDS,
-        "channel_conversations" => CHANNEL_RECORD_FIELDS,
-        "channel_delivery_receipts" => CHANNEL_RECORD_FIELDS,
-        "channel_email_batches" => CHANNEL_RECORD_FIELDS,
-        "channel_email_receipts" => CHANNEL_RECORD_FIELDS,
-        "channel_email_sends" => CHANNEL_RECORD_FIELDS,
-        "channel_email_subscriptions" => CHANNEL_RECORD_FIELDS,
-        "channel_messages" => CHANNEL_FIELDS,
-        "channel_reply_deliveries" => CHANNEL_RECORD_FIELDS,
-        "channel_text_deliveries" => CHANNEL_RECORD_FIELDS,
-        "channel_webhook_rejections" => CHANNEL_RECORD_FIELDS,
-        "channel_whatsapp_native" => CHANNEL_RECORD_FIELDS,
-        "cli_pairings" => ACCOUNT_RECORD_FIELDS,
-        "connect_links" => ACCOUNT_RECORD_FIELDS,
-        "consents" => ACCOUNT_RECORD_FIELDS,
-        "credit_grants" => CREDIT_GRANT_FIELDS,
-        "device_codes" => SECURITY_RECORD_FIELDS,
-        "device_onboard_credentials" => ACCOUNT_RECORD_FIELDS,
-        "encrypted_record_migration_findings" => ACCOUNT_RECORD_FIELDS,
-        "encrypted_record_migration_runs" => ACCOUNT_RECORD_FIELDS,
-        "execution_permission_deliveries" => ACCOUNT_RECORD_FIELDS,
-        "feature_flag_overrides" => ACTIVITY_RECORD_FIELDS,
-        "invite_codes" => INVITE_USAGE_FIELDS,
-        "invocation_diagnostics" => ACTIVITY_RECORD_FIELDS,
-        "lark_base_write_photos" => ACCOUNT_RECORD_FIELDS,
-        "lark_base_writes" => ACCOUNT_RECORD_FIELDS,
-        "login_approvals" => SECURITY_RECORD_FIELDS,
-        "login_codes" => SECURITY_RECORD_FIELDS,
-        "machine_authority_leases" => MACHINE_RECORD_FIELDS,
-        "machine_confirmations" => MACHINE_RECORD_FIELDS,
-        "machine_contexts" => MACHINE_RECORD_FIELDS,
-        "machine_desktops" => MACHINE_RECORD_FIELDS,
-        "machine_external_grants" => MACHINE_RECORD_FIELDS,
-        "machine_free_slots" => MACHINE_RECORD_FIELDS,
-        "machine_jobs" => MACHINE_RECORD_FIELDS,
-        "machine_oauth_consent_requests" => MACHINE_RECORD_FIELDS,
-        "machine_orphan_inventory" => MACHINE_RECORD_FIELDS,
-        "machine_revocations" => MACHINE_RECORD_FIELDS,
-        "machine_separation_compatibility" => ACCOUNT_RECORD_FIELDS,
-        "machine_setups" => MACHINE_RECORD_FIELDS,
-        "machine_update_attempts" => MACHINE_RECORD_FIELDS,
-        "machine_updates" => MACHINE_RECORD_FIELDS,
-        "mcp_session_notifications" => ACTIVITY_RECORD_FIELDS,
-        "mcp_session_slots" => ACCOUNT_RECORD_FIELDS,
-        "mfa_challenges" => ACCOUNT_RECORD_FIELDS,
-        "mfa_factors" => SECURITY_RECORD_FIELDS,
-        "node_registration_tokens" => ACCOUNT_RECORD_FIELDS,
-        "nodes" => NODE_FIELDS,
-        "notification_channels" => SECURITY_RECORD_FIELDS,
-        "nyxbot_channels" => CHANNEL_RECORD_FIELDS,
-        "nyxbot_event_bindings" => ASSISTANT_RECORD_FIELDS,
-        "nyxbot_events" => ASSISTANT_RECORD_FIELDS,
-        "nyxbot_gateway_responses" => ASSISTANT_RECORD_FIELDS,
-        "nyxbot_image_deliveries" => ASSISTANT_RECORD_FIELDS,
-        "nyxbot_image_deliveries_v2" => ASSISTANT_RECORD_FIELDS,
-        "nyxbot_threads" => ASSISTANT_RECORD_FIELDS,
-        "nyxbot_watches" => ASSISTANT_RECORD_FIELDS,
-        "oauth_broker_bindings" => SERVICE_RECORD_FIELDS,
-        "oauth_clients" => OAUTH_CLIENT_FIELDS,
-        "oauth_consent_requests" => SERVICE_RECORD_FIELDS,
-        "oauth_delegation_authorities" => SERVICE_RECORD_FIELDS,
-        "oauth_states" => SERVICE_RECORD_FIELDS,
-        "openclaw_channel_mappings" => ACTIVITY_RECORD_FIELDS,
-        "oracle_pools" => ACCOUNT_RECORD_FIELDS,
-        "org_invites" => ACCOUNT_RECORD_FIELDS,
-        "org_memberships" => ACCOUNT_RECORD_FIELDS,
-        "permission_key_policies" => ACCOUNT_RECORD_FIELDS,
-        "platform_bot_cleanup" => ACCOUNT_RECORD_FIELDS,
-        "platform_bot_configs" => ACCOUNT_RECORD_FIELDS,
-        "platform_bot_installations" => ACCOUNT_RECORD_FIELDS,
-        "platform_delivery_tests" => ACCOUNT_RECORD_FIELDS,
-        "platform_discord_control_installation_history" => ACCOUNT_RECORD_FIELDS,
-        "platform_discord_control_installations" => ACCOUNT_RECORD_FIELDS,
-        "platform_guide_selections" => ACTIVITY_RECORD_FIELDS,
-        "platform_native_replies" => ACTIVITY_RECORD_FIELDS,
-        "platform_onboarding_binding_requests" => ACCOUNT_RECORD_FIELDS,
-        "platform_onboarding_bindings" => ACCOUNT_RECORD_FIELDS,
-        "platform_personal_decision_spacing" => ACCOUNT_RECORD_FIELDS,
-        "platform_personal_setup_selections" => ACCOUNT_RECORD_FIELDS,
-        "platform_personal_stop_effects" => ACCOUNT_RECORD_FIELDS,
-        "platform_public_deployment_activations" => ACCOUNT_RECORD_FIELDS,
-        "platform_public_deployment_proofs" => ACCOUNT_RECORD_FIELDS,
-        "platform_public_probe_consents" => ACCOUNT_RECORD_FIELDS,
-        "platform_public_readiness_probes" => ACCOUNT_RECORD_FIELDS,
-        "platform_setup_notices" => ACCOUNT_RECORD_FIELDS,
-        "platform_setup_steps" => ACCOUNT_RECORD_FIELDS,
-        "platform_setups" => ACCOUNT_RECORD_FIELDS,
-        "refresh_tokens" => SECURITY_RECORD_FIELDS,
-        "saved_logins" => ACCOUNT_RECORD_FIELDS,
-        "service_account_key_read_grants" => SERVICE_RECORD_FIELDS,
-        "service_account_tokens" => SERVICE_RECORD_FIELDS,
-        "service_accounts" => SERVICE_ACCOUNT_FIELDS,
-        "service_approval_configs" => SERVICE_RECORD_FIELDS,
-        "service_change_events" => SERVICE_HISTORY_FIELDS,
-        "service_pool_member_health" => SERVICE_RECORD_FIELDS,
-        "service_pools" => SERVICE_RECORD_FIELDS,
-        "service_preferences" => SERVICE_RECORD_FIELDS,
-        "sessions" => SECURITY_RECORD_FIELDS,
-        "telegram_bot_claims" => ACTIVITY_RECORD_FIELDS,
-        "telegram_bot_requests" => ACTIVITY_RECORD_FIELDS,
-        "telegram_managed_bot_events" => ACTIVITY_RECORD_FIELDS,
-        "trigger_deliveries" => ACCOUNT_RECORD_FIELDS,
-        "trigger_owner_limits" => ACCOUNT_RECORD_FIELDS,
-        "trigger_runs" => ACCOUNT_RECORD_FIELDS,
-        "trigger_work" => ACCOUNT_RECORD_FIELDS,
-        "triggers" => TRIGGER_FIELDS,
-        "usage_meter" => USAGE_FIELDS,
-        "usage_workspaces" => ACCOUNT_RECORD_FIELDS,
-        "user_api_keys" => SERVICE_RECORD_FIELDS,
-        "user_endpoints" => USER_ENDPOINT_FIELDS,
-        "user_provider_credentials" => SERVICE_RECORD_FIELDS,
-        "user_provider_tokens" => SERVICE_RECORD_FIELDS,
-        "user_service_connections" => SERVICE_CONNECTION_FIELDS,
-        "user_services" => SERVICE_RECORD_FIELDS,
-        "assistant_voice_sessions" => VOICE_SESSION_FIELDS,
-        "generated_artifact_content_series" => FILE_METADATA_FIELDS,
-        "oracle_login_snapshots" => ORACLE_LOGIN_SNAPSHOT_FIELDS,
-        "oracle_sessions" => ORACLE_SESSION_FIELDS,
-        "oracle_tasks" => ORACLE_TASK_FIELDS,
-        "oracle_worker_commands" => ORACLE_WORKER_COMMAND_FIELDS,
-        "oracle_workers" => ORACLE_WORKER_FIELDS,
-        "org_channel_lanes" => ORG_CHANNEL_LANE_FIELDS,
-        "org_channel_link_challenges" => ORG_CHANNEL_CHALLENGE_FIELDS,
-        "org_channel_messages" => ORG_CHANNEL_MESSAGE_FIELDS,
-        "org_channel_sender_links" => ORG_CHANNEL_LINK_FIELDS,
-        "platform_personal_bindings" => ACCOUNT_RECORD_FIELDS,
-        "platform_personal_link_challenges" => ACTIVITY_RECORD_FIELDS,
-        "platform_personal_link_intents" => ACTIVITY_RECORD_FIELDS,
-        "users" => PROFILE_FIELDS,
+    Ok(match collection {
+        "agent_key_login_requests" => &["approved_user_id", "status", "created_at", "expires_at"],
+        "agent_service_bindings" => &["user_id", "created_at", "updated_at"],
+        "api_key_credentials" => &["user_id", "kind", "is_active", "created_at", "expires_at"],
+        "api_keys" => &[
+            "user_id",
+            "name",
+            "is_active",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ],
+        "approval_grants" => &["user_id", "service_id", "expires_at"],
+        "approval_requests" => &[
+            "user_id",
+            "service_id",
+            "service_slug",
+            "status",
+            "created_at",
+            "expires_at",
+        ],
+        "assistant_acknowledgements" => &[
+            "user_id",
+            "conversation_id",
+            "service_id",
+            "service_slug",
+            "kind",
+            "status",
+            "created_at",
+            "expires_at",
+        ],
+        "assistant_action_receipts" => {
+            &["user_id", "action", "status", "created_at", "completed_at"]
+        }
+        "assistant_agent_consents" => &[
+            "owner_id",
+            "actor_user_id",
+            "conversation_id",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ],
+        "assistant_agent_learning" => &["owner_id", "created_at", "updated_at"],
+        "assistant_agent_learning_members" => &["member_user_id", "created_at", "updated_at"],
+        "assistant_agent_learning_proposals" => &["owner_id", "status", "created_at", "updated_at"],
+        "assistant_agent_learning_runs" => {
+            &["owner_id", "actor_id", "status", "created_at", "updated_at"]
+        }
+        "assistant_agent_learning_skill_roots" => &["owner_id", "created_at"],
+        "assistant_agent_private_notes" => &[
+            "actor_user_id",
+            "agent_id",
+            "revision",
+            "notes.text",
+            "notes.created_at",
+            "notes.updated_at",
+            "updated_at",
+        ],
+        "assistant_agent_shares" => &["owner_id", "subject_id", "role", "created_at"],
+        "assistant_agent_sharing" => &["owner_id", "updated_at"],
+        "assistant_agents" => &[
+            "user_id",
+            "name",
+            "display_name",
+            "description",
+            "specialty",
+            "persona",
+            "voice_instructions",
+            "memory.text",
+            "created_at",
+            "updated_at",
+        ],
+        "assistant_artifact_deliveries" => &["user_id", "conversation_id", "expires_at"],
+        "assistant_async_operations" => &[
+            "user_id",
+            "conversation_id",
+            "service_id",
+            "state",
+            "created_at",
+            "expires_at",
+        ],
+        "assistant_async_quotas" => &["user_id", "generation"],
+        "assistant_attachment_expiry" => {
+            &["user_id", "conversation_id", "created_at", "expired_at"]
+        }
+        "assistant_attachments" => &["user_id", "content_type", "size", "created_at"],
+        "assistant_authored_draft_claims" => &["conversation_id"],
+        "assistant_checkpoints" => &["user_id", "status", "updated_at"],
+        "assistant_cma_agents" => &["user_id", "created_at", "updated_at"],
+        "assistant_cma_creations" => &["user_id", "created_at", "updated_at"],
+        "assistant_cma_sandboxes" => &["user_id", "created_at", "updated_at"],
+        "assistant_cma_session_origins" => {
+            &["user_id", "conversation_id", "service_id", "created_at"]
+        }
+        "assistant_conversations" => &[
+            "user_id",
+            "title",
+            "model",
+            "created_at",
+            "updated_at",
+            "message_count",
+        ],
+        "assistant_direct_handoffs" => &["user_id", "state", "expires_at"],
+        "assistant_group_agent_access" => &["owner_id", "updated_at"],
+        "assistant_group_agent_proposals" => &["expires_at"],
+        "assistant_group_execution_slots" => &["conversation_id"],
+        "assistant_group_invites" => &["created_at", "expires_at"],
+        "assistant_group_mention_notifications" => &["user_id", "created_at"],
+        "assistant_group_messages" => &[
+            "user_id",
+            "group_id",
+            "author_user_id",
+            "role",
+            "text",
+            "created_at",
+        ],
+        "assistant_group_read_states" => &["user_id"],
+        "assistant_group_requests" => &["user_id", "actor_user_id", "created_at"],
+        "assistant_groups" => &["user_id", "name", "created_at", "updated_at"],
+        "assistant_invocation_turns" => &["user_id", "conversation_id", "state", "created_at"],
+        "assistant_invocations" => &["user_id", "conversation_id", "created_at"],
+        "assistant_learning_migrations" => &["completed_at"],
+        "assistant_learning_publication_targets" => {
+            &["owner_id", "state", "created_at", "updated_at"]
+        }
+        "assistant_message_feedback" => &[
+            "user_id",
+            "message_id",
+            "vote",
+            "comment",
+            "created_at",
+            "updated_at",
+        ],
+        "assistant_messages" => &["user_id", "conversation_id", "role", "text", "created_at"],
+        "assistant_notification_push_budgets" => &["reservations.at"],
+        "assistant_notification_push_sources" => &["user_id", "sent_at"],
+        "assistant_notifications" => &["user_id", "kind", "created_at", "updated_at", "expires_at"],
+        "assistant_onboarding" => &[
+            "intro_version",
+            "outcome",
+            "topics",
+            "work_style",
+            "created_at",
+            "updated_at",
+        ],
+        "assistant_resources" => &["user_id", "conversation_id", "created_at", "expires_at"],
+        "assistant_service_execution" => &["user_id", "conversation_id"],
+        "assistant_settings" => &[
+            "access_mode",
+            "skip_destructive_confirmation",
+            "timezone",
+            "voice.model",
+            "voice.language",
+            "voice.voice",
+            "voice.input_mode",
+            "notifications.push.automation_result",
+            "notifications.push.automation_problem",
+            "notifications.push.needs_decision",
+            "notifications.push.agent_update",
+            "notifications.push.chat_update",
+            "notifications.push.group_mention",
+            "updated_at",
+        ],
+        "assistant_skill_draft_attempts" => &["user_id", "conversation_id", "created_at"],
+        "assistant_tool_results" => &["user_id", "actor_id", "conversation_id", "expires_at"],
+        "assistant_voice_announcements" => &[
+            "user_id",
+            "conversation_id",
+            "state",
+            "text",
+            "created_at",
+            "expires_at",
+        ],
+        "assistant_voice_requests" => &[
+            "user_id",
+            "conversation_id",
+            "state",
+            "created_at",
+            "expires_at",
+        ],
+        "assistant_voice_windows" => &["user_id"],
+        "assistant_wire_logs" => &["user_id", "conversation_id", "created_at", "expires_at"],
+        "async_service_operation_artifacts" => &[
+            "user_id",
+            "filename",
+            "content_type",
+            "size",
+            "created_at",
+            "expires_at",
+        ],
+        "auth_device_codes" => &["approved_user_id", "status", "created_at", "expires_at"],
+        "auth_device_codes_v2" => &["approved_user_id", "status", "created_at", "expires_at"],
+        "authorization_codes" => &["user_id", "created_at", "expires_at"],
+        "billing_wallet" => &[
+            "owner_id",
+            "plan_kind",
+            "balance_credits",
+            "reserved_credits",
+            "pending_lago_debits",
+            "pending_topup_expiry_credits",
+            "has_payment_instrument",
+            "overdraft_cap_credits",
+            "suspended",
+            "collection_state",
+            "balance_synced_at",
+            "created_at",
+            "updated_at",
+        ],
+        "catalog_delegation_grants" => &["user_id", "created_at", "expires_at"],
+        "channel_activity_notifications" => &[
+            "user_id",
+            "conversation_id",
+            "direction",
+            "content_type",
+            "platform",
+            "created_at",
+        ],
+        "channel_adapter_accounts" => &["updated_at"],
+        "channel_adapter_allocations" => &["user_id", "created_at"],
+        "channel_adapter_bindings" => &["user_id", "created_at", "updated_at"],
+        "channel_adapter_events" => &["user_id", "status", "created_at"],
+        "channel_adapter_resource_claims" => &["user_id", "created_at"],
+        "channel_adapter_sessions" => &[
+            "user_id",
+            "conversation_id",
+            "state",
+            "created_at",
+            "expires_at",
+        ],
+        "channel_bots" => &[
+            "user_id",
+            "label",
+            "platform",
+            "status",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ],
+        "channel_connect_links" => &["user_id", "status", "created_at", "expires_at"],
+        "channel_conversations" => &["user_id", "created_at", "updated_at"],
+        "channel_delivery_receipts" => &["user_id", "expires_at"],
+        "channel_email_batches" => &["user_id", "expires_at"],
+        "channel_email_receipts" => &["user_id", "created_at"],
+        "channel_email_sends" => &["user_id", "status", "created_at", "updated_at"],
+        "channel_email_subscriptions" => &["user_id", "created_at"],
+        "channel_messages" => &[
+            "user_id",
+            "conversation_id",
+            "direction",
+            "platform",
+            "content_type",
+            "callback_status",
+            "created_at",
+        ],
+        "channel_reply_deliveries" => &["user_id", "created_at"],
+        "channel_text_deliveries" => &["user_id", "created_at"],
+        "channel_whatsapp_native" => &["owner_id", "updated_at"],
+        "cli_pairings" => &[
+            "user_id",
+            "kind",
+            "status",
+            "created_at",
+            "completed_at",
+            "expires_at",
+        ],
+        "connect_links" => &[
+            "user_id",
+            "service_id",
+            "service_slug",
+            "status",
+            "created_at",
+            "completed_at",
+            "expires_at",
+        ],
+        "consents" => &["user_id", "expires_at"],
+        "credit_grants" => &[
+            "recipient_user_id",
+            "target_kind",
+            "amount",
+            "remaining",
+            "reserved",
+            "scope",
+            "expires_at",
+            "reason",
+            "status",
+            "created_at",
+            "updated_at",
+            "consumed_at",
+            "expired_at",
+            "revoked_at",
+        ],
+        "device_codes" => &["approved_by_user_id", "status", "created_at", "expires_at"],
+        "device_onboard_credentials" => &["owner_user_id", "created_at", "expires_at"],
+        "encrypted_record_migration_findings" => &["collection", "category", "observed_at"],
+        "encrypted_record_migration_runs" => &["phase", "scanned", "rewritten", "started_at"],
+        "execution_permission_deliveries" => &[
+            "user_id",
+            "conversation_id",
+            "state",
+            "created_at",
+            "expires_at",
+        ],
+        "feature_flag_overrides" => &["created_at", "updated_at"],
+        "invite_codes" => &[
+            "used_count",
+            "max_uses",
+            "usages.user_id",
+            "usages.used_at",
+            "created_at",
+            "updated_at",
+        ],
+        "invocation_diagnostics" => &[
+            "actor_user_id",
+            "state",
+            "created_at",
+            "completed_at",
+            "expires_at",
+        ],
+        "lark_base_write_photos" => &["user_id", "created_at", "expires_at"],
+        "lark_base_writes" => &["user_id", "state", "created_at", "updated_at", "expires_at"],
+        "login_approvals" => &["user_id", "expires_at"],
+        "login_codes" => &["user_id", "status", "created_at", "expires_at"],
+        "machine_confirmations" => &["user_id", "node_id", "state", "created_at", "expires_at"],
+        "machine_free_slots" => &["machine_id", "state", "created_at", "updated_at"],
+        "machine_jobs" => &["user_id", "node_id", "state", "created_at", "expires_at"],
+        "machine_orphan_inventory" => &[
+            "owner_id",
+            "machine_id",
+            "state",
+            "reason",
+            "created_at",
+            "last_seen_at",
+        ],
+        "mcp_session_notifications" => &["created_at", "expires_at"],
+        "mcp_session_slots" => &["user_id", "expires_at"],
+        "mfa_challenges" => &["user_id", "created_at", "expires_at"],
+        "mfa_factors" => &["user_id", "is_active", "created_at", "updated_at"],
+        "node_registration_tokens" => &["user_id", "name", "created_at", "expires_at"],
+        "nodes" => &[
+            "user_id",
+            "name",
+            "status",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ],
+        "notification_channels" => &["user_id", "created_at", "updated_at"],
+        "nyxbot_channels" => &["user_id", "status", "created_at", "updated_at"],
+        "nyxbot_event_bindings" => &["user_id", "status", "created_at", "updated_at"],
+        "nyxbot_events" => &[
+            "user_id",
+            "conversation_id",
+            "status",
+            "created_at",
+            "expires_at",
+        ],
+        "nyxbot_gateway_responses" => &["user_id", "conversation_id", "created_at", "expires_at"],
+        "nyxbot_image_deliveries" => &["user_id", "conversation_id", "state", "created_at"],
+        "nyxbot_image_deliveries_v2" => &["user_id", "conversation_id", "state", "created_at"],
+        "nyxbot_threads" => &[
+            "user_id",
+            "conversation_id",
+            "kind",
+            "created_at",
+            "updated_at",
+        ],
+        "nyxbot_watches" => &[
+            "user_id",
+            "conversation_id",
+            "kind",
+            "status",
+            "created_at",
+            "expires_at",
+        ],
+        "oauth_broker_bindings" => &["user_id", "created_at"],
+        "oauth_clients" => &[
+            "created_by",
+            "client_name",
+            "redirect_uris",
+            "allowed_scopes",
+            "grant_types",
+            "client_type",
+            "is_active",
+            "delegation_scopes",
+            "default_service_catalog_slugs",
+            "broker_capability_enabled",
+            "connection_webhook_url",
+            "revocation_webhook_url",
+            "connection_webhook_enabled",
+            "created_at",
+            "updated_at",
+        ],
+        "oauth_consent_requests" => &["user_id", "expires_at"],
+        "oauth_delegation_authorities" => &["user_id", "created_at", "expires_at"],
+        "oauth_states" => &["user_id", "created_at", "expires_at"],
+        "openclaw_channel_mappings" => &[
+            "nyxid_user_id",
+            "channel",
+            "channel_user_id",
+            "created_at",
+            "updated_at",
+        ],
+        "oracle_pools" => &[
+            "user_id",
+            "slug",
+            "name",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+            "is_active",
+        ],
+        "org_invites" => &["role", "created_at", "expires_at"],
+        "org_memberships" => &["org_user_id", "member_user_id", "role", "created_at"],
+        "permission_key_policies" => &["user_id", "created_at", "updated_at"],
+        "platform_bot_cleanup" => &["owner_user_id", "kind", "created_at"],
+        "platform_bot_configs" => &["created_at", "updated_at", "deleted_at", "enabled"],
+        "platform_bot_installations" => &["owner_user_id", "state", "created_at", "updated_at"],
+        "platform_delivery_tests" => &["state", "expires_at"],
+        "platform_discord_control_installation_history" => &["state", "created_at", "updated_at"],
+        "platform_discord_control_installations" => &["state", "created_at", "updated_at"],
+        "platform_guide_selections" => &["binding_id", "generation", "setup_id", "purge_after"],
+        "platform_native_replies" => &["source_id", "kind", "purge_after"],
+        "platform_onboarding_binding_requests" => {
+            &["approved_user_id", "state", "created_at", "expires_at"]
+        }
+        "platform_onboarding_bindings" => &[
+            "user_id",
+            "created_at",
+            "updated_at",
+            "expires_at",
+            "is_active",
+        ],
+        "platform_personal_decision_spacing" => &["last_decision_at"],
+        "platform_personal_setup_selections" => &["user_id"],
+        "platform_personal_stop_effects" => &["created_at"],
+        "platform_public_deployment_activations" => &["activated_at"],
+        "platform_public_deployment_proofs" => &["status"],
+        "platform_public_probe_consents" => &["expires_at"],
+        "platform_public_readiness_probes" => &["state", "expires_at"],
+        "platform_setup_notices" => &["kind", "expires_at"],
+        "platform_setup_steps" => &["created_at"],
+        "platform_setups" => &[
+            "owner_user_id",
+            "state",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ],
+        "refresh_tokens" => &["user_id", "created_at", "expires_at"],
+        "saved_logins" => &["user_id", "created_at", "updated_at"],
+        "service_account_key_read_grants" => &["owner_id", "expires_at"],
+        "service_accounts" => &[
+            "owner_user_id",
+            "created_by",
+            "name",
+            "description",
+            "role_ids",
+            "allowed_scopes",
+            "is_active",
+            "purpose",
+            "rate_limit_override",
+            "created_at",
+            "updated_at",
+            "last_authenticated_at",
+        ],
+        "service_approval_configs" => &["user_id", "service_id", "created_at", "updated_at"],
+        "service_change_events" => &[
+            "owner_id",
+            "service_id",
+            "actor.person_id",
+            "actor.app_id",
+            "actor.name",
+        ],
+        "service_pool_member_health" => &["owner_id", "updated_at", "expires_at"],
+        "service_pools" => &[
+            "user_id",
+            "slug",
+            "name",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ],
+        "service_preferences" => &["version", "ordered", "updated_at"],
+        "sessions" => &[
+            "user_id",
+            "purpose",
+            "ip_address",
+            "user_agent",
+            "revoked",
+            "created_at",
+            "expires_at",
+            "last_active_at",
+        ],
+        "telegram_bot_claims" => &[
+            "owner_user_id",
+            "actor_user_id",
+            "status",
+            "created_at",
+            "expires_at",
+        ],
+        "telegram_bot_requests" => &[
+            "owner_user_id",
+            "actor_user_id",
+            "status",
+            "created_at",
+            "expires_at",
+        ],
+        "telegram_managed_bot_events" => &["created_at"],
+        "trigger_deliveries" => &[
+            "user_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ],
+        "trigger_owner_limits" => &["version"],
+        "trigger_runs" => &["user_id", "expires_at"],
+        "trigger_work" => &["trigger_id", "user_id", "kind", "at"],
+        "triggers" => &[
+            "user_id",
+            "label",
+            "status",
+            "source",
+            "schedule.kind",
+            "schedule.expression",
+            "schedule.timezone",
+            "schedule.amount",
+            "schedule.unit",
+            "schedule.anchor",
+            "schedule.at",
+            "schedule.start",
+            "schedule.end",
+            "schedule.max_runs",
+            "schedule.grace_seconds",
+            "schedule_state",
+            "overlap",
+            "delivery.type",
+            "delivery.url",
+            "delivery.conversation_id",
+            "delivery.confirmation_policy",
+            "delivery.agent_id",
+            "delivery.thread_policy",
+            "delivery.instruction",
+            "delivery.deliver_to",
+            "created_at",
+            "updated_at",
+        ],
+        "usage_meter" => &[
+            "billing_owner_id",
+            "service_id",
+            "service_slug",
+            "metric",
+            "quantity",
+            "status",
+            "created_at",
+        ],
+        "usage_workspaces" => &["config", "revision", "updated_at"],
+        "user_api_keys" => &[
+            "user_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ],
+        "user_endpoints" => &[
+            "user_id",
+            "label",
+            "url",
+            "catalog_service_id",
+            "openapi_spec_url",
+            "recommended_skills",
+            "created_at",
+            "updated_at",
+        ],
+        "user_provider_credentials" => &["user_id", "created_at", "updated_at"],
+        "user_provider_tokens" => &[
+            "user_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ],
+        "user_service_connections" => &[
+            "user_id",
+            "service_id",
+            "credential_type",
+            "credential_label",
+            "metadata",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ],
+        "user_services" => &[
+            "user_id",
+            "slug",
+            "endpoint_id",
+            "catalog_service_id",
+            "service_type",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ],
+        "assistant_voice_sessions" => &[
+            "user_id",
+            "conversation_id",
+            "protocol",
+            "dictation",
+            "measured_ms",
+            "state",
+            "created_at",
+            "deadline",
+            "last_user_at",
+            "closed_at",
+            "observed_seconds",
+            "playback_ms",
+            "final_usage_confirmed",
+            "billing_finalized",
+        ],
+        "generated_artifact_content_series" => {
+            &["user_id", "conversation_id", "revision", "purge_after"]
+        }
+        "oracle_login_snapshots" => &[
+            "created_by_user_id",
+            "format_version",
+            "envelope_size",
+            "created_at",
+            "expires_at",
+        ],
+        "oracle_sessions" => &[
+            "owner_user_id",
+            "origin",
+            "tag",
+            "turn_count",
+            "last_task_id",
+            "chatgpt_url",
+            "owner_worker_label",
+            "closed_at",
+            "created_at",
+            "updated_at",
+        ],
+        "oracle_tasks" => &[
+            "submitter_user_id",
+            "kind",
+            "target_url",
+            "prompt",
+            "model_label",
+            "project_url",
+            "tag",
+            "pdf_name",
+            "attachment_name",
+            "status",
+            "conversation_id",
+            "required_worker_label",
+            "phase",
+            "phase_detail",
+            "response",
+            "response_chars",
+            "chatgpt_url",
+            "failure_reason",
+            "observed_model_switcher",
+            "observed_model_effort",
+            "created_at",
+            "updated_at",
+            "completed_at",
+            "expires_at",
+        ],
+        "oracle_worker_commands" => &[
+            "created_by_user_id",
+            "worker_label",
+            "kind",
+            "status",
+            "required_capability",
+            "delivery_count",
+            "result_code",
+            "bundle_version",
+            "delivered_at",
+            "completed_at",
+            "deadline_at",
+            "expires_at",
+            "created_at",
+            "updated_at",
+        ],
+        "oracle_workers" => &[
+            "enrollment.owner_user_id",
+            "worker_label",
+            "generation",
+            "last_seen_at",
+            "current_task_id",
+            "script_version",
+            "page_url",
+            "first_seen_at",
+            "provisioned_at",
+            "platform",
+            "capabilities",
+            "desired_state",
+            "logged_in",
+            "chrome_alive",
+            "last_error",
+            "cooldown_until",
+        ],
+        "org_channel_lanes" => &["actor_id", "conversation_id", "created_at"],
+        "org_channel_link_challenges" => {
+            &["user_id", "org_id", "state", "created_at", "expires_at"]
+        }
+        "org_channel_messages" => &[
+            "user_id",
+            "channel_id",
+            "conversation_id",
+            "actor_id",
+            "role",
+            "text",
+            "created_at",
+        ],
+        "org_channel_sender_links" => &["user_id", "channel_id", "org_id", "active", "created_at"],
+        "platform_personal_bindings" => &[
+            "user_id",
+            "conversation_id",
+            "state",
+            "created_at",
+            "updated_at",
+        ],
+        "platform_personal_link_challenges" => &["state", "created_at", "expires_at"],
+        "platform_personal_link_intents" => &["state", "created_at", "expires_at"],
+        "users" => &[
+            "email",
+            "display_name",
+            "avatar_url",
+            "email_verified",
+            "mfa_enabled",
+            "social_provider",
+            "created_at",
+            "updated_at",
+            "last_login_at",
+            "profile_config.security.skip_mfa_for_approved_sign_ins",
+            "profile_config.analytics.enabled",
+            "profile_config.services_view",
+            "profile_config.service_views",
+            "profile_config.onboarding.ai_services_completed_at",
+        ],
+        "audit_log" => &["event_type", "created_at"],
         _ => return Err(ExportSpecError(collection.to_owned())),
-    };
-    Ok(fields)
+    })
 }
 fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Option<Document> {
     if entry.collection == "assistant_group_messages" {
@@ -1566,90 +1581,11 @@ async fn build_with_limit(
             truncated: !profile_admitted,
         },
     );
-    let mut handled = BTreeSet::new();
-    for (section, collection, fields, filter, subsection) in [
-        (
-            "services",
-            crate::models::user_service::COLLECTION_NAME,
-            &["service_id", "slug", "created_at", "updated_at"][..],
-            doc! {"user_id": account_id},
-            "user_services",
-        ),
-        (
-            "security",
-            crate::models::session::COLLECTION_NAME,
-            &["created_at", "expires_at", "last_used_at"][..],
-            doc! {"user_id": account_id},
-            "sessions",
-        ),
-        (
-            "assistant",
-            crate::models::assistant_message::COLLECTION_NAME,
-            &["conversation_id", "role", "content", "created_at"][..],
-            doc! {"user_id": account_id},
-            "assistant_messages",
-        ),
-        (
-            "channels",
-            crate::models::channel_message::COLLECTION_NAME,
-            &["conversation_id", "direction", "text", "created_at"][..],
-            doc! {"user_id": account_id},
-            "channel_messages",
-        ),
-        (
-            "account_activity",
-            crate::models::assistant_action_receipt::COLLECTION_NAME,
-            &["action", "status", "created_at", "completed_at"][..],
-            doc! {"user_id": account_id},
-            "assistant_action_receipts",
-        ),
-        (
-            "machines",
-            crate::models::machine_job::COLLECTION_NAME,
-            &["status", "created_at", "completed_at"][..],
-            doc! {"user_id": account_id},
-            "machine_jobs",
-        ),
-    ] {
-        sections.entry(section.into()).or_default().insert(
-            subsection.into(),
-            rows(
-                db,
-                collection,
-                filter,
-                fields,
-                doc! {"created_at": -1},
-                &mut budget,
-            )
-            .await?,
-        );
-        handled.insert(collection);
-    }
-    let memberships = rows(
-        db,
-        "org_memberships",
-        doc! {"member_user_id": account_id},
-        &[
-            "org_user_id",
-            "member_user_id",
-            "role",
-            "created_at",
-            "updated_at",
-        ],
-        doc! {"created_at": -1},
-        &mut budget,
-    )
-    .await?;
-    sections
-        .entry("account".into())
-        .or_default()
-        .insert("org_memberships".into(), memberships);
-    handled.insert("org_memberships");
     let audit = rows(
         db,
         crate::models::audit_log::COLLECTION_NAME,
         doc! {"user_id": account_id},
-        &["event_type", "created_at"],
+        fields_for("audit_log").map_err(|error| AppError::Internal(error.to_string()))?,
         doc! {"created_at": -1},
         &mut budget,
     )
@@ -1658,103 +1594,11 @@ async fn build_with_limit(
         .entry("account_activity".into())
         .or_default()
         .insert("audit_log".into(), audit);
-    handled.insert(crate::models::audit_log::COLLECTION_NAME);
-
-    // Financial rows are retained for integrity, but the person's own
-    // user-visible summaries are part of the export. Only display fields are
-    // projected; ledger hashes, provider references and settlement locks stay
-    // excluded.
-    let wallet = rows(
-        db,
-        crate::models::billing_wallet::COLLECTION_NAME,
-        doc! {"owner_id": account_id},
-        &[
-            "owner_id",
-            "plan_kind",
-            "balance_credits",
-            "reserved_credits",
-            "pending_lago_debits",
-            "pending_topup_expiry_credits",
-            "has_payment_instrument",
-            "overdraft_cap_credits",
-            "suspended",
-            "collection_state",
-            "balance_synced_at",
-            "created_at",
-            "updated_at",
-        ],
-        doc! {"updated_at": -1},
-        &mut budget,
-    )
-    .await?;
-    sections
-        .entry("billing".into())
-        .or_default()
-        .insert("wallet".into(), wallet);
-    handled.insert(crate::models::billing_wallet::COLLECTION_NAME);
-    let grants = rows(
-        db,
-        crate::models::credit_grant::COLLECTION_NAME,
-        doc! {"recipient_user_id": account_id},
-        &[
-            "recipient_user_id",
-            "target_kind",
-            "amount",
-            "remaining",
-            "reserved",
-            "scope",
-            "expires_at",
-            "reason",
-            "status",
-            "created_at",
-            "updated_at",
-            "consumed_at",
-            "expired_at",
-            "revoked_at",
-        ],
-        doc! {"created_at": -1},
-        &mut budget,
-    )
-    .await?;
-    sections
-        .entry("billing".into())
-        .or_default()
-        .insert("credit_grants".into(), grants);
-    handled.insert(crate::models::credit_grant::COLLECTION_NAME);
-    let usage = rows(
-        db,
-        crate::models::usage_meter::COLLECTION_NAME,
-        doc! {"billing_owner_id": account_id},
-        &[
-            "billing_owner_id",
-            "service_id",
-            "service_slug",
-            "metric",
-            "quantity",
-            "status",
-            "created_at",
-            "settled_at",
-            "wallet_funded",
-            "grant_funded",
-            "allowance_funded",
-            "wallet_charge_credits",
-        ],
-        doc! {"created_at": -1},
-        &mut budget,
-    )
-    .await?;
-    sections
-        .entry("billing".into())
-        .or_default()
-        .insert("usage_meter".into(), usage);
-    handled.insert(crate::models::usage_meter::COLLECTION_NAME);
     for entry in personal_data_registry::entries() {
         let personal_data_registry::Export::Section(section) = entry.export else {
             continue;
         };
-        if entry.collection == crate::models::user::COLLECTION_NAME
-            || handled.contains(entry.collection)
-        {
+        if entry.collection == crate::models::user::COLLECTION_NAME {
             continue;
         }
         let spec = explicit_export_spec(entry.collection)
@@ -1911,33 +1755,33 @@ mod tests {
             "url": "https://user:pass@example.test/v1?token=URL_QUERY#URL_FRAGMENT",
             "shared_memory": "OTHER_PERSON_SHARED_MEMORY",
         };
-        let value = safe_item(&row, ASSISTANT_CONVERSATION_FIELDS);
+        let value = safe_item(&row, fields_for("assistant_conversations").unwrap());
         assert_eq!(value["title"], "PERSON_TITLE");
-        let agent = safe_item(&row, ASSISTANT_AGENT_FIELDS);
+        let agent = safe_item(&row, fields_for("assistant_agents").unwrap());
         assert_eq!(agent["persona"], "PERSON_PERSONA");
         assert_eq!(agent["memory"]["text"][0], "PERSON_MEMORY");
         assert!(
-            safe_item(&row, ASSISTANT_RECORD_FIELDS)
+            safe_item(&row, fields_for("assistant_agent_sharing").unwrap())
                 .get("memory")
                 .is_none()
         );
-        let notes = safe_item(&row, PRIVATE_NOTES_FIELDS);
+        let notes = safe_item(&row, fields_for("assistant_agent_private_notes").unwrap());
         assert_eq!(notes["notes"]["text"][0], "PERSON_NOTE");
-        let feedback = safe_item(&row, FEEDBACK_FIELDS);
+        let feedback = safe_item(&row, fields_for("assistant_message_feedback").unwrap());
         assert_eq!(feedback["comment"], "PERSON_FEEDBACK");
-        let trigger = safe_item(&row, TRIGGER_FIELDS);
+        let trigger = safe_item(&row, fields_for("triggers").unwrap());
         assert_eq!(trigger["label"], "PERSON_TRIGGER_LABEL");
         assert_eq!(trigger["schedule"]["expression"], "PERSON_SCHEDULE");
         assert_eq!(
             trigger["delivery"]["instruction"],
             "PERSON_TRIGGER_INSTRUCTION"
         );
-        let endpoint = safe_item(&row, USER_ENDPOINT_FIELDS);
+        let endpoint = safe_item(&row, fields_for("user_endpoints").unwrap());
         assert_eq!(endpoint["url"], "https://example.test");
         assert_eq!(endpoint["url_path_omitted"], true);
-        let connection = safe_item(&row, SERVICE_CONNECTION_FIELDS);
+        let connection = safe_item(&row, fields_for("user_service_connections").unwrap());
         assert_eq!(connection["credential_label"], "PERSON_CONNECTION_LABEL");
-        let node = safe_item(&row, NODE_FIELDS);
+        let node = safe_item(&row, fields_for("nodes").unwrap());
         assert_eq!(node["name"], "PERSON_NODE_NAME");
         assert!(
             !serde_json::to_string(&agent)
@@ -1961,7 +1805,7 @@ mod tests {
                 .unwrap()
                 .contains("TEAM_MEMORY")
         );
-        let group = safe_item(&row, GROUP_MESSAGE_FIELDS);
+        let group = safe_item(&row, fields_for("assistant_group_messages").unwrap());
         assert_eq!(group["author_user_id"], "other-person");
         assert_eq!(group["text"], "OTHER_AUTHOR_MESSAGE");
         // The runtime owner filter requires both identifiers to match. A row
@@ -2053,16 +1897,22 @@ mod tests {
     fn every_declared_url_field_drops_distinct_secret_sentinels() {
         let fields = [
             ("avatar_url", PROFILE_FIELDS),
-            ("chatgpt_url", ORACLE_SESSION_FIELDS),
-            ("target_url", ORACLE_TASK_FIELDS),
-            ("project_url", ORACLE_TASK_FIELDS),
-            ("page_url", ORACLE_WORKER_FIELDS),
-            ("delivery.url", TRIGGER_FIELDS),
-            ("url", USER_ENDPOINT_FIELDS),
-            ("openapi_spec_url", USER_ENDPOINT_FIELDS),
-            ("redirect_uris", OAUTH_CLIENT_FIELDS),
-            ("connection_webhook_url", OAUTH_CLIENT_FIELDS),
-            ("revocation_webhook_url", OAUTH_CLIENT_FIELDS),
+            ("chatgpt_url", fields_for("oracle_sessions").unwrap()),
+            ("target_url", fields_for("oracle_tasks").unwrap()),
+            ("project_url", fields_for("oracle_tasks").unwrap()),
+            ("page_url", fields_for("oracle_workers").unwrap()),
+            ("delivery.url", fields_for("triggers").unwrap()),
+            ("url", fields_for("user_endpoints").unwrap()),
+            ("openapi_spec_url", fields_for("user_endpoints").unwrap()),
+            ("redirect_uris", fields_for("oauth_clients").unwrap()),
+            (
+                "connection_webhook_url",
+                fields_for("oauth_clients").unwrap(),
+            ),
+            (
+                "revocation_webhook_url",
+                fields_for("oauth_clients").unwrap(),
+            ),
         ];
         for (field, allowlist) in fields {
             assert!(
@@ -2407,21 +2257,28 @@ mod tests {
     }
 
     fn put_owner(document: &mut Document, path: &str, owner: &str) {
-        let mut segments = path.split('.').peekable();
-        let Some(first) = segments.next() else {
-            return;
-        };
-        if segments.peek().is_none() {
-            document.insert(first, owner);
-            return;
+        fn put(value: &mut Bson, segments: &[&str], owner: &str) {
+            if segments.is_empty() {
+                *value = Bson::String(owner.into());
+            } else if let Bson::Array(values) = value {
+                if values.is_empty() {
+                    values.push(Bson::Document(Document::new()));
+                }
+                for value in values {
+                    put(value, segments, owner);
+                }
+            } else {
+                if !matches!(value, Bson::Document(_)) {
+                    *value = Bson::Document(Document::new());
+                }
+                let doc = value.as_document_mut().unwrap();
+                let child = doc.entry(segments[0].to_owned()).or_insert(Bson::Null);
+                put(child, &segments[1..], owner);
+            }
         }
-        let rest = segments.collect::<Vec<_>>().join(".");
-        let child = document
-            .entry(first.to_owned())
-            .or_insert_with(|| Bson::Document(Document::new()));
-        if let Bson::Document(child) = child {
-            put_owner(child, &rest, owner);
-        }
+        let mut row = Bson::Document(std::mem::take(document));
+        put(&mut row, &path.split('.').collect::<Vec<_>>(), owner);
+        *document = row.as_document().unwrap().clone();
     }
 
     /// Mongo-backed sentinel coverage for the complete registry export map.
@@ -2465,19 +2322,18 @@ mod tests {
             } else {
                 format!("bystander-{}", entry.collection)
             };
-            let mut target = doc! {
-                "_id": &target_id,
-                "password_hash": "EXPORT_SECRET_SENTINEL",
-                "token_value": "EXPORT_SECRET_SENTINEL",
-                "ciphertext": "EXPORT_SECRET_SENTINEL",
-                "payload_encrypted": Bson::Binary(bson::Binary {
+            let mut target = super::model_tests::model_fixture(entry.collection);
+            target.insert("_id", &target_id);
+            for field in ["password_hash", "token_value", "ciphertext"] {
+                target.insert(field, "EXPORT_SECRET_SENTINEL");
+            }
+            target.insert(
+                "payload_encrypted",
+                Bson::Binary(bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
                     bytes: vec![0xde, 0xad, 0xbe, 0xef],
                 }),
-                "amount": Bson::Decimal128("17.25".parse().unwrap()),
-                "created_at": bson::DateTime::now(),
-                "updated_at": bson::DateTime::now(),
-            };
+            );
             let mut other = target.clone();
             other.insert("_id", &bystander_id);
             for field in fields {
@@ -2549,3 +2405,7 @@ mod tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "account_export_model_tests.rs"]
+mod model_tests;

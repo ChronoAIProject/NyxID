@@ -1,0 +1,738 @@
+//! Serialized storage-model fixtures and explicit writer-shape exceptions.
+use super::*;
+use serde::de::DeserializeOwned;
+use std::sync::OnceLock;
+
+fn roundtrip<T: DeserializeOwned + Serialize>(row: &Document) -> Result<Document, String> {
+    let model: T = bson::from_document(row.clone()).map_err(|error| error.to_string())?;
+    bson::to_document(&model).map_err(|error| error.to_string())
+}
+
+// These coordination writers intentionally have no public storage model.
+// Keep one typed fixture for each documented writer shape, independently of
+// the export projection; unknown input fields do not survive serialization.
+#[derive(serde::Deserialize, Serialize)]
+struct PushReservation {
+    at: bson::DateTime,
+}
+
+/// async_service_operation::admit_in_session uses an untyped quota document.
+#[derive(serde::Deserialize, Serialize)]
+struct AsyncQuota {
+    user_id: String,
+    generation: i64,
+}
+
+/// assistant_upload_retention::delete_root copies scoped metadata into an untyped tombstone.
+#[derive(serde::Deserialize, Serialize)]
+struct AttachmentExpiry {
+    user_id: String,
+    conversation_id: String,
+    created_at: bson::DateTime,
+    expired_at: bson::DateTime,
+}
+
+/// assistant_agent_learning_review::backfill_package_format writes an untyped migration marker.
+#[derive(serde::Deserialize, Serialize)]
+struct LearningMigration {
+    completed_at: bson::DateTime,
+}
+
+/// assistant_notification_service::claim_push writes untyped reservation timestamps.
+#[derive(serde::Deserialize, Serialize)]
+struct PushBudget {
+    reservations: Vec<PushReservation>,
+}
+
+/// assistant_notification_service::claim_push writes untyped source reservations.
+#[derive(serde::Deserialize, Serialize)]
+struct PushSource {
+    user_id: String,
+    sent_at: bson::DateTime,
+}
+
+/// assistant_service_execution::bootstrap writes an untyped execution record.
+#[derive(serde::Deserialize, Serialize)]
+struct ServiceExecution {
+    user_id: String,
+    conversation_id: String,
+}
+
+/// channel_activity_service writes metadata-only untyped activity records.
+#[derive(serde::Deserialize, Serialize)]
+struct ChannelActivity {
+    user_id: String,
+    conversation_id: String,
+    direction: String,
+    content_type: String,
+    platform: String,
+    created_at: bson::DateTime,
+}
+
+/// encrypted_record_migration::tick writes untyped storage diagnostic metadata.
+#[derive(serde::Deserialize, Serialize)]
+struct MigrationFinding {
+    collection: String,
+    category: String,
+    observed_at: bson::DateTime,
+}
+
+/// encrypted_record_migration::start writes an untyped global migration record.
+#[derive(serde::Deserialize, Serialize)]
+struct MigrationRun {
+    phase: String,
+    scanned: i64,
+    rewritten: i64,
+    started_at: bson::DateTime,
+}
+
+/// remote_machine_events::record_investigation writes untyped resource investigation metadata.
+#[derive(serde::Deserialize, Serialize)]
+struct MachineOrphan {
+    owner_id: String,
+    machine_id: String,
+    state: String,
+    reason: String,
+    created_at: bson::DateTime,
+    last_seen_at: bson::DateTime,
+}
+
+/// platform_setup_service::guide_select_current writes an untyped binding-scoped selection.
+#[derive(serde::Deserialize, Serialize)]
+struct GuideSelection {
+    binding_id: String,
+    generation: i64,
+    setup_id: String,
+    purge_after: bson::DateTime,
+}
+
+/// platform_binding_service::admit_reply writes untyped provider reply deduplication metadata.
+#[derive(serde::Deserialize, Serialize)]
+struct NativeReply {
+    source_id: String,
+    kind: String,
+    purge_after: bson::DateTime,
+}
+
+/// platform_link_intent_service writes an untyped last-decision timestamp keyed by the person.
+#[derive(serde::Deserialize, Serialize)]
+struct DecisionSpacing {
+    last_decision_at: bson::DateTime,
+}
+
+/// trigger_service::save writes an untyped owner version counter.
+#[derive(serde::Deserialize, Serialize)]
+struct TriggerOwnerLimit {
+    version: i64,
+}
+
+/// trigger_schedule::enqueue_occurrence writes untyped scheduled work metadata.
+#[derive(serde::Deserialize, Serialize)]
+struct TriggerWork {
+    trigger_id: String,
+    user_id: String,
+    kind: String,
+    at: bson::DateTime,
+}
+
+/// org_channel_service::transcript::lane writes untyped actor-scoped lane metadata.
+#[derive(serde::Deserialize, Serialize)]
+struct OrgLane {
+    actor_id: String,
+    conversation_id: String,
+    created_at: bson::DateTime,
+}
+
+/// org_channel_service::links::begin writes untyped link challenges.
+#[derive(serde::Deserialize, Serialize)]
+struct OrgChallenge {
+    user_id: String,
+    org_id: String,
+    state: String,
+    created_at: bson::DateTime,
+    expires_at: bson::DateTime,
+}
+
+/// org_channel_service::transcript::append extends GroupMessage with actor and conversation selectors.
+#[derive(serde::Deserialize, Serialize)]
+struct OrgMessage {
+    user_id: String,
+    channel_id: String,
+    conversation_id: String,
+    actor_id: String,
+    role: String,
+    text: String,
+    created_at: bson::DateTime,
+}
+
+fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> {
+    match collection {
+        "agent_key_login_requests" => {
+            roundtrip::<crate::models::agent_key_login_request::AgentKeyLoginRequest>(row)
+        }
+        "agent_service_bindings" => {
+            roundtrip::<crate::models::agent_service_binding::AgentServiceBinding>(row)
+        }
+        "api_key_credentials" => {
+            roundtrip::<crate::models::api_key_credential::ApiKeyCredential>(row)
+        }
+        "api_keys" => roundtrip::<crate::models::api_key::ApiKey>(row),
+        "approval_grants" => roundtrip::<crate::models::approval_grant::ApprovalGrant>(row),
+        "approval_requests" => roundtrip::<crate::models::approval_request::ApprovalRequest>(row),
+        "assistant_acknowledgements" => {
+            roundtrip::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(row)
+        }
+        "assistant_action_receipts" => {
+            roundtrip::<crate::models::assistant_action_receipt::AssistantActionReceipt>(row)
+        }
+        "assistant_agent_consents" => {
+            roundtrip::<crate::models::assistant_sharing::AgentConsent>(row)
+        }
+        "assistant_agent_learning" => {
+            roundtrip::<crate::models::assistant_agent_learning::AssistantAgentLearning>(row)
+        }
+        "assistant_agent_learning_members" => {
+            roundtrip::<crate::models::assistant_agent_learning::AssistantAgentLearningMember>(row)
+        }
+        "assistant_agent_learning_proposals" => roundtrip::<
+            crate::models::assistant_agent_learning::AssistantAgentLearningProposal,
+        >(row),
+        "assistant_agent_learning_runs" => {
+            roundtrip::<crate::models::assistant_agent_learning::AssistantAgentLearningRun>(row)
+        }
+        "assistant_agent_learning_skill_roots" => roundtrip::<
+            crate::models::assistant_agent_learning::AssistantAgentLearningSkillRoot,
+        >(row),
+        "assistant_agent_private_notes" => {
+            roundtrip::<crate::models::assistant_sharing::PrivateNotes>(row)
+        }
+        "assistant_agent_shares" => roundtrip::<crate::models::assistant_sharing::AgentShare>(row),
+        "assistant_agent_sharing" => {
+            roundtrip::<crate::models::assistant_sharing::AgentSharing>(row)
+        }
+        "assistant_agents" => roundtrip::<crate::models::assistant_agent::AssistantAgent>(row),
+        "assistant_artifact_deliveries" => {
+            roundtrip::<crate::models::generated_artifact::Delivery>(row)
+        }
+        "assistant_async_operations" => {
+            roundtrip::<crate::models::async_service_operation::AsyncServiceOperation>(row)
+        }
+        "assistant_async_quotas" => roundtrip::<AsyncQuota>(row),
+        "assistant_attachment_expiry" => roundtrip::<AttachmentExpiry>(row),
+        "assistant_attachments" => {
+            roundtrip::<crate::models::assistant_attachment::AssistantAttachment>(row)
+        }
+        "assistant_authored_draft_claims" => {
+            roundtrip::<crate::models::assistant_agent_learning::AuthoredDraftClaim>(row)
+        }
+        "assistant_checkpoints" => {
+            roundtrip::<crate::models::assistant_checkpoint::AssistantCheckpoint>(row)
+        }
+        "assistant_cma_agents" => {
+            roundtrip::<crate::models::assistant_cma_agent::AssistantCmaAgent>(row)
+        }
+        "assistant_cma_creations" => {
+            roundtrip::<crate::models::assistant_cma_creation::AssistantCmaCreation>(row)
+        }
+        "assistant_cma_sandboxes" => {
+            roundtrip::<crate::models::assistant_cma_sandbox::AssistantCmaSandbox>(row)
+        }
+        "assistant_cma_session_origins" => {
+            roundtrip::<crate::models::cma_session_origin::CmaSessionOrigin>(row)
+        }
+        "assistant_conversations" => {
+            roundtrip::<crate::models::assistant_conversation::AssistantConversation>(row)
+        }
+        "assistant_direct_handoffs" => {
+            roundtrip::<crate::models::assistant_direct_handoff::DirectHandoff>(row)
+        }
+        "assistant_group_agent_access" => {
+            roundtrip::<crate::models::assistant_group_collaboration::AgentAccess>(row)
+        }
+        "assistant_group_agent_proposals" => {
+            roundtrip::<crate::models::assistant_group_collaboration::AgentProposal>(row)
+        }
+        "assistant_group_execution_slots" => {
+            roundtrip::<crate::models::assistant_group_collaboration::ExecutionSlot>(row)
+        }
+        "assistant_group_invites" => {
+            roundtrip::<crate::models::assistant_group_collaboration::Invite>(row)
+        }
+        "assistant_group_mention_notifications" => {
+            roundtrip::<crate::models::assistant_group_collaboration::MentionNotification>(row)
+        }
+        "assistant_group_messages" => {
+            roundtrip::<crate::models::assistant_group::GroupMessage>(row)
+        }
+        "assistant_group_read_states" => {
+            roundtrip::<crate::models::assistant_group_collaboration::ReadState>(row)
+        }
+        "assistant_group_requests" => {
+            roundtrip::<crate::models::assistant_group::GroupRequest>(row)
+        }
+        "assistant_groups" => roundtrip::<crate::models::assistant_group::AssistantGroup>(row),
+        "assistant_invocation_turns" => {
+            roundtrip::<crate::models::assistant_invocation::InvocationTurn>(row)
+        }
+        "assistant_invocations" => {
+            roundtrip::<crate::models::assistant_invocation::AssistantInvocation>(row)
+        }
+        "assistant_learning_migrations" => roundtrip::<LearningMigration>(row),
+        "assistant_learning_publication_targets" => {
+            roundtrip::<crate::models::assistant_agent_learning::LearningPublicationTarget>(row)
+        }
+        "assistant_message_feedback" => {
+            roundtrip::<crate::models::assistant_message_feedback::AssistantMessageFeedback>(row)
+        }
+        "assistant_messages" => {
+            roundtrip::<crate::models::assistant_message::AssistantMessage>(row)
+        }
+        "assistant_notification_push_budgets" => roundtrip::<PushBudget>(row),
+        "assistant_notification_push_sources" => roundtrip::<PushSource>(row),
+        "assistant_notifications" => {
+            roundtrip::<crate::models::assistant_notification::AssistantNotification>(row)
+        }
+        "assistant_onboarding" => {
+            roundtrip::<crate::models::assistant_onboarding::AssistantOnboarding>(row)
+        }
+        "assistant_resources" => {
+            roundtrip::<crate::models::assistant_resource::AssistantResource>(row)
+        }
+        "assistant_service_execution" => roundtrip::<ServiceExecution>(row),
+        "assistant_settings" => {
+            roundtrip::<crate::models::assistant_settings::AssistantSettings>(row)
+        }
+        "assistant_skill_draft_attempts" => roundtrip::<
+            crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt,
+        >(row),
+        "assistant_tool_results" => {
+            roundtrip::<crate::models::assistant_tool_result::AssistantToolResult>(row)
+        }
+        "assistant_voice_announcements" => {
+            roundtrip::<crate::models::assistant_voice_announcement::Announcement>(row)
+        }
+        "assistant_voice_requests" => {
+            roundtrip::<crate::models::assistant_voice::VoiceRequest>(row)
+        }
+        "assistant_voice_windows" => roundtrip::<crate::models::assistant_voice::VoiceWindow>(row),
+        "assistant_wire_logs" => {
+            roundtrip::<crate::models::assistant_wire_log::AssistantWireLog>(row)
+        }
+        "async_service_operation_artifacts" => {
+            roundtrip::<crate::models::generated_artifact::PendingArtifact>(row)
+        }
+        "auth_device_codes" => roundtrip::<crate::models::auth_device_code::AuthDeviceCode>(row),
+        "auth_device_codes_v2" => roundtrip::<crate::models::auth_device_code::AuthDeviceCode>(row),
+        "authorization_codes" => {
+            roundtrip::<crate::models::authorization_code::AuthorizationCode>(row)
+        }
+        "billing_wallet" => roundtrip::<crate::models::billing_wallet::BillingWallet>(row),
+        "catalog_delegation_grants" => {
+            roundtrip::<crate::models::catalog_delegation_grant::CatalogDelegationGrant>(row)
+        }
+        "channel_activity_notifications" => roundtrip::<ChannelActivity>(row),
+        "channel_adapter_accounts" => {
+            roundtrip::<crate::models::channel_adapter::ProviderAccount>(row)
+        }
+        "channel_adapter_allocations" => {
+            roundtrip::<crate::models::channel_adapter::ResourceAllocation>(row)
+        }
+        "channel_adapter_bindings" => roundtrip::<crate::models::channel_adapter::Binding>(row),
+        "channel_adapter_events" => roundtrip::<crate::models::channel_adapter::EventReceipt>(row),
+        "channel_adapter_resource_claims" => {
+            roundtrip::<crate::models::channel_adapter::ResourceClaim>(row)
+        }
+        "channel_adapter_sessions" => roundtrip::<crate::models::channel_adapter::CallSession>(row),
+        "channel_bots" => roundtrip::<crate::models::channel_bot::ChannelBot>(row),
+        "channel_connect_links" => {
+            roundtrip::<crate::models::channel_connect_link::ChannelConnectLink>(row)
+        }
+        "channel_conversations" => {
+            roundtrip::<crate::models::channel_conversation::ChannelConversation>(row)
+        }
+        "channel_delivery_receipts" => {
+            roundtrip::<crate::models::channel_delivery::DeliveryReceipt>(row)
+        }
+        "channel_email_batches" => roundtrip::<crate::models::channel_email::EmailBatch>(row),
+        "channel_email_receipts" => roundtrip::<crate::models::channel_email::EmailReceipt>(row),
+        "channel_email_sends" => roundtrip::<crate::models::channel_email::EmailSend>(row),
+        "channel_email_subscriptions" => {
+            roundtrip::<crate::models::channel_email::EmailSubscription>(row)
+        }
+        "channel_messages" => roundtrip::<crate::models::channel_message::ChannelMessage>(row),
+        "channel_reply_deliveries" => {
+            roundtrip::<crate::models::channel_reply_delivery::ChannelReplyDelivery>(row)
+        }
+        "channel_text_deliveries" => {
+            roundtrip::<crate::models::channel_text_delivery::ChannelTextDelivery>(row)
+        }
+        "channel_whatsapp_native" => {
+            roundtrip::<crate::models::channel_whatsapp_native::NativeWhatsapp>(row)
+        }
+        "cli_pairings" => roundtrip::<crate::models::cli_pairing::CliPairing>(row),
+        "connect_links" => roundtrip::<crate::models::connect_link::ConnectLink>(row),
+        "consents" => roundtrip::<crate::models::consent::Consent>(row),
+        "credit_grants" => roundtrip::<crate::models::credit_grant::CreditGrant>(row),
+        "device_codes" => roundtrip::<crate::models::device_code::DeviceCode>(row),
+        "device_onboard_credentials" => {
+            roundtrip::<crate::models::device_onboard_credential::DeviceOnboardCredential>(row)
+        }
+        "encrypted_record_migration_findings" => roundtrip::<MigrationFinding>(row),
+        "encrypted_record_migration_runs" => roundtrip::<MigrationRun>(row),
+        "execution_permission_deliveries" => {
+            roundtrip::<crate::models::execution_permission_channel::Delivery>(row)
+        }
+        "feature_flag_overrides" => {
+            roundtrip::<crate::models::feature_flag_override::FeatureFlagOverride>(row)
+        }
+        "invite_codes" => roundtrip::<crate::models::invite_code::InviteCode>(row),
+        "invocation_diagnostics" => {
+            roundtrip::<crate::models::invocation_diagnostic::InvocationDiagnostic>(row)
+        }
+        "lark_base_write_photos" => {
+            roundtrip::<crate::models::lark_base_write_photo::LarkBaseWritePhoto>(row)
+        }
+        "lark_base_writes" => roundtrip::<crate::models::lark_base_write::LarkBaseWrite>(row),
+        "login_approvals" => roundtrip::<crate::models::login_approval::LoginApproval>(row),
+        "login_codes" => roundtrip::<crate::models::login_code::LoginCode>(row),
+        "machine_confirmations" => {
+            roundtrip::<crate::models::machine_external_execution::ExternalConfirmation>(row)
+        }
+        "machine_free_slots" => roundtrip::<crate::models::machine_free_slot::MachineFreeSlot>(row),
+        "machine_jobs" => roundtrip::<crate::models::machine_job::MachineJob>(row),
+        "machine_orphan_inventory" => roundtrip::<MachineOrphan>(row),
+        "mcp_session_notifications" => {
+            roundtrip::<crate::models::mcp_notification::McpSessionNotification>(row)
+        }
+        "mcp_session_slots" => roundtrip::<crate::models::mcp_session::McpSessionSlot>(row),
+        "mfa_challenges" => roundtrip::<crate::models::session::Session>(row),
+        "mfa_factors" => roundtrip::<crate::models::mfa_factor::MfaFactor>(row),
+        "node_registration_tokens" => {
+            roundtrip::<crate::models::node_registration_token::NodeRegistrationToken>(row)
+        }
+        "nodes" => roundtrip::<crate::models::node::Node>(row),
+        "notification_channels" => {
+            roundtrip::<crate::models::notification_channel::NotificationChannel>(row)
+        }
+        "nyxbot_channels" => roundtrip::<crate::models::nyxbot_channel::NyxbotChannel>(row),
+        "nyxbot_event_bindings" => {
+            roundtrip::<crate::models::nyxbot_event_binding::NyxbotEventBinding>(row)
+        }
+        "nyxbot_events" => roundtrip::<crate::models::nyxbot_channel::NyxbotEvent>(row),
+        "nyxbot_gateway_responses" => {
+            roundtrip::<crate::models::nyxbot_gateway_response::GatewayResponse>(row)
+        }
+        "nyxbot_image_deliveries" => {
+            roundtrip::<crate::models::nyxbot_image_delivery::NyxbotImageDelivery>(row)
+        }
+        "nyxbot_image_deliveries_v2" => {
+            roundtrip::<crate::models::nyxbot_image_delivery::NyxbotImageDelivery>(row)
+        }
+        "nyxbot_threads" => roundtrip::<crate::models::nyxbot_channel::NyxbotThread>(row),
+        "nyxbot_watches" => roundtrip::<crate::models::nyxbot_channel::NyxbotWatch>(row),
+        "oauth_broker_bindings" => {
+            roundtrip::<crate::models::oauth_broker_binding::OauthBrokerBinding>(row)
+        }
+        "oauth_clients" => roundtrip::<crate::models::oauth_client::OauthClient>(row),
+        "oauth_consent_requests" => {
+            roundtrip::<crate::models::oauth_consent_request::OauthConsentRequest>(row)
+        }
+        "oauth_delegation_authorities" => {
+            roundtrip::<crate::models::oauth_delegation_authority::OauthDelegationAuthority>(row)
+        }
+        "oauth_states" => roundtrip::<crate::models::oauth_state::OAuthState>(row),
+        "openclaw_channel_mappings" => {
+            roundtrip::<crate::services::openclaw_channel_service::OpenClawChannelMapping>(row)
+        }
+        "oracle_pools" => roundtrip::<crate::models::oracle_pool::OraclePool>(row),
+        "org_invites" => roundtrip::<crate::models::org_invite::OrgInvite>(row),
+        "org_memberships" => roundtrip::<crate::models::org_membership::OrgMembership>(row),
+        "permission_key_policies" => {
+            roundtrip::<crate::models::permission_policy::PermissionPolicy>(row)
+        }
+        "platform_bot_cleanup" => {
+            roundtrip::<crate::models::platform_bot_config::PlatformBotCleanup>(row)
+        }
+        "platform_bot_configs" => {
+            roundtrip::<crate::models::platform_bot_config::PlatformBotConfig>(row)
+        }
+        "platform_bot_installations" => {
+            roundtrip::<crate::models::platform_installation::PlatformInstallation>(row)
+        }
+        "platform_delivery_tests" => {
+            roundtrip::<crate::models::platform_installation::DeliveryTest>(row)
+        }
+        "platform_discord_control_installation_history" => roundtrip::<
+            crate::models::platform_entry_discord_installation::DiscordControlInstallation,
+        >(row),
+        "platform_discord_control_installations" => roundtrip::<
+            crate::models::platform_entry_discord_installation::DiscordControlInstallation,
+        >(row),
+        "platform_guide_selections" => roundtrip::<GuideSelection>(row),
+        "platform_native_replies" => roundtrip::<NativeReply>(row),
+        "platform_onboarding_binding_requests" => {
+            roundtrip::<crate::models::platform_binding::PlatformBindingRequest>(row)
+        }
+        "platform_onboarding_bindings" => {
+            roundtrip::<crate::models::platform_binding::PlatformBinding>(row)
+        }
+        "platform_personal_decision_spacing" => roundtrip::<DecisionSpacing>(row),
+        "platform_personal_setup_selections" => {
+            roundtrip::<crate::models::platform_manager_management::PersonalSetupSelection>(row)
+        }
+        "platform_personal_stop_effects" => roundtrip::<
+            crate::models::platform_bot_runtime_controls::PlatformPersonalStopEffect,
+        >(row),
+        "platform_public_deployment_activations" => {
+            roundtrip::<crate::models::platform_public_contract::PublicDeploymentActivation>(row)
+        }
+        "platform_public_deployment_proofs" => {
+            roundtrip::<crate::models::platform_public_contract::PublicDeploymentRecord>(row)
+        }
+        "platform_public_probe_consents" => {
+            roundtrip::<crate::models::platform_public_contract::ProbeConsent>(row)
+        }
+        "platform_public_readiness_probes" => {
+            roundtrip::<crate::models::platform_public_contract::PublicProbe>(row)
+        }
+        "platform_setup_notices" => {
+            roundtrip::<crate::models::platform_installation::SetupNotice>(row)
+        }
+        "platform_setup_steps" => {
+            roundtrip::<crate::models::platform_installation::SetupStepJob>(row)
+        }
+        "platform_setups" => roundtrip::<crate::models::platform_setup::PlatformSetup>(row),
+        "refresh_tokens" => roundtrip::<crate::models::refresh_token::RefreshToken>(row),
+        "saved_logins" => roundtrip::<crate::models::saved_login::SavedLogin>(row),
+        "service_account_key_read_grants" => roundtrip::<
+            crate::models::service_account_key_read_grant::ServiceAccountKeyReadGrant,
+        >(row),
+        "service_accounts" => roundtrip::<crate::models::service_account::ServiceAccount>(row),
+        "service_approval_configs" => {
+            roundtrip::<crate::models::service_approval_config::ServiceApprovalConfig>(row)
+        }
+        "service_change_events" => {
+            roundtrip::<crate::models::service_change_event::ServiceChangeEvent>(row)
+        }
+        "service_pool_member_health" => {
+            roundtrip::<crate::models::service_pool_member_health::ServicePoolMemberHealth>(row)
+        }
+        "service_pools" => roundtrip::<crate::models::service_pool::ServicePool>(row),
+        "service_preferences" => {
+            roundtrip::<crate::models::service_preference::ServicePreference>(row)
+        }
+        "sessions" => roundtrip::<crate::models::session::Session>(row),
+        "telegram_bot_claims" => {
+            roundtrip::<crate::models::telegram_bot_claim::TelegramBotClaim>(row)
+        }
+        "telegram_bot_requests" => {
+            roundtrip::<crate::models::telegram_bot_request::TelegramBotRequest>(row)
+        }
+        "telegram_managed_bot_events" => {
+            roundtrip::<crate::models::telegram_bot_request::ManagedBotEvents>(row)
+        }
+        "trigger_deliveries" => {
+            roundtrip::<crate::models::trigger_delivery::TriggerDeliveryRecord>(row)
+        }
+        "trigger_owner_limits" => roundtrip::<TriggerOwnerLimit>(row),
+        "trigger_runs" => roundtrip::<crate::models::trigger_run::TriggerRun>(row),
+        "trigger_work" => roundtrip::<TriggerWork>(row),
+        "triggers" => roundtrip::<crate::models::trigger::Trigger>(row),
+        "usage_meter" => roundtrip::<crate::models::usage_meter::UsageMeterRow>(row),
+        "usage_workspaces" => roundtrip::<crate::models::usage_workspace::UsageWorkspace>(row),
+        "user_api_keys" => roundtrip::<crate::models::user_api_key::UserApiKey>(row),
+        "user_endpoints" => roundtrip::<crate::models::user_endpoint::UserEndpoint>(row),
+        "user_provider_credentials" => {
+            roundtrip::<crate::models::user_provider_credentials::UserProviderCredentials>(row)
+        }
+        "user_provider_tokens" => {
+            roundtrip::<crate::models::user_provider_token::UserProviderToken>(row)
+        }
+        "user_service_connections" => {
+            roundtrip::<crate::models::user_service_connection::UserServiceConnection>(row)
+        }
+        "user_services" => roundtrip::<crate::models::user_service::UserService>(row),
+        "assistant_voice_sessions" => {
+            roundtrip::<crate::models::assistant_voice_session::VoiceSession>(row)
+        }
+        "generated_artifact_content_series" => {
+            roundtrip::<crate::models::generated_artifact::ContentSeries>(row)
+        }
+        "oracle_login_snapshots" => {
+            roundtrip::<crate::models::oracle_login_snapshot::OracleLoginSnapshot>(row)
+        }
+        "oracle_sessions" => roundtrip::<crate::models::oracle_session::OracleSession>(row),
+        "oracle_tasks" => roundtrip::<crate::models::oracle_task::OracleTask>(row),
+        "oracle_worker_commands" => {
+            roundtrip::<crate::models::oracle_worker_command::OracleWorkerCommand>(row)
+        }
+        "oracle_workers" => roundtrip::<crate::models::oracle_worker::OracleWorker>(row),
+        "org_channel_lanes" => roundtrip::<OrgLane>(row),
+        "org_channel_link_challenges" => roundtrip::<OrgChallenge>(row),
+        "org_channel_messages" => roundtrip::<OrgMessage>(row),
+        "org_channel_sender_links" => roundtrip::<crate::models::org_channel::SenderLink>(row),
+        "platform_personal_bindings" => {
+            roundtrip::<crate::models::platform_personal_binding::PlatformPersonalBinding>(row)
+        }
+        "platform_personal_link_challenges" => {
+            roundtrip::<crate::models::platform_link_intent::PlatformLinkChallenge>(row)
+        }
+        "platform_personal_link_intents" => {
+            roundtrip::<crate::models::platform_link_intent::PlatformLinkIntent>(row)
+        }
+        "users" => roundtrip::<crate::models::user::User>(row),
+        "audit_log" => roundtrip::<crate::models::audit_log::AuditLog>(row),
+        _ => Err(format!("no storage-model fixture for {collection}")),
+    }
+}
+
+fn inputs() -> &'static BTreeMap<String, Vec<Document>> {
+    static INPUTS: OnceLock<BTreeMap<String, Vec<Document>>> = OnceLock::new();
+    INPUTS.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test_data/account-export-models.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    })
+}
+
+pub(super) fn model_fixture(collection: &str) -> Document {
+    stored_fixture(collection, &inputs()[collection][0])
+        .unwrap_or_else(|error| panic!("{collection}: {error}"))
+}
+
+#[test]
+fn every_export_path_exists_in_serialized_storage_models() {
+    let mut problems = Vec::new();
+    let mut specs = personal_data_registry::entries()
+        .iter()
+        .filter(|entry| matches!(entry.export, personal_data_registry::Export::Section(_)))
+        .map(|entry| (entry.collection, fields_for(entry.collection).unwrap()))
+        .collect::<Vec<_>>();
+    specs.push(("audit_log", fields_for("audit_log").unwrap()));
+    for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
+        specs.push((view.collection, additional_export_spec(view).fields));
+    }
+    for (collection, fields) in specs {
+        let Some(rows) = inputs().get(collection) else {
+            problems.push(format!("{collection}: missing independent model fixture"));
+            continue;
+        };
+        let serialized = rows
+            .iter()
+            .filter_map(|row| match stored_fixture(collection, row) {
+                Ok(row) => Some(row),
+                Err(error) => {
+                    problems.push(format!("{collection}: {error}"));
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for field in fields {
+            if !serialized.iter().any(|row| get_path(row, field).is_some()) {
+                problems.push(format!(
+                    "{collection}.{field}: absent from serialized model"
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[tokio::test]
+async fn model_rows_export_real_message_feedback_session_service_and_channel_fields() {
+    use crate::models::{
+        assistant_message::AssistantMessage, assistant_message_feedback::AssistantMessageFeedback,
+        channel_message::ChannelMessage, session::Session, user_service::UserService,
+    };
+    let db = crate::test_utils::connect_transaction_test_database("export_storage_models").await;
+    let person = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(crate::test_utils::test_user(
+            &person,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+
+    let mut message: AssistantMessage =
+        bson::from_document(model_fixture("assistant_messages")).unwrap();
+    message.user_id = person.clone();
+    message.role = "user".into();
+    message.text = "My authored message".into();
+    db.collection::<AssistantMessage>("assistant_messages")
+        .insert_one(message)
+        .await
+        .unwrap();
+    let mut feedback: AssistantMessageFeedback =
+        bson::from_document(model_fixture("assistant_message_feedback")).unwrap();
+    feedback.user_id = person.clone();
+    feedback.vote = "up".into();
+    feedback.comment = Some("My feedback".into());
+    db.collection::<AssistantMessageFeedback>("assistant_message_feedback")
+        .insert_one(feedback)
+        .await
+        .unwrap();
+    let mut session: Session = bson::from_document(model_fixture("sessions")).unwrap();
+    session.user_id = person.clone();
+    session.token_hash = "MODEL_SECRET_SENTINEL".into();
+    db.collection::<Session>("sessions")
+        .insert_one(session)
+        .await
+        .unwrap();
+    let mut service: UserService = bson::from_document(model_fixture("user_services")).unwrap();
+    service.user_id = person.clone();
+    service.slug = "my-service".into();
+    service.catalog_service_id = Some("catalog-service".into());
+    db.collection::<UserService>("user_services")
+        .insert_one(service)
+        .await
+        .unwrap();
+    let mut channel: ChannelMessage =
+        bson::from_document(model_fixture("channel_messages")).unwrap();
+    channel.user_id = person.clone();
+    channel.callback_status = Some("delivered".into());
+    channel.thread_id = Some("interaction:MODEL_SECRET_SENTINEL".into());
+    db.collection::<ChannelMessage>("channel_messages")
+        .insert_one(channel)
+        .await
+        .unwrap();
+
+    let export = build(&db, &person).await.unwrap();
+    for collection in [
+        "assistant_messages",
+        "assistant_message_feedback",
+        "sessions",
+        "user_services",
+        "channel_messages",
+    ] {
+        let spec = explicit_export_spec(collection).unwrap();
+        let subsection = &export.sections[spec.section][spec.subsection];
+        assert_eq!(subsection.total_count, 1, "{collection}");
+        assert_eq!(subsection.items.len(), 1, "{collection}");
+        for field in spec.fields {
+            let path = format!("/{}", field.replace('.', "/"));
+            let value = subsection.items[0]
+                .pointer(&path)
+                .unwrap_or_else(|| panic!("{collection}.{field}"));
+            assert!(!value.is_null(), "{collection}.{field}");
+            assert!(
+                !value.as_str().is_some_and(str::is_empty),
+                "{collection}.{field}"
+            );
+        }
+    }
+    assert_eq!(
+        export.sections["assistant"]["assistant_messages"].items[0]["text"],
+        "My authored message"
+    );
+    assert_eq!(
+        export.sections["assistant"]["assistant_message_feedback"].items[0]["vote"],
+        "up"
+    );
+    assert!(
+        !serde_json::to_string(&export)
+            .unwrap()
+            .contains("MODEL_SECRET_SENTINEL")
+    );
+    db.drop().await.unwrap();
+}
