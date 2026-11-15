@@ -12,6 +12,9 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Irreversible supplemental result attempts, scoped to this settled reply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplemental_result_claims: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation_work: Option<super::trigger_run::AutomationWork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

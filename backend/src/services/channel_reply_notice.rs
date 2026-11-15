@@ -70,6 +70,7 @@ pub async fn failed(
                 if unknown { "The last send has an unknown outcome." } else { "A part was not delivered." });
             let notice_id = record.get_str("owner_notice_id").unwrap().to_owned();
         let message = AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),

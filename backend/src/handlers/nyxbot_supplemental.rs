@@ -25,6 +25,7 @@ pub struct Decision {
     pub purpose: Purpose,
     pub anchor: Anchor,
     pub event: Option<String>,
+    pub turn: Option<String>,
     egress: Egress,
     outcome: Outcome,
     reason: Option<Reason>,
@@ -35,6 +36,7 @@ impl Decision {
             purpose,
             anchor: Anchor::None,
             event: None,
+            turn: None,
             egress: Egress::Skipped,
             outcome: Outcome::Skipped,
             reason: Some(Reason::SourceUnavailable),
@@ -125,7 +127,13 @@ pub async fn event_anchor(
     )
     .await?
     {
-        Ok(Some(_)) => Ok(Some(id.clone())),
+        Ok(Some(message)) => match sources::result_window(decision.purpose, message.created_at) {
+            Ok(()) => Ok(Some(id.clone())),
+            Err(reason) => {
+                decision.skip(reason);
+                Ok(None)
+            }
+        },
         Ok(None) => {
             decision.skip(Reason::MissingAnchor);
             Ok(None)
@@ -147,18 +155,20 @@ pub async fn relay(
     text: &str,
     decision: &mut Decision,
 ) -> AppResult<()> {
-    if let Err(reason) = sources::reference_live(thread) {
-        decision.skip(reason);
-        return Ok(());
+    if !decision.purpose.result() {
+        if let Err(reason) = sources::reference_live(thread) {
+            decision.skip(reason);
+            return Ok(());
+        }
+        // Progress retains the original gateway-reference window.
+        let ciphertext = thread
+            .event_ref_ciphertext
+            .as_deref()
+            .ok_or_else(|| AppError::Internal("Event reference unavailable".into()))?;
+        let reference = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
+        std::str::from_utf8(&reference)
+            .map_err(|_| AppError::Internal("Event reference unavailable".into()))?;
     }
-    // Keep the existing gateway-send eligibility even though egress is local.
-    let ciphertext = thread
-        .event_ref_ciphertext
-        .as_deref()
-        .ok_or_else(|| AppError::Internal("Event reference unavailable".into()))?;
-    let reference = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
-    std::str::from_utf8(&reference)
-        .map_err(|_| AppError::Internal("Event reference unavailable".into()))?;
     if decrypt_agent_key(state, channel).await?.is_none() {
         decision.skip(Reason::AuthorityRefused);
         return Ok(());
@@ -174,6 +184,14 @@ pub async fn relay(
                 decision.skip(Reason::SourceUnavailable);
                 return Ok(());
             };
+            let result_anchor = if decision.purpose.result() {
+                let Some(id) = event_anchor(state, &event, channel, thread, decision).await? else {
+                    return Ok(());
+                };
+                Some(id)
+            } else {
+                None
+            };
             if late_delivery::eligible(state, &event, delivery, row)
                 .await?
                 .is_none()
@@ -181,10 +199,16 @@ pub async fn relay(
                 decision.skip(Reason::AuthorityRefused);
                 return Ok(());
             }
-            let Some(id) = event_anchor(state, &event, channel, thread, decision).await? else {
-                return Ok(());
-            };
-            id
+            match result_anchor {
+                Some(id) => id,
+                None => {
+                    let Some(id) = event_anchor(state, &event, channel, thread, decision).await?
+                    else {
+                        return Ok(());
+                    };
+                    id
+                }
+            }
         }
         sources::Source::Unbound => {
             match sources::chat_anchor(&state.db, channel, thread, decision.purpose).await? {
@@ -199,6 +223,52 @@ pub async fn relay(
             }
         }
     };
+    if decision.purpose.result() {
+        // Complete local authority and credential preparation before the claim;
+        // the ordinary adapter still revalidates immediately before sending.
+        use crate::handlers::channel_relay as relay;
+        let auth = route_key_auth(state, channel).await?;
+        let body = relay::AsyncReplyRequest {
+            message_id: id.clone(),
+            thread_reply: false,
+            reply: relay::AsyncReplyBody {
+                text: Some(text.to_owned()),
+                metadata: crate::services::channel_reply_plan::assistant_metadata(
+                    &channel.platform,
+                ),
+                attachments: Vec::new(),
+            },
+        };
+        let context =
+            relay::resolve_reply_request_context(state, &HeaderMap::new(), Some(&auth), &body)
+                .await?;
+        let adapter = relay::reply_adapter(state, &context)?;
+        let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+        crate::services::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            adapter.as_ref(),
+            &bot,
+        )
+        .await?;
+        prepare_result_text(
+            text,
+            &channel.platform,
+            thread.platform_chat_id.as_deref().unwrap_or_default(),
+        )?;
+        if let Err(reason) = sources::claim_result(
+            &state.db,
+            &row.user_id,
+            &row.id,
+            row.active_turn.as_ref().map(|t| t.turn_id.as_str()),
+            origin,
+        )
+        .await?
+        {
+            decision.skip(reason);
+            return Ok(());
+        }
+    }
     decision.dispatch(Egress::LocalRelay);
     crate::services::channel_reply_notice::supplemental(Box::pin(direct_reply(
         state, channel, &id, text, None,
@@ -269,20 +339,30 @@ pub async fn followed(
     }
     decision.event = Some(event.id.clone());
     decision.anchor = Anchor::ThreadBinding;
-    if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
-        decision.skip(Reason::ReferenceExpired);
-        return Ok(());
+    if decision.purpose.result() {
+        if let Err(reason) = sources::result_window(decision.purpose, event.created_at) {
+            decision.skip(reason);
+            return Ok(());
+        }
+    } else {
+        if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
+            decision.skip(Reason::ReferenceExpired);
+            return Ok(());
+        }
+        let Some(ciphertext) = &event.event_context_ciphertext else {
+            decision.skip(Reason::ReferenceUnavailable);
+            return Ok(());
+        };
+        let context: Value = serde_json::from_slice(&Zeroizing::new(
+            state.encryption_keys.decrypt(ciphertext).await?,
+        ))
+        .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
+        if context["event_ref"].as_str().is_none() {
+            decision.skip(Reason::ReferenceUnavailable);
+            return Ok(());
+        }
     }
-    let Some(ciphertext) = &event.event_context_ciphertext else {
-        decision.skip(Reason::ReferenceUnavailable);
-        return Ok(());
-    };
-    let context: Value = serde_json::from_slice(&Zeroizing::new(
-        state.encryption_keys.decrypt(ciphertext).await?,
-    ))
-    .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
-    if context["event_ref"].as_str().is_none() || decrypt_agent_key(state, channel).await?.is_none()
-    {
+    if decrypt_agent_key(state, channel).await?.is_none() {
         decision.skip(Reason::ReferenceUnavailable);
         return Ok(());
     }
@@ -302,6 +382,24 @@ pub async fn followed(
     {
         decision.skip(Reason::MissingAnchor);
         return Ok(());
+    }
+    if decision.purpose.result() {
+        // This shared resolver prepares live credentials and the exact admitted
+        // root without sending or acquiring an image delivery claim.
+        thread_follow::bound_image_audience(state, channel, owner, origin, conversation).await?;
+        prepare_result_text(text, &channel.platform, "")?;
+        if let Err(reason) = sources::claim_result(
+            &state.db,
+            owner,
+            conversation,
+            decision.turn.as_deref(),
+            origin,
+        )
+        .await?
+        {
+            decision.skip(reason);
+            return Ok(());
+        }
     }
     decision.dispatch(Egress::LocalRelay);
     let outcome = crate::services::channel_reply_notice::supplemental(Box::pin(
@@ -326,5 +424,19 @@ pub async fn followed(
         return Err(error);
     }
     decision.outcome("confirmed");
+    Ok(())
+}
+
+fn prepare_result_text(text: &str, platform: &str, chat: &str) -> AppResult<()> {
+    crate::services::channel_reply_plan::ordinary(
+        &crate::services::channel_platform::OutboundReply {
+            text: Some(text.to_owned()),
+            metadata: crate::services::channel_reply_plan::assistant_metadata(platform),
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
+        platform,
+        chat,
+    )?;
     Ok(())
 }

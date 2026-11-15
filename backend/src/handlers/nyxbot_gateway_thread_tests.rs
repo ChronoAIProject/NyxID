@@ -669,16 +669,9 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
         let (body, id) = f.input("start", ThreadAddress::Mention, false, true).await;
         assert!(f.send(&body, &id).await.contains("Here is your answer"));
         let child = f.children().await.remove(0);
-        let mut row = engine::get(
-            &f.state.db,
-            OWNER,
-            child.conversation_id.as_deref().unwrap(),
-        )
-        .await
-        .unwrap();
+        let row = followed_result_row(&f, &child).await;
         let origin = row.channel.clone().unwrap();
-        let turn_id = Uuid::new_v4().to_string();
-        row.active_turn=Some(bson::from_document(doc! {"turn_id":&turn_id,"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
+        let turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
         if !gateway {
             f.state
                 .db
@@ -1304,7 +1297,7 @@ async fn supplemental_followed_reply_preserves_thread_callback_variants_and_part
                 f.state.db.collection::<bson::Document>(MESSAGES).update_one(doc!{"_id":&id},doc!{"$set":{"thread_context":bson::to_bson(&body["event_context"]["activity"]["thread"]).unwrap()}}).await.unwrap();
                 assert!(Box::pin(f.send(&body,&id)).await.contains("Here is your answer"));
                 let child=f.children().await.remove(0);
-                let row=engine::get(&f.state.db,OWNER,child.conversation_id.as_deref().unwrap()).await.unwrap();
+                let row=followed_result_row(&f,&child).await;
                 let counter=std::sync::atomic::AtomicUsize::new(1);
                 Mock::given(path("/open-apis/im/v1/messages/om_root/reply")).respond_with(move |_:&wiremock::Request|ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":format!("om_part_{}",counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst))}}))).mount(&f.platform).await;
                 let token=crate::crypto::jwt::generate_relay_reply_token(&f.state.jwt_keys,&f.state.config,&f.row.route_api_key_id,f.row.route_id.as_deref().unwrap(),&id,"lark").unwrap();
@@ -1721,6 +1714,8 @@ async fn org_member_group_dm_group(linking_admin: bool) {
             .unwrap();
         }
         if phase == 2 {
+            let mut conversation = conversation.clone();
+            settled_result_turn(&f.state, &mut conversation).await;
             // Main's supplemental path must also accept the committed lane on
             // pre-upgrade events, without consuming the final reply capability.
             Box::pin(deliver_to_for(
@@ -2811,4 +2806,69 @@ async fn malformed_thread_reply_preserves_main_errors_token_and_health() {
         f.state.db.drop().await.unwrap();
     })
     .await;
+}
+
+async fn followed_result_row(
+    f: &Fixture,
+    child: &NyxbotThread,
+) -> crate::models::assistant_conversation::AssistantConversation {
+    let mut row = engine::get(
+        &f.state.db,
+        OWNER,
+        child.conversation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    settled_result_turn(&f.state, &mut row).await;
+    row
+}
+
+pub(super) async fn settled_result_turn(
+    state: &AppState,
+    row: &mut crate::models::assistant_conversation::AssistantConversation,
+) {
+    let saved = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(doc! {"conversation_id":&row.id,"user_id":&row.user_id,"role":"assistant"})
+        .sort(doc! {"seq":-1})
+        .await
+        .unwrap()
+        .unwrap();
+    row.active_turn=Some(bson::from_document(doc! {"turn_id":saved.get_str("turn_id").unwrap(),"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
+}
+
+#[tokio::test]
+async fn supplemental_result_window_followed_original_event_and_retention() {
+    Box::pin(async {
+        for case in ["late","expired","event_gone","inbound_gone","context_absent","context_bad"] {
+            let f=Box::pin(Fixture::new("result_window_followed")).await;
+            let (body,id)=Box::pin(f.input("start",ThreadAddress::Mention,false,true)).await;
+            f.state.db.collection::<bson::Document>(MESSAGES).update_one(doc! {"_id":&id},doc! {"$set":{"thread_context":bson::to_bson(&body["event_context"]["activity"]["thread"]).unwrap()}}).await.unwrap();
+            assert!(Box::pin(f.send(&body,&id)).await.contains("Here is your answer"));
+            let child=f.children().await.remove(0);
+            let row=followed_result_row(&f,&child).await;
+            let filter=doc! {"channel_id":&f.row.id,"event_id":&id};
+            let mut fields=doc! {"created_at":bson::DateTime::from_chrono(Utc::now()-if case=="expired" {ChronoDuration::hours(24)}else{ChronoDuration::minutes(30)})};
+            if case=="context_absent" { fields.insert("event_context_ciphertext",bson::Bson::Null); }
+            if case=="context_bad" { fields.insert("event_context_ciphertext",bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}); }
+            f.state.db.collection::<bson::Document>(EVENTS).update_one(filter.clone(),doc! {"$set":fields}).await.unwrap();
+            if case=="event_gone" { f.state.db.collection::<bson::Document>(EVENTS).delete_one(filter).await.unwrap(); }
+            if case=="inbound_gone" { f.state.db.collection::<bson::Document>(MESSAGES).delete_one(doc! {"_id":&id}).await.unwrap(); }
+            Mock::given(path("/open-apis/im/v1/messages/om_root/reply")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"message_id":"late-result"}}))).mount(&f.platform).await;
+            deliver_to_for(&f.state,&row,row.channel.as_ref().unwrap(),"late result",None,supplemental::Purpose::TeamResult).await;
+            let sends=f.platform.received_requests().await.unwrap().into_iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count();
+            let eligible=matches!(case,"late"|"context_absent"|"context_bad");
+            assert_eq!(sends,usize::from(eligible),"{case}");
+            let audit=f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"nyxbot_channel_supplemental_delivery"}).await.unwrap().unwrap();
+            let data=audit.get_document("event_data").unwrap();
+            if case=="expired" { assert_eq!(data.get_str("reason"),Ok("anchor_expired")); }
+            if eligible {
+                deliver_to_for(&f.state,&row,row.channel.as_ref().unwrap(),"late result",None,supplemental::Purpose::TeamResult).await;
+                assert_eq!(f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count(),1);
+            }
+            assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
+            f.state.db.drop().await.unwrap();
+        }
+    }).await;
 }

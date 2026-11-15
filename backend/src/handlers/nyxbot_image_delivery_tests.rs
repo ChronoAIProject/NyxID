@@ -703,7 +703,7 @@ async fn nyxbot_gateway_missing_anchor_fails_images_without_changing_text_target
 }
 
 #[tokio::test]
-async fn nyxbot_gateway_expired_event_reference_keeps_images_on_relay_and_text_off_it() {
+async fn nyxbot_gateway_expired_event_reference_keeps_images_before_local_result() {
     let (f, server) = image_fixture("telegram", "gateway").await;
     let attachments = add_images(&f).await;
     mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
@@ -746,8 +746,13 @@ async fn nyxbot_gateway_expired_event_reference_keeps_images_on_relay_and_text_o
     )
     .await;
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|r| r.url.path().ends_with("sendPhoto")));
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[..2]
+            .iter()
+            .all(|r| r.url.path().ends_with("sendPhoto"))
+    );
+    assert!(requests[2].url.path().ends_with("sendMessage"));
     assert!(sends(&f).await.is_empty());
     assert!(claim(&f).await.items.iter().all(|item| !matches!(
         item.state,

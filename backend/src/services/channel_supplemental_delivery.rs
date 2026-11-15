@@ -27,6 +27,10 @@ pub enum Purpose {
     PermissionResult,
 }
 impl Purpose {
+    pub fn result(self) -> bool {
+        matches!(self, Self::TeamResult | Self::TeamAdditionalResult)
+    }
+
     pub fn progress(self) -> bool {
         matches!(
             self,
@@ -56,6 +60,8 @@ pub enum Reason {
     SourceUnavailable,
     ReferenceUnavailable,
     ReferenceExpired,
+    AnchorExpired,
+    AlreadyClaimed,
     EmptyOutput,
     NoDestination,
 }
@@ -93,7 +99,6 @@ pub fn reference_live(thread: &NyxbotThread) -> Result<(), Reason> {
 }
 
 pub fn reference_anchor(thread: &NyxbotThread) -> Result<&str, Reason> {
-    reference_live(thread)?;
     let id = thread
         .event_ref_relay_message_id
         .as_deref()
@@ -219,7 +224,10 @@ pub async fn chat_anchor(
 ) -> AppResult<Result<(String, Anchor), Reason>> {
     if let Some(id) = &thread.last_relay_message_id {
         match validate_anchor(db, channel, thread, id, None).await? {
-            Ok(Some(_)) => return Ok(Ok((id.clone(), Anchor::ChatPointer))),
+            Ok(Some(message)) => {
+                return Ok(result_window(purpose, message.created_at)
+                    .map(|()| (id.clone(), Anchor::ChatPointer)));
+            }
             Err(reason) => return Ok(Err(reason)),
             Ok(None) => {}
         }
@@ -227,15 +235,92 @@ pub async fn chat_anchor(
     if purpose.progress() {
         return Ok(Err(Reason::MissingAnchor));
     }
+    if !purpose.result()
+        && let Err(reason) = reference_live(thread)
+    {
+        return Ok(Err(reason));
+    }
     let id = match reference_anchor(thread) {
         Ok(id) => id,
         Err(reason) => return Ok(Err(reason)),
     };
     Ok(
         match validate_anchor(db, channel, thread, id, None).await? {
-            Ok(Some(_)) => Ok((id.to_owned(), Anchor::ChatReferenceEvent)),
+            Ok(Some(message)) => result_window(purpose, message.created_at)
+                .map(|()| (id.to_owned(), Anchor::ChatReferenceEvent)),
             Ok(None) => Err(Reason::MissingAnchor),
             Err(reason) => Err(reason),
         },
     )
+}
+
+pub fn result_window(purpose: Purpose, created_at: DateTime<Utc>) -> Result<(), Reason> {
+    if purpose.result() && created_at + chrono::Duration::hours(24) <= Utc::now() {
+        Err(Reason::AnchorExpired)
+    } else {
+        Ok(())
+    }
+}
+
+/// The destination is stable across pointer refreshes and primary/additional routing.
+/// Followed children identify the original platform root without using an inbound ID.
+fn result_destination(origin: &ChannelOrigin) -> String {
+    let binding = origin
+        .thread
+        .as_ref()
+        .map(|b| (&b.child_id, b.generation, b.channel_generation, &b.agent_id));
+    let encoded = serde_json::to_vec(&(&origin.nyxbot_channel_id, &origin.partition, binding))
+        .expect("destination identifiers serialize");
+    let mut hash = Sha256::new();
+    hash.update(b"nyxbot-supplemental-result-v1\0");
+    hash.update(encoded);
+    format!("{:x}", hash.finalize())
+}
+
+/// A possibly committed claim never authorizes dispatch. This marker has no retry path.
+pub async fn claim_result(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    turn: Option<&str>,
+    origin: &ChannelOrigin,
+) -> AppResult<Result<(), Reason>> {
+    let Some(turn) = turn else {
+        return Ok(Err(Reason::SourceUnavailable));
+    };
+    let messages = db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
+    let identity = doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,"role":"assistant",
+    "status":{"$in":["completed","failed","cancelled"]}};
+    let Some(saved) = messages
+        .find_one(identity.clone())
+        .projection(doc! {"_id":1})
+        .await?
+    else {
+        return Ok(Err(Reason::SourceUnavailable));
+    };
+    let destination = result_destination(origin);
+    let mut filter = identity;
+    filter.insert(
+        "_id",
+        saved
+            .get("_id")
+            .cloned()
+            .ok_or_else(|| crate::errors::AppError::Internal("Settled reply unavailable".into()))?,
+    );
+    filter.insert("supplemental_result_claims", doc! {"$ne":&destination});
+    let claimed = messages
+        .update_one(
+            filter,
+            doc! {"$addToSet":{"supplemental_result_claims":destination}},
+        )
+        .await
+        // Database validation details can contain the marker; never log those details.
+        .map_err(|_| {
+            crate::errors::AppError::Internal("Supplemental result claim unavailable".into())
+        })?;
+    Ok(if claimed.modified_count == 1 {
+        Ok(())
+    } else {
+        Err(Reason::AlreadyClaimed)
+    })
 }

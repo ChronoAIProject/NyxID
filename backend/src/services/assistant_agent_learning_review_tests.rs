@@ -1592,6 +1592,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                supplemental_result_claims: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),

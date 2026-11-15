@@ -780,11 +780,27 @@ choices preserve bot owner, route key, platform, chat/topic/root and guest
 checks. Retained-message validation uses the existing primary-key index; no
 recent-event discovery query is added.
 
-The generic gateway reference still expires 29 minutes after its last refresh;
-a retained chat pointer does not extend that eligibility. After expiry, generic
-supplemental results remain in the transcript but their text is not sent.
-Followed results retain the original event's 29-minute window; permission
-occurrences retain their existing event/target gates. Direct and relay-era
+Relay-source gateway team and additional-chat results deliver within 24 hours
+of the selected retained inbound's `created_at`, and genuine followed results
+within 24 hours of the original retained event. At or past 24 hours they skip
+with `anchor_expired`, preserving the transcript. These results need no live or
+decryptable gateway reference; the paired fallback still requires its binding
+digest to match, but its reference expiry may be past. Retained-source and live
+authority checks, including agent-key presence, remain. Checking/capacity/machine
+progress keeps the original 29-minute reference gates and skip reasons;
+permission occurrences retain their own event/target gates.
+
+Widened results claim their exact settled assistant message per stable
+destination before text dispatch (#2462). Primary and additional delivery to
+the same chat share one claim. Repeated hooks audit `already_claimed` and do not
+send; a claim database error follows `source_unavailable` without sending.
+Confirmed, rejected, unknown and interrupted attempts are never retried. There
+is no preparation lease: a crash after the claim can lose the text. The optional
+serde-defaulted claim list is internal, absent from API/log/audit, and purged with
+the message. New replicas share it; old replicas ignore it and keep the 29-minute
+behavior until drained (also on rollback). There is no readiness gate or
+retroactive protection for pre-upgrade sends. Other transports and primary
+answer claims do not use this marker. Direct and relay-era
 `direct_reply` paths are unchanged. Failed local supplemental text keeps its
 receipts and audit without adding a primary-answer failure event to the web
 transcript. The existing live-turn notice claim selects
@@ -801,15 +817,16 @@ results as well as local sends/skips, their closed purpose/outcome/reason and
 anchor (`event_source`, `chat_pointer`, `chat_reference_event`, `thread_binding`,
 `none`), plus turn/event/conversation IDs. No text, inbound references, tokens
 or binding digests are recorded. No owner action is needed; drain old replicas
-to finish replacing the old supplemental egress.
+to apply the result window and claims everywhere.
 
 Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.
 Per-destination MongoDB image claims are taken inside the existing text claim for
 direct/late replies, gateway streams and automation results. Event-turn sends
-remain best-effort: images have durable claims, while their text keeps its prior
-best-effort semantics. A crash after event-turn images and before text can leave
-images without text. Text is not replayed. An attachment claimed by a new writer
+retain their image claims and image-before-text preparation. Widened relay-source
+results then acquire the supplemental text claim described above; other event-turn
+text retains its prior best-effort behavior. A crash after images and before text
+can leave images without text. Claimed text is not replayed. An attachment claimed by a new writer
 but not yet uploaded has a MongoDB-time preparation lease and is recovered
 independently under current authority; confirmed or uncertain uploads are never
 resent. See `docs/CHANNEL_BOT_RELAY.md` for the claim phases. Direct/late replies,

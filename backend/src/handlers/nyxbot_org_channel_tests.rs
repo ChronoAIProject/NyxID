@@ -1151,6 +1151,8 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             let (headers, jti) =
                 gateway_thread_tests::thread_reply_headers(&state, &row, &event_id);
             if phase == 2 {
+                let mut guest = guest.clone();
+                gateway_thread_tests::settled_result_turn(&state, &mut guest).await;
                 Box::pin(deliver_to_for(
                     &state,
                     &guest,
