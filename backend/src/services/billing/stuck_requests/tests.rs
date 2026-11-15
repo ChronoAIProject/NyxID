@@ -12,8 +12,15 @@ async fn roster(
 }
 async fn read_registry(f: &Fixture) -> AppResult<Registry> {
     super::super::hold_conservation::backlog::retry_snapshot_read(|| async {
-        let mut tx = f.db.client().start_session().snapshot(true).await?;
-        registry(&f.db, &mut tx).await
+        let mut tx = f.db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .await?;
+        let result = registry(&f.db, &mut tx).await;
+        let cleanup = tx.abort_transaction().await;
+        let registry = result?;
+        cleanup?;
+        Ok(registry)
     })
     .await
 }
