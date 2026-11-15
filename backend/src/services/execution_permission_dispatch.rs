@@ -1027,8 +1027,7 @@ pub(crate) fn prepare<'a>(
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
         context.observation.stage(diagnostics::Stage::Proposal);
-        super::assistant_model_observer::before_approval_request(&state.config.frontend_url, false)
-            .await?;
+        super::assistant_model_observer::before_approval_request(None).await?;
         chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
             c.approval_options()
         })
@@ -1039,7 +1038,6 @@ pub(crate) fn prepare<'a>(
             && let Some(chat) = chat
             && let Some(request) = proposals::create(
                 db,
-                &state.config.frontend_url,
                 keys,
                 context,
                 chat,

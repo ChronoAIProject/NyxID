@@ -8203,16 +8203,39 @@ async fn model_approval_proposal_claim_is_once_across_concurrent_attempts() {
         .await
         .unwrap()
         .unwrap();
-    let (a, b) = tokio::join!(
-        observed::CURRENT_MODEL.scope(
+    // The stop watcher must not see a proposal claim until its transaction
+    // commits, and an aborted insert must leave another attempt able to claim.
+    let mut aborted = db.client().start_session().await.unwrap();
+    aborted.start_transaction().await.unwrap();
+    observed::CURRENT_MODEL
+        .scope(
             Some(first.clone()),
-            observed::before_approval_request("https://example.test", true)
-        ),
-        observed::CURRENT_MODEL.scope(
-            Some(second.clone()),
-            observed::before_approval_request("https://example.test", true)
+            observed::before_approval_request(Some(&mut aborted)),
         )
-    );
+        .await
+        .unwrap();
+    let pending = get(&db, "owner", &row.id).await.unwrap();
+    assert!(observed::approval_error(pending.active_turn.as_ref().unwrap()).is_none());
+    aborted.abort_transaction().await.unwrap();
+    let claim = |request: observed::ModelRequest| {
+        let db = db.clone();
+        async move {
+            observed::CURRENT_MODEL
+                .scope(Some(request), async {
+                    let mut session = db.client().start_session().await?;
+                    session
+                        .start_transaction()
+                        .and_run2(async |session| {
+                            let result = observed::before_approval_request(Some(session)).await;
+                            crate::services::api_key_mutation_service::transaction_result(result)
+                        })
+                        .await
+                        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+                })
+                .await
+        }
+    };
+    let (a, b) = tokio::join!(claim(first.clone()), claim(second.clone()));
     assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1);
     assert!(
         matches!(a, Err(AppError::ApprovalUnsupported))

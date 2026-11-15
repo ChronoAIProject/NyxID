@@ -2995,11 +2995,7 @@ pub(super) async fn check_llm_approval_descriptor(
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
-    crate::services::assistant_model_observer::before_approval_request(
-        &state.config.frontend_url,
-        false,
-    )
-    .await?;
+    crate::services::assistant_model_observer::before_approval_request(None).await?;
     let notify_user_ids = approval_service::approval_notification_recipients(
         &state.db,
         &approval_owner_user_id,
