@@ -270,7 +270,7 @@ async fn export_reserved(
         .iter()
         .flat_map(|(name, subsections)| {
             subsections.iter().map(move |(subsection, value)| {
-                serde_json::json!({"section": name, "subsection": subsection, "count": value.items.len(), "total_count": value.total_count})
+                serde_json::json!({"section": name, "subsection": subsection, "count": value.items.len(), "total_count": value.total_count, "total_count_exact": value.total_count_exact})
             })
         })
         .collect();

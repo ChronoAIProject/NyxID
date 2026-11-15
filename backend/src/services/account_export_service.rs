@@ -29,6 +29,8 @@ pub struct ExportSpecError(pub String);
 pub struct ExportSubsection {
     pub items: Vec<serde_json::Value>,
     pub total_count: u64,
+    /// False means total_count is a lower bound, not the full matching total.
+    pub total_count_exact: bool,
     pub truncated: bool,
     pub unavailable: bool,
     /// Parent resolution was bounded; total_count covers only the resolved scope.
@@ -1634,6 +1636,9 @@ async fn query_rows(
 ) -> AppResult<ExportSubsection> {
     let base = source_pipeline(collection, filter.clone());
     let mut count_pipeline = base.clone();
+    // Stop after one sentinel beyond the delivery cap. Counting every match
+    // defeats bounded exports when residual predicates require fetching bodies.
+    count_pipeline.push(doc! {"$limit": SUBSECTION_ROW_CAP + 1});
     count_pipeline.push(doc! {"$count": "count"});
     let total_count = db
         .collection::<Document>(collection)
@@ -1680,6 +1685,7 @@ async fn query_rows(
     Ok(ExportSubsection {
         items,
         total_count,
+        total_count_exact: total_count <= SUBSECTION_ROW_CAP as u64,
         truncated,
         unavailable: false,
         scope_truncated: false,
@@ -1719,6 +1725,7 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
                                 ExportSubsection {
                                     items: Vec::new(),
                                     total_count: value.total_count,
+                                    total_count_exact: value.total_count_exact,
                                     truncated: value.truncated,
                                     unavailable: value.unavailable,
                                     scope_truncated: value.scope_truncated,
@@ -1880,6 +1887,7 @@ async fn build_with_limit(
                 ExportSubsection {
                     items: admitted.then_some(profile).into_iter().collect(),
                     total_count: 1,
+                    total_count_exact: true,
                     truncated: !admitted,
                     unavailable: false,
                     scope_truncated: false,
@@ -1898,6 +1906,7 @@ async fn build_with_limit(
                 ExportSubsection::default()
             };
             value.scope_truncated = scope_truncated;
+            value.total_count_exact &= !scope_truncated;
             value.truncated |= scope_truncated;
             Ok(ExportPage::from_read(value, limit, budget))
         }
@@ -2453,6 +2462,7 @@ mod tests {
                 ExportSubsection {
                     items: vec![serde_json::json!({"body": "x".repeat(64)}); 3],
                     total_count: 3,
+                    total_count_exact: true,
                     truncated: false,
                     unavailable: false,
                     scope_truncated: false,

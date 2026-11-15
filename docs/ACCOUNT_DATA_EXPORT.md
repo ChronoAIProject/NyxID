@@ -16,14 +16,21 @@ a source collection:
 {
   "items": [],
   "total_count": 42,
+  "total_count_exact": true,
   "truncated": false,
   "unavailable": false,
   "scope_truncated": false
 }
 ```
 
-Rows are newest first. A subsection reads at most 10,000 rows and reports the
-unbounded matching `total_count`; if more rows exist, `truncated` is true and
+Rows are newest first. A subsection exports at most 10,000 rows. Its count query
+stops at 10,001 matching rows, across every kind of record. `total_count` remains
+a numeric count: when `total_count_exact` is true it is the full matching total;
+when false it is a lower bound (normally 10,001), and more rows may exist.
+A bounded parent scope also makes the count a lower bound, even below 10,001.
+An unavailable source has an unknown total (`total_count: 0`,
+`total_count_exact: false`), rather than evidence that it is empty.
+If more rows exist, `truncated` is true and
 its fully qualified name (`section.subsection`) appears in
 `truncated_sections`. The complete serialized document is capped at 32 MiB;
 64 KiB is reserved for the envelope and metadata. The remaining bytes initially

@@ -144,7 +144,7 @@ async fn fifty_thousand_messages_use_batched_indexed_reads_within_timeout() {
         .await
         .unwrap();
     for base in (0..50_000).step_by(1000) {
-        db.collection::<Document>("assistant_messages").insert_many((base..base+1000).map(|i|doc! {"_id":format!("message-{i}"),"user_id":"person","conversation_id":format!("conversation-{:03}",i/500),"seq":i%500,"created_at":bson::DateTime::from_millis(i64::from(i)),"role":"assistant","origin":"user","text":"private reply"})).await.unwrap();
+        db.collection::<Document>("assistant_messages").insert_many((base..base+1000).map(|i|doc! {"_id":format!("message-{i}"),"user_id":"person","conversation_id":format!("conversation-{:03}",i/500),"seq":i%500,"created_at":bson::DateTime::from_millis(i64::from(i)),"role":"assistant","origin":"user","text":"x".repeat(4096)})).await.unwrap();
     }
     let started = std::time::Instant::now();
     let (filter, truncated) = message_scope(&db, "person").await.unwrap();
@@ -173,9 +173,17 @@ async fn fifty_thousand_messages_use_batched_indexed_reads_within_timeout() {
     .await
     .unwrap();
     let elapsed = started.elapsed();
-    eprintln!("50,000-message export: {:?}, 10,000 rows, IXSCAN", elapsed);
-    assert_eq!(result.total_count, 50_000);
-    assert_eq!(result.items.len(), 10_000);
+    eprintln!(
+        "50,000-message export (4 KiB text/row): {:?}, {} rows, bounded lower count {}, IXSCAN",
+        elapsed,
+        result.items.len(),
+        result.total_count
+    );
+    assert_eq!(result.total_count, SUBSECTION_ROW_CAP as u64 + 1);
+    assert!(!result.total_count_exact);
+    assert!(result.truncated);
+    assert!(!result.unavailable);
+    assert!(!result.items.is_empty() && result.items.len() <= SUBSECTION_ROW_CAP as usize);
     assert!(elapsed < QUERY_TIMEOUT, "{elapsed:?}");
     db.drop().await.unwrap();
 }
@@ -281,6 +289,7 @@ async fn pending_deliveries_do_not_hide_private_conversations_or_unrouted_replie
     .await
     .unwrap();
     assert_eq!(messages.total_count, 1);
+    assert!(messages.total_count_exact);
     assert_eq!(messages.items[0]["text"], "private reply");
     db.drop().await.unwrap();
 }
