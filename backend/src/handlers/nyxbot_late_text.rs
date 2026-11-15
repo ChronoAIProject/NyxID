@@ -89,19 +89,28 @@ pub(super) async fn send(
     for (index, part) in parts.into_iter().enumerate().skip(saved.next as usize) {
         let index = index as u32;
         let guard = {
+            let bot_id = channel.channel_bot_id.clone();
             let state = state.clone();
             let event = event.clone();
             let d = d.clone();
             let conversation = conversation.clone();
             let claim = claim.to_owned();
             std::sync::Arc::new(move || {
+                let bot_id = bot_id.clone();
                 let state = state.clone();
                 let event = event.clone();
                 let d = d.clone();
                 let conversation = conversation.clone();
                 let claim = claim.clone();
                 Box::pin(async move {
-                    if eligible(&state, &event, &d, &conversation).await?.is_none() {
+                    let checked = crate::services::platform_bot_authority::read_personal_routes(
+                        &state.db, &bot_id,
+                    )
+                    .await?;
+                    if eligible_with(&state, &event, &d, &conversation, Some(&checked))
+                        .await?
+                        .is_none()
+                    {
                         return Err(AppError::Forbidden(
                             "Channel answer authority changed".into(),
                         ));

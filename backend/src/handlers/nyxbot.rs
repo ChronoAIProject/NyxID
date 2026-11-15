@@ -187,9 +187,18 @@ pub(crate) async fn resolve_bot_ref(
 /// Check durable authority before rollout availability, so a paused binding is
 /// still released promptly on real revocation. Database errors are never loss.
 pub(crate) async fn org_access(state: &AppState, row: &NyxbotChannel) -> AppResult<OrgAccess> {
-    if !crate::services::platform_bot_authority::permits_personal_routes(
+    org_access_with(state, row, None).await
+}
+
+async fn org_access_with(
+    state: &AppState,
+    row: &NyxbotChannel,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<OrgAccess> {
+    if !crate::services::platform_bot_authority::permits_with(
         &state.db,
         &row.channel_bot_id,
+        checked,
     )
     .await?
     {
@@ -204,7 +213,15 @@ pub(crate) async fn org_access(state: &AppState, row: &NyxbotChannel) -> AppResu
 }
 
 async fn require_org_access(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
-    match org_access(state, row).await? {
+    require_org_access_with(state, row, None).await
+}
+
+async fn require_org_access_with(
+    state: &AppState,
+    row: &NyxbotChannel,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<()> {
+    match org_access_with(state, row, checked).await? {
         OrgAccess::Holds => Ok(()),
         OrgAccess::Lost => {
             Box::pin(release_org_channel(state, row)).await?;
@@ -6564,12 +6581,21 @@ pub(crate) async fn route_key_auth(
     state: &AppState,
     channel: &NyxbotChannel,
 ) -> AppResult<crate::mw::auth::AuthUser> {
-    crate::services::platform_bot_authority::require_personal_routes(
+    route_key_auth_with(state, channel, None).await
+}
+
+async fn route_key_auth_with(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<crate::mw::auth::AuthUser> {
+    crate::services::platform_bot_authority::require_with(
         &state.db,
         &channel.channel_bot_id,
+        checked,
     )
     .await?;
-    require_org_access(state, channel).await?;
+    require_org_access_with(state, channel, checked).await?;
     let key_owner = bot_owner(channel);
     let key = key_service::get_api_key(&state.db, key_owner, &channel.route_api_key_id).await?;
     let mut auth = super::assistant_team::owner_auth(key_owner)?;

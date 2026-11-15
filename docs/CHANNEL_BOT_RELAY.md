@@ -2835,3 +2835,9 @@ one “Delivery unconfirmed” notice. Attachments keep their separate existing
 send barriers. Generic relay calls remain passthrough and gain no content store.
 See [the late-answer contract](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes)
 for timeouts and rolling-upgrade/rollback behavior.
+
+Within one provider-boundary authority check, helpers share one fresh bot
+ownership observation (bot, platform installation and profile reservation) and
+one loaded scheduled destination. This does not cache authority across effects:
+each attachment upload, text part and subsequent provider effect reads it again.
+A confirmed prefix never authorizes its suffix.

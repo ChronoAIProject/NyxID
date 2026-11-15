@@ -668,6 +668,16 @@ pub(super) async fn eligible(
     d: &ChannelTurnDelivery,
     conversation: &AssistantConversation,
 ) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    eligible_with(state, event, d, conversation, None).await
+}
+
+pub(super) async fn eligible_with(
+    state: &AppState,
+    event: &NyxbotEvent,
+    d: &ChannelTurnDelivery,
+    conversation: &AssistantConversation,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
     let (channel, thread) = if d.origin.thread.is_some() {
         // Each admitted native-thread turn has its own source binding. A newer
         // turn can update conversation.channel; never compare that full binding
@@ -684,7 +694,14 @@ pub(super) async fn eligible(
             thread,
         )
     } else {
-        let Some(target) = delivery_target(state, conversation, &d.origin).await? else {
+        let Some(target) = crate::services::channel_turn_delivery::target_with(
+            &state.db,
+            conversation,
+            &d.origin,
+            checked,
+        )
+        .await?
+        else {
             return Ok(None);
         };
         target
@@ -693,7 +710,7 @@ pub(super) async fn eligible(
         return Ok(None);
     }
     // An unavailable rollout/dependency leaves pending delivery retryable.
-    require_org_access(state, &channel).await?;
+    require_org_access_with(state, &channel, checked).await?;
     if state
         .db
         .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
@@ -815,7 +832,12 @@ pub(super) async fn eligible(
     {
         return Ok(None);
     }
-    let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+    let bot = crate::services::platform_bot_authority::bot_with(
+        &state.db,
+        &channel.channel_bot_id,
+        checked,
+    )
+    .await?;
     if !bot.is_active || bot.status == "suspended" {
         return Ok(None);
     }

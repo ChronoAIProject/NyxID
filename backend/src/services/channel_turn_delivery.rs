@@ -86,7 +86,7 @@ pub(crate) async fn validate_guest_setup_in_session(
     if !row.guest_turn || !delivery.guest || event.expires_at <= Utc::now() {
         return Err(refused());
     }
-    let (channel, thread) = target_in_session(db, row, &delivery.origin, session, true)
+    let (channel, thread) = target_in_session(db, row, &delivery.origin, session, true, None)
         .await?
         .ok_or_else(refused)?;
     let custom_binding_allowed = if let Some(binding_id) = event.custom_binding_id.as_deref() {
@@ -631,7 +631,8 @@ pub async fn queued_origin_in_session(
     else {
         return Ok(None);
     };
-    let Some((mut channel, thread)) = target_in_session(db, &row, &d.origin, session, true).await?
+    let Some((mut channel, thread)) =
+        target_in_session(db, &row, &d.origin, session, true, None).await?
     else {
         return Ok(None);
     };
@@ -848,8 +849,17 @@ pub async fn target(
     row: &crate::models::assistant_conversation::AssistantConversation,
     origin: &crate::models::assistant_conversation::ChannelOrigin,
 ) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    target_with(db, row, origin, None).await
+}
+
+pub(crate) async fn target_with(
+    db: &Database,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &crate::models::assistant_conversation::ChannelOrigin,
+    checked: Option<&super::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
     let mut session = db.client().start_session().await?;
-    target_in_session(db, row, origin, &mut session, false).await
+    target_in_session(db, row, origin, &mut session, false, checked).await
 }
 
 async fn target_in_session(
@@ -858,6 +868,7 @@ async fn target_in_session(
     origin: &crate::models::assistant_conversation::ChannelOrigin,
     session: &mut ClientSession,
     fence: bool,
+    checked: Option<&super::platform_bot_authority::PersonalRouteCheck>,
 ) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
     use crate::models::nyxbot_channel::{
         COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as THREADS,
@@ -896,7 +907,7 @@ async fn target_in_session(
         }
         let channel = access.channel().clone();
         let Some(thread)=db.collection::<NyxbotThread>(THREADS).find_one(doc!{"channel_id":&channel.id,"user_id":&channel.user_id,"partition":&origin.partition}).session(&mut *session).await? else {return Ok(None)};
-        if !super::platform_bot_authority::permits_personal_routes(db, &channel.channel_bot_id)
+        if !super::platform_bot_authority::permits_with(db, &channel.channel_bot_id, checked)
             .await?
         {
             return Ok(None);
@@ -926,7 +937,7 @@ async fn target_in_session(
     else {
         return Ok(None);
     };
-    if !super::platform_bot_authority::permits_personal_routes(db, &channel.channel_bot_id).await? {
+    if !super::platform_bot_authority::permits_with(db, &channel.channel_bot_id, checked).await? {
         return Ok(None);
     }
     if let Some(org) = &channel.bot_owner_id {
