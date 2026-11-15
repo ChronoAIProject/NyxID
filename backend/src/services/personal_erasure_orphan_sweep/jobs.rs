@@ -131,6 +131,8 @@ fn page_range(job: &str) -> Document {
     doc! {"_id": {"$gte": format!("{job}:"), "$lt": format!("{job};")}}
 }
 
+const APPLY_ACTIVE: &str = "An apply is already pending for this dry-run";
+
 const REVIEWED_UNAVAILABLE: &str = "Reviewed dry-run expired or unavailable; run a new dry-run";
 
 fn reviewed_filter(digest: &str) -> Document {
@@ -193,38 +195,68 @@ pub async fn start(
         created_at: bson::DateTime::now(),
         updated_at: bson::DateTime::now(),
     };
-    if let Some(source) = &job.source_job_id {
-        let mut tx = db.client().start_session().await?;
-        tx.start_transaction()
-            .read_concern(ReadConcern::snapshot())
-            .write_concern(WriteConcern::majority())
-            .await?;
-        let result: AppResult<()> = async {
-            if db
-                .collection::<Document>(JOBS)
-                .update_one(
-                    {
-                        let mut filter = reviewed_filter(expected.unwrap_or_default());
-                        filter.insert("_id", source);
-                        filter
-                    },
-                    doc! {"$inc":{"apply_references":1}},
-                )
-                .session(&mut tx)
-                .await?
-                .matched_count
-                != 1
-            {
-                return Err(AppError::Conflict(REVIEWED_UNAVAILABLE.into()));
-            }
-            db.collection::<Job>(JOBS)
-                .insert_one(&job)
-                .session(&mut tx)
-                .await?;
-            Ok(())
-        }
-        .await;
-        super::super::org_membership_authority::finish(tx, result).await?;
+    if job.source_job_id.is_some() {
+        // A source-document CAS makes racing admissions conflict on one write,
+        // rather than both passing a snapshot read of the apply-job collection.
+        let context = (
+            db.clone(),
+            job.clone(),
+            expected.unwrap_or_default().to_owned(),
+        );
+        super::super::transaction_service::run_db_only(db, &context, |tx, (db, job, digest)| {
+            Box::pin(async move {
+                let source = job
+                    .source_job_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::Internal("Apply source missing".into()))?;
+                let mut filter = reviewed_filter(digest);
+                filter.insert("_id", source);
+                filter.insert("active_apply_job_id", Bson::Null);
+                let updated = db
+                    .collection::<Document>(JOBS)
+                    .update_one(
+                        filter,
+                        doc! {"$set":{"active_apply_job_id":&job.id},"$inc":{"apply_references":1}},
+                    )
+                    .session(&mut *tx)
+                    .await?;
+                if updated.matched_count != 1 {
+                    let mut valid = reviewed_filter(digest);
+                    valid.insert("_id", source);
+                    let available = db
+                        .collection::<Document>(JOBS)
+                        .find_one(valid)
+                        .session(&mut *tx)
+                        .await?
+                        .is_some();
+                    return Err(AppError::Conflict(
+                        if available {
+                            APPLY_ACTIVE
+                        } else {
+                            REVIEWED_UNAVAILABLE
+                        }
+                        .into(),
+                    ));
+                }
+                // Pending jobs admitted before the source fence existed also
+                // retain exclusive use of their reviewed pages.
+                if db
+                    .collection::<Document>(JOBS)
+                    .find_one(doc! {"source_job_id":source,"status":"pending"})
+                    .session(&mut *tx)
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::Conflict(APPLY_ACTIVE.into()));
+                }
+                db.collection::<Job>(JOBS)
+                    .insert_one(job)
+                    .session(tx)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await?;
     } else {
         db.collection::<Job>(JOBS).insert_one(&job).await?;
     }
@@ -239,19 +271,44 @@ pub async fn status(db: &mongodb::Database, id: &str) -> AppResult<SweepStatus> 
         .ok_or_else(|| AppError::NotFound("Orphan sweep not found".into()))
 }
 
+/// Release only this apply's source fence, atomically with its terminal status.
+async fn release_source_in_session(
+    db: &mongodb::Database,
+    job: &Job,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    if job.apply
+        && matches!(job.status.as_str(), "complete" | "failed")
+        && let Some(source) = &job.source_job_id
+    {
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id":source,"active_apply_job_id":&job.id},
+                doc! {"$unset":{"active_apply_job_id":""}},
+            )
+            .session(tx)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn claim(db: &mongodb::Database) -> AppResult<Option<Job>> {
     // An expired, still-tokened lease is a failed attempt even when the old
-    // process died before it could record its error. A successor owns this
-    // increment atomically with the new claim.
-    Ok(db.collection::<Job>(JOBS).find_one_and_update(
-        doc! {"status": "pending", "$expr": {"$lte": [{"$ifNull": ["$lease_until", bson::DateTime::from_millis(0)]}, "$$NOW"]}},
-        vec![doc! {"$set": {
-            "consecutive_failures":{"$add":[{"$ifNull":["$consecutive_failures",0]}, {"$cond":[{"$ne":[{"$ifNull":["$lease_token",Bson::Null]},Bson::Null]},1,0]}]},
-            "lease_token": Uuid::new_v4().to_string(), "updated_at": "$$NOW",
-            "lease_until": {"$dateAdd": {"startDate": "$$NOW", "unit": "second", "amount": LEASE_SECONDS}}
-        }}, failure_limit_stage()],
-    ).sort(doc! {"updated_at": 1, "_id": 1}).return_document(ReturnDocument::After)
-        .write_concern(WriteConcern::majority()).await?)
+    // process died before recording its error. Terminal claims must release
+    // the source fence in this same transaction.
+    super::super::transaction_service::run_db_only(db, db, |tx, db| Box::pin(async move {
+        let job = db.collection::<Job>(JOBS).find_one_and_update(
+            doc! {"status": "pending", "$expr": {"$lte": [{"$ifNull": ["$lease_until", bson::DateTime::from_millis(0)]}, "$$NOW"]}},
+            vec![doc! {"$set": {
+                "consecutive_failures":{"$add":[{"$ifNull":["$consecutive_failures",0]}, {"$cond":[{"$ne":[{"$ifNull":["$lease_token",Bson::Null]},Bson::Null]},1,0]}]},
+                "lease_token": Uuid::new_v4().to_string(), "updated_at": "$$NOW",
+                "lease_until": {"$dateAdd": {"startDate": "$$NOW", "unit": "second", "amount": LEASE_SECONDS}}
+            }}, failure_limit_stage()],
+        ).sort(doc! {"updated_at": 1, "_id": 1}).return_document(ReturnDocument::After)
+            .session(&mut *tx).await?;
+        if let Some(job) = &job { release_source_in_session(db, job, tx).await?; }
+        Ok(job)
+    })).await
 }
 
 fn failure_limit_stage() -> Document {
@@ -262,10 +319,12 @@ fn failure_limit_stage() -> Document {
 }
 
 async fn record_failure(db: &mongodb::Database, job: &Job) -> AppResult<()> {
-    // The token, not an unexpired timestamp, fences this failure write. If a
-    // successor claimed first it records the expired attempt itself instead.
-    db.collection::<Document>(JOBS)
-        .update_one(
+    // The token, not an unexpired timestamp, fences this write. A successor
+    // claiming first records the expired attempt instead.
+    let context = (db.clone(), job.clone());
+    super::super::transaction_service::run_db_only(db, &context, |tx, (db, job)| {
+        Box::pin(async move {
+            let failed = db.collection::<Job>(JOBS).find_one_and_update(
             doc! {"_id":&job.id,"status":"pending","lease_token":&job.lease_token},
             vec![
                 doc! {"$set": {
@@ -274,10 +333,14 @@ async fn record_failure(db: &mongodb::Database, job: &Job) -> AppResult<()> {
                 }},
                 failure_limit_stage(),
             ],
-        )
-        .write_concern(WriteConcern::majority())
-        .await?;
-    Ok(())
+        ).return_document(ReturnDocument::After).session(&mut *tx).await?;
+            if let Some(failed) = &failed {
+                release_source_in_session(db, failed, tx).await?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 async fn save_in_session(
@@ -313,8 +376,9 @@ async fn save_in_session(
             doc! {"_id": &job.id},
             doc! {"$set": stored, "$currentDate": {"updated_at": true}},
         )
-        .session(tx)
+        .session(&mut *tx)
         .await?;
+    release_source_in_session(db, job, tx).await?;
     Ok(())
 }
 
@@ -945,6 +1009,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_applies_share_a_source_fence_until_completion() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("orphan_apply_admission").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let dry = start(&db, "operator", false, None).await.unwrap();
+        let report = finish(&db, &dry.job_id).await.unwrap();
+        let (left, right) = tokio::join!(
+            start(&db, "operator-a", true, Some(&report.digest)),
+            start(&db, "operator-b", true, Some(&report.digest)),
+        );
+        let (admitted, refused) = match (left, right) {
+            (Ok(job), Err(error)) | (Err(error), Ok(job)) => (job, error),
+            _ => panic!("exactly one concurrent apply must be admitted"),
+        };
+        assert!(matches!(refused, AppError::Conflict(message) if message == APPLY_ACTIVE));
+        let source = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id":&dry.job_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.get_str("active_apply_job_id").unwrap(),
+            admitted.job_id
+        );
+        finish(&db, &admitted.job_id).await.unwrap();
+        let second = start(&db, "operator", true, Some(&report.digest))
+            .await
+            .unwrap();
+        finish(&db, &second.job_id).await.unwrap();
+        assert_eq!(
+            db.collection::<Document>(JOBS)
+                .find_one(doc! {"_id":&dry.job_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get("active_apply_job_id"),
+            None
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_and_abandoned_applies_release_the_source_fence_atomically() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("orphan_apply_terminal_fence")
+                .await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let dry = start(&db, "operator", false, None).await.unwrap();
+        let report = finish(&db, &dry.job_id).await.unwrap();
+        for abandoned in [false, true] {
+            let apply = start(&db, "operator", true, Some(&report.digest))
+                .await
+                .unwrap();
+            let job = claim(&db).await.unwrap().unwrap();
+            assert_eq!(job.id, apply.job_id);
+            db.collection::<Document>(JOBS).update_one(doc! {"_id":&job.id}, doc! {"$set":{
+                "consecutive_failures":RETRY_CAP-1, "lease_until":bson::DateTime::from_millis(0)
+            }}).await.unwrap();
+            if abandoned {
+                let successor = claim(&db).await.unwrap().unwrap();
+                assert_eq!(successor.status, "failed");
+                // The dead worker cannot reclaim or change a successor's outcome.
+                record_failure(&db, &job).await.unwrap();
+            } else {
+                record_failure(&db, &job).await.unwrap();
+            }
+            assert_eq!(
+                status(&db, &apply.job_id).await.unwrap().failure.as_deref(),
+                Some("page_retry_limit_exceeded")
+            );
+            assert_eq!(
+                db.collection::<Document>(JOBS)
+                    .find_one(doc! {"_id":&dry.job_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get("active_apply_job_id"),
+                None
+            );
+        }
+        // A terminal checkpoint and its fence release roll back together.
+        let apply = start(&db, "operator", true, Some(&report.digest))
+            .await
+            .unwrap();
+        let mut job = claim(&db).await.unwrap().unwrap();
+        job.status = "failed".into();
+        job.failure = Some("ownership_specification_changed".into());
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction()
+            .read_concern(ReadConcern::snapshot())
+            .write_concern(WriteConcern::majority())
+            .await
+            .unwrap();
+        save_in_session(&db, &job, Vec::new(), &mut tx)
+            .await
+            .unwrap();
+        assert!(
+            db.collection::<Document>(JOBS)
+                .find_one(doc! {"_id":&dry.job_id,"active_apply_job_id":&apply.job_id})
+                .session(&mut tx)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tx.abort_transaction().await.unwrap();
+        assert!(
+            matches!(start(&db,"operator",true,Some(&report.digest)).await, Err(AppError::Conflict(message)) if message == APPLY_ACTIVE)
+        );
+        save(&db, &job, Vec::new()).await.unwrap();
+        // An ordinary abandoned claim can resume, complete, and release too.
+        let recovered = start(&db, "operator", true, Some(&report.digest))
+            .await
+            .unwrap();
+        let dead = claim(&db).await.unwrap().unwrap();
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id":&dead.id},
+                doc! {"$set":{"lease_until":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        finish(&db, &recovered.job_id).await.unwrap();
+        let next = start(&db, "operator", true, Some(&report.digest))
+            .await
+            .unwrap();
+        finish(&db, &next.job_id).await.unwrap();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn repeated_digest_retries_rows_after_remote_cleanup_clears() {
         let db =
             crate::test_utils::connect_transaction_test_database("orphan_blocked_reapply").await;
@@ -979,9 +1174,7 @@ mod tests {
             .update_one(doc! {"_id":"remote"}, doc! {"$set":{"completed":true}})
             .await
             .unwrap();
-        let next = scan(&db).await.unwrap();
-        assert_eq!(next.digest, dry.digest);
-        let second = start(&db, "operator", true, Some(&next.digest))
+        let second = start(&db, "operator", true, Some(&dry.digest))
             .await
             .unwrap();
         assert_eq!(second.status, "pending");
