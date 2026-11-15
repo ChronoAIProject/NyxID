@@ -193,14 +193,18 @@ Integrity also exposes a read-only `billing_hold_backlog` inventory of unfinishe
 wallet, grant and allowance rows, grouped by meter status and creation age
 (under one hour, 1–24 hours, 1–7 days, over seven days). It shows row counts,
 outstanding holds and distinct resources, wallets and owners; allowance units
-stay separated by metric. Each kind uses its own snapshot of meter rows and
-joined resource locks, excluding recorded returns and matching applied locks.
+stay separated by metric. Each kind uses a read-only snapshot transaction for
+meter rows, cursor batches and joined resource locks, excluding recorded returns
+and matching applied locks. Aborting the transaction at the end releases its
+pinned history.
 Each kind scans at most 10,000 rows using the existing partial indexes, with a
 three-second server and four-second overall client bound. Expired or unavailable
 snapshots retry from scratch up to eight times within that same client bound;
 partial attempts are discarded. Truncation, malformed rows or exhausted reads
 make that kind explicitly incomplete; unavailable reads show no totals and are
-retried on the next page read.
+retried on the next page read. Failure details include a stable reason, stage,
+elapsed milliseconds and database error code when available, never raw queries
+or driver messages.
 These are amounts still held, not proof of abandonment or permission to charge
 or release them. Conservation diagnostics separately count affected resources
 and wallets, including resources without a wallet. Reading these diagnostics changes no counters and adds no work to billed

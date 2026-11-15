@@ -1,7 +1,8 @@
 //! Read-only inventory of unfinished funded rows. Age alone is not abandonment.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -9,7 +10,7 @@ use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database,
     bson::{self, Document, doc},
-    options::{CollectionOptions, Hint, ReadConcern},
+    options::{Hint, ReadConcern},
 };
 use serde::Deserialize;
 
@@ -397,14 +398,11 @@ async fn scan_once(
     session: &mut ClientSession,
     collection: &str,
     limit: usize,
+    stage: &Mutex<&'static str>,
 ) -> AppResult<Inventory> {
+    *stage.lock().unwrap() = "aggregate";
     let mut cursor = db
-        .collection_with_options::<Document>(
-            METERS,
-            CollectionOptions::builder()
-                .read_concern(ReadConcern::snapshot())
-                .build(),
-        )
+        .collection::<Document>(METERS)
         .aggregate(pipeline(collection, limit))
         .hint(Hint::Keys(live_index(collection)))
         .max_time(QUERY_TIMEOUT)
@@ -412,12 +410,21 @@ async fn scan_once(
         .session(&mut *session)
         .await?;
     let mut result = Inventory::default();
-    while let Some(row) = cursor.stream(&mut *session).try_next().await? {
+    loop {
+        *stage.lock().unwrap() = "cursor";
+        let Some(row) = cursor.stream(&mut *session).try_next().await? else {
+            break;
+        };
         if result.rows == limit {
             result.truncated = true;
             break;
         }
+        *stage.lock().unwrap() = "decode";
         result.add(collection, row)?;
+        #[cfg(test)]
+        if result.rows == 1 {
+            tests::pause_cursor().await;
+        }
     }
     Ok(result)
 }
@@ -446,20 +453,92 @@ where
     unreachable!()
 }
 
-async fn scan(db: &Database, collection: &str, limit: usize) -> AppResult<Inventory> {
-    // A kind's meter rows and joined resource locks share one snapshot. An
-    // outside-transaction session does not pin history between commands: do
-    // not retain its timestamp across kinds or retry an expired timestamp.
-    // Restart the entire aggregate/cursor; a failed attempt's totals are local.
-    tokio::time::timeout(
+// Only stable metadata is exposed: driver messages may contain query values.
+#[derive(Debug)]
+struct ReadFailure {
+    reason: &'static str,
+    stage: &'static str,
+    database_code: Option<i32>,
+}
+impl ReadFailure {
+    fn from_error(error: &AppError, stage: &'static str) -> Self {
+        use mongodb::error::ErrorKind;
+        let mut code = None;
+        let reason = match error {
+            AppError::DatabaseError(error) => match error.kind.as_ref() {
+                ErrorKind::Command(command) => {
+                    code = Some(command.code);
+                    match command.code {
+                        50 | 262 => "query_timeout",
+                        239 | 246 => "snapshot_unavailable",
+                        27 => "index_unavailable",
+                        2 if command.message.contains("hint") => "index_unavailable",
+                        _ => "database_error",
+                    }
+                }
+                ErrorKind::BsonDeserialization(_) => "row_decode_error",
+                _ => "database_unavailable",
+            },
+            _ => "row_decode_error",
+        };
+        Self {
+            reason,
+            stage,
+            database_code: code,
+        }
+    }
+    fn metadata(&self) -> String {
+        let mut value = format!("reason={} stage={}", self.reason, self.stage);
+        if let Some(code) = self.database_code {
+            value.push_str(&format!(" database_code={code}"));
+        }
+        value
+    }
+}
+
+async fn scan(db: &Database, collection: &str, limit: usize) -> Result<Inventory, ReadFailure> {
+    let stage = Mutex::new("session");
+    // Pin each kind's rows and joined locks across the aggregate and getMore.
+    // Retrying an outside-transaction snapshot cannot protect its history.
+    // Every retry discards its totals and starts a fresh read-only transaction.
+    let result = tokio::time::timeout(
         CLIENT_TIMEOUT,
         retry_snapshot_read(|| async {
-            let mut session = db.client().start_session().snapshot(true).await?;
-            scan_once(db, &mut session, collection, limit).await
+            *stage.lock().unwrap() = "session";
+            let mut session = db.client().start_session().await?;
+            *stage.lock().unwrap() = "snapshot_start";
+            session
+                .start_transaction()
+                .read_concern(ReadConcern::snapshot())
+                .await?;
+            let result = scan_once(db, &mut session, collection, limit, &stage).await;
+            let failed_stage = *stage.lock().unwrap();
+            *stage.lock().unwrap() = "snapshot_release";
+            // No writes to commit. Cancellation also queues an abort on drop.
+            let cleanup = session.abort_transaction().await;
+            match result {
+                Err(error) => {
+                    *stage.lock().unwrap() = failed_stage;
+                    Err(error)
+                }
+                Ok(inventory) => {
+                    cleanup?;
+                    Ok(inventory)
+                }
+            }
         }),
     )
-    .await
-    .map_err(|_| AppError::Internal("Hold inventory read timed out".into()))?
+    .await;
+    let stage = *stage.lock().unwrap();
+    match result {
+        Ok(Ok(inventory)) => Ok(inventory),
+        Ok(Err(error)) => Err(ReadFailure::from_error(&error, stage)),
+        Err(_) => Err(ReadFailure {
+            reason: "deadline_exceeded",
+            stage,
+            database_code: None,
+        }),
+    }
 }
 
 pub(super) async fn diagnostics(
@@ -473,16 +552,30 @@ pub(super) async fn diagnostics(
         ("grant", GRANTS),
         ("allowance", PERIODS),
     ] {
+        let started = Instant::now();
         match scan(db, collection, MAX_ROWS).await {
             Ok(inventory) => {
                 present |= inventory.rows > 0;
                 lines.extend(inventory.detail(kind));
+                let reason = if inventory.invalid != 0 {
+                    "reason=row_decode_error stage=decode"
+                } else if inventory.truncated {
+                    "reason=row_limit stage=inventory"
+                } else {
+                    "reason=ok"
+                };
+                lines.push(format!(
+                    "{kind}: {reason} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ));
             }
-            Err(_) => {
+            Err(failure) => {
                 present = true;
                 unread = true;
                 lines.push(format!(
-                    "{kind}: complete=false; read failed or timed out; no totals available"
+                    "{kind}: complete=false; {} elapsed_ms={}; no totals available",
+                    failure.metadata(),
+                    started.elapsed().as_millis()
                 ));
             }
         }
@@ -552,10 +645,132 @@ mod tests {
     use mongodb::bson::Bson;
     use std::sync::{Arc, Mutex};
 
+    tokio::task_local! {
+        static CURSOR_PAUSE: Duration;
+    }
+    pub(super) async fn pause_cursor() {
+        if let Ok(delay) = CURSOR_PAUSE.try_with(|delay| *delay) {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn hold_diagnostics_pins_slow_cursor_under_concurrent_writes() {
+        let (db, commands) = fixture().await;
+        db.collection::<Document>(METERS)
+            .insert_many((0..600).map(|i| row(&format!("r-{i}"), "forwarded", 4000)))
+            .await
+            .unwrap();
+        let read = CURSOR_PAUSE.scope(Duration::from_millis(100), async {
+            for collection in [WALLETS, GRANTS, PERIODS] {
+                let result = scan(&db, collection, 1000).await.unwrap();
+                assert_eq!(result.rows, 600);
+                assert_eq!(result.invalid, 0);
+                let (unit, amount) = match collection {
+                    WALLETS => ("credits", Credits::from_whole(1200)),
+                    GRANTS => ("credits", "600.00048".parse().unwrap()),
+                    _ => ("tokens", Credits::from_whole(600)),
+                };
+                assert_eq!(result.totals[unit].held, amount);
+            }
+        });
+        // Keep advancing database time while the consumer is deliberately slow,
+        // like a coverage-instrumented reader. No synthetic server error is used.
+        let writer = async {
+            loop {
+                db.collection::<Document>(WALLETS)
+                    .update_one(doc! {"_id":"w"}, doc! {"$inc":{"unrelated_revision":1}})
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        tokio::pin!(writer);
+        tokio::select! {
+            () = read => {},
+            () = &mut writer => unreachable!(),
+        }
+        assert!(
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| *s == "getMore")
+                .count()
+                >= 6
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn hold_diagnostics_failure_metadata_is_stable_and_private() {
+        for (code, message, reason) in [
+            (50, "private-query-values", "query_timeout"),
+            (262, "private-query-values", "query_timeout"),
+            (239, "private-query-values", "snapshot_unavailable"),
+            (246, "private-query-values", "snapshot_unavailable"),
+            (27, "private-query-values", "index_unavailable"),
+            (2, "hint: private-query-values", "index_unavailable"),
+            (13, "private-query-values", "database_error"),
+        ] {
+            let command: mongodb::error::CommandError =
+                bson::from_document(doc! {"code":code,"errmsg":message}).unwrap();
+            let error = AppError::DatabaseError(mongodb::error::ErrorKind::Command(command).into());
+            let failure = ReadFailure::from_error(&error, "cursor");
+            assert_eq!(
+                failure.metadata(),
+                format!("reason={reason} stage=cursor database_code={code}")
+            );
+            assert!(!failure.metadata().contains("private-query-values"));
+        }
+    }
+
+    #[tokio::test]
+    async fn hold_diagnostics_timeout_aborts_snapshot_and_next_read_recovers() {
+        let (db, commands) = fixture().await;
+        db.collection::<Document>(METERS)
+            .insert_one(row("r", "forwarded", 4000))
+            .await
+            .unwrap();
+        commands.lock().unwrap().clear();
+        let started = Instant::now();
+        let result = CURSOR_PAUSE
+            .scope(
+                CLIENT_TIMEOUT + Duration::from_secs(1),
+                scan(&db, GRANTS, 100),
+            )
+            .await;
+        let failure = result.err().unwrap();
+        assert_eq!(failure.reason, "deadline_exceeded");
+        assert_eq!(failure.stage, "decode");
+        assert_eq!(failure.database_code, None);
+        assert!(started.elapsed() >= CLIENT_TIMEOUT);
+        // Cancelling the query drops the session and the driver queues an abort.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|name| name == "abortTransaction")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let result = scan(&db, GRANTS, 100).await.unwrap();
+        assert_eq!(result.totals["credits"].held, "1.0000008".parse().unwrap());
+        db.drop().await.unwrap();
+    }
+
     fn assert_inventory_commands(commands: &[String]) {
         let expired = commands
             .iter()
             .filter(|name| name.as_str() == "snapshot_expired")
+            .count();
+        let aborts = commands
+            .iter()
+            .filter(|name| name.as_str() == "abortTransaction")
             .count();
         let aggregates = commands
             .iter()
@@ -563,7 +778,7 @@ mod tests {
             .count();
         assert_eq!(
             commands.len(),
-            aggregates + expired,
+            aggregates + expired + aborts,
             "unexpected command: {commands:?}"
         );
         assert_eq!(
@@ -572,6 +787,10 @@ mod tests {
             "one successful read per kind: {commands:?}"
         );
         assert!(aggregates <= 3 * MAX_READ_ATTEMPTS);
+        assert!(aborts >= 3 && aborts <= aggregates * 2, "{commands:?}");
+        println!(
+            "hold backlog commands: aggregates={aggregates} aborts={aborts} expired={expired}"
+        );
     }
 
     fn snapshot_error(code: i32) -> AppError {
@@ -628,7 +847,7 @@ mod tests {
         let attempts = Cell::new(0);
         let result = retry_snapshot_read(|| async {
             attempts.set(attempts.get() + 1);
-            let result = scan(&db, GRANTS, 100).await?;
+            let result = scan(&db, GRANTS, 100).await.map_err(|failure| AppError::Internal(failure.metadata()))?;
             if attempts.get() == 1 {
                 assert_eq!(result.totals["credits"].held, "1.0000008".parse().unwrap());
                 db.collection::<Document>(GRANTS).update_one(doc! {"_id":"g"},doc! {"$set":{"active_settlement":{
@@ -677,7 +896,7 @@ mod tests {
         assert!(
             inventory
                 .detail
-                .contains("grant: complete=false; read failed or timed out; no totals available")
+                .contains("grant: complete=false; reason=index_unavailable stage=aggregate database_code=2 elapsed_ms=")
         );
         indexes
             .create_indexes(crate::db::billing_hold_indexes())
@@ -836,7 +1055,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            scan_once(&db, &mut session, GRANTS, 100)
+            scan_once(&db, &mut session, GRANTS, 100, &Mutex::new("aggregate"))
                 .await
                 .unwrap()
                 .totals["credits"]
@@ -880,7 +1099,7 @@ mod tests {
         }
         // The original read snapshot still sees the un-applied resource and row.
         assert_eq!(
-            scan_once(&db, &mut session, GRANTS, 100)
+            scan_once(&db, &mut session, GRANTS, 100, &Mutex::new("aggregate"))
                 .await
                 .unwrap()
                 .totals["credits"]
@@ -991,7 +1210,7 @@ mod tests {
         assert!(
             failed[0]
                 .detail
-                .contains("grant: complete=false; read failed or timed out; no totals available")
+                .contains("grant: complete=false; reason=index_unavailable stage=aggregate database_code=2 elapsed_ms=")
         );
         assert!(failed[0].detail.contains("allowance: complete=true"));
         db.drop().await.unwrap();
