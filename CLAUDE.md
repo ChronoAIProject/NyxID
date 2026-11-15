@@ -886,6 +886,7 @@ NyxBot saved manager replies and proactive text posts use the shared
 link or replay a sending/uncertain part. Revalidate live authority between effects;
 retain confirmed prefix IDs on partial outcomes. Pin action-card identities and
 numeric media notice inputs so retries reproduce the plan without storing bodies.
+Saved manager and scheduled chat text uses exact MongoDB-time preparation leases and a parent/part transaction at the provider boundary; reclaim only pending parts, never a receipt-less sending part, and revalidate live authority between effects.
 Manager attachments use v2 image claims with the existing legacy read gate.
 Versioned attachment preparations retain original routing identifiers and MongoDB-time leases; reclaim only proven-unsent work, fence the exact attempt before every upload, and never retry a possible provider effect (see `docs/CHANNEL_BOT_RELAY.md`). Drain
 these writers for upgrade/rollback; old workers must not resume multipart rows.

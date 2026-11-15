@@ -2328,24 +2328,33 @@ async fn send_post_planned_impl(
     .await?;
     let mut last = None;
     for (index, part) in parts.into_iter().enumerate() {
-        let attempt = match journal::claim(&state.db, &delivery, index).await? {
-            journal::PartClaim::Sent(previous) => {
-                last = Some(crate::handlers::channel_relay::AsyncReplyResponse {
-                    message_id: previous
-                        .outbound_message_id
-                        .ok_or_else(journal::unconfirmed)?,
-                    platform_message_id: previous.platform_message_id,
-                    delivered_as: None,
-                });
-                continue;
-            }
-            journal::PartClaim::Send(attempt) => attempt,
-        };
-        match crate::services::telegram_formatting::scope(
+        let attempt =
+            match crate::services::channel_text_preparation::claim(&state.db, &delivery, index)
+                .await?
+            {
+                journal::PartClaim::Sent(previous) => {
+                    last = Some(crate::handlers::channel_relay::AsyncReplyResponse {
+                        message_id: previous
+                            .outbound_message_id
+                            .ok_or_else(journal::unconfirmed)?,
+                        platform_message_id: previous.platform_message_id,
+                        delivered_as: None,
+                    });
+                    continue;
+                }
+                journal::PartClaim::Send(attempt) => attempt,
+            };
+        match crate::services::channel_text_preparation::with_part(
             &state.db,
-            journal::formatting_receipt(&delivery, index, &attempt),
-            Some(&target.bot.id),
-            send_post_one(state, target, part, fence),
+            &delivery,
+            index,
+            &attempt,
+            crate::services::telegram_formatting::scope(
+                &state.db,
+                journal::formatting_receipt(&delivery, index, &attempt),
+                Some(&target.bot.id),
+                send_post_one(state, target, part, fence),
+            ),
         )
         .await
         {
@@ -2405,7 +2414,17 @@ async fn send_post_planned_impl(
                     .await?;
                     return Err(error);
                 }
-                // Keep the pre-dispatch Sending marker on ambiguous effects.
+                if crate::services::channel_text_preparation::active()
+                    && crate::services::channel_text_preparation::release(
+                        &state.db, &delivery, index, &attempt,
+                    )
+                    .await?
+                {
+                    return Err(AppError::RateLimitedWithRetry {
+                        retry_after: crate::services::channel_text_preparation::RETRY_SECS,
+                    });
+                }
+                // Sending is never evidence of an unsent request.
                 return Err(journal::unconfirmed());
             }
         }
@@ -2546,6 +2565,18 @@ async fn send_post_one_impl(
         outbound,
         target.adapter.as_ref(),
     );
+    let effect_guard = effect_guard.or_else(|| {
+        crate::services::channel_text_preparation::active().then(|| {
+            let state = state.clone();
+            let target = target.clone();
+            std::sync::Arc::new(move || {
+                let state = state.clone();
+                let target = target.clone();
+                Box::pin(async move { revalidate_post_target(&state, &target, None).await })
+                    as futures::future::BoxFuture<'static, AppResult<()>>
+            }) as crate::services::channel_platform::PostEffectGuard
+        })
+    });
     if let Some(guard) = effect_guard {
         crate::services::channel_platform::with_post_effect_guard(guard, send).await
     } else {

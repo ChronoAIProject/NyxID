@@ -94,6 +94,7 @@ pub mod channel_routing_service;
 pub mod channel_send_service;
 pub mod channel_text;
 pub mod channel_text_delivery;
+pub mod channel_text_preparation;
 pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;

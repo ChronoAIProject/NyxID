@@ -351,6 +351,24 @@ on refusal or uncertainty. Proactive tool results include `text_delivery` counts
 for sent, uncertain, refused and unattempted parts. A fully delivered status
 requires a confirmed receipt for every text part.
 
+Saved manager replies (personal, public and FAQ) and scheduled chat results keep
+text parts `pending` while preparing. An additive preparation holds an exact
+attempt and a 180-second MongoDB-time lease. Immediately before the first provider
+effect, a transaction checks the live parent claim and changes that exact part to
+`sending`. Reclaiming preparation fences a slow predecessor. Each later effect
+still checks live authority; neither an accepted prefix nor an earlier authority
+check authorizes the next part. The same attempt may perform the adapter's
+existing documented-refusal fallback within a fixed 120-second send bound.
+
+Existing manager and schedule workers recover only pending preparations. They
+reload the saved reply and its pinned plan; no bodies enter the delivery journal.
+Manager recovery waits for its existing two-minute stale-parent bound. Scheduled
+results keep their existing six-minute parent lease and 30-minute retry window.
+Receipt-less `sending`, old `dispatching` without multipart evidence, and ambiguous
+provider outcomes stay terminal. Public-manager recovery keeps the original
+expiry and authority and adds no transcript, link or readback surface. Ephemeral
+command/signup output keeps its existing single-attempt behaviour.
+
 The manager pins action-card IDs and media outcome counts, and proactive plans
 pin numeric media-notice inputs. Concurrent initialization accepts the same ordered
 card-ID snapshot; a different or malformed existing snapshot remains a conflict.
@@ -374,11 +392,17 @@ never retried. Successful attachments have
 no placeholder; only unavailable/unconfirmed items get a fallback note. The
 turn's existing eight-attachment capture bound and media byte limit still apply.
 
-Rollout: drain manager/proactive writers before upgrading their API replicas and
-workers together. Old binaries do not understand multipart receipts and must not
-resume new pending rows. Before rollback, stop/drain these writers and terminally
-fence every unfinished multipart parent/job; preserve the journals and v2 image
-claims. Do not delete a journal to force a resend. Text journals have no TTL so a
+This preparation change needs no operator action in an ordinary rolling update
+from the multipart-capable build. Older writers ignore the additive lease, but
+must still claim `pending -> sending` with their own attempt before sending; that
+claim fences the preparing new writer. New writers never reclaim `sending`.
+Rolling back to that build needs no data change and preserves accepted-prefix
+and uncertainty barriers, but loses preparation recovery for its own new claims.
+
+Upgrading from a build that predates multipart receipts still requires draining
+manager/proactive writers and upgrading API replicas and workers together. Before
+rolling back that far, stop/drain these writers and terminally fence unfinished
+multipart parent/jobs; preserve the journals and v2 image claims. Do not delete a journal to force a resend. Text journals have no TTL so a
 later retry cannot forget acceptance; owner deletion purges them. Existing v1
 image rollout and sunset requirements remain in force.
 

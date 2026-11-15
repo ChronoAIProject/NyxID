@@ -1245,30 +1245,35 @@ async fn settle_chat_result(
     });
     let text = failure.as_deref().unwrap_or(text);
     let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
-    let seconds = (claim.expires_at - Utc::now()).num_seconds().max(0) as u64;
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
-        async {
-            if error.is_none() {
-                Box::pin(super::nyxbot::chats::post_automation_images(
-                    state, run, chat_id, agent, &row.id, text,
-                ))
-                .await
-                .map(|_| ())
-            } else {
-                Box::pin(super::nyxbot::chats::post_automation(
-                    state,
-                    &run.user_id,
-                    chat_id,
-                    text,
-                    agent,
-                    &row.id,
-                    &run.id,
-                ))
-                .await
-                .map(|_| ())
-            }
-        },
+        std::time::Duration::from_secs(delivery::ATTEMPT_SECONDS),
+        crate::services::channel_text_preparation::with_parent(
+            crate::services::channel_text_preparation::Parent::Scheduled {
+                id: run.id.clone(),
+                claim: claim.attempt.clone(),
+            },
+            async {
+                if error.is_none() {
+                    Box::pin(super::nyxbot::chats::post_automation_images(
+                        state, run, chat_id, agent, &row.id, text,
+                    ))
+                    .await
+                    .map(|_| ())
+                } else {
+                    Box::pin(super::nyxbot::chats::post_automation(
+                        state,
+                        &run.user_id,
+                        chat_id,
+                        text,
+                        agent,
+                        &row.id,
+                        &run.id,
+                    ))
+                    .await
+                    .map(|_| ())
+                }
+            },
+        ),
     )
     .await;
     match result {
