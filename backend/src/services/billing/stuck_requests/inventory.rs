@@ -1,7 +1,7 @@
 use super::*;
 use mongodb::{
     ClientSession,
-    options::{CollectionOptions, ReadConcern},
+    options::{Hint, ReadConcern},
 };
 use std::collections::{BTreeMap, BTreeSet};
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
@@ -85,6 +85,7 @@ struct Inventory {
     invalid: usize,
     truncated: bool,
     registry_readable: bool,
+    registry_failure: Option<ReadFailure>,
     requests: BTreeSet<String>,
     groups: BTreeMap<(String, bool, String), Group>,
     holds: BTreeMap<(String, bool, String, String, String), Group>,
@@ -172,11 +173,15 @@ impl Inventory {
         lines.join("\n")
     }
 }
-async fn scan_once(db: &mongodb::Database, tx: &mut ClientSession) -> AppResult<Inventory> {
-    // Ownership is an observation for this read-only page; terminal recovery
-    // rechecks it transactionally. Do not carry its snapshot timestamp into
-    // the money aggregate: outside a transaction MongoDB does not pin history.
-    // Meter rows and all joined resource locks still share one fresh snapshot.
+async fn scan_once(
+    db: &mongodb::Database,
+    tx: &mut ClientSession,
+    stage: &std::sync::Mutex<&'static str>,
+) -> AppResult<Inventory> {
+    // Registry liveness is observational here; terminal recovery rechecks it
+    // transactionally. The inventory transaction pins meter/resource history across
+    // cursor batches, including on servers with no retained snapshot window.
+    *stage.lock().unwrap() = "registry";
     let mut owner_session = db.client().start_session().await?;
     let registry = registry(db, &mut owner_session).await;
     if let Err(error) = &registry
@@ -184,19 +189,21 @@ async fn scan_once(db: &mongodb::Database, tx: &mut ClientSession) -> AppResult<
     {
         return Err(registry.err().unwrap());
     }
+    let registry_failure = registry
+        .as_ref()
+        .err()
+        .map(|error| ReadFailure::from_error(error, "registry"));
     let registry = registry.ok();
     let mut out = Inventory {
         registry_readable: registry.is_some(),
+        registry_failure,
         ..Default::default()
     };
+    *stage.lock().unwrap() = "inventory";
     let mut cursor = db
-        .collection_with_options::<Document>(
-            METERS,
-            CollectionOptions::builder()
-                .read_concern(ReadConcern::snapshot())
-                .build(),
-        )
+        .collection::<Document>(METERS)
         .aggregate(pipeline())
+        .hint(Hint::Name(INDEX.to_owned()))
         .max_time(std::time::Duration::from_secs(3))
         .batch_size(256)
         .session(&mut *tx)
@@ -207,6 +214,10 @@ async fn scan_once(db: &mongodb::Database, tx: &mut ClientSession) -> AppResult<
             break;
         }
         out.rows += 1;
+        #[cfg(test)]
+        if out.rows == 1 {
+            super::tests::after_first_row().await;
+        }
         if out.add(row, registry.as_ref()).is_err() {
             out.invalid += 1;
         }
@@ -216,21 +227,142 @@ async fn scan_once(db: &mongodb::Database, tx: &mut ClientSession) -> AppResult<
 pub(crate) async fn diagnostics(
     db: &mongodb::Database,
 ) -> AppResult<Vec<super::super::BillingStartupDiagnostic>> {
+    let started = std::time::Instant::now();
+    let stage = std::sync::Mutex::new("session");
     let result = tokio::time::timeout(
         TIMEOUT,
         super::super::hold_conservation::backlog::retry_snapshot_read(|| async {
-            let mut tx = db.client().start_session().snapshot(true).await?;
-            scan_once(db, &mut tx).await
+            let mut tx = db.client().start_session().await?;
+            tx.start_transaction()
+                .read_concern(ReadConcern::snapshot())
+                .await?;
+            let result = scan_once(db, &mut tx, &stage).await;
+            // This is a read-only transaction. Abort releases the pinned history;
+            // dropping a cancelled session also queues an abort in the driver.
+            let failed_stage = *stage.lock().unwrap();
+            *stage.lock().unwrap() = "snapshot_release";
+            let cleanup = tx.abort_transaction().await;
+            match result {
+                Err(error) => {
+                    *stage.lock().unwrap() = failed_stage;
+                    Err(error)
+                }
+                Ok(inventory) => {
+                    cleanup?;
+                    Ok(inventory)
+                }
+            }
         }),
     )
     .await;
+    let elapsed = started.elapsed().as_millis();
     let detail = match result {
         Ok(Ok(inventory)) if inventory.rows == 0 => return Ok(vec![]),
-        Ok(Ok(inventory)) => inventory.detail(),
-        _ => "complete=false; forwarded request inventory could not be read; no cleanup eligibility established".into(),
+        Ok(Ok(inventory)) => {
+            let reason = if let Some(failure) = &inventory.registry_failure {
+                failure.metadata()
+            } else if inventory.invalid != 0 {
+                "reason=row_decode_error stage=decode".into()
+            } else if inventory.truncated {
+                "reason=row_limit stage=inventory".into()
+            } else {
+                "reason=ok".into()
+            };
+            format!("{}\n{reason} elapsed_ms={elapsed}", inventory.detail())
+        }
+        Ok(Err(error)) => ReadFailure::from_error(&error, *stage.lock().unwrap()).detail(elapsed),
+        Err(_) => ReadFailure {
+            reason: "deadline_exceeded",
+            stage: *stage.lock().unwrap(),
+            database_code: None,
+        }
+        .detail(elapsed),
     };
     Ok(vec![super::super::BillingStartupDiagnostic{
         code:"billing_stuck_requests".into(),summary:"Forwarded request recovery eligibility".into(),detail,
         remediation:"Read-only classification. Live includes the registry's 45-second window plus a two-minute margin. Legacy eligibility requires registration times for every live generation and an extra hour before the earliest registration. Missing, malformed, empty or unreadable registry evidence authorizes no cleanup. Amounts exclude returned holds and matching applied resource locks. Groups overlap in requests and resources; truncated totals are not population totals. No quantities or charges are changed by this diagnostic.".into(),detected_at:chrono::Utc::now(),
     }])
+}
+
+// Only stable metadata is exposed: driver messages can contain query values.
+#[derive(Clone)]
+struct ReadFailure {
+    reason: &'static str,
+    stage: &'static str,
+    database_code: Option<i32>,
+}
+impl ReadFailure {
+    fn from_error(error: &AppError, stage: &'static str) -> Self {
+        use mongodb::error::ErrorKind;
+        let mut code = None;
+        let reason = match error {
+            AppError::DatabaseError(error) => match error.kind.as_ref() {
+                ErrorKind::Command(command) => {
+                    code = Some(command.code);
+                    match command.code {
+                        50 | 262 => "query_timeout",
+                        239 | 246 => "snapshot_unavailable",
+                        27 => "index_unavailable",
+                        // MongoDB uses BadValue for a missing named hint.
+                        2 if command.message.contains("hint") => "index_unavailable",
+                        _ => "database_error",
+                    }
+                }
+                ErrorKind::BsonDeserialization(_) => "row_decode_error",
+                _ => "database_unavailable",
+            },
+            _ if stage == "registry" => "registry_evidence_unavailable",
+            _ => "row_decode_error",
+        };
+        Self {
+            reason,
+            stage,
+            database_code: code,
+        }
+    }
+    fn metadata(&self) -> String {
+        let mut value = format!("reason={} stage={}", self.reason, self.stage);
+        if let Some(code) = self.database_code {
+            value.push_str(&format!(" database_code={code}"));
+        }
+        value
+    }
+    fn detail(&self, elapsed: u128) -> String {
+        format!(
+            "complete=false; {} elapsed_ms={elapsed}; no cleanup eligibility established",
+            self.metadata()
+        )
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn stuck_request_failure_codes_do_not_expose_driver_messages() {
+        for (code, name, reason) in [
+            (50, "MaxTimeMSExpired", "query_timeout"),
+            (239, "SnapshotTooOld", "snapshot_unavailable"),
+            (246, "SnapshotUnavailable", "snapshot_unavailable"),
+            (27, "IndexNotFound", "index_unavailable"),
+            (13, "Unauthorized", "database_error"),
+        ] {
+            let command: mongodb::error::CommandError = bson::from_document(doc! {
+                "code":code,"codeName":name,"errmsg":"private-query-values",
+            })
+            .unwrap();
+            let error = AppError::DatabaseError(mongodb::error::Error::from(
+                mongodb::error::ErrorKind::Command(command),
+            ));
+            let detail = ReadFailure::from_error(&error, "inventory").detail(123);
+            assert!(
+                detail.contains(&format!(
+                    "reason={reason} stage=inventory database_code={code} elapsed_ms=123"
+                )),
+                "{detail}"
+            );
+            assert!(!detail.contains("private-query-values"));
+        }
+    }
 }
