@@ -1938,6 +1938,7 @@ async fn server_run(cli: Cli) {
     let internal_listener = TcpListener::bind(&config.internal_bind_addr)
         .await
         .expect("Failed to bind internal dispatch address");
+    let listeners_bound_at = chrono::Utc::now();
     let internal_body_limit =
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
     let internal_app = services::node_dispatch::internal_router(
@@ -1971,6 +1972,7 @@ async fn server_run(cli: Cli) {
         app,
         internal_app,
     );
+    services::shutdown::startup::listeners_bound(&shutdown_state, listeners_bound_at);
     let signal = tokio::select! {
         () = servers.failed() => None,
         signal = signals.next() => Some(signal),

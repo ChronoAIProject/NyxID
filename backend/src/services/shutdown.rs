@@ -1,4 +1,6 @@
 //! Process-local work accounting. Draining stops pullers, never request admission.
+#[cfg(test)]
+mod deploy_gap_tests;
 pub(crate) mod diagnostics;
 #[cfg(test)]
 mod diagnostics_tests;
@@ -7,8 +9,10 @@ pub mod drain;
 mod inventory_tests;
 pub mod release;
 pub mod signals;
+pub(crate) mod startup;
 #[cfg(test)]
 mod tests;
+mod traffic;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -44,6 +48,7 @@ pub struct Runtime(Arc<Inner>);
 struct Inner {
     state: Mutex<State>,
     http: Mutex<diagnostics::Registry>,
+    traffic: traffic::Traffic,
     requests: AtomicUsize,
     streams: AtomicUsize,
     subscriptions: AtomicUsize,
@@ -175,6 +180,18 @@ impl State {
 }
 
 impl Runtime {
+    pub fn recent_traffic(&self) -> traffic::Snapshot {
+        self.0.traffic.snapshot()
+    }
+
+    pub fn record_received(&self) {
+        self.0.traffic.received();
+    }
+
+    pub fn record_responded(&self) {
+        self.0.traffic.responded();
+    }
+
     pub fn record_release(&self, kind: &'static str, count: u64) {
         let mut state = self.state();
         if state.draining && count > 0 {
