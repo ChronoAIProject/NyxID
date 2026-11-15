@@ -369,6 +369,68 @@ fn owner_branches(filter: &Document) -> Vec<Document> {
     branches
 }
 
+fn settled_durable_fixture(collection: &str, owner: &str, id: &str) -> Option<Document> {
+    use crate::models::{
+        durable_operation_execution::{DurableExecutionStatus, DurableOperationExecution},
+        durable_operation_grant::{
+            DurableOperationConstraints, DurableOperationGrant, DurableReplayPolicy,
+        },
+    };
+    let now = chrono::Utc::now();
+    Some(match collection {
+        "durable_operation_executions" => bson::to_document(&DurableOperationExecution {
+            id: id.into(),
+            grant_id: "settled-grant".into(),
+            operation_id: "settled-operation".into(),
+            api_key_id: "settled-key".into(),
+            user_id: owner.into(),
+            user_service_id: "settled-service".into(),
+            endpoint_id: "settled-endpoint".into(),
+            contract_digest: "settled-contract".into(),
+            request_digest: "personal-request".into(),
+            status: DurableExecutionStatus::Completed,
+            downstream_attempts: 1,
+            node_id: None,
+            response_status: Some(200),
+            terminal_detail: None,
+            dispatched_at: Some(now),
+            terminal_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap(),
+        "durable_operation_grants" => bson::to_document(&DurableOperationGrant {
+            id: id.into(),
+            user_id: owner.into(),
+            api_key_id: "settled-key".into(),
+            user_service_id: "settled-service".into(),
+            endpoint_id: "settled-endpoint".into(),
+            method: "POST".into(),
+            normalized_path_template: "/operation".into(),
+            contract_digest: "settled-contract".into(),
+            constraints: DurableOperationConstraints::default(),
+            valid_from: now - chrono::Duration::hours(1),
+            expires_at: now,
+            total_limit: 1,
+            total_used: 1,
+            window: None,
+            window_started_at: None,
+            window_used: 0,
+            replay_policy: DurableReplayPolicy::NonReplayable,
+            client_audit_binding: None,
+            revoked_at: Some(now),
+            revoked_by: Some(owner.into()),
+            state_version: 1,
+            created_by: owner.into(),
+            reauthorized_from: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap(),
+        _ => return None,
+    })
+}
+
 /// Registry-driven behavioral coverage. The inventory is the table of cases,
 /// so adding a new local predicate automatically adds a target/bystander case.
 #[tokio::test]
@@ -493,9 +555,12 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                                 "bystander"
                             }
                         );
-                        let mut row = model_inputs
-                            .get(entry.collection)
-                            .map(|rows| rows[0].clone())
+                        let mut row = settled_durable_fixture(entry.collection, person, &id)
+                            .or_else(|| {
+                                model_inputs
+                                    .get(entry.collection)
+                                    .map(|rows| rows[0].clone())
+                            })
                             .unwrap_or_default();
                         // Never populate both disjunctive owner fields with
                         // the target: that would conceal a broken selector.
@@ -837,12 +902,26 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
     for (collection, id, before, target, disposition) in domain_rows {
         let row = db
             .collection::<Document>(collection)
-            .find_one(doc! {"_id":id})
+            .find_one(doc! {"_id":&id})
             .await
             .unwrap();
         if !target {
             assert_eq!(row, Some(before), "bystander {collection}");
             continue;
+        }
+        if matches!(
+            collection,
+            "durable_operation_executions" | "durable_operation_grants"
+        ) {
+            let receipt = db
+                .collection::<Document>("personal_erasure_local_receipts")
+                .find_one(doc! {"source_collection":collection,"source_id":&id,"user_id":&owner})
+                .await
+                .unwrap()
+                .expect("settled durable evidence must have a compact receipt");
+            assert_eq!(receipt.get_bool("personal_erasure_retained"), Ok(true));
+            assert!(!receipt.contains_key("request_digest"));
+            assert!(!receipt.contains_key("constraints"));
         }
         match disposition {
             "deleted" => assert!(row.is_none(), "domain row survived in {collection}"),

@@ -596,47 +596,6 @@ mutations. Organization accounts are live owners; after organization removal,
 only structurally orphaned rows in permitted cleanup classes are in scope.
 
 
-Two additional joined-export indexes replace full child-collection scans with
-indexed parent-key reads. They are feature-owned in
-`platform_provisioning_service::ensure_account_export_indexes`, awaited from
-`personal_erasure_service::ensure_startup_indexes` before listening, with the
-same synchronous-build/prebuild behavior as the message index. This extends the
-previous erasure-only decision to leave these small lifecycle collections
-unindexed: a repeated self-service export now requires selective child reads.
-These two keys are explicit export exceptions, not a blanket owner-index rule.
-
-| Collection | Key/name | Reason and startup behavior |
-| --- | --- | --- |
-| `platform_delivery_tests` | `installation_id`; `account_export_platform_delivery_tests_installation_id` | `platform_runtime_service::begin_test` creates per-attempt UUID rows with a 10-minute expiry; their ids cannot be derived from installation ids. Each export must select the person's rows without scanning other owners' tests. Startup awaits the build; prebuild on a large deployment as above. |
-| `platform_setup_steps` | `setup_id`; `account_export_platform_setup_steps_setup_id` | `platform_provisioning_service` stores step jobs keyed by creation-request UUID, with setup ids as the authoritative parent relation. Parent-scoped export reads need this separate join key. Startup awaits the build; prebuild on a large deployment as above. |
-
-```javascript
-db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_export_platform_delivery_tests_installation_id"});
-db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
-```
-
-The complete additive rollout set is 19 indexes: 16 erasure indexes and three
-export indexes. Existing definitions remain untouched; the upgrade tests compare
-all definitions before/after and replay the old startup fixture afterward.
-The large message-history export also adds one compound index in its owning
-module: `assistant_nyxagent::ensure_account_export_indexes`, called and awaited
-by `personal_erasure_service::ensure_startup_indexes` before listener binding.
-`assistant_messages_account_export` has keys `{user_id:1, created_at:-1, _id:-1}`.
-`assistant_nyxagent::begin_owner_turn_in_session` and `finish_turn_inner` append
-one row per input/reply without a transcript TTL. The existing
-`conversation_id/seq` index cannot serve an owner's cross-conversation
-newest-first read or explicit authored-input branch. This single index bounds
-that per-event read without a blocking sort; no existing index is dropped,
-renamed or rebuilt. Like the existing synchronous additions described above,
-startup awaits a large-collection build and may be delayed. Pre-build with:
-
-```javascript
-db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"assistant_messages_account_export"});
-```
-
-The rollout set is therefore the 16 erasure indexes above plus this one export
-index. Upgrade tests allow precisely these additions and preserve the previous
-index set, including on an older-replica startup.
 Continuous remote cleanup waits are recorded on the pending local-inventory or source domain's
 `remote_wait_started_at` using MongoDB server time. After 24 hours, the job enters
 `operator_action` with `remote_cleanup_wait_exceeded`; an operator must resolve
@@ -667,3 +626,55 @@ days. Each worker pass purges at most 128 pages from each of at most 16 finished
 jobs; pending apply jobs pin their source dry-run pages. After retention expires,
 run a fresh dry-run before applying. No additional large-collection index is
 needed: page reads and deletion use the existing `_id` prefix.
+
+Terminal `durable_operation_grants` and `durable_operation_executions` are compacted
+by `personal_erasure_service::local::retain_settled_evidence`: original rows are
+removed, while `personal_erasure_local_receipts` retains opaque `user_id`, row id
+and settlement evidence. Receipt ownership is therefore personal bookkeeping.
+`audit_log` stays immutable; its separate registry-declared `AuditMetadata` export
+view returns only event type and creation time for the authenticated person.
+
+
+The large message-history export also adds one compound index in its owning
+module: `assistant_nyxagent::ensure_account_export_indexes`, called and awaited
+by `personal_erasure_service::ensure_startup_indexes` before listener binding.
+`assistant_messages_account_export` has keys `{user_id:1, created_at:-1, _id:-1}`.
+`assistant_nyxagent::begin_owner_turn_in_session` and `finish_turn_inner` append
+one row per input/reply without a transcript TTL. The existing
+`conversation_id/seq` index cannot serve an owner's cross-conversation
+newest-first read or explicit authored-input branch. This single index bounds
+that per-event read without a blocking sort; no existing index is dropped,
+renamed or rebuilt. Like the existing synchronous additions described above,
+startup awaits a large-collection build and may be delayed. Pre-build with:
+
+```javascript
+db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"assistant_messages_account_export"});
+```
+
+The message index joins the 16 erasure indexes above. Upgrade tests allow
+precisely the declared additions and preserve the previous
+index set, including on an older-replica startup.
+
+
+Two additional joined-export indexes replace full child-collection scans with
+indexed parent-key reads. They are feature-owned in
+`platform_provisioning_service::ensure_account_export_indexes`, awaited from
+`personal_erasure_service::ensure_startup_indexes` before listening, with the
+same synchronous-build/prebuild behavior as the message index. This extends the
+previous erasure-only decision to leave these small lifecycle collections
+unindexed: a repeated self-service export now requires selective child reads.
+These two keys are explicit export exceptions, not a blanket owner-index rule.
+
+| Collection | Key/name | Reason and startup behavior |
+| --- | --- | --- |
+| `platform_delivery_tests` | `installation_id`; `account_export_platform_delivery_tests_installation_id` | `platform_runtime_service::begin_test` creates per-attempt UUID rows with a 10-minute expiry; their ids cannot be derived from installation ids. Each export must select the person's rows without scanning other owners' tests. Startup awaits the build; prebuild on a large deployment as above. |
+| `platform_setup_steps` | `setup_id`; `account_export_platform_setup_steps_setup_id` | `platform_provisioning_service` stores step jobs keyed by creation-request UUID, with setup ids as the authoritative parent relation. Parent-scoped export reads need this separate join key. Startup awaits the build; prebuild on a large deployment as above. |
+
+```javascript
+db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_export_platform_delivery_tests_installation_id"});
+db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
+```
+
+The complete additive rollout set is 19 indexes: 16 erasure indexes and three
+export indexes. Existing definitions remain untouched; the upgrade tests compare
+all definitions before/after and replay the old startup fixture afterward.

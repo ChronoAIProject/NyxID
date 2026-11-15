@@ -327,4 +327,33 @@ resolved parent scope. Source-query failures still mark the view unavailable.
 Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
 Assistant-message reads resolve up to 10,000 private conversation ids once per export, then use indexed message predicates with batches of 100. Explicit owner-authored inputs do not need a conversation join. If private scope is capped, `scope_truncated` is true.
 
-Reply classification uses each stored message’s origin, platform origin and platform reply fields (`assistant_nyxagent::persist_message` and settled-turn message writes), not the conversation’s mutable `reply_channel`. Replies to channel-origin turns, platform-routed replies and replies in shared/guest conversations are excluded. Changing a delivery preference cannot change which previously stored replies qualify.
+Reply classification uses each stored message’s origin, platform origin and platform reply fields (`assistant_nyxagent::begin_owner_turn_in_session` and settled-turn message writes), not the conversation’s mutable `reply_channel`. Replies to channel-origin turns, platform-routed replies and replies in shared/guest conversations are excluded. Changing a delivery preference cannot change which previously stored replies qualify.
+
+Storage-fixture coverage uses production serde models wherever the writer has a
+storage model. `channel_activity_notifications` uses `ChannelMessage` selected by
+`channel_activity_service::collection`; `org_channel_messages` serializes
+`GroupMessage` plus the three raw routing selectors added by
+`org_channel_service::transcript::publish`. These are not independent message
+schemas. The remaining typed test envelopes below describe genuine raw BSON
+writers: the feature stores `Document` directly and has no whole-row serde model.
+They intentionally omit unknown fields during round-trip validation.
+
+| Collection | Raw writer and reason for a test envelope |
+| --- | --- |
+| `assistant_async_quotas` | `async_service_operation::admit_in_session`: mutable quota counter, no storage model. |
+| `assistant_attachment_expiry` | `assistant_upload_retention::delete_root`: expiry tombstone copied from scoped attachment metadata. |
+| `assistant_authored_draft_claims` | `assistant_skill_authoring_claims::reserve/save_claim`: owner envelope around the production `AuthoredDraftClaim` model. |
+| `assistant_learning_migrations` | `assistant_agent_learning_review::backfill_package_format`: global migration marker. |
+| `assistant_notification_push_budgets` | `assistant_notification_service::claim_push`: reservation timestamp array. |
+| `assistant_notification_push_sources` | `assistant_notification_service::claim_push`: deduplication reservation. |
+| `assistant_service_execution` | `assistant_service_execution::check_inner/attach_org_offer`: acknowledgement-to-execution binding envelope. |
+| `encrypted_record_migration_findings` | `encrypted_record_migration::advance`: keyed diagnostic document, excluded from export. |
+| `encrypted_record_migration_runs` | `encrypted_record_migration::start`: migration coordination document, excluded from export. |
+| `machine_orphan_inventory` | `remote_machine_events::record_investigation`: diagnostic resource investigation document. |
+| `platform_guide_selections` | `platform_setup_service::guide_select_current`: binding/generation selection counter. |
+| `platform_native_replies` | `platform_binding_service::admit_native_reply_in_session`: provider reply deduplication document. |
+| `platform_personal_decision_spacing` | `platform_link_intent_service::admit_decision`: per-person timestamp counter. |
+| `trigger_owner_limits` | `trigger_service::create`: atomic owner version counter. |
+| `trigger_work` | `trigger_schedule::insert_run/set_schedule_job`: queued scheduled occurrence document. |
+| `org_channel_lanes` | `org_channel_service::transcript::lane`: actor/routing selectors and generated conversation id. |
+| `org_channel_link_challenges` | `org_channel_service::links::issue`: one-time link challenge document. |

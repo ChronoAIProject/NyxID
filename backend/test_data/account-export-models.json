@@ -1353,11 +1353,13 @@
   ],
   "channel_activity_notifications": [
     {
-      "user_id": "fixture-value",
+      "_id": "fixture-value",
       "conversation_id": "fixture-value",
+      "user_id": "fixture-value",
       "direction": "fixture-value",
-      "content_type": "fixture-value",
       "platform": "fixture-value",
+      "content_type": "fixture-value",
+      "callback_status": "fixture-value",
       "created_at": {
         "$date": {
           "$numberLong": "1700000000000"
@@ -4686,10 +4688,11 @@
   ],
   "org_channel_messages": [
     {
+      "author_user_id": "fixture-value",
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
       "user_id": "fixture-value",
-      "channel_id": "fixture-value",
-      "conversation_id": "fixture-value",
-      "actor_id": "fixture-value",
+      "seq": 1,
       "role": "fixture-value",
       "text": "fixture-value",
       "created_at": {
@@ -4697,7 +4700,9 @@
           "$numberLong": "1700000000000"
         }
       },
-      "author_user_id": "fixture-value"
+      "channel_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "actor_id": "fixture-value"
     }
   ],
   "org_channel_sender_links": [

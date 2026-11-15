@@ -61,25 +61,14 @@ struct PushSource {
     sent_at: bson::DateTime,
 }
 
-/// assistant_service_execution::bootstrap writes an untyped execution record.
+/// assistant_service_execution::check_inner/attach_org_offer writes an untyped execution record.
 #[derive(serde::Deserialize, Serialize)]
 struct ServiceExecution {
     user_id: String,
     conversation_id: String,
 }
 
-/// channel_activity_service writes metadata-only untyped activity records.
-#[derive(serde::Deserialize, Serialize)]
-struct ChannelActivity {
-    user_id: String,
-    conversation_id: String,
-    direction: String,
-    content_type: String,
-    platform: String,
-    created_at: bson::DateTime,
-}
-
-/// encrypted_record_migration::tick writes untyped storage diagnostic metadata.
+/// encrypted_record_migration::advance writes untyped storage diagnostic metadata.
 #[derive(serde::Deserialize, Serialize)]
 struct MigrationFinding {
     collection: String,
@@ -116,7 +105,7 @@ struct GuideSelection {
     purge_after: bson::DateTime,
 }
 
-/// platform_binding_service::admit_reply writes untyped provider reply deduplication metadata.
+/// platform_binding_service::admit_native_reply_in_session writes untyped provider reply deduplication metadata.
 #[derive(serde::Deserialize, Serialize)]
 struct NativeReply {
     source_id: String,
@@ -132,7 +121,7 @@ struct DecisionSpacing {
     last_decision_at: bson::DateTime,
 }
 
-/// trigger_service::save writes an untyped owner version counter.
+/// trigger_service::create writes an untyped owner version counter.
 #[derive(serde::Deserialize, Serialize)]
 struct TriggerOwnerLimit {
     #[serde(rename = "_id")]
@@ -140,7 +129,7 @@ struct TriggerOwnerLimit {
     version: i64,
 }
 
-/// trigger_schedule::enqueue_occurrence writes untyped scheduled work metadata.
+/// trigger_schedule::insert_run writes untyped scheduled work metadata.
 #[derive(serde::Deserialize, Serialize)]
 struct TriggerWork {
     trigger_id: String,
@@ -157,7 +146,7 @@ struct OrgLane {
     created_at: bson::DateTime,
 }
 
-/// org_channel_service::links::begin writes untyped link challenges.
+/// org_channel_service::links::issue writes untyped link challenges.
 #[derive(serde::Deserialize, Serialize)]
 struct OrgChallenge {
     user_id: String,
@@ -167,18 +156,14 @@ struct OrgChallenge {
     expires_at: bson::DateTime,
 }
 
-/// org_channel_service::transcript::append extends GroupMessage with actor and conversation selectors.
+/// org_channel_service::transcript::publish extends GroupMessage with actor and conversation selectors.
 #[derive(serde::Deserialize, Serialize)]
 struct OrgMessage {
-    user_id: String,
-    #[serde(default)]
-    author_user_id: Option<String>,
+    #[serde(flatten)]
+    message: crate::models::assistant_group::GroupMessage,
     channel_id: String,
     conversation_id: String,
     actor_id: String,
-    role: String,
-    text: String,
-    created_at: bson::DateTime,
 }
 
 fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> {
@@ -344,7 +329,9 @@ fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> 
         "catalog_delegation_grants" => {
             roundtrip::<crate::models::catalog_delegation_grant::CatalogDelegationGrant>(row)
         }
-        "channel_activity_notifications" => roundtrip::<ChannelActivity>(row),
+        "channel_activity_notifications" => {
+            roundtrip::<crate::models::channel_message::ChannelMessage>(row)
+        }
         "channel_adapter_accounts" => {
             roundtrip::<crate::models::channel_adapter::ProviderAccount>(row)
         }
@@ -622,7 +609,6 @@ fn every_export_path_exists_in_serialized_storage_models() {
         .filter(|entry| matches!(entry.export, personal_data_registry::Export::Section(_)))
         .map(|entry| (entry.collection, fields_for(entry.collection).unwrap()))
         .collect::<Vec<_>>();
-    specs.push(("audit_log", fields_for("audit_log").unwrap()));
     for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
         specs.push((view.collection, additional_export_spec(view).fields));
     }
@@ -896,6 +882,9 @@ async fn export_selectors_isolate_three_people_and_shared_relationships() {
         let usages =
             &export.sections["account_activity"]["invite_codes"].items[0]["usages"]["user_id"];
         assert_eq!(usages, &serde_json::json!([person]));
+        let invite = &export.sections["account_activity"]["invite_codes"].items[0];
+        assert!(invite.get("used_count").is_none());
+        assert!(invite.get("max_uses").is_none());
         assert_eq!(
             export.sections["assistant"]["assistant_agent_consents"].total_count,
             1
@@ -1054,11 +1043,6 @@ fn export_documentation_matches_every_declared_view_and_field() {
         let spec = explicit_export_spec(entry.collection).unwrap();
         rows.insert((spec.section, spec.subsection, spec.fields));
     }
-    rows.insert((
-        "account_activity",
-        "audit_log",
-        fields_for("audit_log").unwrap(),
-    ));
     for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
         let spec = additional_export_spec(view);
         rows.insert((spec.section, spec.subsection, spec.fields));
@@ -1178,9 +1162,18 @@ async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_privat
         assert_eq!(encoded.contains(text), included, "{text}");
     }
     // Current delivery preferences cannot retroactively reclassify stored replies.
-    db.collection::<Document>("assistant_conversations").update_one(doc! {"_id":"private"},doc! {"$set":{"reply_channel":{"platform":"telegram","conversation_id":"destination"}}}).await.unwrap();
+    db.collection::<Document>("assistant_conversations")
+        .update_one(
+            doc! {"_id":"private"},
+            doc! {"$set":{"reply_channel":{"platform":"telegram","conversation_id":"destination"}}},
+        )
+        .await
+        .unwrap();
     let changed = build(&db, &person).await.unwrap();
-    assert_eq!(export.sections["assistant"]["assistant_messages"].items, changed.sections["assistant"]["assistant_messages"].items);
+    assert_eq!(
+        export.sections["assistant"]["assistant_messages"].items,
+        changed.sections["assistant"]["assistant_messages"].items
+    );
     assert!(!encoded.contains("GUEST_TITLE_SENTINEL"));
     assert!(encoded.contains("Private title"));
     assert_eq!(
@@ -1193,20 +1186,49 @@ async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_privat
 #[tokio::test]
 async fn personal_group_owner_inputs_from_the_real_writer_are_exported() {
     use crate::models::assistant_group::{AssistantGroup, GroupMessage};
-    let db=crate::test_utils::connect_transaction_test_database("export_group_writer").await;
-    let person=uuid::Uuid::new_v4().to_string();
-    db.collection::<crate::models::user::User>("users").insert_one(crate::test_utils::test_user(&person,crate::models::user::UserType::Person)).await.unwrap();
-    let mut group:AssistantGroup=bson::from_document(model_fixture("assistant_groups")).unwrap();
-    group.id=format!("nyxg-{}",uuid::Uuid::new_v4().simple());
-    group.user_id=person.clone(); group.collaboration=None;
-    db.collection::<AssistantGroup>("assistant_groups").insert_one(&group).await.unwrap();
-    let message=crate::services::assistant_group_service::append_with_recipients(&db,&person,&group.id,"user",None,"MY_PERSONAL_GROUP_INPUT",&[],&[]).await.unwrap();
+    let db = crate::test_utils::connect_transaction_test_database("export_group_writer").await;
+    let person = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(crate::test_utils::test_user(
+            &person,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let mut group: AssistantGroup = bson::from_document(model_fixture("assistant_groups")).unwrap();
+    group.id = format!("nyxg-{}", uuid::Uuid::new_v4().simple());
+    group.user_id = person.clone();
+    group.collaboration = None;
+    db.collection::<AssistantGroup>("assistant_groups")
+        .insert_one(&group)
+        .await
+        .unwrap();
+    let message = crate::services::assistant_group_service::append_with_recipients(
+        &db,
+        &person,
+        &group.id,
+        "user",
+        None,
+        "MY_PERSONAL_GROUP_INPUT",
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
     assert!(message.author_user_id.is_none());
-    assert!(message.collaboration.is_none()); assert!(!message.org_group);
-    let mut other=message.clone();other.id=uuid::Uuid::new_v4().to_string();other.org_group=true;other.text="OTHER_ORG_MEMBER_INPUT".into();
-    db.collection::<GroupMessage>("assistant_group_messages").insert_one(other).await.unwrap();
-    let export=build(&db,&person).await.unwrap();
-    let text=serde_json::to_string(&export).unwrap();
-    assert!(text.contains("MY_PERSONAL_GROUP_INPUT")); assert!(!text.contains("OTHER_ORG_MEMBER_INPUT"));
+    assert!(message.collaboration.is_none());
+    assert!(!message.org_group);
+    let mut other = message.clone();
+    other.id = uuid::Uuid::new_v4().to_string();
+    other.org_group = true;
+    other.text = "OTHER_ORG_MEMBER_INPUT".into();
+    db.collection::<GroupMessage>("assistant_group_messages")
+        .insert_one(other)
+        .await
+        .unwrap();
+    let export = build(&db, &person).await.unwrap();
+    let text = serde_json::to_string(&export).unwrap();
+    assert!(text.contains("MY_PERSONAL_GROUP_INPUT"));
+    assert!(!text.contains("OTHER_ORG_MEMBER_INPUT"));
     db.drop().await.unwrap();
 }

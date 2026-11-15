@@ -568,6 +568,7 @@ fn additional_export_spec(
     view: &personal_data_registry::AdditionalExportView,
 ) -> ExplicitExportSpec {
     let fields = match view.selector {
+        personal_data_registry::ExportViewSelector::AuditMetadata => &["event_type", "created_at"],
         personal_data_registry::ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
             AUTHORED_GROUP_MESSAGE_FIELDS
         }
@@ -584,6 +585,7 @@ fn additional_export_filter(
     account_id: &str,
 ) -> Document {
     match view.selector {
+        personal_data_registry::ExportViewSelector::AuditMetadata => doc! {"user_id":account_id},
         personal_data_registry::ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
             doc! {"author_user_id": account_id, "user_id": {"$ne": account_id}}
         }
@@ -1364,12 +1366,7 @@ fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Opti
 
 fn private_conversation_filter(prefix: &str) -> Document {
     let mut filter = doc! {};
-    for field in [
-        "collaboration",
-        "platform_thread",
-        "channel",
-        "group_id",
-    ] {
+    for field in ["collaboration", "platform_thread", "channel", "group_id"] {
         filter.insert(format!("{prefix}{field}"), Bson::Null);
     }
     for field in ["shared_agent_thread", "guest_turn", "invocation_controlled"] {
@@ -1799,27 +1796,15 @@ async fn build_with_limit(
 ) -> AppResult<AccountExport> {
     let mut sections = empty_sections();
     let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
-    let mut sources = vec![
-        (
-            "users",
-            ExplicitExportSpec {
-                section: "account",
-                subsection: "profile",
-                fields: PROFILE_FIELDS,
-            },
-            Some(doc! {"_id": account_id}),
-        ),
-        (
-            "audit_log",
-            ExplicitExportSpec {
-                section: "account_activity",
-                subsection: "audit_log",
-                fields: fields_for("audit_log")
-                    .map_err(|error| AppError::Internal(error.to_string()))?,
-            },
-            Some(doc! {"user_id": account_id}),
-        ),
-    ];
+    let mut sources = vec![(
+        "users",
+        ExplicitExportSpec {
+            section: "account",
+            subsection: "profile",
+            fields: PROFILE_FIELDS,
+        },
+        Some(doc! {"_id": account_id}),
+    )];
     for entry in personal_data_registry::entries() {
         let personal_data_registry::Export::Section(section) = entry.export else {
             continue;
@@ -2530,10 +2515,23 @@ mod tests {
         for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
             let source = personal_data_registry::find(view.collection).expect(view.collection);
             let spec = additional_export_spec(view);
-            assert_eq!(
-                source.export,
-                personal_data_registry::Export::Section(spec.section)
-            );
+            match view.selector {
+                personal_data_registry::ExportViewSelector::AuditMetadata => {
+                    assert_eq!(
+                        source.erasure,
+                        personal_data_registry::Erasure::Retained(
+                            personal_data_registry::RetainedCategory::Audit
+                        )
+                    );
+                    assert_eq!(spec.fields, &["event_type", "created_at"]);
+                }
+                personal_data_registry::ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
+                    assert_eq!(
+                        source.export,
+                        personal_data_registry::Export::Section(spec.section)
+                    );
+                }
+            }
             assert!(
                 seen.insert((spec.section, spec.subsection)),
                 "duplicate additional view subsection"

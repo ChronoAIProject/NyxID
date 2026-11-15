@@ -410,6 +410,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
         ));
     };
     let domain = &job.domains[index];
+    use super::super::personal_data_registry::ErasureDomain;
     let result: AppResult<Outcome> = async {
         // Defend jobs accepted by an earlier writer too. Provider credentials
         // must remain intact until publication reconciliation has settled.
@@ -432,7 +433,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
                     Outcome::Pending("platform_lifecycle_pending")
                 },
             ),
-            "oracle" => Ok(
+            name if name == ErasureDomain::Oracle.execution().0 => Ok(
                 if Box::pin(super::super::oracle_pool_service::personal_erasure_pass(
                     db,
                     &job.user_id,
@@ -470,7 +471,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
                     }
                 },
             ),
-            "channel_bots" => {
+            name if name == ErasureDomain::ChannelBots.execution().0 => {
                 Ok(if Box::pin(super::channel::pass(state, &job)).await? {
                     Outcome::Complete
                 } else {
@@ -490,7 +491,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
                     Outcome::OperatorAction("machine_lifecycle_reconciliation_required")
                 }
             }),
-            "local_inventory" => {
+            name if name == ErasureDomain::LocalEvidence.execution().0 => {
                 Ok(if Box::pin(super::local::pass(state, &job)).await? {
                     Outcome::Complete
                 } else if super::local::remote_cleanup_pending(&state.db, &job.user_id).await? {
@@ -499,7 +500,7 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
                     Outcome::Pending("local_inventory_cleanup_pending")
                 })
             }
-            "source" => {
+            name if name == ErasureDomain::Source.execution().0 => {
                 Ok(if Box::pin(super::local::source(db, &job)).await? {
                     Outcome::Complete
                 } else if super::local::remote_cleanup_pending(db, &job.user_id).await? {

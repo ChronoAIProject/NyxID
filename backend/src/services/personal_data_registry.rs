@@ -33,6 +33,7 @@ impl RetainedCategory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErasureDomain {
     Learning,
+    LocalEvidence,
     Voice,
     Channel,
     NodeDrain,
@@ -45,10 +46,10 @@ pub enum ErasureDomain {
     Source,
 }
 
-#[cfg(test)]
 impl ErasureDomain {
     pub const fn execution(self) -> (&'static str, &'static str) {
         match self {
+            Self::LocalEvidence => ("local_inventory", "local::retain_settled_evidence"),
             Self::Learning => ("local_inventory", "learning::clear"),
             Self::Voice => ("local_inventory", "local::pass"),
             Self::Channel => ("local_inventory", "local::joined_parents"),
@@ -114,6 +115,7 @@ pub enum ExportSelector {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExportViewSelector {
     AuthoredGroupMessagesOutsideOwnedGroups,
+    AuditMetadata,
 }
 
 /// An explicitly scoped second export view of an already registered source.
@@ -125,12 +127,20 @@ pub struct AdditionalExportView {
     pub selector: ExportViewSelector,
 }
 
-pub static ADDITIONAL_EXPORT_VIEWS: &[AdditionalExportView] = &[AdditionalExportView {
-    collection: "assistant_group_messages",
-    section: "assistant",
-    subsection: "authored_group_messages",
-    selector: ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups,
-}];
+pub static ADDITIONAL_EXPORT_VIEWS: &[AdditionalExportView] = &[
+    AdditionalExportView {
+        collection: "assistant_group_messages",
+        section: "assistant",
+        subsection: "authored_group_messages",
+        selector: ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups,
+    },
+    AdditionalExportView {
+        collection: "audit_log",
+        section: "account_activity",
+        subsection: "audit_log",
+        selector: ExportViewSelector::AuditMetadata,
+    },
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -1403,18 +1413,18 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "durable_operation_executions",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        erasure: Erasure::Domain(ErasureDomain::LocalEvidence),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "durable_operation_executions is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+        why: "durable_operation_executions is compacted by local::retain_settled_evidence after terminal execution; the original row is deleted and only opaque user_id, row identity and settlement reason remain in personal_erasure_local_receipts.",
     },
     Entry {
         collection: "durable_operation_grants",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        erasure: Erasure::Domain(ErasureDomain::LocalEvidence),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "durable_operation_grants is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+        why: "durable_operation_grants is compacted by local::retain_settled_evidence after terminal execution; the original row is deleted and only opaque user_id, row identity and settlement reason remain in personal_erasure_local_receipts.",
     },
     Entry {
         collection: "encrypted_record_migration_findings",
@@ -2144,7 +2154,7 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "personal_erasure_local_receipts",
-        owner: OwnerSelector::NotPersonal,
+        owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
@@ -4942,7 +4952,11 @@ mod tests {
         for view in ADDITIONAL_EXPORT_VIEWS {
             let source =
                 find(view.collection).expect("additional export source must be registered");
-            assert_eq!(source.export, Export::Section(view.section));
+            if view.selector == ExportViewSelector::AuditMetadata {
+                assert_eq!(source.erasure, Erasure::Retained(RetainedCategory::Audit));
+            } else {
+                assert_eq!(source.export, Export::Section(view.section));
+            }
             assert!(
                 selectors.insert((view.collection, view.selector)),
                 "duplicate export view selector"
@@ -4952,6 +4966,9 @@ mod tests {
                 "duplicate export view subsection"
             );
             match view.selector {
+                ExportViewSelector::AuditMetadata => {
+                    assert_eq!(view.collection, "audit_log");
+                }
                 ExportViewSelector::AuthoredGroupMessagesOutsideOwnedGroups => {
                     assert_eq!(
                         view.collection,
@@ -4966,7 +4983,7 @@ mod tests {
         }
         assert_eq!(
             selectors.len(),
-            1,
+            2,
             "authored group-message export view is missing"
         );
     }
