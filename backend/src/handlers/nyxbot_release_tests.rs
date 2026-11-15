@@ -252,6 +252,8 @@ async fn release_lease_takeover_fences_stale_completion_and_repeated_delete_404(
     release::retire_attempt(&state, &reserved.id, ReleaseReason::SetupFailed)
         .await
         .unwrap();
+    // Retirement uses the host clock; claim eligibility uses MongoDB time.
+    immediate(&state, &reserved.id).await;
     let old = release::claim(&state.db, Some(&reserved.id))
         .await
         .unwrap()
@@ -632,7 +634,6 @@ async fn release_retirement_and_route_key_revocation_roll_back_together() {
         .await
         .unwrap();
     let response = disconnect(&state, OWNER, &row.id).await.unwrap();
-    assert_eq!(response["gateway_released"], true);
     let retired = state
         .db
         .collection::<Release>(RELEASES)
@@ -642,7 +643,21 @@ async fn release_retirement_and_route_key_revocation_roll_back_together() {
         .unwrap();
     assert_eq!(retired.owner_user_id, OWNER);
     assert_eq!(retired.expected_version, Some(1));
-    assert_eq!(retired.state, ReleaseState::Settled);
+    assert_eq!(
+        response["gateway_released"],
+        retired.state == ReleaseState::Settled
+    );
+    // Inline cleanup is opportunistic: a host-clock retirement can become
+    // due just after the MongoDB-clock claim. Drive that queued obligation.
+    if retired.state != ReleaseState::Settled {
+        assert_eq!(retired.state, ReleaseState::Due);
+        assert!(execute(&state, &retired.id).await);
+    }
+    assert_retired_key(&state, &row.route_api_key_id).await;
+    assert_eq!(
+        current(&state, &retired.id).await.state,
+        ReleaseState::Settled
+    );
     upstream.abort();
     state.db.drop().await.unwrap();
 }
