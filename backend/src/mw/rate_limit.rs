@@ -186,7 +186,90 @@ pub struct PerKeyRateLimiter {
     window_secs: u64,
 }
 
+/// Single-use reservation for an export's fixed-window rate slot.
+pub struct RateReservation {
+    key: String,
+    reset_at: chrono::DateTime<chrono::Utc>,
+    #[cfg(test)]
+    memory_start: Option<Instant>,
+}
+
 impl PerKeyRateLimiter {
+    pub async fn reserve(&self, key: &str) -> Result<(Option<RateReservation>, u64), AppError> {
+        if let Some(db) = &self.db {
+            let admitted = RateWindowStore::admit(
+                db,
+                &self.namespace,
+                key,
+                u64::from(self.max_requests),
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await?;
+            let retry = admitted
+                .reset_at
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                .max(1) as u64;
+            return Ok((
+                admitted.allowed.then(|| RateReservation {
+                    key: key.into(),
+                    reset_at: admitted.reset_at,
+                    #[cfg(test)]
+                    memory_start: None,
+                }),
+                retry,
+            ));
+        }
+        #[cfg(test)]
+        {
+            let now = Instant::now();
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let entry = state.entry(key.into()).or_insert((0, now));
+            if now.duration_since(entry.1).as_secs() >= self.window_secs {
+                *entry = (0, now);
+            }
+            if entry.0 >= self.max_requests {
+                return Ok((None, self.window_secs));
+            }
+            entry.0 += 1;
+            Ok((
+                Some(RateReservation {
+                    key: key.into(),
+                    reset_at: chrono::Utc::now(),
+                    memory_start: Some(entry.1),
+                }),
+                self.window_secs,
+            ))
+        }
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
+    pub async fn refund(&self, reservation: RateReservation) -> Result<(), AppError> {
+        if let Some(db) = &self.db {
+            return RateWindowStore::refund(
+                db,
+                &self.namespace,
+                &reservation.key,
+                reservation.reset_at,
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await;
+        }
+        #[cfg(test)]
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(entry) = state.get_mut(&reservation.key)
+                && Some(entry.1) == reservation.memory_start
+            {
+                entry.0 = entry.0.saturating_sub(1);
+            }
+            Ok(())
+        }
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
     #[cfg(test)]
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
@@ -2717,5 +2800,57 @@ mod tests {
         limiter.check("conv-2");
         limiter.check("conv-3");
         assert_eq!(limiter.active_conversations(), 3);
+    }
+}
+
+#[cfg(test)]
+mod export_reservation_tests {
+    use super::*;
+    use mongodb::bson::{self, Document};
+
+    #[tokio::test]
+    async fn export_reservations_bound_concurrency_and_refund_only_the_original_window() {
+        let db = crate::test_utils::connect_transaction_test_database("export_rate_refunds").await;
+        let limiter = Arc::new(PerKeyRateLimiter::with_db(
+            db.clone(),
+            "export-refunds",
+            3,
+            3600,
+        ));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let limiter = limiter.clone();
+            tasks.push(tokio::spawn(async move {
+                limiter.reserve("person").await.unwrap().0
+            }));
+        }
+        let mut admitted = Vec::new();
+        for task in tasks {
+            if let Some(token) = task.await.unwrap() {
+                admitted.push(token);
+            }
+        }
+        assert_eq!(admitted.len(), 3);
+        limiter.refund(admitted.pop().unwrap()).await.unwrap();
+        assert!(limiter.reserve("person").await.unwrap().0.is_some());
+        assert!(limiter.reserve("person").await.unwrap().0.is_none());
+        // Simulate the next fixed window in the stored row. An old, slow
+        // request must never credit this window when its failure arrives late.
+        db.collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .update_many(
+                doc! {},
+                doc! {"$inc": {"count": 5}, "$set": {"window_start": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        limiter.refund(admitted.pop().unwrap()).await.unwrap();
+        let stored = db
+            .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.get_i64("count"), Ok(8));
+        db.drop().await.unwrap();
     }
 }

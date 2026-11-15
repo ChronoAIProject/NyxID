@@ -321,3 +321,11 @@ export content.
 ## Orphan cleanup operations
 
 The operator orphan sweep uses owner-field indexes and a 60-second MongoDB statement bound. It groups only owner counts, filters live users and service accounts in batches, then streams sorted row ids for orphan owners. Run a dry run, apply its digest, and repeat the dry run until it reports no candidates; children of parents removed during an apply appear on the next pass.
+
+A source query failure or timeout marks that kind of record `unavailable: true`
+and lists its full subsection name in `unavailable_sections`. Its items and count
+are empty/zero because no complete result is available; other sources continue.
+The audit records the same unavailable list without database diagnostics. Account
+lookup, encoding and mandatory audit failures fail the request; a server failure
+refunds only its original fixed-window slot. Slots are reserved atomically before
+work starts, so concurrent requests cannot bypass the hourly limit.

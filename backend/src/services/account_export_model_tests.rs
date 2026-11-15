@@ -993,6 +993,7 @@ async fn row_cap_marks_the_source_and_is_listed_without_final_byte_trimming() {
             file_payloads: "metadata_only",
         },
         truncated_sections: Vec::new(),
+        unavailable_sections: Vec::new(),
         excluded: Vec::new(),
         sections: BTreeMap::from([(
             "assistant".into(),

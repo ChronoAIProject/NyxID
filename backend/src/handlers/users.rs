@@ -95,16 +95,26 @@ pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> Ap
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::RateLimitedWithRetry { retry_after: 1 })?;
-    let admission = state
-        .account_export_limiter
-        .check_shared_with_retry(&account_id)
-        .await?;
-    if !admission.0 {
-        return Err(AppError::RateLimitedWithRetry {
-            retry_after: admission.1,
-        });
+    let (reservation, retry_after) = state.account_export_limiter.reserve(&account_id).await?;
+    let Some(reservation) = reservation else {
+        return Err(AppError::RateLimitedWithRetry { retry_after });
+    };
+    let result = export_reserved(&state, &auth_user, &account_id).await;
+    if result
+        .as_ref()
+        .is_err_and(|error| error.status_code().is_server_error())
+    {
+        state.account_export_limiter.refund(reservation).await?;
     }
-    let export = crate::services::account_export_service::build(&state.db, &account_id).await?;
+    result
+}
+
+async fn export_reserved(
+    state: &AppState,
+    auth_user: &AuthUser,
+    account_id: &str,
+) -> AppResult<Response> {
+    let export = crate::services::account_export_service::build(&state.db, account_id).await?;
     let counts: Vec<serde_json::Value> = export
         .sections
         .iter()
@@ -117,7 +127,7 @@ pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> Ap
     let bytes = serde_json::to_vec(&export)
         .map_err(|_| AppError::Internal("Account export encoding failed".into()))?;
     let actor = crate::services::audit_service::AuditActor {
-        user_id: account_id.clone(),
+        user_id: account_id.to_owned(),
         ip_address: auth_user.ip_address.clone(),
         user_agent: auth_user.user_agent.clone(),
         api_key_id: None,
@@ -127,7 +137,7 @@ pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> Ap
         state.db.clone(),
         &actor,
         "user.data_exported",
-        Some(serde_json::json!({"format": crate::services::account_export_service::FORMAT, "version": crate::services::account_export_service::VERSION, "sections": counts, "truncated_sections": export.truncated_sections, "byte_size": bytes.len()})),
+        Some(serde_json::json!({"format": crate::services::account_export_service::FORMAT, "version": crate::services::account_export_service::VERSION, "sections": counts, "truncated_sections": export.truncated_sections, "unavailable_sections": export.unavailable_sections, "byte_size": bytes.len()})),
     )
     .await
     .map_err(|_| AppError::Internal("Account export audit append failed".into()))?;
@@ -2249,6 +2259,7 @@ mod export_http_tests {
                 .starts_with("0:")
         );
         assert!(body.len() <= crate::services::account_export_service::MAX_BYTES);
+        assert_eq!(export["unavailable_sections"], serde_json::json!([]));
         let audit = fixture
             .state
             .db
@@ -2264,5 +2275,87 @@ mod export_http_tests {
         );
         assert!(audit.get("entry_hash").is_some());
         fixture.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn export_http_continues_failed_source_and_refunds_server_failures() {
+        let fixture = Fixture::new("export_unavailable_refund").await;
+        let db = &fixture.state.db;
+        db.collection::<Document>("invalid_session_source")
+            .insert_one(doc! {"_id":"bad", "bad":"not-an-integer"})
+            .await
+            .unwrap();
+        db.run_command(
+            doc! {"create":"sessions", "viewOn":"invalid_session_source", "pipeline":[
+                {"$set": {"user_id": {"$toString": {"$toInt": "$bad"}}}}
+            ]},
+        )
+        .await
+        .unwrap();
+        let (status, _, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        let export: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            export["sections"]["security"]["sessions"]["unavailable"],
+            true
+        );
+        assert_eq!(
+            export["sections"]["security"]["sessions"]["items"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            export["sections"]["account"]["profile"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            export["unavailable_sections"],
+            serde_json::json!(["security.sessions"])
+        );
+        let audit = db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type":"user.data_exported"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get_array("unavailable_sections")
+                .unwrap(),
+            &vec![bson::Bson::String("security.sessions".into())]
+        );
+        db.collection::<Document>("sessions").drop().await.unwrap();
+        // The export's audit append is mandatory. A view rejects writes and
+        // supplies a real server failure after rate admission, without changing
+        // infrastructure or affecting another source/database.
+        db.collection::<Document>("audit_log").drop().await.unwrap();
+        db.run_command(doc! {"create":"audit_log", "viewOn":"empty_audit_source"})
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                fixture.request(&[bearer(&fixture.human_token)]).await.0,
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+        db.collection::<Document>("audit_log").drop().await.unwrap();
+        // One successful export above consumed one slot. Four failed attempts
+        // consumed none; exactly two remaining successes are admitted.
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        db.drop().await.unwrap();
     }
 }

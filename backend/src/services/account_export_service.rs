@@ -45,6 +45,7 @@ pub struct AccountExport {
     pub account_id: String,
     pub limits: ExportLimits,
     pub truncated_sections: Vec<String>,
+    pub unavailable_sections: Vec<String>,
     pub excluded: Vec<&'static str>,
     pub sections: BTreeMap<String, BTreeMap<String, ExportSubsection>>,
 }
@@ -1539,6 +1540,41 @@ async fn rows(
     sort: Document,
     budget: &mut ExportBudget,
 ) -> AppResult<ExportSubsection> {
+    match query_rows(db, collection, filter, fields, sort, budget).await {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            // Do not expose database diagnostics or content. Every source has
+            // an independent budget, so a failed source cannot starve others.
+            tracing::warn!(collection, "Account export subsection unavailable");
+            Ok(ExportSubsection {
+                unavailable: true,
+                ..Default::default()
+            })
+        }
+    }
+}
+
+fn unavailable_names(export: &AccountExport) -> Vec<String> {
+    export
+        .sections
+        .iter()
+        .flat_map(|(section, values)| {
+            values
+                .iter()
+                .filter(|(_, value)| value.unavailable)
+                .map(move |(name, _)| format!("{section}.{name}"))
+        })
+        .collect()
+}
+
+async fn query_rows(
+    db: &mongodb::Database,
+    collection: &str,
+    filter: Document,
+    fields: &[&str],
+    sort: Document,
+    budget: &mut ExportBudget,
+) -> AppResult<ExportSubsection> {
     let base = source_pipeline(collection, filter.clone());
     let mut count_pipeline = base.clone();
     count_pipeline.push(doc! {"$count": "count"});
@@ -1610,6 +1646,7 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
         limits: export.limits.clone(),
         excluded: export.excluded.clone(),
         truncated_sections: truncated.iter().cloned().collect(),
+        unavailable_sections: export.unavailable_sections.clone(),
         sections: export
             .sections
             .iter()
@@ -1720,6 +1757,7 @@ async fn build_with_limit(
             Some(doc! {"user_id": account_id}),
         ),
     ];
+
     for entry in personal_data_registry::entries() {
         let personal_data_registry::Export::Section(section) = entry.export else {
             continue;
@@ -1795,6 +1833,7 @@ async fn build_with_limit(
             },
         },
         truncated_sections: Vec::new(),
+        unavailable_sections: Vec::new(),
         excluded: vec![
             "password and authentication hashes",
             "tokens, keys, secrets, ciphertext, signatures and provider credentials",
@@ -1803,6 +1842,7 @@ async fn build_with_limit(
         ],
         sections,
     };
+    export.unavailable_sections = unavailable_names(&export);
     enforce_cap_with_limit(&mut export, max_bytes);
     Ok(export)
 }
@@ -2334,13 +2374,14 @@ mod tests {
                 file_payloads: "metadata_only",
             },
             truncated_sections: Vec::new(),
+            unavailable_sections: Vec::new(),
             excluded: Vec::new(),
             sections,
         };
-        enforce_cap_with_limit(&mut export, 400);
+        enforce_cap_with_limit(&mut export, 500);
         assert!(export.sections["assistant"]["messages"].truncated);
         assert_eq!(export.truncated_sections, vec!["assistant.messages"]);
-        assert!(serde_json::to_vec(&export).unwrap().len() <= 400);
+        assert!(serde_json::to_vec(&export).unwrap().len() <= 500);
     }
     #[test]
     fn registry_export_mapping_is_one_to_one() {
