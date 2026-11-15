@@ -10,7 +10,7 @@ import {
   shareAccountExport,
 } from "./accountExport";
 
-function fixture({ available = true, switchAccount = false, failShare = false, abort = false, length = null as string | null, invalid = false, body = undefined as string | undefined, pieces = undefined as Uint8Array[] | undefined } = {}) {
+function fixture({ available = true, switchAccount = false, failShare = false, abort = false, length = null as string | null, encoding = null as string | null, invalid = false, body = undefined as string | undefined, pieces = undefined as Uint8Array[] | undefined } = {}) {
   const calls: string[] = [];
   let reads = 0;
   let requestSignal: AbortSignal | undefined;
@@ -20,7 +20,7 @@ function fixture({ available = true, switchAccount = false, failShare = false, a
   return { calls, signal: () => requestSignal, deps: {
     available: async () => { calls.push("available"); return available; },
     request: async (signal: AbortSignal) => { requestSignal = signal; calls.push("request"); return {
-      response: { headers: { get: () => length }, body: { getReader: () => ({
+      response: { headers: { get: (name: string) => name === "Content-Encoding" ? encoding : length }, body: { getReader: () => ({
         read: async () => { if (abort && reads > 0) throw new TypeError("connection aborted"); const value = chunks[reads++]; return { done: !value, value }; },
         cancel: async () => { calls.push("cancel"); }, releaseLock: () => { calls.push("release"); },
       }) } },
@@ -329,4 +329,24 @@ test("45-second response headers succeed without triggering the body idle watchd
   assert.equal(timers.pending(), 0);
   context.mock.timers.tick(ACCOUNT_EXPORT_DEADLINE_MS * 2);
   assert.equal(timers.fired(), 0);
+});
+
+test("encoded exports use bounded structural validation instead of the wire byte count", async () => {
+  for (const encoding of ["gzip", "br", " GZip "]) {
+    const f = fixture({ encoding, length: "1024" });
+    await shareAccountExport(f.deps);
+    assert.ok(f.calls.includes("share"));
+    assert.ok(!f.calls.includes("text"));
+    const truncated = fixture({ encoding, length: "1024", invalid: true });
+    await assert.rejects(shareAccountExport(truncated.deps), /export_incomplete/);
+    assert.ok(!truncated.calls.includes("share"));
+    assert.ok(truncated.calls.includes("remove"));
+  }
+});
+
+test("identity encoding still requires the exact Content-Length", async () => {
+  const f = fixture({ encoding: "identity", length: "1024" });
+  await assert.rejects(shareAccountExport(f.deps), /export_incomplete/);
+  assert.ok(!f.calls.includes("share"));
+  assert.ok(f.calls.includes("remove"));
 });

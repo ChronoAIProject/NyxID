@@ -9773,7 +9773,10 @@ of at most 64 KiB. A 120-second total delivery deadline discards the remaining
 buffer and aborts the body with an error; it refunds the delivery slot, while
 leaving the attempt charged. The frontend nginx export route disables gzip and
 buffering. Clients must reject body errors and a byte count differing from a
-present length. Web also parses the JSON. Without a length, mobile requires clean
+present length when encoding is absent or identity. Do not compress this route
+at any ingress; for nonidentity encoding clients fall back to JSON/structural
+validation rather than compare wire and decoded byte counts. Web also parses the
+JSON. Without a usable length, mobile requires clean
 transport completion and a bounded check of the first and last non-whitespace
 bytes (`{` / `}`), tracked while writing; it never reads back or parses the full
 file. Mobile bounds headers to 75 seconds (60-second server build budget plus margin),

@@ -83,7 +83,10 @@ export async function shareAccountExport(deps: {
     reader = source;
     file = deps.create();
     let bytes = 0;
-    const length = response.headers.get("Content-Length");
+    const encoding = response.headers.get("Content-Encoding");
+    // Fetch exposes decoded bytes; a compressed wire length cannot verify them.
+    const length = encoding !== null && encoding.trim().toLowerCase() !== "identity"
+      ? null : response.headers.get("Content-Length");
     let firstByte: number | undefined;
     let lastByte: number | undefined;
     for (;;) {
@@ -115,7 +118,7 @@ export async function shareAccountExport(deps: {
       throw new Error("export_incomplete");
     }
     // Reaching done without a read error plus these outer braces is the
-    // bounded structural check when a proxy omits Content-Length.
+    // bounded structural check when a proxy omits length or encodes the body.
     if (length === null && (firstByte !== 0x7b || lastByte !== 0x7d)) {
       throw new Error("export_incomplete");
     }

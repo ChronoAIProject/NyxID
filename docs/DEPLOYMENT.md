@@ -772,6 +772,16 @@ Private signing-key backups remain sensitive even after the public verifier is r
 
 NyxID should run behind a reverse proxy in production for TLS termination, load balancing, and `X-Forwarded-For` header injection.
 
+### Account export transport
+
+Do not compress `POST /api/v1/users/me/export` at any ingress, reverse proxy or
+CDN. Preserve its exact `Content-Length`, disable response buffering, and propagate
+upstream body errors so interrupted exports cannot be saved as complete. The
+frontend nginx configuration has an exact export location with gzip and buffering
+disabled; apply the same rule to any additional ingress. If an intermediary does
+encode a response, clients cannot compare its wire length to decoded bytes and
+must fall back to JSON or structural validation.
+
 ### Caddy (Recommended)
 
 ```

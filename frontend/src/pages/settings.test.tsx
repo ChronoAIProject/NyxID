@@ -452,12 +452,12 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(transport).toHaveBeenCalledTimes(2);
     });
 
-    it("downloads the server-named JSON export and revokes its object URL", async () => {
+    it.each([null, "gzip"])("downloads the server-named JSON export and revokes its object URL (encoding %s)", async (encoding) => {
       const original = transport.getMockImplementation()!;
       transport.mockImplementation(async (url, options) => {
         if (url === "/api/v1/users/me/export" && options?.method === "POST") {
           return new Response('{"format":"nyxid.account-export"}', {
-            headers: { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="account.json"' },
+            headers: { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="account.json"', ...(encoding ? { "Content-Encoding": encoding, "Content-Length": "1024" } : {}) },
           });
         }
         return original(url, options);
@@ -486,7 +486,7 @@ describe.each(["/settings", "/assistant"] as const)(
       }
     });
 
-    it.each(["fetch abort", "body abort", "short body", "invalid JSON without length"])("does not download an incomplete export: %s", async (failure) => {
+    it.each(["fetch abort", "body abort", "short body", "identity mismatch", "encoded invalid JSON", "invalid JSON without length"])("does not download an incomplete export: %s", async (failure) => {
       const original = transport.getMockImplementation()!;
       transport.mockImplementation(async (url, options) => {
         if (url !== "/api/v1/users/me/export" || options?.method !== "POST") return original(url, options);
@@ -494,8 +494,8 @@ describe.each(["/settings", "/assistant"] as const)(
         if (failure === "body abort") return new Response(new ReadableStream({
           start(controller) { controller.error(new TypeError("connection aborted")); },
         }));
-        return new Response(failure === "short body" ? '{"format":"nyxid.account-export"}' : '{"format":', {
-          headers: failure === "short body" ? { "Content-Length": "1024" } : {},
+        return new Response(["short body", "identity mismatch"].includes(failure) ? '{"format":"nyxid.account-export"}' : '{"format":', {
+          headers: failure === "short body" ? { "Content-Length": "1024" } : failure === "identity mismatch" ? { "Content-Encoding": "identity", "Content-Length": "1024" } : failure === "encoded invalid JSON" ? { "Content-Encoding": "gzip", "Content-Length": "1024" } : {},
         });
       });
       const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);

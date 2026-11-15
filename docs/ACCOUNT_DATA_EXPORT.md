@@ -392,7 +392,9 @@ The response body has a total 120-second delivery deadline starting when it is
 created. The backend emits at most 64 KiB per slice and sets `Content-Length` to
 the exact serialized byte size. The API stack does not compress responses; the
 frontend nginx export location disables gzip and response buffering to preserve
-that length and propagate an upstream abort. At the deadline, the backend drops
+that length and propagate an upstream abort. **Do not compress
+`POST /api/v1/users/me/export`** at any ingress, reverse proxy or CDN; preserve the
+length and disable response buffering (see `DEPLOYMENT.md`). At the deadline, the backend drops
 its remaining bytes independently of reader polling, releases the replica
 concurrency permit, and errors the body so transport aborts rather than ending
 with a clean EOF. A slice already handed to the transport can remain until that
@@ -400,10 +402,12 @@ transport drops it. Expiry is a non-delivery: the delivery slot is refunded,
 while the separate hourly attempt remains charged.
 
 Web and mobile reject transport/read errors and byte counts that differ from a
-present `Content-Length`. Web also parses the JSON before starting a download or
+present `Content-Length` only when `Content-Encoding` is absent or `identity`.
+Fetch exposes decoded bytes; a nonidentity encoding makes that length unusable,
+so clients use their JSON/structural fallback. Web also parses the JSON before starting a download or
 showing success. Mobile never reads the temporary file back or parses the full
-body: when the length is present, the exact byte count proves completeness. When
-it is absent, mobile requires a clean transport completion and checks that the
+body: when the unencoded length is present, the exact byte count proves completeness. When
+it is absent or an encoding is present, mobile requires a clean transport completion and checks that the
 first and last non-whitespace bytes are `{` and `}`. It tracks only those two bytes
 while writing, using constant validation memory; this is a structural check, not
 a full JSON syntax check. On failure, mobile removes the temporary file and never

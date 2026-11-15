@@ -1103,7 +1103,10 @@ function PrivacyTab() {
     try {
       const response = await apiFetch("/users/me/export", { method: "POST" });
       const blob = await response.blob();
-      const length = response.headers.get("Content-Length");
+      const encoding = response.headers.get("Content-Encoding");
+      // Fetch exposes decoded bytes, not the compressed wire representation.
+      const length = encoding !== null && encoding.trim().toLowerCase() !== "identity"
+        ? null : response.headers.get("Content-Length");
       if (length !== null && (!/^\d+$/.test(length) || blob.size !== Number(length))) {
         throw new Error("Incomplete account export");
       }
