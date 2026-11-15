@@ -710,7 +710,120 @@ async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
     redact_invite_usages(db, owner).await
 }
 
-async fn erase_page(
+/// Local revocation creates durable external-effect outboxes. Their completion,
+/// rather than domain ordering alone, permits deleting recovery credentials.
+async fn settle_telegram_requests(db: &Database, owner: &str) -> AppResult<()> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        if db.collection::<Document>(super::super::erasure_admission::COLLECTION).update_one(
+            doc! {"_id":owner,"erasure_accepted":true},doc! {"$inc":{"cleanup_revision":1_i64}},
+        ).session(&mut tx).await?.matched_count != 1 {
+            return Err(AppError::Conflict("Personal cleanup barrier is unavailable".into()));
+        }
+        let mut cursor=db.collection::<Document>("telegram_bot_requests").find(doc! {"owner_user_id":owner,"active":true})
+            .sort(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
+        let rows:Vec<Document>=cursor.stream(&mut tx).try_collect().await?;
+        for row in rows {
+            let Some(id)=row.get("_id") else {continue;};
+            let unstarted=matches!(row.get_str("status").unwrap_or_default(),"waiting_telegram"|"waiting_bot"|"waiting_consent"|"ready");
+            let confirmed=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(
+                doc! {"_id":id,"user_id":owner,"personal_erasure_cleanup_complete":true},
+            ).session(&mut tx).await?.is_some();
+            if unstarted || confirmed {
+                db.collection::<Document>("telegram_bot_requests").update_one(
+                    doc! {"_id":id,"owner_user_id":owner,"revision":row.get("revision").cloned().unwrap_or(bson::Bson::Null)},
+                    doc! {"$set":{"active":false,"status":"cancelled","auto_connect":false},"$inc":{"revision":1_i64,"connection_generation":1_i64}},
+                ).session(&mut tx).await?;
+            }
+        }
+        Ok(())
+    }.await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
+
+pub(crate) async fn remote_cleanup_clear(
+    db: &Database,
+    owner: &str,
+    tx: &mut ClientSession,
+) -> AppResult<bool> {
+    for (collection, filter) in [
+        (
+            "platform_bot_cleanup",
+            doc! {"owner_user_id": owner, "completed": {"$ne": true}},
+        ),
+        (
+            "telegram_bot_requests",
+            doc! {"owner_user_id": owner, "active": true},
+        ),
+    ] {
+        if db
+            .collection::<Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id": 1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(!stop_effect_needs_local_node(db, owner, None, tx).await?)
+}
+
+/// Stop completion uses its persisted capture, not the binding. Only an active
+/// local node still provides a cancel capability that this pass would remove.
+/// Filter pending effects for this owner first; unwind and lookup keep memory
+/// bounded without collecting every effect or node id into a client-side array.
+pub(super) async fn stop_effect_needs_local_node(
+    db: &Database,
+    owner: &str,
+    node_id: Option<&str>,
+    tx: &mut ClientSession,
+) -> AppResult<bool> {
+    let mut pending = doc! {
+        "active_turn.origin.user_id": owner, "completed": {"$ne": true},
+    };
+    if let Some(id) = node_id {
+        pending.insert("machine_scopes.node_id", id);
+    }
+    let mut pipeline = vec![
+        doc! {"$match": pending},
+        doc! {"$project": {"machine_scopes.node_id": 1}},
+        doc! {"$unwind": "$machine_scopes"},
+    ];
+    if let Some(id) = node_id {
+        pipeline.push(doc! {"$match": {"machine_scopes.node_id": id}});
+    }
+    pipeline.extend([
+        doc! {"$lookup": {
+            "from": crate::models::node::COLLECTION_NAME,
+            "localField": "machine_scopes.node_id", "foreignField": "_id",
+            "pipeline": [
+                {"$match": {"user_id": owner, "is_active": true,
+                    "metadata.provisioning_source": {"$ne": "remote_machine"}}},
+                {"$project": {"_id": 1}},
+            ],
+            "as": "local_node",
+        }},
+        doc! {"$match": {"local_node.0": {"$exists": true}}},
+        doc! {"$limit": 1},
+        doc! {"$project": {"_id": 1}},
+    ]);
+    let mut cursor = db
+        .collection::<Document>("platform_personal_stop_effects")
+        .aggregate(pipeline)
+        .max_time(std::time::Duration::from_secs(10))
+        .session(&mut *tx)
+        .await?;
+    Ok(cursor.next(tx).await.transpose()?.is_some())
+}
+
+pub(super) async fn erase_page(
     db: &Database,
     owner: &str,
     collection: &str,
@@ -731,6 +844,11 @@ async fn erase_page(
         .write_concern(WriteConcern::majority())
         .await?;
     let result: AppResult<bool> = async {
+        if !remote_cleanup_clear(db, owner, &mut tx).await? {
+            return Err(AppError::Conflict(
+                "Platform cleanup still needs its recovery data".into(),
+            ));
+        }
         let barrier = db
             .collection::<Document>(super::super::erasure_admission::COLLECTION)
             .update_one(
@@ -1032,6 +1150,16 @@ pub(crate) const NODE_DRAIN_COLLECTIONS: &[&str] = &[
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(&state.db);
+    settle_telegram_requests(&db, &job.user_id).await?;
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .await?;
+    let clear = remote_cleanup_clear(&db, &job.user_id, &mut tx).await?;
+    tx.abort_transaction().await?;
+    if !clear {
+        return Ok(false);
+    }
     if redact_shared(&db, &job.user_id).await? {
         return Ok(false);
     }
@@ -1172,6 +1300,57 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
                     .map_err(|_| AppError::Internal("Invalid retained node owner fence".into()))?,
             );
         }
+        #[cfg(test)]
+        if let Some(hook) = before_node_drain_test_hook(&db) {
+            hook.reached.notify_one();
+            hook.resume.notified().await;
+        }
+        // Capture can still be enqueued by lifecycle recovery after admission.
+        // Recheck immediately before external drain/disconnect as well as in
+        // every deletion transaction; the pass-start snapshot is insufficient.
+        let mut tx = db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(ReadConcern::snapshot())
+            .write_concern(WriteConcern::majority())
+            .await?;
+        let ready: AppResult<bool> = async {
+            if stop_effect_needs_local_node(&db, &job.user_id, Some(id), &mut tx).await? {
+                return Ok(false);
+            }
+            if db
+                .collection::<Document>(super::super::erasure_admission::COLLECTION)
+                .update_one(
+                    doc! {"_id":&job.user_id,"erasure_accepted":true},
+                    doc! {"$inc":{"cleanup_revision":1_i64}},
+                )
+                .session(&mut tx)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Err(AppError::Conflict(
+                    "Personal cleanup barrier is unavailable".into(),
+                ));
+            }
+            // Reconcile active nodes left by older acceptance paths only after
+            // their captured Stop no longer needs the live signing capability.
+            db.collection::<Document>(crate::models::node::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":id,"user_id":&job.user_id,"is_active":true,
+                    "metadata.provisioning_source":{"$ne":"remote_machine"}},
+                    vec![doc! {"$set":{"is_active":false,"status":"draining",
+                        "personal_erasure_drain_required":true,
+                        "personal_erasure_drain_owner":{"$ifNull":["$personal_erasure_drain_owner","$connection_owner"]}}}],
+                )
+                .session(&mut tx)
+                .await?;
+            Ok(true)
+        }
+        .await;
+        if !super::super::org_membership_authority::finish(tx, ready).await? {
+            return Ok(false);
+        }
+        node_model.is_active = false;
         if node
             .get_bool("personal_erasure_generation_retired")
             .unwrap_or(false)
@@ -1222,6 +1401,7 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         .write_concern(WriteConcern::majority())
         .await?;
     let result:AppResult<bool>=async {
+        if !remote_cleanup_clear(db,&job.user_id,&mut tx).await? {return Ok(false);}
         if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]}).session(&mut tx).await?.is_some() {return Ok(false);}
         for (collection,filter) in inventory(&job.user_id) {
             if db.collection::<Document>(collection).find_one(filter).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
@@ -1246,4 +1426,21 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         Ok(db.collection::<Document>(USERS).find_one(doc! {"_id":&job.user_id}).session(&mut tx).await?.is_none())
     }.await;
     super::super::org_membership_authority::finish(tx, result).await
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct BeforeNodeDrainHook {
+    pub reached: tokio::sync::Notify,
+    pub resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(super) static BEFORE_NODE_DRAIN: std::sync::LazyLock<
+    dashmap::DashMap<String, std::sync::Arc<BeforeNodeDrainHook>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(test)]
+fn before_node_drain_test_hook(db: &Database) -> Option<std::sync::Arc<BeforeNodeDrainHook>> {
+    BEFORE_NODE_DRAIN.get(db.name()).map(|entry| entry.clone())
 }

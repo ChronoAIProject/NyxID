@@ -2488,3 +2488,749 @@ async fn notification_feed_is_erased_for_exact_person_and_blocks_completion_if_l
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn pending_platform_effects_preserve_parents_children_and_credentials() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"user_id": &owner})
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = [
+        (
+            "user_services",
+            doc! {"_id":"held-service", "user_id": &owner, "name":"Recovery service"},
+        ),
+        (
+            "service_history_heads",
+            doc! {"_id":"held-service", "sequence": 5_i64},
+        ),
+        (
+            "platform_bot_installations",
+            doc! {"_id":"held-installation", "owner_user_id": &owner, "state":"owner_deleted"},
+        ),
+        (
+            "platform_delivery_tests",
+            doc! {"_id":"held-test", "installation_id":"held-installation"},
+        ),
+        (
+            "platform_setups",
+            doc! {"_id":"held-setup", "owner_user_id": &owner, "state":"cancelled"},
+        ),
+        (
+            "platform_setup_steps",
+            doc! {"_id":"held-step", "setup_id":"held-setup"},
+        ),
+        (
+            "platform_personal_bindings",
+            doc! {"_id":"held-binding", "user_id": &owner, "state":"revoked"},
+        ),
+        (
+            "user_provider_credentials",
+            doc! {"_id":"held-credential", "user_id": &owner, "encrypted":"recovery-capability"},
+        ),
+    ];
+    for (collection, row) in &rows {
+        db.collection::<Document>(collection)
+            .insert_one(row.clone())
+            .await
+            .unwrap();
+    }
+    db.collection::<Document>("platform_bot_cleanup")
+        .insert_one(doc! {"_id":"pending", "owner_user_id":&owner, "completed":false})
+        .await
+        .unwrap();
+    assert!(!super::local::pass(&state, &job).await.unwrap());
+    for (collection, row) in &rows {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id":row.get("_id").unwrap()})
+                .await
+                .unwrap(),
+            Some(row.clone())
+        );
+    }
+    db.collection::<Document>("platform_bot_cleanup")
+        .update_one(doc! {"_id":"pending"}, doc! {"$set":{"completed":true}})
+        .await
+        .unwrap();
+    let bystander = doc! {"_id":"other-owner", "user_id":"other-person", "name":"Unrelated"};
+    db.collection::<Document>("user_services")
+        .insert_one(bystander.clone())
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if super::local::pass(&state, &job).await.unwrap() {
+            break;
+        }
+    }
+    for (collection, row) in &rows {
+        assert!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id": row.get("_id").unwrap()})
+                .await
+                .unwrap()
+                .is_none(),
+            "{collection}"
+        );
+    }
+    assert_eq!(
+        db.collection::<Document>("user_services")
+            .find_one(doc! {"_id":"other-owner"})
+            .await
+            .unwrap(),
+        Some(bystander)
+    );
+    assert_eq!(
+        db.collection::<Document>("platform_bot_cleanup")
+            .count_documents(doc! {"completed":true})
+            .await
+            .unwrap(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn complete_job_retires_active_personal_links_and_waiting_telegram_requests() {
+    use crate::models::{
+        platform_link_intent::{PlatformLinkChallenge, PlatformLinkIntent},
+        platform_personal_binding::PlatformPersonalBinding,
+        telegram_bot_request::TelegramBotRequest,
+    };
+    use chrono::Utc;
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let (clients, server) = crate::telemetry::erasure::test_support::clients().await;
+    crate::services::telemetry_erasure_service::register_destinations(&db, &clients)
+        .await
+        .unwrap();
+    let bystander = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>(USERS)
+        .insert_one(test_user(&bystander, UserType::Person))
+        .await
+        .unwrap();
+    let fixtures: std::collections::BTreeMap<String, Vec<Document>> = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("test_data/account-export-models.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut targets = Vec::new();
+    let mut others = Vec::new();
+    for (person, prefix, sender) in [
+        (&owner, "target", 100_i64),
+        (&bystander, "bystander", 200_i64),
+    ] {
+        for (collection, suffix, owner_field, state_field, initial) in [
+            (
+                "platform_personal_bindings",
+                "binding",
+                "user_id",
+                "state",
+                "active",
+            ),
+            (
+                "platform_personal_link_intents",
+                "intent",
+                "claimant_user_id",
+                "state",
+                "pending",
+            ),
+            (
+                "platform_personal_link_challenges",
+                "review",
+                "reviewed_user_id",
+                "state",
+                "review",
+            ),
+            (
+                "platform_personal_link_challenges",
+                "awaiting",
+                "reviewed_user_id",
+                "state",
+                "awaiting_chat_confirmation",
+            ),
+            (
+                "telegram_bot_requests",
+                "telegram",
+                "owner_user_id",
+                "status",
+                "waiting_telegram",
+            ),
+        ] {
+            let mut row = fixtures[collection][0].clone();
+            row.insert("_id", format!("{prefix}-{suffix}"));
+            row.insert(owner_field, person);
+            row.insert(state_field, initial);
+            row.insert(
+                "expires_at",
+                bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1)),
+            );
+            if collection == "telegram_bot_requests" {
+                row.insert("actor_user_id", person);
+            } else {
+                // Different external senders: retiring the target's consent must
+                // not invalidate another person's pending chat confirmation.
+                row.insert("telegram_sender_id", sender);
+                row.insert("telegram_chat_id", sender);
+                if collection == "platform_personal_bindings" {
+                    row.insert("active_turn", bson::Bson::Null);
+                } else {
+                    row.insert(
+                        "purge_after",
+                        bson::DateTime::from_chrono(Utc::now() + chrono::Duration::days(1)),
+                    );
+                    if collection == "platform_personal_link_challenges" {
+                        row.insert("intent_id", format!("{prefix}-intent"));
+                    }
+                }
+            }
+            // Store real serialized models, including checked platform identity
+            // projections, rather than constructing inventory-shaped documents.
+            let row = match collection {
+                "platform_personal_bindings" => {
+                    bson::to_document(&bson::from_document::<PlatformPersonalBinding>(row).unwrap())
+                }
+                "platform_personal_link_intents" => {
+                    bson::to_document(&bson::from_document::<PlatformLinkIntent>(row).unwrap())
+                }
+                "platform_personal_link_challenges" => {
+                    bson::to_document(&bson::from_document::<PlatformLinkChallenge>(row).unwrap())
+                }
+                _ => bson::to_document(&bson::from_document::<TelegramBotRequest>(row).unwrap()),
+            }
+            .unwrap();
+            db.collection::<Document>(collection)
+                .insert_one(row.clone())
+                .await
+                .unwrap();
+            if person == &owner {
+                targets.push((collection, row));
+            } else {
+                others.push((collection, row));
+            }
+        }
+    }
+    accept(&db, &owner, &owner, None).await.unwrap();
+    until_source_removed(&state, &owner).await;
+    finish_with_vendor_evidence(&state, &owner, &clients, &server).await;
+    assert_eq!(
+        status(&db, &owner).await.unwrap().unwrap().status,
+        ErasureStatus::Complete
+    );
+    for (collection, row) in targets {
+        assert!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id": row.get("_id").unwrap()})
+                .await
+                .unwrap()
+                .is_none(),
+            "target survived in {collection}"
+        );
+    }
+    for (collection, expected) in others {
+        let actual = db
+            .collection::<Document>(collection)
+            .find_one(doc! {"_id": expected.get("_id").unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_vec(&actual).unwrap(),
+            bson::to_vec(&expected).unwrap(),
+            "bystander changed in {collection}"
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+/// Existing accepted jobs may still have active local nodes. Seed that persisted
+/// state explicitly after acceptance, without relaxing normal node admission.
+async fn pending_stop_fixture() -> (
+    crate::AppState,
+    PersonalErasureJob,
+    crate::models::node::Node,
+) {
+    use crate::services::node_service;
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let (_, token, _) =
+        node_service::create_registration_token(&db, &owner, "stop-recovery", 10, 300)
+            .await
+            .unwrap();
+    let (mut node, _, _) = node_service::register_node(&db, &state.encryption_keys, &token, None)
+        .await
+        .unwrap();
+    node.status = crate::models::node::NodeStatus::Online;
+    node.machine = Some(nyxid_machine::MachineProfile {
+        version: nyxid_machine::PROTOCOL_VERSION,
+        runtime_id: uuid::Uuid::new_v4().to_string(),
+        shell: true,
+        exact_cancel: true,
+        ..Default::default()
+    });
+    accept(&db, &owner, &owner, None).await.unwrap();
+    db.collection::<crate::models::node::Node>("nodes")
+        .replace_one(doc! {"_id":&node.id}, &node)
+        .await
+        .unwrap();
+    let job = status(&db, &owner).await.unwrap().unwrap();
+    (state, job, node)
+}
+
+async fn insert_pending_personal_stop(
+    db: &Database,
+    owner: &str,
+    node: Option<&crate::models::node::Node>,
+) -> String {
+    use crate::models::{
+        platform_bot_runtime_controls::*, platform_entry_projection::*,
+        platform_personal_binding::*,
+    };
+    let now = chrono::Utc::now();
+    let row = PlatformPersonalStopEffect {
+        id: uuid::Uuid::new_v4().to_string(),
+        active_turn: PersonalActiveTurn {
+            conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+            turn_id: uuid::Uuid::new_v4().to_string(),
+            origin: PersonalTurnProof {
+                platform_config_id: "stop-profile".into(),
+                manager_bot_id: "1234".into(),
+                entry: StoredEntryIdentity::TelegramV1 {
+                    telegram_bot_id: 1234,
+                },
+                sender: StoredSenderIdentity::TelegramV1 {
+                    telegram_sender_id: 100,
+                    telegram_chat_id: 100,
+                },
+                manager_authority_epoch: 1,
+                personal_control_revision: 1,
+                binding_id: "stop-binding".into(),
+                binding_generation: 1,
+                user_id: owner.into(),
+                nyxbot_agent_id: uuid::Uuid::new_v4().to_string(),
+                source: PersonalOriginSource::ThreadEvent {
+                    admission_id: uuid::Uuid::new_v4().to_string(),
+                },
+            },
+        },
+        machine_scopes: node
+            .map(|n| {
+                vec![ExactMachineScope {
+                    node_id: n.id.clone(),
+                    runtime_id: n.machine.as_ref().unwrap().runtime_id.clone(),
+                }]
+            })
+            .unwrap_or_default(),
+        machine_jobs: Vec::new(),
+        stop_requested_at: now,
+        progress: None,
+        completed: false,
+        claim_id: None,
+        lease_expires_at: None,
+        retry_at: now,
+        created_at: now,
+    };
+    db.collection::<PlatformPersonalStopEffect>(STOP_EFFECTS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    row.id
+}
+
+async fn run_real_personal_stop_processor(state: &crate::AppState) {
+    let producers = crate::services::platform_manager_transport::compose(
+        state.clone(),
+        crate::handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        crate::handlers::agent_skills::preload_context(state.clone()),
+    );
+    let result = producers
+        .lifecycle
+        .recover_personal_lifecycle(&state.db, producers.personal.as_ref(), 1)
+        .await
+        .unwrap();
+    assert_eq!(result.processed, 1);
+}
+
+async fn assert_stop_completed(db: &Database, id: &str, completed: bool) {
+    let row = db
+        .collection::<Document>("platform_personal_stop_effects")
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.get_bool("completed"), Ok(completed));
+}
+
+#[tokio::test]
+async fn pending_personal_stop_preserves_active_local_node_until_real_processor_completes() {
+    use crate::services::node_ws_manager::{NodeCapabilitiesMsg, NodeOutboundMessage};
+    let (state, job, node) = pending_stop_fixture().await;
+    let db = &state.db;
+    let id = insert_pending_personal_stop(db, &job.user_id, Some(&node)).await;
+    db.collection::<Document>("user_services")
+        .insert_one(doc! {"_id":"recovery-parent","user_id":&job.user_id})
+        .await
+        .unwrap();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    crate::test_utils::register_test_node_connection(&state, &node.id, sender).await;
+    let caps: NodeCapabilitiesMsg =
+        serde_json::from_value(serde_json::json!({"machine":node.machine})).unwrap();
+    state.node_ws_manager.record_capabilities(&node.id, &caps);
+    crate::services::machine_service::capable(&node, nyxid_machine::Operation::CancelExact)
+        .unwrap();
+    let before = db
+        .collection::<Document>("nodes")
+        .find_one(doc! {"_id":&node.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!local::pass(&state, &job).await.unwrap());
+    assert_eq!(
+        db.collection::<Document>("nodes")
+            .find_one(doc! {"_id":&node.id})
+            .await
+            .unwrap(),
+        Some(before)
+    );
+    assert!(
+        db.collection::<Document>("user_services")
+            .find_one(doc! {"_id":"recovery-parent"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "blocked pass must not drain or disconnect"
+    );
+    let manager = state.node_ws_manager.clone();
+    let node_id = node.id.clone();
+    let signing = crate::services::node_service::get_node_signing_secret(
+        db,
+        &state.encryption_keys,
+        &node.id,
+    )
+    .await
+    .unwrap();
+    let peer = tokio::spawn(async move {
+        let NodeOutboundMessage::Text(text) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), receiver.recv())
+                .await
+                .expect("real processor must dispatch the cancel")
+                .unwrap()
+        else {
+            panic!("cancel request")
+        };
+        let request: nyxid_machine::Request = serde_json::from_str(&text).unwrap();
+        assert_eq!(request.operation, nyxid_machine::Operation::CancelExact);
+        nyxid_machine::signing::ReplayGuard::default()
+            .verify(&request, &node_id, &signing, chrono::Utc::now().timestamp())
+            .unwrap();
+        manager.deliver_machine_result(
+            &node_id,
+            nyxid_machine::Response {
+                request_id: request.request_id,
+                result: serde_json::json!({"stopped":true}),
+            },
+        );
+    });
+    run_real_personal_stop_processor(&state).await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), peer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_stop_completed(db, &id, true).await;
+    until_source_removed(&state, &job.user_id).await;
+    assert!(
+        db.collection::<Document>("nodes")
+            .find_one(doc! {"_id":&node.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.collection::<Document>("user_services")
+            .find_one(doc! {"_id":"recovery-parent"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn independent_personal_stop_completes_through_real_processor_after_erasure() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let (clients, server) = crate::telemetry::erasure::test_support::clients().await;
+    crate::services::telemetry_erasure_service::register_destinations(&db, &clients)
+        .await
+        .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let id = insert_pending_personal_stop(&db, &owner, None).await;
+    let effect = db
+        .collection::<Document>("platform_personal_stop_effects")
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    // The stale binding reference is not needed by the processor or completion.
+    db.collection::<Document>("platform_personal_bindings").insert_one(doc! {
+        "_id":"stop-binding","user_id":&owner,"state":"revoked","active_turn":effect.get("active_turn").unwrap(),
+    }).await.unwrap();
+    until_source_removed(&state, &owner).await;
+    finish_with_vendor_evidence(&state, &owner, &clients, &server).await;
+    assert_eq!(
+        status(&db, &owner).await.unwrap().unwrap().status,
+        ErasureStatus::Complete
+    );
+    assert_stop_completed(&db, &id, false).await;
+    assert!(
+        db.collection::<Document>("platform_personal_bindings")
+            .find_one(doc! {"_id":"stop-binding"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    run_real_personal_stop_processor(&state).await;
+    assert_stop_completed(&db, &id, true).await;
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_dependency_matches_only_active_owned_local_nodes() {
+    let (state, job, node) = pending_stop_fixture().await;
+    let db = &state.db;
+    let id = insert_pending_personal_stop(db, &job.user_id, Some(&node)).await;
+    for (set, blocked) in [
+        (
+            doc! {"is_active":true,"user_id":&job.user_id,"metadata.provisioning_source":"ordinary"},
+            true,
+        ),
+        (doc! {"is_active":false}, false),
+        (doc! {"is_active":true,"user_id":"other-owner"}, false),
+        (
+            doc! {"user_id":&job.user_id,"metadata.provisioning_source":"remote_machine"},
+            false,
+        ),
+    ] {
+        db.collection::<Document>("nodes")
+            .update_one(doc! {"_id":&node.id}, doc! {"$set":set})
+            .await
+            .unwrap();
+        assert_eq!(
+            local::remote_cleanup_pending(db, &job.user_id)
+                .await
+                .unwrap(),
+            blocked
+        );
+    }
+    db.collection::<Document>("nodes")
+        .delete_one(doc! {"_id":&node.id})
+        .await
+        .unwrap();
+    assert!(
+        !local::remote_cleanup_pending(db, &job.user_id)
+            .await
+            .unwrap()
+    );
+    // One capture can cover two nodes. The node-specific pre-drain check must
+    // not hold inactive A just because the same capture still needs active B.
+    let mut inactive = node.clone();
+    inactive.is_active = false;
+    let mut other = node.clone();
+    other.id = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::node::Node>("nodes")
+        .insert_many([&inactive, &other])
+        .await
+        .unwrap();
+    db.collection::<Document>("platform_personal_stop_effects")
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$push":{"machine_scopes":{
+                "node_id":&other.id,"runtime_id":&other.machine.as_ref().unwrap().runtime_id,
+            }}},
+        )
+        .await
+        .unwrap();
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .await
+        .unwrap();
+    for (node_id, blocked) in [
+        (Some(node.id.as_str()), false),
+        (Some(other.id.as_str()), true),
+        (None, true),
+    ] {
+        assert_eq!(
+            local::stop_effect_needs_local_node(db, &job.user_id, node_id, &mut tx)
+                .await
+                .unwrap(),
+            blocked,
+            "node-specific dependency: {node_id:?}"
+        );
+    }
+    tx.abort_transaction().await.unwrap();
+    assert_stop_completed(db, &id, false).await;
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_inserted_after_pass_start_prevents_node_drain_and_transactional_delete() {
+    let (state, job, node) = pending_stop_fixture().await;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    crate::test_utils::register_test_node_connection(&state, &node.id, sender).await;
+    let hook = std::sync::Arc::new(local::BeforeNodeDrainHook::default());
+    local::BEFORE_NODE_DRAIN.insert(state.db.name().into(), hook.clone());
+    let pass_state = state.clone();
+    let pass_job = job.clone();
+    let pass = tokio::spawn(async move { local::pass(&pass_state, &pass_job).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), hook.reached.notified())
+        .await
+        .unwrap();
+    insert_pending_personal_stop(&state.db, &job.user_id, Some(&node)).await;
+    let before = state
+        .db
+        .collection::<Document>("nodes")
+        .find_one(doc! {"_id":&node.id})
+        .await
+        .unwrap()
+        .unwrap();
+    hook.resume.notify_one();
+    assert!(!pass.await.unwrap().unwrap());
+    local::BEFORE_NODE_DRAIN.remove(state.db.name());
+    assert!(
+        receiver.try_recv().is_err(),
+        "racing effect must prevent drain/disconnect"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>("nodes")
+            .find_one(doc! {"_id":&node.id})
+            .await
+            .unwrap(),
+        Some(before)
+    );
+    // Exercise the same transaction guard used immediately before the node delete.
+    assert!(matches!(
+        local::erase_page(&state.db, &job.user_id, "nodes", doc! {"_id":&node.id}).await,
+        Err(AppError::Conflict(_))
+    ));
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn node_stop_wait_escalates_and_admin_node_delete_then_operator_retry_completes_erasure() {
+    let (state, mut job, node) = pending_stop_fixture().await;
+    let db = &state.db;
+    let id = insert_pending_personal_stop(db, &job.user_id, Some(&node)).await;
+    let index = job
+        .domains
+        .iter()
+        .position(|d| d.domain == "local_inventory")
+        .unwrap();
+    // Let the real preceding domains close admission and finish retirement;
+    // then age the node-blocked local phase beyond its documented wait bound.
+    for _ in 0..20 {
+        job = status(db, &job.user_id).await.unwrap().unwrap();
+        if job.domains[..index]
+            .iter()
+            .all(|d| d.status == DomainStatus::Complete)
+        {
+            break;
+        }
+        step(&state).await;
+    }
+    assert!(
+        job.domains[..index]
+            .iter()
+            .all(|d| d.status == DomainStatus::Complete)
+    );
+    job.domains[index].remote_wait_started_at =
+        Some(chrono::Utc::now() - chrono::Duration::hours(25));
+    db.collection::<PersonalErasureJob>(JOBS)
+        .replace_one(doc! {"_id":&job.id}, &job)
+        .await
+        .unwrap();
+    step(&state).await;
+    let blocked = status(db, &job.user_id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, ErasureStatus::OperatorAction);
+    assert_eq!(
+        blocked.domains[index].reason.as_deref(),
+        Some("remote_cleanup_wait_exceeded")
+    );
+    crate::services::node_service::admin_delete_node(db, &node.id)
+        .await
+        .unwrap();
+    let inactive = db
+        .collection::<crate::models::node::Node>("nodes")
+        .find_one(doc! {"_id":&node.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!inactive.is_active);
+    assert_eq!(inactive.status, crate::models::node::NodeStatus::Offline);
+    assert!(
+        crate::services::machine_service::dispatch(
+            &state,
+            &inactive,
+            nyxid_machine::Operation::CancelExact,
+            serde_json::json!({})
+        )
+        .await
+        .is_err()
+    );
+    let request = worker::DomainRetryRequest {
+        domain: "local_inventory".into(),
+        job_id: job.id.clone(),
+        expected_retry_generation: blocked.domains[index].retry_generation,
+        idempotency_key: uuid::Uuid::new_v4().to_string(),
+    };
+    worker::retry_domain(db, &job.user_id, &job.user_id, &request)
+        .await
+        .unwrap();
+    until_source_removed(&state, &job.user_id).await;
+    crate::services::telemetry_erasure_service::drain_once(db, &Default::default())
+        .await
+        .unwrap();
+    crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+        db,
+        &job.user_id,
+        "operator",
+        "evidence://deployment-inventory",
+        "Verified deployment history",
+    )
+    .await
+    .unwrap();
+    for _ in 0..20 {
+        if status(db, &job.user_id).await.unwrap().unwrap().status == ErasureStatus::Complete {
+            break;
+        }
+        step(&state).await;
+    }
+    assert_eq!(
+        status(db, &job.user_id).await.unwrap().unwrap().status,
+        ErasureStatus::Complete
+    );
+    assert!(
+        db.collection::<Document>("nodes")
+            .find_one(doc! {"_id":&node.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // NodeUnavailable remains non-terminal; admin deletion only clears the local dependency.
+    run_real_personal_stop_processor(&state).await;
+    assert_stop_completed(db, &id, false).await;
+    db.drop().await.unwrap();
+}
