@@ -226,3 +226,21 @@ test("Privacy export uses neutral share wording and second-based busy retries", 
     env.harness.unmount();
   }
 });
+
+test("Privacy export watchdog failures use the existing localized error toast", () => {
+  for (const language of ["en", "zh-CN", "zh-TW"] as const) {
+    const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", { language });
+    try {
+      for (const reason of ["export_idle_timeout", "export_deadline_exceeded"]) {
+        env.mutationOptions[1]!.onError(new Error(reason));
+        env.harness.render();
+        const toast = env.all().find((node) => node.type === "ToastOverlay")!.props.toast;
+        assert.equal(toast.kind, "error");
+        assert.equal(toast.lines, 2);
+        assert.equal(toast.message, language === "en"
+          ? "We couldn't create your data export. Please try again."
+          : language === "zh-CN" ? "无法创建数据导出，请重试。" : "無法建立資料匯出，請重試。");
+      }
+    } finally { env.harness.unmount(); }
+  }
+});

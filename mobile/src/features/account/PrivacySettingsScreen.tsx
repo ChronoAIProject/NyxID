@@ -79,8 +79,8 @@ export function PrivacySettingsScreen(
       if (!accountId) throw new Error("auth_session_missing");
       await shareAccountExport({
         available: Sharing.isAvailableAsync,
-        request: () => requestBoundAuthenticatedResponse("/users/me/export", {
-          method: "POST", expectedAccountId: accountId,
+        request: (signal) => requestBoundAuthenticatedResponse("/users/me/export", {
+          method: "POST", expectedAccountId: accountId, signal,
         }),
         create: () => {
           const file = new File(Paths.cache, `nyxid-account-export-${Date.now()}.json`);

@@ -9771,7 +9771,11 @@ buffering. Clients must reject body errors and a byte count differing from a
 present length. Web also parses the JSON. Without a length, mobile requires clean
 transport completion and a bounded check of the first and last non-whitespace
 bytes (`{` / `}`), tracked while writing; it never reads back or parses the full
-file. See the export document for the client validation contract.
+file. Mobile aborts after 30 seconds without new bytes or 150 seconds overall,
+removes its temporary file, and bounds native reader cancellation to one second
+before showing the existing export error. Network deadlines stop before the
+user-controlled share sheet. See the export document for the client validation
+contract.
 
 Orphan application appends a chained `user.account.erasure_orphan_sweep_started`
 event containing the reviewed digest before any mutation, and a chained

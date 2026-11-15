@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { cleanStaleAccountExports, shareAccountExport } from "./accountExport";
+import test, { type TestContext } from "node:test";
+import { getEventListeners } from "node:events";
+import {
+  ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS,
+  ACCOUNT_EXPORT_DEADLINE_MS,
+  ACCOUNT_EXPORT_IDLE_TIMEOUT_MS,
+  cleanStaleAccountExports,
+  shareAccountExport,
+} from "./accountExport";
 
 function fixture({ available = true, switchAccount = false, failShare = false, abort = false, length = null as string | null, invalid = false, body = undefined as string | undefined, pieces = undefined as Uint8Array[] | undefined } = {}) {
   const calls: string[] = [];
   let reads = 0;
+  let requestSignal: AbortSignal | undefined;
   const text = body ?? (invalid ? '{"format":' : '{"format":"nyxid.account-export","note":"你好"}');
   const encoded = new TextEncoder().encode(text);
   const chunks = pieces ?? [encoded.slice(0, 5), encoded.slice(5)];
-  return { calls, deps: {
+  return { calls, signal: () => requestSignal, deps: {
     available: async () => { calls.push("available"); return available; },
-    request: async () => { calls.push("request"); return {
+    request: async (signal: AbortSignal) => { requestSignal = signal; calls.push("request"); return {
       response: { headers: { get: () => length }, body: { getReader: () => ({
         read: async () => { if (abort && reads > 0) throw new TypeError("connection aborted"); const value = chunks[reads++]; return { done: !value, value }; },
         cancel: async () => { calls.push("cancel"); }, releaseLock: () => { calls.push("release"); },
@@ -37,7 +45,7 @@ test("export streams bytes with account checks and cleans the cache after a void
   assert.equal(await shareAccountExport(deps), undefined, "void share result does not prove the file was saved");
   assert.deepEqual(calls.filter((c) => c.startsWith("write:")), ["write:5", "write:44"]);
   assert.ok(calls.indexOf("close") < calls.indexOf("share"));
-  assert.equal(calls.at(-1), "remove");
+  assert.equal(calls.filter((call) => call === "remove").length, 1);
   assert.equal(calls.filter((c) => c === "owner").length, 5);
 });
 
@@ -45,7 +53,7 @@ test("account switches and share failures close and remove the file without clai
   for (const options of [{ switchAccount: true }, { failShare: true }]) {
     const { calls, deps } = fixture(options);
     await assert.rejects(shareAccountExport(deps));
-    assert.equal(calls.at(-1), "remove");
+    assert.equal(calls.filter((call) => call === "remove").length, 1);
     assert.equal(calls.filter((c) => c === "close").length, 1);
     if (options.switchAccount) assert.ok(!calls.includes("share"));
   }
@@ -65,7 +73,7 @@ test("an oversized stream is cancelled before writing beyond the server limit", 
   }) } }, assertOwner: async () => {} });
   await assert.rejects(shareAccountExport(deps), /export_too_large/);
   assert.ok(!calls.some((c) => c.startsWith("write:")));
-  assert.equal(calls.at(-1), "remove");
+  assert.equal(calls.filter((call) => call === "remove").length, 1);
 });
 
 for (const [name, options] of [
@@ -78,7 +86,7 @@ for (const [name, options] of [
     await assert.rejects(shareAccountExport(deps));
     assert.ok(!calls.includes("share"));
     assert.equal(calls.filter((c) => c === "close").length, 1);
-    assert.equal(calls.at(-1), "remove");
+    assert.equal(calls.filter((call) => call === "remove").length, 1);
     assert.ok(calls.includes("cancel"));
   });
 }
@@ -96,7 +104,7 @@ test("without Content-Length a complete stream tracks braces across whitespace-o
   await shareAccountExport(deps);
   assert.ok(calls.includes("share"));
   assert.ok(!calls.includes("text"));
-  assert.equal(calls.at(-1), "remove");
+  assert.equal(calls.filter((call) => call === "remove").length, 1);
 });
 
 test("without Content-Length truncated, empty and non-object streams are never shared", async () => {
@@ -105,6 +113,194 @@ test("without Content-Length truncated, empty and non-object streams are never s
     await assert.rejects(shareAccountExport(deps), /export_incomplete/);
     assert.ok(!calls.includes("share"));
     assert.ok(!calls.includes("text"));
-    assert.equal(calls.at(-1), "remove");
+    assert.equal(calls.filter((call) => call === "remove").length, 1);
   }
+});
+
+type ReadResult = { done: boolean; value: Uint8Array | undefined };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function replaceReader(f: ReturnType<typeof fixture>, reader: {
+  read(): Promise<ReadResult>;
+  cancel(): Promise<void>;
+  releaseLock(): void;
+}) {
+  const request = f.deps.request;
+  f.deps.request = async (signal) => {
+    const result = await request(signal);
+    return { ...result, response: { ...result.response, body: { getReader: () => reader } } };
+  };
+}
+
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+function trackTimers(context: TestContext) {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const active = new Set<unknown>();
+  let fired = 0;
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  context.mock.method(globalThis, "setTimeout", ((callback: () => void, delay?: number) => {
+    const handle = schedule(() => {
+      active.delete(handle);
+      fired++;
+      callback();
+    }, delay);
+    active.add(handle);
+    return handle;
+  }) as typeof setTimeout);
+  context.mock.method(globalThis, "clearTimeout", (...args: Parameters<typeof clearTimeout>) => {
+    active.delete(args[0]);
+    return cancel(...args);
+  });
+  return { pending: () => active.size, fired: () => fired };
+}
+
+test("a hung native read aborts at the idle bound, removes the file and bounds cancellation", async (context) => {
+  const timers = trackTimers(context);
+  assert.equal(ACCOUNT_EXPORT_IDLE_TIMEOUT_MS, 30_000);
+  assert.equal(ACCOUNT_EXPORT_DEADLINE_MS, 150_000);
+  assert.equal(ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS, 1_000);
+  const f = fixture();
+  const read = deferred<ReadResult>();
+  replaceReader(f, {
+    read: () => read.promise,
+    cancel: async () => { f.calls.push("cancel"); await new Promise<never>(() => {}); },
+    releaseLock: () => { f.calls.push("release"); throw new TypeError("A read is still pending"); },
+  });
+  const rejected = assert.rejects(shareAccountExport(f.deps), /export_idle_timeout/);
+  await flush();
+  const signal = f.signal();
+  assert.ok(signal);
+  assert.ok(f.calls.includes("create"));
+  context.mock.timers.tick(ACCOUNT_EXPORT_IDLE_TIMEOUT_MS - 1);
+  await flush();
+  assert.equal(signal.aborted, false);
+  assert.ok(!f.calls.includes("remove"));
+  context.mock.timers.tick(1);
+  await flush();
+  assert.equal(signal.aborted, true);
+  assert.equal((signal.reason as Error).message, "export_idle_timeout");
+  assert.ok(f.calls.includes("remove"), "file deletion does not await native cancellation");
+  assert.ok(f.calls.indexOf("remove") < f.calls.indexOf("cancel"));
+  assert.equal(timers.pending(), 1, "only the bounded cancel wait remains");
+  context.mock.timers.tick(ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS);
+  await rejected;
+  assert.ok(f.calls.includes("release"), "a pending-read lock error cannot hide the timeout");
+  assert.ok(!f.calls.includes("share"));
+  assert.equal(timers.pending(), 0);
+  assert.deepEqual(getEventListeners(signal, "abort"), []);
+  read.resolve({ done: false, value: new Uint8Array([123]) });
+  await flush();
+  assert.ok(!f.calls.some((call) => call.startsWith("write:")), "late native bytes cannot touch a deleted file");
+  context.mock.timers.tick(ACCOUNT_EXPORT_DEADLINE_MS * 2);
+  assert.equal(timers.fired(), 2, "the idle and cancellation timers fired; the overall timer was cleared");
+});
+
+test("the overall deadline aborts slow progress that keeps resetting the idle watchdog", async (context) => {
+  const timers = trackTimers(context);
+  const f = fixture();
+  let next = deferred<ReadResult>();
+  replaceReader(f, {
+    read: () => { next = deferred<ReadResult>(); return next.promise; },
+    cancel: async () => { f.calls.push("cancel"); },
+    releaseLock: () => { f.calls.push("release"); },
+  });
+  const rejected = assert.rejects(shareAccountExport(f.deps), /export_deadline_exceeded/);
+  await flush();
+  for (let i = 0; i < 7; i++) {
+    context.mock.timers.tick(20_000);
+    next.resolve({ done: false, value: new Uint8Array([i === 0 ? 123 : 32]) });
+    await flush();
+    assert.equal(f.signal()?.aborted, false);
+  }
+  assert.equal(f.calls.filter((call) => call.startsWith("write:")).length, 7);
+  context.mock.timers.tick(10_000);
+  await rejected;
+  assert.equal(f.signal()?.aborted, true);
+  assert.ok(f.calls.includes("remove"));
+  assert.ok(!f.calls.includes("share"));
+  assert.equal(timers.pending(), 0);
+  assert.equal(timers.fired(), 1, "only the overall watchdog fired");
+  assert.deepEqual(getEventListeners(f.signal()!, "abort"), []);
+});
+
+test("normal completion clears network watchdogs before the user-controlled share sheet", async (context) => {
+  const timers = trackTimers(context);
+  const f = fixture();
+  const shared = deferred<void>();
+  f.deps.share = async () => { f.calls.push("share"); await shared.promise; };
+  const result = shareAccountExport(f.deps);
+  await flush();
+  assert.ok(f.calls.includes("share"));
+  assert.equal(timers.pending(), 0);
+  context.mock.timers.tick(ACCOUNT_EXPORT_DEADLINE_MS * 2);
+  await flush();
+  assert.equal(f.signal()?.aborted, false);
+  shared.resolve();
+  await result;
+  assert.ok(f.calls.includes("remove"));
+  assert.equal(timers.pending(), 0);
+  assert.equal(timers.fired(), 0);
+  assert.deepEqual(getEventListeners(f.signal()!, "abort"), []);
+});
+
+test("all failure exits clear their timers and remove every created file", async (context) => {
+  const timers = trackTimers(context);
+  for (const options of [{ available: false }, { invalid: true }, { abort: true }, { switchAccount: true }, { failShare: true }]) {
+    const f = fixture(options);
+    await assert.rejects(shareAccountExport(f.deps));
+    assert.equal(timers.pending(), 0);
+    if (f.calls.includes("create")) assert.ok(f.calls.includes("remove"));
+    context.mock.timers.tick(ACCOUNT_EXPORT_DEADLINE_MS * 2);
+    assert.equal(timers.fired(), 0);
+    const signal = f.signal();
+    if (signal) assert.deepEqual(getEventListeners(signal, "abort"), []);
+  }
+});
+
+test("the idle watchdog also bounds a request that never returns response headers", async (context) => {
+  const timers = trackTimers(context);
+  const f = fixture();
+  const request = f.deps.request;
+  f.deps.request = async (signal) => {
+    await request(signal);
+    return new Promise<never>(() => {});
+  };
+  const rejected = assert.rejects(shareAccountExport(f.deps), /export_idle_timeout/);
+  await flush();
+  context.mock.timers.tick(ACCOUNT_EXPORT_IDLE_TIMEOUT_MS);
+  await rejected;
+  assert.equal(f.signal()?.aborted, true);
+  assert.ok(!f.calls.includes("create"));
+  assert.equal(timers.pending(), 0);
+});
+
+test("empty chunks do not renew the no-new-bytes watchdog", async (context) => {
+  const timers = trackTimers(context);
+  const f = fixture();
+  let next = deferred<ReadResult>();
+  replaceReader(f, {
+    read: () => { next = deferred<ReadResult>(); return next.promise; },
+    cancel: async () => {},
+    releaseLock: () => {},
+  });
+  const rejected = assert.rejects(shareAccountExport(f.deps), /export_idle_timeout/);
+  await flush();
+  for (let i = 0; i < 2; i++) {
+    context.mock.timers.tick(10_000);
+    next.resolve({ done: false, value: new Uint8Array() });
+    await flush();
+  }
+  context.mock.timers.tick(10_000);
+  await rejected;
+  assert.equal(f.signal()?.aborted, true);
+  assert.ok(f.calls.includes("remove"));
+  assert.ok(!f.calls.includes("share"));
+  assert.equal(timers.pending(), 0);
 });

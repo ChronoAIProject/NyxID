@@ -1,3 +1,15 @@
+/** Client network bounds; the total exceeds the server's 120-second body deadline. */
+export const ACCOUNT_EXPORT_IDLE_TIMEOUT_MS = 30_000;
+export const ACCOUNT_EXPORT_DEADLINE_MS = 150_000;
+/** Native cancellation can also hang after a failed read. */
+export const ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS = 1_000;
+
+type ExportReader = {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel(): Promise<unknown>;
+  releaseLock(): void;
+};
+
 function isJsonWhitespace(byte: number) {
   return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
 }
@@ -5,29 +17,71 @@ function isJsonWhitespace(byte: number) {
 /** One bounded file stream, bound to the admitted account for its lifetime. */
 export async function shareAccountExport(deps: {
   available(): Promise<boolean>;
-  request(): Promise<{
-    response: { headers: { get(name: string): string | null }; body: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<unknown>; releaseLock(): void } } | null };
+  request(signal: AbortSignal): Promise<{
+    response: { headers: { get(name: string): string | null }; body: { getReader(): ExportReader } | null };
     assertOwner(): Promise<void>;
   }>;
   create(): { uri: string; write(bytes: Uint8Array): void; close(): void; remove(): void };
   share(uri: string): Promise<void>;
 }) {
-  if (!(await deps.available())) throw new Error("sharing_unavailable");
-  const { response, assertOwner } = await deps.request();
-  await assertOwner();
-  if (!response.body) throw new Error("export_stream_unavailable");
-  const reader = response.body.getReader();
+  const controller = new AbortController();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let timeoutError: Error | undefined;
+  function clearWatchdogs() {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    idleTimer = undefined;
+    deadlineTimer = undefined;
+  }
+  function expire(message: string) {
+    timeoutError = new Error(message);
+    clearWatchdogs();
+    controller.abort(timeoutError);
+  }
+  function resetIdle() {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => expire("export_idle_timeout"), ACCOUNT_EXPORT_IDLE_TIMEOUT_MS);
+  }
+  async function waitFor<T>(operation: () => Promise<T>): Promise<T> {
+    if (controller.signal.aborted) throw timeoutError ?? new Error("export_cancelled");
+    let onAbort!: () => void;
+    const interrupted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(timeoutError ?? new Error("export_cancelled"));
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      // Race each wait: native fetch/read can ignore abort. Remove each
+      // listener afterwards instead of accumulating handlers per chunk.
+      return await Promise.race([interrupted, Promise.resolve().then(() => {
+        if (controller.signal.aborted) throw timeoutError ?? new Error("export_cancelled");
+        return operation();
+      })]);
+    } finally {
+      controller.signal.removeEventListener("abort", onAbort);
+    }
+  }
+  let reader: ExportReader | undefined;
   let file: ReturnType<typeof deps.create> | undefined;
   let closed = false;
+  deadlineTimer = setTimeout(() => expire("export_deadline_exceeded"), ACCOUNT_EXPORT_DEADLINE_MS);
   try {
+    if (!(await waitFor(() => deps.available()))) throw new Error("sharing_unavailable");
+    resetIdle();
+    const { response, assertOwner } = await waitFor(() => deps.request(controller.signal));
+    await waitFor(assertOwner);
+    if (!response.body) throw new Error("export_stream_unavailable");
+    const source = response.body.getReader();
+    reader = source;
     file = deps.create();
     let bytes = 0;
     const length = response.headers.get("Content-Length");
     let firstByte: number | undefined;
     let lastByte: number | undefined;
     for (;;) {
-      const chunk = await reader.read();
-      await assertOwner();
+      const chunk = await waitFor(() => source.read());
+      if (!chunk.done && chunk.value?.byteLength) resetIdle();
+      await waitFor(assertOwner);
       if (chunk.done) break;
       if (!chunk.value) continue;
       bytes += chunk.value.byteLength;
@@ -58,12 +112,36 @@ export async function shareAccountExport(deps: {
       throw new Error("export_incomplete");
     }
     file.close(); closed = true;
-    await assertOwner();
+    await waitFor(assertOwner);
+    // The share sheet is user-controlled; only transfer/validation is timed.
+    clearWatchdogs();
     await deps.share(file.uri);
+  } catch (error) {
+    if (!controller.signal.aborted) controller.abort(error);
+    throw error;
   } finally {
-    try { await reader.cancel(); } catch { /* A closed stream needs no cancel. */ }
-    reader.releaseLock();
-    try { if (!closed) file?.close(); } finally { file?.remove(); }
+    clearWatchdogs();
+    try {
+      // Remove the file before waiting on possibly-stuck native cancellation.
+      try { if (!closed) file?.close(); } finally { file?.remove(); }
+    } finally {
+      if (reader) {
+        const source = reader;
+        let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() => source.cancel()),
+            new Promise<void>((resolve) => {
+              cancelTimer = setTimeout(resolve, ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS);
+            }),
+          ]);
+        } catch { /* Failed native cancellation cannot prevent cleanup. */ }
+        finally {
+          if (cancelTimer !== undefined) clearTimeout(cancelTimer);
+          try { source.releaseLock(); } catch { /* A native read may still be pending. */ }
+        }
+      }
+    }
   }
 }
 

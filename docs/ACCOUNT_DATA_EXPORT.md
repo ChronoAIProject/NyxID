@@ -397,3 +397,15 @@ first and last non-whitespace bytes are `{` and `}`. It tracks only those two by
 while writing, using constant validation memory; this is a structural check, not
 a full JSON syntax check. On failure, mobile removes the temporary file and never
 opens the share sheet.
+
+Mobile also bounds stalled native requests and readers independently of their
+AbortSignal support. `ACCOUNT_EXPORT_IDLE_TIMEOUT_MS` is 30 seconds without new
+bytes, starting with the request and renewed only by nonempty byte chunks.
+`ACCOUNT_EXPORT_DEADLINE_MS` is 150 seconds from starting the export, including
+admission and validation; progress cannot extend it. Both watchdogs abort the
+request and race pending async work so even an unsettled native `read()` fails.
+The temporary file is closed and removed before waiting for native cancellation;
+`ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS` bounds that wait to one second, and a lock
+release error from a still-pending read is ignored. The existing localized export
+error toast appears after cleanup, with no share sheet. All timers are cleared on
+success or failure. Network watchdogs stop before the user-controlled share sheet.
