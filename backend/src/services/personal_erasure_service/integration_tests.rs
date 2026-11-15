@@ -34,6 +34,372 @@ async fn until_source_removed(state: &crate::AppState, owner: &str) {
     );
 }
 
+async fn seed_orphan_delivery_intents(db: &Database, owner: &str) -> Vec<(&'static str, Document)> {
+    let intents = crate::models::node_credential_desired::COLLECTION_NAME;
+    let receipts = super::super::personal_erasure_registry::REVOCATION_RECEIPTS;
+    let mut preserved = Vec::new();
+    for kind in [UserType::Org, UserType::Person] {
+        let other = uuid::Uuid::new_v4().to_string();
+        preserved.push((USERS, bson::to_document(&test_user(&other, kind)).unwrap()));
+        preserved.push((
+            intents,
+            doc! {
+                "_id":uuid::Uuid::new_v4().to_string(),
+                "node_id":uuid::Uuid::new_v4().to_string(),
+                "service_slug":"example-service", "service_id":"example-service-id",
+                "owner_id":&other, "actor_user_id":owner,
+                "generation":1_i64, "pending":true, "retry_at":bson::DateTime::now(),
+            },
+        ));
+        preserved.push((
+            receipts,
+            doc! {
+                "_id":uuid::Uuid::new_v4().to_string(), "user_id":&other,
+                "fixture_marker":"retained-other-owner-receipt",
+            },
+        ));
+    }
+    for (collection, row) in &preserved {
+        db.collection::<Document>(collection)
+            .insert_one(row)
+            .await
+            .unwrap();
+    }
+    db.collection::<Document>(intents)
+        .insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),
+            "node_id":uuid::Uuid::new_v4().to_string(),
+            "service_slug":"example-service", "service_id":"example-service-id",
+            "owner_id":owner, "actor_user_id":owner,
+            "generation":1_i64, "pending":true, "retry_at":bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        db.collection::<Document>("nodes")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    preserved
+}
+
+async fn assert_delivery_bystanders_unchanged(db: &Database, rows: &[(&str, Document)]) {
+    for (collection, expected) in rows {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .find_one(doc! {"_id":expected.get("_id").unwrap()})
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(expected),
+            "changed another owner in {collection}"
+        );
+    }
+}
+
+async fn finish_with_vendor_evidence(
+    state: &crate::AppState,
+    owner: &str,
+    clients: &crate::telemetry::erasure::ErasureClients,
+    server: &crate::telemetry::erasure::test_support::Server,
+) {
+    use std::sync::atomic::Ordering;
+    for _ in 0..16 {
+        state
+            .db
+            .collection::<Document>(crate::models::telemetry_erasure_job::COLLECTION_NAME)
+            .update_many(
+                doc! {"user_id":owner},
+                doc! {"$set":{"retry_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        super::super::telemetry_erasure_service::drain_once(&state.db, clients)
+            .await
+            .unwrap();
+        if server.state.deletes.load(Ordering::SeqCst) > 0 {
+            server.state.verified.store(true, Ordering::SeqCst);
+        }
+        step(state).await;
+        if status(&state.db, owner).await.unwrap().unwrap().status == ErasureStatus::Complete {
+            assert_eq!(server.state.deletes.load(Ordering::SeqCst), 1);
+            return;
+        }
+    }
+    panic!("erasure did not complete with verified vendor evidence");
+}
+
+fn stuck_delivery_intent_detection_pipeline() -> Vec<Document> {
+    vec![
+        doc! {"$match":{"status":"pending","domains":{"$elemMatch":{
+            "domain":"source","status":"pending","reason":"source_cleanup_pending"
+        }}}},
+        doc! {"$lookup":{"from":"node_credential_desired","localField":"user_id",
+        "foreignField":"owner_id","as":"intents"}},
+        doc! {"$match":{"intents.0":{"$exists":true}}},
+        doc! {"$project":{"user_id":1,"accepted_at":1,"updated_at":1,"intents":{"$size":"$intents"}}},
+    ]
+}
+
+#[tokio::test]
+async fn orphan_delivery_intent_does_not_hold_account_erasure_pending() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let preserved = seed_orphan_delivery_intents(&db, &owner).await;
+    let (clients, server) = crate::telemetry::erasure::test_support::clients().await;
+    super::super::telemetry_erasure_service::register_destinations(&db, &clients)
+        .await
+        .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
+    until_source_removed(&state, &owner).await;
+    finish_with_vendor_evidence(&state, &owner, &clients, &server).await;
+    assert_eq!(
+        status(&db, &owner).await.unwrap().unwrap().status,
+        ErasureStatus::Complete
+    );
+    assert!(
+        db.collection::<Document>(USERS)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::node_credential_desired::COLLECTION_NAME)
+            .count_documents(doc! {"owner_id":&owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_delivery_bystanders_unchanged(&db, &preserved).await;
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stuck_source_cleanup_recovers_without_repair_or_replaying_completed_domains() {
+    use futures::TryStreamExt;
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let preserved = seed_orphan_delivery_intents(&db, &owner).await;
+    let (clients, server) = crate::telemetry::erasure::test_support::clients().await;
+    super::super::telemetry_erasure_service::register_destinations(&db, &clients)
+        .await
+        .unwrap();
+    // Reproduce the stored state left by repeated source_cleanup_pending passes,
+    // without accepting a new job or resetting an existing job during recovery.
+    db.collection::<Document>(USERS).update_one(doc! {"_id":&owner}, doc! {"$set":{
+        "is_active":false,"platform_personal_deleting":true,"platform_personal_retirement_pending":false
+    }}).await.unwrap();
+    db.collection::<Document>(super::super::erasure_admission::COLLECTION)
+        .insert_one(doc! {
+            "_id":&owner,"erasure_accepted":true,"cleanup_revision":41_i64
+        })
+        .await
+        .unwrap();
+    let at = bson::DateTime::from_millis(bson::DateTime::now().timestamp_millis() - 60_000);
+    let domains: Vec<Document> = DOMAINS
+        .iter()
+        .enumerate()
+        .map(|(index, domain)| {
+            doc! {
+                "domain":*domain,"status":if index < 5 {"complete"} else {"pending"},
+                "reason":if *domain == "source" {Some("source_cleanup_pending")} else {None},
+                "cursor":if index < 5 {Some(format!("completed:{domain}"))} else {None},
+                "completed_at":if index < 5 {Some(at)} else {None},
+                "consecutive_failures":0_i32,"retry_generation":0_i64,
+            }
+        })
+        .collect();
+    assert_eq!(
+        &DOMAINS[..5],
+        &[
+            "platform",
+            "oracle",
+            "channel_bots",
+            "provider_credentials",
+            "local_inventory"
+        ]
+    );
+    let completed_before = domains[..5].to_vec();
+    let id = uuid::Uuid::new_v4().to_string();
+    db.collection::<Document>(JOBS).insert_one(doc! {
+        "_id":&id,"user_id":&owner,"requested_by":&owner,"owner_deletion_policy":bson::Bson::Null,
+        "status":"pending","inventory_version":INVENTORY_VERSION,"domains":domains,
+        "accepted_at":at,"updated_at":at,"completed_at":bson::Bson::Null,
+        "lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,"retry_at":bson::Bson::Null,
+    }).await.unwrap();
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    super::super::telemetry_erasure_service::enqueue_in_session(&db, &owner, &mut tx)
+        .await
+        .unwrap();
+    super::super::transaction_service::commit(&mut tx)
+        .await
+        .unwrap();
+    let receipts = super::super::personal_erasure_registry::REVOCATION_RECEIPTS;
+    db.collection::<Document>(receipts).insert_one(doc! {
+        "_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"fixture_marker":"old-final-phase-receipt"
+    }).await.unwrap();
+    let detected: Vec<Document> = db
+        .collection::<Document>(JOBS)
+        .aggregate(stuck_delivery_intent_detection_pipeline())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(detected.len(), 1);
+    assert_eq!(detected[0].get_str("_id"), Ok(id.as_str()));
+    assert_eq!(detected[0].get_str("user_id"), Ok(owner.as_str()));
+    assert_eq!(detected[0].get_i32("intents"), Ok(1));
+
+    // Each normal pass deletes only its exact final-metadata page. A user_id
+    // receipt still drains before the owner_id intent and final source row.
+    for pass in 0..3 {
+        step(&state).await;
+        let job = db
+            .collection::<PersonalErasureJob>(JOBS)
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        for (actual, expected) in job.domains[..5].iter().zip(&completed_before) {
+            let expected: DomainCheckpoint = bson::from_document(expected.clone()).unwrap();
+            assert_eq!(
+                bson::to_document(actual).unwrap(),
+                bson::to_document(&expected).unwrap()
+            );
+        }
+        assert_eq!(
+            job.domains[5].status,
+            if pass == 2 {
+                DomainStatus::Complete
+            } else {
+                DomainStatus::Pending
+            }
+        );
+        for domain in &job.domains[6..] {
+            assert_eq!(domain.status, DomainStatus::Pending);
+            assert!(domain.completed_at.is_none());
+            assert!(domain.cursor.is_none());
+            assert!(domain.reason.is_none());
+        }
+        assert_eq!(
+            db.collection::<Document>(receipts)
+                .count_documents(doc! {"user_id":&owner})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    assert!(
+        db.collection::<Document>(USERS)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<Document>(crate::models::node_credential_desired::COLLECTION_NAME)
+            .count_documents(doc! {"owner_id":&owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        db.collection::<Document>(super::super::erasure_admission::COLLECTION)
+            .find_one(doc! {"_id":&owner,"cleanup_revision":{"$gt":41_i64}})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let detected: Vec<Document> = db
+        .collection::<Document>(JOBS)
+        .aggregate(stuck_delivery_intent_detection_pipeline())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(detected.is_empty());
+
+    step(&state).await;
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.domains[6].domain, "machine");
+    assert_eq!(job.domains[6].status, DomainStatus::Complete);
+    assert!(job.domains[6].completed_at.is_some());
+    assert!(job.domains[7].completed_at.is_none());
+    step(&state).await;
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.domains[7].domain, "vendor");
+    assert_eq!(job.domains[7].status, DomainStatus::Pending);
+    assert_eq!(
+        job.domains[7].reason.as_deref(),
+        Some("vendor_erasure_pending")
+    );
+    finish_with_vendor_evidence(&state, &owner, &clients, &server).await;
+    let complete = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(complete.status, ErasureStatus::Complete);
+    assert!(complete.completed_at.is_some());
+    assert!(
+        complete
+            .domains
+            .iter()
+            .all(|domain| domain.status == DomainStatus::Complete)
+    );
+    assert!(complete.domains[7].cursor.is_some());
+    for (actual, expected) in complete.domains[..5].iter().zip(completed_before) {
+        let expected: DomainCheckpoint = bson::from_document(expected).unwrap();
+        assert_eq!(
+            bson::to_document(actual).unwrap(),
+            bson::to_document(&expected).unwrap()
+        );
+    }
+    let completed_snapshot = db
+        .collection::<Document>(JOBS)
+        .find_one(doc! {"_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!process_one(&state).await.unwrap());
+    assert_eq!(
+        db.collection::<Document>(JOBS)
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap(),
+        completed_snapshot
+    );
+    let detected: Vec<Document> = db
+        .collection::<Document>(JOBS)
+        .aggregate(stuck_delivery_intent_detection_pipeline())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(detected.is_empty());
+    assert_delivery_bystanders_unchanged(&db, &preserved).await;
+    db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared_effect_evidence() {
     let (db, owner) = tests::fixture().await;

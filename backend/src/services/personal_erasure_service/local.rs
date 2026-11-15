@@ -921,10 +921,12 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         let barrier=db.collection::<Document>(super::super::erasure_admission::COLLECTION).update_one(doc! {"_id":&job.user_id,"erasure_accepted":true},doc! {"$inc":{"cleanup_revision":1_i64}}).session(&mut tx).await?;
         if barrier.matched_count!=1 {return Err(AppError::Conflict("Personal cleanup barrier is unavailable".into()));}
         for (collection, filter) in super::super::personal_erasure_registry::final_metadata(&job.user_id) {
-            let mut cursor = db.collection::<Document>(collection).find(filter).projection(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
+            let mut cursor = db.collection::<Document>(collection).find(filter.clone()).projection(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
             let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
             if !rows.is_empty() {
-                db.collection::<Document>(collection).delete_many(doc! {"user_id":&job.user_id,"_id":{"$in":rows.into_iter().filter_map(|mut row| row.remove("_id")).collect::<Vec<_>>()}}).session(&mut tx).await?;
+                // Preserve the registry predicate: delivery intents use owner_id,
+                // while revocation receipts use user_id. Keep the exact page fence.
+                db.collection::<Document>(collection).delete_many(doc! {"$and":[filter, {"_id":{"$in":rows.into_iter().filter_map(|mut row| row.remove("_id")).collect::<Vec<_>>()}}]}).session(&mut tx).await?;
                 return Ok(false);
             }
         }
