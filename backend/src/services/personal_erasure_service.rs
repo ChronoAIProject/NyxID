@@ -129,7 +129,10 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
 /// idempotent when an older replica restarts during a rolling deployment.
 pub async fn ensure_startup_indexes(db: &Database) -> AppResult<()> {
     super::security_readiness_service::ensure_indexes(db).await?;
-    ensure_indexes(db).await
+    ensure_indexes(db).await?;
+    super::assistant_nyxagent::ensure_account_export_indexes(db).await?;
+    super::platform_provisioning_service::ensure_account_export_indexes(db).await?;
+    Ok(())
 }
 
 /// Checked-in upgrade fixture: origin/main's startup index sequence before

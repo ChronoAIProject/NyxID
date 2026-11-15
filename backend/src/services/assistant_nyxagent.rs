@@ -1198,6 +1198,38 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
     Ok(reset)
 }
 
+/// Additive account-export index, owned here with the message writer. The
+/// base startup fixture deliberately omits this later feature addition.
+pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    let collection = db.collection::<bson::Document>(MESSAGES);
+    let keys = doc! {"user_id":1,"created_at":-1,"_id":-1};
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index.keys.iter().take(3).eq(keys.iter()) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(keys)
+                .options(
+                    IndexOptions::builder()
+                        .name("assistant_messages_account_export".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::assistant_wake_service::ensure_indexes(db).await?;
     super::collaboration_group_service::ensure_indexes(db).await?;

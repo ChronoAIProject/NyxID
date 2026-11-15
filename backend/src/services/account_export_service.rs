@@ -1380,19 +1380,56 @@ fn private_conversation_filter(prefix: &str) -> Document {
     filter
 }
 
+fn parent_scope_sort(collection: &str) -> Document {
+    match collection {
+        "assistant_conversations" | "platform_setups" => doc! {"updated_at":-1,"_id":-1},
+        "mcp_sessions" => doc! {"user_id":1},
+        "platform_bot_installations" => doc! {"owner_user_id":1},
+        _ => doc! {"_id":1},
+    }
+}
+
 /// Resolve only projected identities and cap the in-memory $in list. Parent
 /// owner predicates and child join keys have existing prefix indexes.
-async fn resolve_ids(db: &mongodb::Database, collection: &str, filter: Document) -> AppResult<(Vec<Bson>, bool)> {
-    let mut cursor = db.collection::<Document>(collection).find(filter)
-        .projection(doc! {"_id": 1}).sort(doc! {"_id": 1})
-        .limit(PARENT_ID_CAP as i64 + 1).batch_size(QUERY_BATCH_SIZE)
-        .max_time(QUERY_TIMEOUT).await?;
+async fn resolve_ids(
+    db: &mongodb::Database,
+    collection: &str,
+    filter: Document,
+) -> AppResult<(Vec<Bson>, bool)> {
+    let mut cursor = db
+        .collection::<Document>(collection)
+        .find(filter)
+        .projection(doc! {"_id": 1})
+        .sort(parent_scope_sort(collection))
+        .limit(PARENT_ID_CAP as i64 + 1)
+        .batch_size(QUERY_BATCH_SIZE)
+        .max_time(QUERY_TIMEOUT)
+        .await?;
     let mut ids = Vec::new();
     while let Some(row) = cursor.try_next().await? {
-        if ids.len() == PARENT_ID_CAP { return Ok((ids, true)); }
-        if let Some(id) = row.get("_id") { ids.push(id.clone()); }
+        if ids.len() == PARENT_ID_CAP {
+            return Ok((ids, true));
+        }
+        if let Some(id) = row.get("_id") {
+            ids.push(id.clone());
+        }
     }
     Ok((ids, false))
+}
+
+/// Resolve private scope once per export, rather than joining each message.
+async fn message_scope(db: &mongodb::Database, person: &str) -> AppResult<(Document, bool)> {
+    let mut private = private_conversation_filter("");
+    private.insert("user_id", person);
+    let (ids, truncated) = resolve_ids(db, "assistant_conversations", private).await?;
+    Ok((
+        doc! {"$and": [{"user_id": person}, {"$or": [
+            {"role":"user", "author":"owner"},
+            {"conversation_id":{"$in":ids}, "author":{"$ne":"guest"}, "origin":{"$in":[Bson::Null,"user"]},
+                "platform_origin":Bson::Null, "platform_reply":Bson::Null, "role":{"$in":["user","assistant"]}}
+        ]}]},
+        truncated,
+    ))
 }
 
 fn source_pipeline(collection: &str, filter: Document) -> Vec<Document> {
@@ -1401,19 +1438,8 @@ fn source_pipeline(collection: &str, filter: Document) -> Vec<Document> {
     if collection == "assistant_conversations" {
         // Shared titles can originate from a guest's first message.
         pipeline.push(doc! {"$match": private_conversation_filter("")});
-    } else if collection == "assistant_messages" {
-        let mut private = private_conversation_filter("");
-        // A conversation must exist and must belong to the same person as the
-        // message. Null legacy authorship is safe only in that private scope.
-        private.insert("$expr", doc! {"$eq": ["$user_id", "$$owner"]});
-        pipeline.push(doc! {"$lookup": {"from":"assistant_conversations", "let":{"conversation":"$conversation_id", "owner":"$user_id"},
-            "pipeline":[{"$match":{"$expr":{"$eq":["$_id","$$conversation"]}}}, {"$match":private}], "as":"_export_private"}});
-        pipeline.push(doc! {"$match": {"$or": [
-            {"role":"user", "author":"owner"},
-            {"_export_private.0":{"$exists":true}, "author":{"$ne":"guest"}, "origin":{"$in":[Bson::Null,"user"]},
-                "platform_origin":Bson::Null,"platform_reply":Bson::Null, "role":{"$in":["user","assistant"]}}
-        ]}});
     }
+
     pipeline
 }
 
@@ -1560,7 +1586,20 @@ async fn rows(
     sort: Document,
     budget: &mut ExportBudget,
 ) -> AppResult<ExportSubsection> {
-    match query_rows(db, collection, filter, fields, sort, budget).await {
+    let prepared = if collection == "assistant_messages" {
+        if let Ok(person) = filter.get_str("user_id") {
+            message_scope(db, person).await.map(|(filter, _)| filter)
+        } else {
+            Ok(filter)
+        }
+    } else {
+        Ok(filter)
+    };
+    let result = match prepared {
+        Ok(filter) => query_rows(db, collection, filter, fields, sort, budget).await,
+        Err(error) => Err(error),
+    };
+    match result {
         Ok(value) => Ok(value),
         Err(_) => {
             // Do not expose database diagnostics or content. Every source has
@@ -1622,7 +1661,7 @@ async fn query_rows(
     let mut cursor = db
         .collection::<Document>(collection)
         .aggregate(pipeline)
-        .batch_size(1)
+        .batch_size(QUERY_BATCH_SIZE)
         .max_time(QUERY_TIMEOUT)
         .await?;
     let mut items = Vec::new();
@@ -1802,8 +1841,15 @@ async fn build_with_limit(
     let mut parent_scopes = BTreeMap::new();
     for (index, (collection, _, filter)) in sources.iter_mut().enumerate() {
         if let Some(personal_data_registry::Entry {
-            export_selector: personal_data_registry::ExportSelector::JoinedPerson { parent, field, owner_field }, ..
-        }) = personal_data_registry::find(collection) {
+            export_selector:
+                personal_data_registry::ExportSelector::JoinedPerson {
+                    parent,
+                    field,
+                    owner_field,
+                },
+            ..
+        }) = personal_data_registry::find(collection)
+        {
             let key = (*parent, *owner_field);
             if let std::collections::btree_map::Entry::Vacant(scope) = parent_scopes.entry(key) {
                 let resolved = resolve_ids(db, parent, doc! {*owner_field: account_id}).await;
@@ -1817,6 +1863,17 @@ async fn build_with_limit(
             }
         }
     }
+    for (index, (collection, _, filter)) in sources.iter_mut().enumerate() {
+        if *collection == "assistant_messages" {
+            match message_scope(db, account_id).await {
+                Ok((resolved, truncated)) => {
+                    *filter = Some(resolved);
+                    scope_flags[index].0 = truncated;
+                }
+                Err(_) => scope_flags[index].1 = true,
+            }
+        }
+    }
     let pages = allocate_pages(max_bytes, sources.len(), |index, limit| {
         let (collection, spec, filter) = &sources[index];
         let account = &account;
@@ -1827,7 +1884,10 @@ async fn build_with_limit(
                 ..Default::default()
             };
             let mut value = if unavailable {
-                ExportSubsection { unavailable: true, ..Default::default() }
+                ExportSubsection {
+                    unavailable: true,
+                    ..Default::default()
+                }
             } else if *collection == "users" {
                 let profile = safe_item(account, PROFILE_FIELDS);
                 let admitted = budget.admit(&profile);

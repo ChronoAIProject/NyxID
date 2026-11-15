@@ -584,3 +584,22 @@ db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform
 The complete additive rollout set is 19 indexes: 16 erasure indexes and three
 export indexes. Existing definitions remain untouched; the upgrade tests compare
 all definitions before/after and replay the old startup fixture afterward.
+The large message-history export also adds one compound index in its owning
+module: `assistant_nyxagent::ensure_account_export_indexes`, called and awaited
+by `personal_erasure_service::ensure_startup_indexes` before listener binding.
+`assistant_messages_account_export` has keys `{user_id:1, created_at:-1, _id:-1}`.
+`assistant_nyxagent::begin_owner_turn_in_session` and `finish_turn_inner` append
+one row per input/reply without a transcript TTL. The existing
+`conversation_id/seq` index cannot serve an owner's cross-conversation
+newest-first read or explicit authored-input branch. This single index bounds
+that per-event read without a blocking sort; no existing index is dropped,
+renamed or rebuilt. Like the existing synchronous additions described above,
+startup awaits a large-collection build and may be delayed. Pre-build with:
+
+```javascript
+db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"assistant_messages_account_export"});
+```
+
+The rollout set is therefore the 16 erasure indexes above plus this one export
+index. Upgrade tests allow precisely these additions and preserve the previous
+index set, including on an older-replica startup.

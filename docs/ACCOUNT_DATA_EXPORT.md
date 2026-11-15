@@ -30,7 +30,7 @@ its fully qualified name (`section.subsection`) appears in
 provide an equal share to every declared subsection (including the profile,
 audit view and additional authored-message view). Unused space is then divided
 equally among subsections still limited by bytes. Only those sources are read
-again, replacing their earlier pages in newest-first order; sources that are
+again, replacing their earlier pages in the same indexed order; sources that are
 complete, unavailable or already at the 10,000-row limit are not read again.
 There are at most four passes per source (one initial pass and up to three
 redistributions), or eight aggregation queries per source, plus cursor batches.
@@ -325,3 +325,4 @@ resolved parent scope. Source-query failures still mark the view unavailable.
 
 
 Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
+Assistant-message reads resolve up to 10,000 private conversation ids once per export, then use indexed message predicates with batches of 100. Explicit owner-authored inputs do not need a conversation join. If private scope is capped, `scope_truncated` is true.

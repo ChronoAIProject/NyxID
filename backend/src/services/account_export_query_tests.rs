@@ -3,16 +3,30 @@ use super::*;
 
 fn uses_index(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::Object(map) => map.get("stage").and_then(|value| value.as_str()) == Some("IXSCAN")
-            || map.values().any(uses_index),
+        serde_json::Value::Object(map) => {
+            map.get("stage").and_then(|value| value.as_str()) == Some("IXSCAN")
+                || map.values().any(uses_index)
+        }
         serde_json::Value::Array(values) => values.iter().any(uses_index),
         _ => false,
     }
 }
 
 async fn explain(db: &mongodb::Database, collection: &str, filter: Document) {
-    let result = db.run_command(doc! {"explain": {"find": collection, "filter": filter}, "verbosity": "executionStats"}).await.unwrap();
-    let plan = serde_json::to_value(result.get_document("queryPlanner").unwrap().get_document("winningPlan").unwrap()).unwrap();
+    let result = db
+        .run_command(
+            doc! {"explain": {"find": collection, "filter": filter, "sort": if ["mcp_sessions","platform_bot_installations","platform_setups"].contains(&collection) {parent_scope_sort(collection)} else {doc! {}}, "limit":PARENT_ID_CAP as i64 + 1}, "verbosity": "executionStats"},
+        )
+        .await
+        .unwrap();
+    let plan = serde_json::to_value(
+        result
+            .get_document("queryPlanner")
+            .unwrap()
+            .get_document("winningPlan")
+            .unwrap(),
+    )
+    .unwrap();
     assert!(uses_index(&plan), "{collection}: {plan}");
     eprintln!("export plan {collection}: IXSCAN");
 }
@@ -25,7 +39,14 @@ async fn joined_views_resolve_indexed_parent_and_child_scopes_without_lookups() 
         .await
         .unwrap();
     for entry in personal_data_registry::entries() {
-        let personal_data_registry::ExportSelector::JoinedPerson {parent, field, owner_field} = entry.export_selector else {continue;};
+        let personal_data_registry::ExportSelector::JoinedPerson {
+            parent,
+            field,
+            owner_field,
+        } = entry.export_selector
+        else {
+            continue;
+        };
         let parent_id = format!("{}-parent", entry.collection);
         for index in 0..200 {
             let id = if index == 0 {
@@ -37,16 +58,29 @@ async fn joined_views_resolve_indexed_parent_and_child_scopes_without_lookups() 
             db.collection::<Document>(entry.collection).insert_one(doc! {"_id": format!("{}-{index}",entry.collection), field: &id, "sequence": index, "revision": index, "kind": &id, "created_at": bson::DateTime::now()}).await.unwrap();
         }
         let owner = doc! {owner_field:"person"};
-        explain(&db,parent,owner.clone()).await;
-        let (ids,truncated) = resolve_ids(&db,parent,owner).await.unwrap();
+        explain(&db, parent, owner.clone()).await;
+        let (ids, truncated) = resolve_ids(&db, parent, owner).await.unwrap();
         assert!(!truncated);
         assert!(ids.contains(&Bson::String(parent_id)));
         let filter = doc! {field:{"$in":ids}};
-        explain(&db,entry.collection,filter.clone()).await;
-        assert!(source_pipeline(entry.collection,filter.clone()).iter().all(|stage| !stage.contains_key("$lookup")));
+        explain(&db, entry.collection, filter.clone()).await;
+        assert!(
+            source_pipeline(entry.collection, filter.clone())
+                .iter()
+                .all(|stage| !stage.contains_key("$lookup"))
+        );
         let mut budget = ExportBudget::new(MAX_BYTES);
-        let value = rows(&db,entry.collection,filter,fields_for(entry.collection).unwrap(),doc! {"created_at":-1},&mut budget).await.unwrap();
-        assert_eq!(value.total_count,1, "{}", entry.collection);
+        let value = rows(
+            &db,
+            entry.collection,
+            filter,
+            fields_for(entry.collection).unwrap(),
+            doc! {"created_at":-1},
+            &mut budget,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value.total_count, 1, "{}", entry.collection);
     }
     db.drop().await.unwrap();
 }
@@ -54,12 +88,94 @@ async fn joined_views_resolve_indexed_parent_and_child_scopes_without_lookups() 
 #[tokio::test]
 async fn parent_scope_resolution_caps_ids_and_marks_the_incomplete_scope() {
     let db = crate::test_utils::connect_transaction_test_database("export_parent_cap").await;
-    db.collection::<Document>("mcp_sessions").create_index(mongodb::IndexModel::builder().keys(doc! {"user_id":1}).build()).await.unwrap();
-    for start in (0..PARENT_ID_CAP+1).step_by(1000) {
-        db.collection::<Document>("mcp_sessions").insert_many((start..(start+1000).min(PARENT_ID_CAP+1)).map(|index|doc! {"_id":format!("parent-{index:05}"),"user_id":"person"})).await.unwrap();
+    db.collection::<Document>("mcp_sessions")
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .build(),
+        )
+        .await
+        .unwrap();
+    for start in (0..PARENT_ID_CAP + 1).step_by(1000) {
+        db.collection::<Document>("mcp_sessions")
+            .insert_many(
+                (start..(start + 1000).min(PARENT_ID_CAP + 1))
+                    .map(|index| doc! {"_id":format!("parent-{index:05}"),"user_id":"person"}),
+            )
+            .await
+            .unwrap();
     }
-    let (ids,truncated)=resolve_ids(&db,"mcp_sessions",doc! {"user_id":"person"}).await.unwrap();
+    let (ids, truncated) = resolve_ids(&db, "mcp_sessions", doc! {"user_id":"person"})
+        .await
+        .unwrap();
     assert!(truncated);
-    assert_eq!(ids.len(),PARENT_ID_CAP);
+    assert_eq!(ids.len(), PARENT_ID_CAP);
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(crate::test_utils::test_user(
+            "person",
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let export = build(&db, "person").await.unwrap();
+    assert!(export.sections["account_activity"]["mcp_session_notifications"].scope_truncated);
+    assert!(export.sections["account_activity"]["mcp_session_notifications"].truncated);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn fifty_thousand_messages_use_batched_indexed_reads_within_timeout() {
+    let db = crate::test_utils::connect_transaction_test_database("export_message_scale").await;
+    db.collection::<Document>("assistant_conversations")
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"user_id":1,"updated_at":-1,"_id":-1})
+                .build(),
+        )
+        .await
+        .unwrap();
+    super::super::assistant_nyxagent::ensure_account_export_indexes(&db)
+        .await
+        .unwrap();
+    db.collection::<Document>("assistant_conversations")
+        .insert_many(
+            (0..100).map(|i| doc! {"_id":format!("conversation-{i:03}"),"user_id":"person"}),
+        )
+        .await
+        .unwrap();
+    for base in (0..50_000).step_by(1000) {
+        db.collection::<Document>("assistant_messages").insert_many((base..base+1000).map(|i|doc! {"_id":format!("message-{i}"),"user_id":"person","conversation_id":format!("conversation-{:03}",i/500),"seq":i%500,"created_at":bson::DateTime::from_millis(i64::from(i)),"role":"assistant","origin":"user","text":"private reply"})).await.unwrap();
+    }
+    let started = std::time::Instant::now();
+    let (filter, truncated) = message_scope(&db, "person").await.unwrap();
+    assert!(!truncated);
+    let plan = db.run_command(doc! {"explain":{"aggregate":"assistant_messages","pipeline":[{"$match":&filter},{"$sort":{"created_at":-1,"_id":-1}},{"$limit":10001}],"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
+    let winning = plan
+        .get_document("queryPlanner")
+        .unwrap()
+        .get_document("winningPlan")
+        .unwrap();
+    let plan_json = serde_json::to_value(winning).unwrap();
+    assert!(uses_index(&plan_json), "{plan_json}");
+    assert!(
+        !plan_json.to_string().contains("\"SORT\""),
+        "blocking sort: {plan_json}"
+    );
+    let mut budget = ExportBudget::new(MAX_BYTES);
+    let result = query_rows(
+        &db,
+        "assistant_messages",
+        filter,
+        fields_for("assistant_messages").unwrap(),
+        doc! {"created_at":-1,"_id":-1},
+        &mut budget,
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+    eprintln!("50,000-message export: {:?}, 10,000 rows, IXSCAN", elapsed);
+    assert_eq!(result.total_count, 50_000);
+    assert_eq!(result.items.len(), 10_000);
+    assert!(elapsed < QUERY_TIMEOUT, "{elapsed:?}");
     db.drop().await.unwrap();
 }
