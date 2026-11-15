@@ -132,12 +132,12 @@ pub async fn ensure_startup_indexes(db: &Database) -> AppResult<()> {
     ensure_indexes(db).await
 }
 
-/// Checked-in upgrade fixture: origin/main ba8cdb81020962aedafd793d812683f12efdc6d2's
-/// startup sequence before the
-/// privacy registry's owner-index additions. Keeping this exact call path in
+/// Checked-in upgrade fixture: origin/main's startup index sequence before
+/// the privacy registry's owner-index additions, refreshed whenever the base
+/// changes. Keeping this exact call path in
 /// the test binary lets the existing-deployment and mixed-fleet tests replay
 /// the old index set without dropping or renaming any definition.
-/// `db::ensure_indexes` is unchanged from that base, including its new
+/// `db::ensure_indexes` is unchanged from that base, including its
 /// node-credential delivery and usage-checkpoint recovery indexes; the caller
 /// runs it before this fixture.
 #[cfg(test)]

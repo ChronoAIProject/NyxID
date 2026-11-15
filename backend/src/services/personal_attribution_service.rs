@@ -58,8 +58,8 @@ pub(crate) mod test_support {
     use super::*;
     use futures::TryStreamExt;
 
-    pub const NAME: &str = "WS5 Attribution Alice Sentinel";
-    pub const EMAIL: &str = "ws5-attribution-alice-sentinel@example.test";
+    pub const NAME: &str = "Attribution Alice Sentinel";
+    pub const EMAIL: &str = "attribution-alice-sentinel@example.test";
 
     pub struct Case {
         pub collection: &'static str,

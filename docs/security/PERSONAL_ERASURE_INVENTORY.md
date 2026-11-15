@@ -9,14 +9,14 @@ reviewable as collections change.
 
 ## Owner-index rollout
 
-These WS5 startup additions never drop, rename, or rebuild an existing index. They
+These startup additions never drop, rename, or rebuild an existing index. They
 reuse any existing index whose first key is the erasure owner predicate and
 add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions. The final manifest adds 17 indexes:
-the accepted 16 event-stream indexes plus the group-message author lookup needed
-for shared-attribution redaction. The 54 other classified gaps add no index.
+not change retention or ownership decisions. The manifest adds 17 indexes:
+16 per-event stream owner indexes plus the group-message author index used for
+attribution redaction. The 54 other classified gaps add no index.
 
 Each row below is a real missing prefix on a collection that grows with
 events, messages, requests, or deliveries. Without it, the owner query would
@@ -25,31 +25,25 @@ resource-bounded collections, short-lived rows, and joined children bounded by
 their parent are explicitly classified in the registry tests and receive no
 new index. `channel_send_claims` is also covered by its composite `_id` prefix.
 
-`db::create_connection` awaits the base `db::ensure_indexes` call
-(`backend/src/db.rs:86-92`), and `main` awaits
-`ensure_startup_indexes` (`backend/src/main.rs:986-988`). That awaits
+`db::create_connection` awaits the base `db::ensure_indexes` call, and `main`
+awaits `personal_erasure_service::ensure_startup_indexes`. That awaits
 `ensure_indexes` → `ensure_owner_index_gaps` → `create_index(...).await`
-(`backend/src/services/personal_erasure_service.rs:107-132`), before either
-listener binds (`backend/src/main.rs:1943-1948`). Therefore every row below is an
+before either listener binds. Therefore every row below is an
 awaited startup build: on a large existing collection MongoDB may hold startup
 until the one-time index build completes. This follows the existing startup
 precedent for large collections, where `ensure_indexes` awaits feature-owned
-index creation such as `assistant_wire_logs` (`backend/src/db.rs:399-411`),
-`refresh_tokens` (`backend/src/db.rs:545-569`),
-`trigger_deliveries` (`backend/src/db.rs:2202-2236`),
-`mcp_session_notifications` (`backend/src/db.rs:1431-1449`),
-`invocation_diagnostics` (`backend/src/db.rs:2551-2573`), and
-`service_pool_health_observations` (`backend/src/db.rs:2794-2812`). No deferred
+index creation in the `assistant_wire_logs`, `refresh_tokens`,
+`trigger_deliveries`, `mcp_session_notifications`, `invocation_diagnostics`,
+and `service_pool_health_observations` blocks of `db::ensure_indexes`. No deferred
 or background build mechanism is introduced. A concrete additive precedent
 on a large event collection is the awaited `usage_rollup_actor_window` index on
-`usage_meter` (`backend/src/services/billing/usage_rollup.rs:151-169`), reached
-through `backend/src/db.rs:3363`. The same path awaits new v6 covering indexes
-for hourly/daily billing summaries (`backend/src/services/billing/usage_rollup.rs:235-250`)
+`usage_meter` in `billing::usage_rollup::ensure_indexes`, reached through
+`db::ensure_indexes`. The same path awaits v6 covering indexes
+for hourly/daily billing summaries in `billing::usage_rollup::ensure_indexes`
 before serving. This change follows those synchronous additions. A first build
 scans the existing data and consumes database CPU/I/O and index storage while
 other replicas continue serving; compatible existing prefixes skip creation.
-No production build duration is assumed here; seeded timing and query plans
-are part of PM end-to-end verification.
+No production build duration is assumed here.
 
 The checked-in origin/main startup fixture in the registry tests is generated
 from `db::ensure_indexes` plus origin/main's security-readiness and personal
@@ -57,80 +51,78 @@ erasure index calls. The upgrade tests run that fixture first, run the branch
 sequence twice, and then replay the fixture to prove mixed-fleet compatibility.
 Paths in the tables below are relative to `backend/src`.
 
-The round-10 rebase adds six registry classifications with no new WS5 indexes.
-See [the collection audit](PRIVACY_REBASE_COLLECTIONS.md) for persisted-field
-quotes, every writer, retention, expected volume, and the test-only evidence.
-The upgrade fixture now uses base `cdcd410c20b0cd45b37b352394b367f348d41c25`
-and includes main's node-delivery indexes.
+`node_credential_desired` is removed by the node drain and by
+`personal_erasure_registry::final_metadata` using `owner_id`; organization-owned
+rows retain only an opaque actor ID.
 
 | Collection | Key | New index name | Why this gap is kept | Startup/build behavior |
 | --- | --- | --- | --- | --- |
-| `assistant_group_messages` | `user_id` | `personal_erasure_owner_assistant_group_messages_user_id` | Per-message group inserts (`services/collaboration_group_service/requests.rs:76`, `runtime.rs:530`), with no message TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `assistant_group_messages` | `author_user_id` | `personal_erasure_owner_assistant_group_messages_author_user_id` | Participant posts and addressed requests snapshot the human author's display name (`services/collaboration_group_service/participant_posts.rs:55`, `requests.rs:191-193`); no message TTL bounds this stream. Shared-message redaction and its final-source/orphan checks otherwise scan the whole collection. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `assistant_group_requests` | `user_id` | `personal_erasure_owner_assistant_group_requests_user_id` | Per-addressed-group-message inserts (`services/collaboration_group_service/requests.rs:226-261`); no TTL or completed-history cap, and local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `nyxbot_events` | `user_id` | `personal_erasure_owner_nyxbot_events_user_id` | Per-inbound-event inserts (`handlers/nyxbot.rs:5275-5296`), retained for 24 hours (seven days with media, `handlers/nyxbot.rs:5665-5669`) at message volume; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `trigger_deliveries` | `user_id` | `personal_erasure_owner_trigger_deliveries_user_id` | Per-delivery inserts (`services/trigger_service.rs:1006-1049`); configured TTL defaults to 72 hours, leaving a high-volume stream for local cleanup. | Awaited before listeners; a large build can delay startup, following `db.rs:2202-2236`. |
-| `trigger_work` | `user_id` | `personal_erasure_owner_trigger_work_user_id` | Per-run and per-notice work inserts (`services/trigger_schedule.rs:328-338,1572-1580`), plus schedule rows; no TTL bounds stalled work before owner cleanup. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `channel_adapter_events` | `user_id` | `personal_erasure_owner_channel_adapter_events_user_id` | Per-call-turn/SMS event inserts (`services/call_channels/session.rs:271,424`); event receipts have no TTL, and settled rows need owner cleanup. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `channel_delivery_receipts` | `user_id` | `personal_erasure_owner_channel_delivery_receipts_user_id` | Per-message receipt upserts (`services/channel_delivery_service.rs:115-178`), with 30-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `channel_reply_deliveries` | `user_id` | `personal_erasure_owner_channel_reply_deliveries_user_id` | Per-reply inserts (`services/channel_reply_delivery.rs:24-57`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` | Per-inbound-email receipt writes (`services/channel_adapters/aurinko_lifecycle.rs:319-386`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` | Per-email-send inserts (`services/channel_adapters/aurinko_lifecycle.rs:505-519`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` | Per-webhook-batch upserts (`services/channel_adapters/aurinko_lifecycle.rs:283-290`), with 31-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `mcp_session_notifications` | `user_id` | `personal_erasure_owner_mcp_session_notifications_user_id` | Per-notification outbox; retention defaults to 30 days (`models/mcp_session.rs:20,931-941`), allowing a large notification stream. | Awaited before listeners; a large build can delay startup, following `db.rs:1431-1449`. |
-| `refresh_tokens` | `user_id` | `personal_erasure_owner_refresh_tokens_user_id` | Per-rotation inserts (`services/token_service.rs:970-1064`), with configurable expiry (default seven days); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `db.rs:545-569`. |
-| `service_change_events` | `actor.person_id` | `personal_erasure_owner_service_change_events_actor_person_id` | Per-service-change journal (`models/service_change_event.rs`, `services/service_history/transaction.rs`), with no TTL; shared-history redaction filters by actor person ID. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
-| `service_pool_health_observations` | `pool_id` | `personal_erasure_owner_service_pool_health_observations_pool_id` | Per-request observation stream (`services/service_pool_health_service.rs:290-304`); a one-hour TTL still admits all live request volume, and joined-child cleanup needs `pool_id`. | Awaited before listeners; a large build can delay startup, following `db.rs:2794-2812`. |
-| `assistant_group_mention_notifications` | `user_id` | `personal_erasure_owner_assistant_group_mention_notifications_user_id` | One insert per mentioned participant (`services/collaboration_group_service/notifications.rs:119-139`), with seven-day TTL (`mod.rs:271-280`); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `services/billing/usage_rollup.rs:151-169`. |
+| `assistant_group_messages` | `user_id` | `personal_erasure_owner_assistant_group_messages_user_id` | Per-message group inserts (`collaboration_group_service::requests::append`, `collaboration_group_service::runtime::publish_reply`), with no message TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `assistant_group_messages` | `author_user_id` | `personal_erasure_owner_assistant_group_messages_author_user_id` | Participant posts and addressed requests snapshot the human author's display name (`collaboration_group_service::participant_posts::try_post`, `collaboration_group_service::requests::enqueue_with_uploads_ready`); no message TTL bounds this stream. Shared-message redaction and its final-source/orphan checks otherwise scan the whole collection. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `assistant_group_requests` | `user_id` | `personal_erasure_owner_assistant_group_requests_user_id` | Per-addressed-group-message inserts (`collaboration_group_service::requests::enqueue_with_uploads_ready`); no TTL or completed-history cap, and local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `nyxbot_events` | `user_id` | `personal_erasure_owner_nyxbot_events_user_id` | Per-inbound-event inserts (`handlers::nyxbot::custom_responses`), retained for 24 hours (seven days with media, `handlers::nyxbot::responses_with_producers_impl`) at message volume; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `trigger_deliveries` | `user_id` | `personal_erasure_owner_trigger_deliveries_user_id` | Per-delivery inserts (`trigger_service::admit_webhook_delivery`); configured TTL defaults to 72 hours, leaving a high-volume stream for local cleanup. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `trigger_deliveries` block. |
+| `trigger_work` | `user_id` | `personal_erasure_owner_trigger_work_user_id` | Per-run and per-notice work inserts (`trigger_schedule::insert_run` and `trigger_schedule::record_terminal_in_session`), plus schedule rows; no TTL bounds stalled work before owner cleanup. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `channel_adapter_events` | `user_id` | `personal_erasure_owner_channel_adapter_events_user_id` | Per-call-turn/SMS event inserts (`call_channels::session::insert_sms_send` and `call_channels::session::admit`); event receipts have no TTL, and settled rows need owner cleanup. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `channel_delivery_receipts` | `user_id` | `personal_erasure_owner_channel_delivery_receipts_user_id` | Per-message receipt upserts (`channel_delivery_service::observe`), with 30-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `channel_reply_deliveries` | `user_id` | `personal_erasure_owner_channel_reply_deliveries_user_id` | Per-reply inserts (`channel_reply_delivery::Delivery::begin`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` | Per-inbound-email receipt writes (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::receive_batch`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` | Per-email-send inserts (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::reply_once`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` | Per-webhook-batch upserts (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::receive_batch`), with 31-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `mcp_session_notifications` | `user_id` | `personal_erasure_owner_mcp_session_notifications_user_id` | Per-notification outbox; retention defaults to 30 days (`mcp_session::DEFAULT_MCP_NOTIFICATION_TTL_SECS` and `mcp_session::insert_notification_in_transaction`), allowing a large notification stream. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `mcp_session_notifications` block. |
+| `refresh_tokens` | `user_id` | `personal_erasure_owner_refresh_tokens_user_id` | Per-rotation inserts (`token_service::refresh_tokens`), with configurable expiry (default seven days); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `refresh_tokens` block. |
+| `service_change_events` | `actor.person_id` | `personal_erasure_owner_service_change_events_actor_person_id` | Per-service-change journal (`models/service_change_event.rs`, `services/service_history/transaction.rs`), with no TTL; shared-history redaction filters by actor person ID. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
+| `service_pool_health_observations` | `pool_id` | `personal_erasure_owner_service_pool_health_observations_pool_id` | Per-request observation stream (`service_pool_health_service::issue_observation_ticket`); a one-hour TTL still admits all live request volume, and joined-child cleanup needs `pool_id`. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `service_pool_health_observations` block. |
+| `assistant_group_mention_notifications` | `user_id` | `personal_erasure_owner_assistant_group_mention_notifications_user_id` | One insert per mentioned participant (`collaboration_group_service::notifications::enqueue`), with seven-day TTL (`collaboration_group_service::ensure_indexes`); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 
-Two proposed KEEP entries are deliberately dropped after tracing their writers:
+Two diagnostic predicates receive no additional index:
 `assistant_wire_logs.user_id` is opt-in diagnostic capture (request header plus
-a default-off flag, `backend/src/handlers/assistant.rs:185-210`) with a 15-minute
-TTL (`backend/src/services/assistant_wire_log_service.rs:9,24-36`).
+a default-off flag, `handlers::assistant::upstream_echo_collector`) with a 15-minute
+TTL (`assistant_wire_log_service::WIRE_LOG_TTL_SECS` and `assistant_wire_log_service::store`).
 `invocation_diagnostics.actor_user_id` is default-off, access-token failed-request
-handle issuance (`backend/src/config.rs:1110`,
-`backend/src/handlers/invocation_diagnostics.rs:94-115`), with a 60-second TTL
+handle issuance (`AppConfig::from_env`,
+`handlers::invocation_diagnostics::HttpInvocation::finish`), with a 60-second TTL
 and 10-second duplicate-issuance throttle
-(`backend/src/services/invocation_diagnostic_service.rs:46-48,202-240`). These
+(`invocation_diagnostic_service::HANDLE_TTL_SECS`, `DUPLICATE_ISSUE_WINDOW` and `issue`). These
 are short-lived diagnostic flows, so bounded cleanup does not justify a new
 startup build and ongoing write cost.
 
-One proposed DROP is kept: `assistant_group_requests.user_id`. The writer
+`assistant_group_requests.user_id` needs an additional index. The writer
 inserts a row for each addressed group message
-(`backend/src/services/collaboration_group_service/requests.rs:226-261`), the
-model has no expiry (`backend/src/models/assistant_group.rs:129-148`), and
+(`collaboration_group_service::requests::enqueue_with_uploads_ready`), the
+model has no expiry (`assistant_group::GroupRequest`), and
 admission removes pending agents without deleting the request
-(`backend/src/services/collaboration_group_service/requests.rs:360-365`).
+(`collaboration_group_service::requests::admit_in_session`).
 The 16-request admission cap applies only to pending requests
-(`backend/src/services/collaboration_group_service/requests.rs:133`); it does
+(`collaboration_group_service::requests::enqueue_with_uploads_ready`); it does
 not bound completed history. The collection therefore grows with group
 activity, and its owner erasure/source query otherwise scans the stream.
-The remaining 49 proposed drops stay excluded; their checked predicate
-classifications distinguish small/resource lifecycles, short TTLs,
+The checked classifications for other excluded predicates distinguish small/resource lifecycles, short TTLs,
 parent-bounded children, and the existing claim `_id` prefix. No existing
-deployed index is removed by this reduction.
+deployed index is removed.
 
-The excluded predicates are reviewed as follows (paths below are relative to
-`backend/src`; the exact field list is `OWNER_INDEX_BOUNDED` in the registry):
+The excluded predicates have the following lifecycle bounds (paths below are
+relative to `backend/src`; the exact field list is `OWNER_INDEX_BOUNDED` in the
+registry):
 
-| Dropped collections | Writer/lifecycle evidence for bounded cleanup |
+| Collections without additional indexes | Writer/lifecycle evidence for bounded cleanup |
 | --- | --- |
-| `agent_key_login_requests`, `auth_device_codes`, `auth_device_codes_v2`, `authorization_codes`, `device_codes`, `login_approvals`, `mfa_challenges`, `oauth_consent_requests` | Login/consent protocols write expiring rows, rather than a retained event stream (`services/auth_agent_key_login_service.rs:39,201`, `services/token_service.rs:568`, and the corresponding expiry indexes in `db.rs`). |
+| `agent_key_login_requests`, `auth_device_codes`, `auth_device_codes_v2`, `authorization_codes`, `device_codes`, `login_approvals`, `mfa_challenges`, `oauth_consent_requests` | Login/consent protocols write expiring rows, rather than a retained event stream (`auth_agent_key_login_service::REQUEST_TTL_SECS` and `auth_agent_key_login_service::request`, `token_service::insert_mfa_pending_session_with_method`, and the corresponding expiry indexes in `db.rs`). |
 | `assistant_agent_sharing`, `assistant_agent_shares`, `assistant_agent_private_notes`, `assistant_agent_consents` | Sharing policy, recipient grant, private note and connection consent state belongs to agent/recipient/connection lifecycles (`models/assistant_sharing.rs`, `services/shared_agent_service.rs`); this is resource state rather than the message stream. |
-| `assistant_agent_learning_members`, `assistant_agent_learning_runs`, `assistant_agent_learning_skill_roots`, `assistant_learning_migrations` | Opt-in membership and explicit learning/publication work (`services/assistant_agent_learning.rs:331-367,792-907`); bounded feature lifecycle rather than every assistant message. |
-| `assistant_async_quotas`, `assistant_checkpoints` | One quota counter per owner (`services/async_service_operation.rs:251`) and one replaced checkpoint per conversation (`services/assistant_nyxagent.rs:1962-2030`); resource state rather than an append-only history. |
-| `assistant_group_agent_access`, `assistant_group_agent_proposals`, `assistant_group_invites`, `assistant_group_read_states` | Group access/invite lifecycle and one read-state per participant (`services/collaboration_group_service/membership.rs`, `notifications.rs:103-105`); invites/proposals also expire (`mod.rs:282-296`). |
-| `assistant_skill_draft_attempts`, `assistant_voice_windows`, `assistant_voice_announcements` | Explicit draft attempts expire after a day (`db.rs:138-152`); voice windows are bounded by a voice session (`services/voice/runtime.rs:797-828`), and announcements are expiring coordination (`models/assistant_voice_announcement.rs:20`). |
-| `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`models/channel_email.rs:10-22`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
-| `encrypted_record_migration_findings`, `encrypted_record_migration_runs` | Migration-generation diagnostics/progress (`services/encrypted_record_migration.rs:1085-1112,1289-1303`), not hot request writes. |
+| `assistant_agent_learning_members`, `assistant_agent_learning_runs`, `assistant_agent_learning_skill_roots`, `assistant_learning_migrations` | Opt-in membership and explicit learning/publication work (`assistant_agent_learning::set_member_opt_in`, `create_run` and `reserve_run`); bounded feature lifecycle rather than every assistant message. |
+| `assistant_async_quotas`, `assistant_checkpoints` | One quota counter per owner (`async_service_operation::reserve_with_artifacts`) and one replaced checkpoint per conversation (`assistant_nyxagent::write_checkpoint_in_session`); resource state rather than an append-only history. |
+| `assistant_group_agent_access`, `assistant_group_agent_proposals`, `assistant_group_invites`, `assistant_group_read_states` | Group access/invite lifecycle and one read-state per participant (`services/collaboration_group_service/membership.rs`, `collaboration_group_service::notifications::ensure_state`); invites/proposals also expire (`collaboration_group_service::ensure_indexes`). |
+| `assistant_skill_draft_attempts`, `assistant_voice_windows`, `assistant_voice_announcements` | Explicit draft attempts expire after a day (`db::ensure_indexes`, `assistant_skill_draft_attempts` expiry index); voice windows are bounded by a voice session (`voice::runtime::checkpoint_windows` and `voice::runtime::settle_windows`), and announcements are expiring coordination (`assistant_voice_announcement::Announcement::expires_at`). |
+| `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`channel_email::EmailSubscription`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
+| `encrypted_record_migration_findings`, `encrypted_record_migration_runs` | Migration-generation diagnostics/progress (`encrypted_record_migration::advance`), not hot request writes. |
 | `feature_flag_overrides`, `invite_codes`, `org_invites` | Administrative targeting and invite lifecycles; embedded invite usage is bounded by the authored invite's usage policy (`models/invite_code.rs`, `services/feature_flag_service.rs`, `services/org_invite_service.rs`). |
-| `user_services.created_by.actor.person_id`, `user_services.last_change.actor.person_id` | Only the creator and latest-change summary on each service resource are replaced (`services/service_history/projection.rs:496-535`); historical events use the separately indexed journal. No per-event growth on these resource rows. |
-| `oauth_states.history_context.actor.person_id` | A saved initiation context per expiring OAuth flow (`models/oauth_state.rs:14`, `db.rs`'s `oauth_states` expiry index); no retained actor-history stream. |
+| `user_services.created_by.actor.person_id`, `user_services.last_change.actor.person_id` | Only the creator and latest-change summary on each service resource are replaced (`service_history::projection::record_changes` and `service_history::projection::record_service`); historical events use the separately indexed journal. No per-event growth on these resource rows. |
+| `oauth_states.history_context.actor.person_id` | A saved initiation context per expiring OAuth flow (`oauth_state::OAuthState`, `db.rs`'s `oauth_states` expiry index); no retained actor-history stream. |
 | `platform_guide_selections`, `platform_native_replies`, `platform_onboarding_binding_requests`, `platform_personal_decision_spacing`, `platform_personal_setup_selections` | Guide/setup/binding selection, reply and spacing coordination (`services/platform_guide_service.rs`, `services/platform_native_reply_service.rs`, `services/platform_personal_owner_lifecycle.rs`); low-volume setup flows. |
-| `platform_delivery_tests`, `platform_setup_steps` | Joined installation/setup lifecycle children (`models/platform_installation.rs:5-7,90-103`); bounded steps/tests per parent. |
-| `service_account_key_read_grants`, `service_pool_member_health` | Owner grant configuration (`models/service_account_key_read_grant.rs`) and one current health row per member/context, with one-hour expiry (`services/service_pool_health_service.rs:14-15,250-283`); observations remain separately indexed. |
-| `telegram_bot_claims`, `telegram_bot_requests`, `telegram_managed_bot_events` | Bot provisioning/claim lifecycle; request admission lasts 15 minutes and terminal request purge follows lifecycle checks (`services/telegram_new_service.rs:391-392,626`), while managed events track bot creation. |
-| `channel_send_claims` | The model has no `conversation_id` field (`models/channel_send_claim.rs:6-14`); cleanup uses an anchored composite `_id` regex (`services/personal_erasure_service/local.rs`, `services/personal_erasure_orphan_sweep.rs:330-332`), served by `_id_`. |
+| `platform_delivery_tests`, `platform_setup_steps` | Joined installation/setup lifecycle children (`platform_installation::STEPS`, `platform_installation::TESTS` and `platform_installation::DeliveryTest`); bounded steps/tests per parent. |
+| `service_account_key_read_grants`, `service_pool_member_health` | Owner grant configuration (`models/service_account_key_read_grant.rs`) and one current health row per member/context, with one-hour expiry (`service_pool_health_service::HEALTH_RETENTION_MS` and `service_pool_health_service::issue_observation_ticket`); observations remain separately indexed. |
+| `telegram_bot_claims`, `telegram_bot_requests`, `telegram_managed_bot_events` | Bot provisioning/claim lifecycle; request admission lasts 15 minutes and terminal request purge follows lifecycle checks (`telegram_new_service::TelegramNewService::expire` and `telegram_new_service::TelegramNewService::begin_inner`), while managed events track bot creation. |
+| `channel_send_claims` | The model has no `conversation_id` field (`channel_send_claim::ChannelSendClaim`); cleanup uses an anchored composite `_id` regex (`services/personal_erasure_service/local.rs`, `personal_erasure_orphan_sweep::collect_groups`), served by `_id_`. |
 
 ## Pre-job orphan sweep
 
@@ -307,7 +299,7 @@ delete another owner's resource.
 | Collection | Persisted snapshot and authoritative person selector | Cleanup |
 | --- | --- | --- |
 | `service_change_events` | `HistoryActor` at `actor`, keyed by `actor.person_id` | Delete the person's own journal; on surviving shared events replace existing actor names with `Deleted account` and remove email snapshots. |
-| `user_services` | `ServiceChangeSummary` at `created_by` and `last_change`, each wrapping `actor`, keyed by `created_by.actor.person_id` / `last_change.actor.person_id` | Delete personally owned resources; redact the matching creator/updater on other owners' resources, retaining every opaque actor/person/API-key/app id. Endpoint and API-key changes write their summaries here (`services/service_history/projection.rs:496-535`); those two model collections have no separate actor-summary field. |
+| `user_services` | `ServiceChangeSummary` at `created_by` and `last_change`, each wrapping `actor`, keyed by `created_by.actor.person_id` / `last_change.actor.person_id` | Delete personally owned resources; redact the matching creator/updater on other owners' resources, retaining every opaque actor/person/API-key/app id. Endpoint and API-key changes write their summaries here (`service_history::projection::record_changes` and `service_history::projection::record_service`); those two model collections have no separate actor-summary field. |
 | `oauth_states` | `HistoryContext` at `history_context`, keyed by `history_context.actor.person_id` | Delete the person's own flows; redact saved initiation labels on another owner's surviving flow. |
 | `assistant_group_messages` | `author_display_name`, keyed by `author_user_id` | Existing lifecycle cleanup may remove the author's messages; replace labels on any surviving shared message without changing its text, resource owner or opaque author id. |
 | `invite_codes` | `usages[].email`, keyed by that element's `user_id` | Remove only that usage's email, retaining opaque ids, other usages, limits and usage counters. |
