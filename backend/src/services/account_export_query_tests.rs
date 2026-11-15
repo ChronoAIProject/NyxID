@@ -243,3 +243,44 @@ async fn unbounded_export_selectors_use_selective_prefix_indexes() {
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn pending_deliveries_do_not_hide_private_conversations_or_unrouted_replies() {
+    let db =
+        crate::test_utils::connect_transaction_test_database("export_pending_deliveries").await;
+    db.collection::<Document>("assistant_conversations").insert_one(doc! {
+        "_id":"private", "user_id":"person", "title":"Private title", "deliver_also":[{"channel":"pending"}]
+    }).await.unwrap();
+    db.collection::<Document>("assistant_messages").insert_many([
+        doc! {"_id":"private-reply", "user_id":"person", "conversation_id":"private", "role":"assistant", "origin":"user", "text":"private reply"},
+        doc! {"_id":"routed-reply", "user_id":"person", "conversation_id":"private", "role":"assistant", "origin":"user", "platform_reply":{"destination":"channel"}, "text":"routed reply"},
+        doc! {"_id":"platform-origin", "user_id":"person", "conversation_id":"private", "role":"assistant", "origin":"user", "platform_origin":{"platform":"telegram"}, "text":"platform reply"},
+    ]).await.unwrap();
+    let mut budget = ExportBudget::new(MAX_BYTES);
+    let conversations = query_rows(
+        &db,
+        "assistant_conversations",
+        doc! {"user_id":"person"},
+        fields_for("assistant_conversations").unwrap(),
+        doc! {"updated_at":-1},
+        &mut budget,
+    )
+    .await
+    .unwrap();
+    assert_eq!(conversations.items.len(), 1);
+    assert_eq!(conversations.items[0]["title"], "Private title");
+    let (scope, _) = message_scope(&db, "person").await.unwrap();
+    let messages = query_rows(
+        &db,
+        "assistant_messages",
+        scope,
+        fields_for("assistant_messages").unwrap(),
+        doc! {"created_at":-1},
+        &mut budget,
+    )
+    .await
+    .unwrap();
+    assert_eq!(messages.total_count, 1);
+    assert_eq!(messages.items[0]["text"], "private reply");
+    db.drop().await.unwrap();
+}

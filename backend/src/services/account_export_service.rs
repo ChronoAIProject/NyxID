@@ -1375,10 +1375,6 @@ fn private_conversation_filter(prefix: &str) -> Document {
     for field in ["shared_agent_thread", "guest_turn", "invocation_controlled"] {
         filter.insert(format!("{prefix}{field}"), doc! {"$ne": true});
     }
-    filter.insert(
-        format!("{prefix}deliver_also"),
-        doc! {"$in": [Bson::Null, Bson::Array(Vec::new())]},
-    );
     filter
 }
 
