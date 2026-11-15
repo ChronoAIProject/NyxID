@@ -213,7 +213,16 @@ impl BillingReconciler {
         if !continue_reconcile() {
             return Ok(stats);
         }
-        stats.recovered_settlements += super::voice::reconcile(&self.db).await?;
+        match super::voice::reconcile(&self.db).await {
+            Ok(count) => stats.recovered_settlements += count,
+            Err(error) => tracing::error!(
+                code = "billing_voice_window_recovery_failed",
+                failed_windows = 0_u64,
+                selection_failed = true,
+                error_code = error.error_code(),
+                "Voice window batch unavailable; continuing billing reconciliation"
+            ),
+        }
         if !continue_reconcile() {
             return Ok(stats);
         }

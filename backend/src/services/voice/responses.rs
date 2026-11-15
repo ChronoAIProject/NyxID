@@ -17,6 +17,7 @@ use crate::{
 };
 
 const LIMIT: usize = 256;
+pub(crate) const RESPONSE_USAGE_LIMIT: usize = LIMIT;
 const TOOL: &str = "request_nyxbot";
 const STATUS_TOOL: &str = "get_task_status";
 
@@ -525,7 +526,7 @@ async fn checkpoint_usage(
     {
         return Ok(());
     }
-    if call.responses.usage().map_or(0, |usage| usage.len()) >= LIMIT {
+    if call.responses.usage().map_or(0, |usage| usage.len()) >= RESPONSE_USAGE_LIMIT {
         return Err(invalid());
     }
     if let Some(reported) = crate::services::llm_usage_service::extract_reported_usage(event) {
@@ -547,10 +548,25 @@ pub(super) async fn settle(state: &AppState, call: &mut VoiceSession) -> AppResu
     if !call.responses.active() {
         return Ok(());
     }
+    let usage = recorded_usage(&call.responses);
+    crate::services::billing::meter::settle_voice_checkpoint(
+        &state.db,
+        &billing_id(&call.id),
+        usage,
+        call.responses.model().map(str::to_owned),
+    )
+    .await?;
+    *call = session::write(&state.db, call, doc! {"responses_finalized":true}).await?;
+    Ok(())
+}
+
+/// Exactly the same reported-prefix rule for normal close and orphan recovery.
+pub(crate) fn recorded_usage(
+    responses: &crate::models::voice_responses::ResponsesState,
+) -> PlatformUsage {
     let mut usage = PlatformUsage::default();
     let mut breakdown = crate::models::service_billing::TokenBreakdown::default();
-    for value in call
-        .responses
+    for value in responses
         .usage()
         .into_iter()
         .flat_map(|usage| usage.values())
@@ -575,18 +591,9 @@ pub(super) async fn settle(state: &AppState, call: &mut VoiceSession) -> AppResu
                 .saturating_add(tokens.cache_creation_tokens);
         }
     }
-    usage = usage
+    usage
         .with_token_breakdown(Some(breakdown))
-        .with_reported_model(call.responses.model().map(str::to_owned));
-    crate::services::billing::meter::settle_voice_checkpoint(
-        &state.db,
-        &billing_id(&call.id),
-        usage,
-        call.responses.model().map(str::to_owned),
-    )
-    .await?;
-    *call = session::write(&state.db, call, doc! {"responses_finalized":true}).await?;
-    Ok(())
+        .with_reported_model(responses.model().map(str::to_owned))
 }
 
 /// Closing never admits new work, but still records observed response usage.

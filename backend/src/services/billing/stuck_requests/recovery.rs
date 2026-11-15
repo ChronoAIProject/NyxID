@@ -1,5 +1,8 @@
 use super::*;
-use std::{collections::BTreeSet, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 const BATCH_ROWS: i64 = 100;
 const BATCH_REQUESTS: usize = 50;
 const BUDGET: Duration = Duration::from_secs(5);
@@ -7,12 +10,25 @@ const BUDGET: Duration = Duration::from_secs(5);
 pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<()> {
     // A cancelled terminal transaction is atomic. A committed terminal quantity
     // resumes through ordinary settlement, including its financial lock bridges.
-    match tokio::time::timeout(BUDGET, run(db)).await {
+    let mut deferred = BTreeMap::new();
+    let result = match tokio::time::timeout(BUDGET, run(db, &mut deferred)).await {
         Ok(result) => result,
-        Err(_) => Ok(()),
+        Err(_) => {
+            *deferred.entry("pass_time_budget").or_insert(0_u64) += 1;
+            Ok(())
+        }
+    };
+    if result.is_err() {
+        *deferred
+            .entry("pass_read_or_settlement_failed")
+            .or_insert(0_u64) += 1;
     }
+    if !deferred.is_empty() {
+        log_deferred(&deferred);
+    }
+    result
 }
-async fn run(db: &mongodb::Database) -> AppResult<()> {
+async fn run(db: &mongodb::Database, deferred: &mut BTreeMap<&'static str, u64>) -> AppResult<()> {
     if !super::super::reconcile::continue_reconcile() {
         return Ok(());
     }
@@ -34,6 +50,7 @@ async fn run(db: &mongodb::Database) -> AppResult<()> {
         .unwrap_or("");
     let mut tx = db.client().start_session().await?;
     let Ok(registry) = registry(db, &mut tx).await else {
+        *deferred.entry("registry_unavailable").or_default() += 1;
         return Ok(());
     };
     drop(tx);
@@ -59,26 +76,41 @@ async fn run(db: &mongodb::Database) -> AppResult<()> {
         if !matches!(selection::has_reservation(row), Ok(true)) {
             continue;
         }
-        let Ok(c) = classify(row, Some(&registry)) else {
-            continue;
-        };
-        if !c.eligible {
-            continue;
-        }
         let request = row
             .get_str("billing_request_id")
             .map_err(|_| unavailable())?;
         if !seen.insert(request.to_owned()) {
             continue;
         }
-        match terminal::publish(db, request).await {
-            Ok(rows) => {
-                super::super::meter::settle_persisted(db, rows).await?;
+        let c = match classify(row, Some(&registry)) {
+            Ok(c) => c,
+            Err(_) => {
+                *deferred
+                    .entry(if voice::is_voice(row) {
+                        "voice_malformed_evidence"
+                    } else {
+                        "meter_row_malformed"
+                    })
+                    .or_default() += 1;
+                continue;
             }
-            Err(_) => tracing::warn!(
-                billing_request_id = request,
-                "Unknown request exit deferred; durable state will be rechecked"
-            ),
+        };
+        if !c.eligible {
+            if voice::is_voice(row) {
+                *deferred.entry(c.label).or_default() += 1;
+            }
+            continue;
+        }
+        match terminal::publish_outcome(db, request).await {
+            Ok(terminal::Outcome::Published(rows)) => {
+                super::super::meter::settle_persisted(db, rows).await?
+            }
+            Ok(terminal::Outcome::Deferred(reason)) => {
+                *deferred.entry(reason).or_default() += 1;
+            }
+            Err(error) => {
+                *deferred.entry(publication_reason(&error)).or_default() += 1;
+            }
         }
     }
     if visited == rows.len() && rows.len() < BATCH_ROWS as usize {
@@ -92,4 +124,82 @@ async fn run(db: &mongodb::Database) -> AppResult<()> {
         .upsert(true)
         .await?;
     Ok(())
+}
+
+fn publication_reason(error: &AppError) -> &'static str {
+    match error {
+        AppError::Conflict(_) => "publication_conflict",
+        AppError::DatabaseError(error)
+            if error.contains_label("TransientTransactionError")
+                && !error.contains_label("UnknownTransactionCommitResult") =>
+        {
+            "publication_conflict"
+        }
+        _ => "request_read_or_publication_failed",
+    }
+}
+fn log_deferred(deferred: &BTreeMap<&'static str, u64>) {
+    let actionable = deferred.keys().any(|reason| {
+        matches!(
+            *reason,
+            "voice_malformed_evidence"
+                | "excluded_voice_unknown_shape"
+                | "voice_actor_mismatch"
+                | "meter_row_malformed"
+                | "request_rows_unavailable"
+                | "policy_quantity_unavailable"
+                | "request_read_or_publication_failed"
+                | "pass_read_or_settlement_failed"
+        )
+    });
+    if actionable {
+        tracing::warn!(?deferred, "Held request recovery deferred");
+    } else {
+        tracing::debug!(?deferred, "Held request recovery deferred");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_r3_conflict_and_failure_summary_levels() {
+        let conflict = publication_reason(&AppError::Conflict("changed".into()));
+        let failure = publication_reason(&AppError::DatabaseError(mongodb::error::Error::custom(
+            "read failed",
+        )));
+        assert_eq!(conflict, "publication_conflict");
+        assert_eq!(failure, "request_read_or_publication_failed");
+        for (reasons, level) in [
+            (
+                vec![conflict, "pass_time_budget", "registry_unavailable"],
+                "DEBUG",
+            ),
+            (vec![conflict, failure], "WARN"),
+            (vec!["pass_read_or_settlement_failed"], "WARN"),
+            (
+                vec![
+                    "excluded_voice_unknown_shape",
+                    "voice_actor_mismatch",
+                    "meter_row_malformed",
+                ],
+                "WARN",
+            ),
+        ] {
+            let capture = tempfile::NamedTempFile::new().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(capture.reopen().unwrap())
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            tracing::callsite::rebuild_interest_cache();
+            log_deferred(&reasons.into_iter().map(|r| (r, 1)).collect());
+            let logs = std::fs::read_to_string(capture.path()).unwrap();
+            assert_eq!(logs.lines().count(), 1, "{logs}");
+            assert!(logs.contains(level), "{logs}");
+        }
+    }
 }

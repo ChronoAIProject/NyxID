@@ -104,6 +104,15 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"settled":1,"deadline":1})
                 .build(),
+            IndexModel::builder()
+                .keys(doc! {"reconcile_failed_at":1,"deadline":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("voice_window_reconcile_order".to_owned())
+                        .partial_filter_expression(doc! {"settled":false})
+                        .build(),
+                )
+                .build(),
         ])
         .await?;
     Ok(())
