@@ -148,6 +148,15 @@ async fn settled(f: &Fixture, failed: bool) {
         "turn_id": &f.event.turn_id, "seq": 1, "role": "assistant", "text": "Useful answer", "status": if failed {"failed"} else {"completed"},
         "created_at": bson::DateTime::now(),
     }).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&f.event.conversation_id},
+            doc! {"$max":{"message_count":1_i64}},
+        )
+        .await
+        .unwrap();
 }
 async fn status(f: &Fixture) -> String {
     f.state
@@ -1292,4 +1301,385 @@ async fn model_approval_channel_partial_reply_keeps_guidance() {
     assert!(text.contains("Incomplete"));
     assert!(text.contains("approval settings require approval for this model request"));
     assert!(text.contains("https://example.test/approvals/settings"));
+}
+
+// The preparation seam drops the worker after credentials/request preparation,
+// before any provider effect. No task is left running after the simulated death.
+#[tokio::test]
+async fn late_gateway_crash_during_preparation_survivor_sends_once() {
+    let f = fixture("late_gateway_preparation").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_prepared",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    assert!(sends(&f).await.is_empty());
+    patch(
+        &f,
+        doc! {"delivery.preparation.lease_until": bson::DateTime::from_millis(0)},
+    )
+    .await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(
+        sends(&f).await.len(),
+        1,
+        "survivor must recover proven-unsent preparation"
+    );
+    assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn late_direct_crash_during_preparation_survivor_sends_once() {
+    let (f, server) = image_delivery_tests::image_fixture("telegram", "direct").await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}})),
+        )
+        .mount(&server)
+        .await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_prepared",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    patch(
+        &f,
+        doc! {"delivery.preparation.lease_until": bson::DateTime::from_millis(0)},
+    )
+    .await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    let sends = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/sendMessage"))
+        .count();
+    assert_eq!(sends, 1, "survivor must recover proven-unsent preparation");
+    assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn late_abandoned_sending_becomes_one_visible_unconfirmed_notice() {
+    let f = fixture("late_abandoned_notice").await;
+    settled(&f, false).await;
+    patch(
+        &f,
+        doc! {"delivery.state":"sending", "delivery.claim_id":"lost",
+        "delivery.checked_at":bson::DateTime::from_millis(0)},
+    )
+    .await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert!(sends(&f).await.is_empty());
+    assert_eq!(status(&f).await, "unknown");
+    let notices = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .count_documents(doc! {"conversation_id":&f.event.conversation_id,"role":"event"})
+        .await
+        .unwrap();
+    assert_eq!(notices, 1);
+}
+
+#[tokio::test]
+async fn late_normal_send_command_counts() {
+    for direct in [false, true] {
+        let (mut f, _server) = if direct {
+            let (f, server) = image_delivery_tests::image_fixture("telegram", "direct").await;
+            Mock::given(path("/bottoken/sendMessage"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"ok":true,"result":{"message_id":43}})),
+                )
+                .mount(&server)
+                .await;
+            (f, Some(server))
+        } else {
+            let f = fixture("late_command_count").await;
+            settled(&f, false).await;
+            (f, None)
+        };
+        delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+        let (db, commands) = crate::services::durable_wake_tests::monitored(&f.state.db).await;
+        f.state.db = db;
+        late_delivery::process(&f.state, &f.event.id).await;
+        let counts = crate::services::durable_wake_tests::take(&commands);
+        println!(
+            "late normal direct={direct}: total={} {counts:?}",
+            counts.values().sum::<usize>()
+        );
+        assert_eq!(status(&f).await, "sent");
+    }
+}
+
+async fn expire_text_preparation(f: &Fixture) {
+    patch(
+        f,
+        doc! {"delivery.preparation.lease_until":bson::DateTime::from_millis(0)},
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn late_slow_preparer_loses_claim_before_any_provider_send() {
+    let f = fixture("late_slow_preparer").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "late_text_prepared",
+        late_delivery::process(&f.state, &f.event.id),
+        async {
+            expire_text_preparation(&f).await;
+            let state = f.state.clone();
+            let event = f.event.id.clone();
+            // A separate task models another replica and does not inherit the
+            // deliberately suspended worker's task-local crash injection.
+            state
+                .shutdown
+                .clone()
+                .spawn(async move {
+                    late_delivery::process(&state, &event).await;
+                })
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(sends(&f).await.len(), 1);
+    assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn late_two_survivors_recover_one_preparation_and_old_claim_cannot_win() {
+    let f = fixture("late_two_survivors").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_prepared",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    assert!(
+        !delivery::claim_send(&f.state.db, &f.event.id, "old-worker")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !delivery::claim_stream(&f.state.db, &f.event.id, "completed")
+            .await
+            .unwrap()
+    );
+    expire_text_preparation(&f).await;
+    let (a, b) = tokio::join!(
+        late_delivery::sweep(&f.state),
+        late_delivery::sweep(&f.state)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(sends(&f).await.len(), 1);
+    assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn late_gateway_acceptance_without_receipt_is_terminal_and_visible() {
+    let f = fixture("late_acceptance_without_receipt").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_accepted_before_receipt",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    assert_eq!(sends(&f).await.len(), 1);
+    expire_text_preparation(&f).await;
+    let (a, b) = tokio::join!(
+        late_delivery::sweep(&f.state),
+        late_delivery::sweep(&f.state)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(sends(&f).await.len(), 1);
+    assert_eq!(status(&f).await, "unknown");
+    let notices = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+        .find(doc! {"conversation_id":&f.event.conversation_id,"role":"event"})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].text.starts_with("Delivery unconfirmed."));
+}
+
+#[tokio::test]
+async fn late_direct_accepted_prefix_is_not_repeated_after_worker_death() {
+    let (f, server) = image_delivery_tests::image_fixture("telegram", "direct").await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}})),
+        )
+        .mount(&server)
+        .await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id":&f.event.conversation_id,"role":"assistant"},
+            doc! {"$set":{"text":format!("{} tail", "A".repeat(6000))}},
+        )
+        .await
+        .unwrap();
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_receipt_committed",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    expire_text_preparation(&f).await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    let sends: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/sendMessage"))
+        .collect();
+    assert_eq!(sends.len(), 2);
+    let first: Value = serde_json::from_slice(&sends[0].body).unwrap();
+    let second: Value = serde_json::from_slice(&sends[1].body).unwrap();
+    assert_ne!(first["text"], second["text"]);
+    assert_eq!(status(&f).await, "sent");
+}
+
+#[tokio::test]
+async fn late_recovered_preparation_rechecks_revoked_authority() {
+    let f = fixture("late_revoked_preparation").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_prepared",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    expire_text_preparation(&f).await;
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"status":"revoked"}},
+        )
+        .await
+        .unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert!(sends(&f).await.is_empty());
+    assert_eq!(status(&f).await, "refused");
+}
+
+#[tokio::test]
+async fn late_preparation_lease_uses_database_time_and_no_content_is_copied() {
+    let f = fixture("late_database_clock").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    patch(&f,doc! {"delivery.checked_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(7))}).await;
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_prepared",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    let row = f
+        .state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .find_one(doc! {"_id":&f.event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let d = row.get_document("delivery").unwrap();
+    let p = d.get_document("preparation").unwrap();
+    assert_eq!(
+        p.get_datetime("lease_until").unwrap().timestamp_millis()
+            - d.get_datetime("checked_at").unwrap().timestamp_millis(),
+        crate::services::channel_turn_preparation::PREPARATION_SECS * 1000
+    );
+    let metadata = serde_json::to_string(p).unwrap();
+    assert!(!metadata.contains("Useful answer"));
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert!(sends(&f).await.is_empty());
+}
+
+#[tokio::test]
+async fn late_guest_uncertainty_does_not_create_owner_transcript_readback() {
+    let f = fixture("late_guest_unconfirmed").await;
+    settled(&f, false).await;
+    patch(&f,doc! {"delivery.guest":true,"delivery.state":"sending","delivery.checked_at":bson::DateTime::from_millis(0)}).await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(status(&f).await, "unknown");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id":&f.event.conversation_id,"role":"event"})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn late_dispatch_marker_without_receipt_never_reopens_preparation() {
+    let f = fixture("late_dispatch_marker").await;
+    settled(&f, false).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "late_text_dispatch_committed",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    assert_eq!(status(&f).await, "sending");
+    assert!(sends(&f).await.is_empty());
+    expire_text_preparation(&f).await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(status(&f).await, "unknown");
+    assert!(
+        sends(&f).await.is_empty(),
+        "a missing receipt never proves no send"
+    );
+}
+
+#[tokio::test]
+async fn late_unscoped_direct_reply_uses_only_ordinary_delivery_records() {
+    let (mut f, server) = image_delivery_tests::image_fixture("telegram", "direct").await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}})),
+        )
+        .mount(&server)
+        .await;
+    let (db, commands) = crate::services::durable_wake_tests::monitored(&f.state.db).await;
+    f.state.db = db;
+    direct_reply(
+        &f.state,
+        &f.channel,
+        &f.event.event_id,
+        "Ordinary reply",
+        None,
+    )
+    .await
+    .unwrap();
+    let counts = crate::services::durable_wake_tests::take(&commands);
+    assert!(!counts.keys().any(|key| key.ends_with(":nyxbot_events")));
+    assert_eq!(status(&f).await, "waiting");
 }

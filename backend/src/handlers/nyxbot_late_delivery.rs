@@ -7,8 +7,11 @@ use crate::{
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         nyxbot_channel::ChannelTurnDelivery,
     },
-    services::channel_turn_delivery as delivery,
+    services::{channel_turn_delivery as delivery, channel_turn_preparation as preparation},
 };
+
+#[path = "nyxbot_late_text.rs"]
+mod text;
 
 // CMA's default hard limit is 600 s from ingress, not from provider admission.
 // Finish early enough for its terminal frames and normal delivery pacing. An
@@ -350,10 +353,9 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
     let rows: Vec<NyxbotEvent> = state
         .db
         .collection(EVENTS)
-        .find(doc! {
-            "delivery.version": 1, "delivery.state": {"$in": ["waiting", "pending"]},
+        .find(doc! {"$and":[preparation::due(), {
             "$or": [{"turn_id": {"$type": "string"}}, {"status": "queued"}],
-        })
+        }]})
         .sort(doc! {"delivery.checked_at": 1})
         .limit(32)
         .await?
@@ -362,6 +364,9 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
     use futures::StreamExt;
     futures::stream::iter(rows)
         .for_each_concurrent(4, |event| async move {
+            let Some(_work) = state.shutdown.background() else {
+                return;
+            };
             process(state, &event.id).await;
         })
         .await;
@@ -402,7 +407,11 @@ async fn refuse(state: &AppState, event_id: &str) -> AppResult<()> {
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one_and_update(
-            doc! {"_id": event_id, "delivery.state": {"$in": ["waiting", "pending"]}},
+            doc! {"_id": event_id, "$or":[
+                {"delivery.state":{"$in":["waiting","pending"]}},
+                {"delivery.state":"preparing_text","delivery.preparation.version":1,
+                 "$expr":{"$lte":["$delivery.preparation.lease_until","$$NOW"]}},
+            ]},
             doc! {"$set": {"delivery.state": "refused"}},
         )
         .await?
@@ -423,8 +432,8 @@ async fn refuse(state: &AppState, event_id: &str) -> AppResult<()> {
 
 async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> AppResult<()> {
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
-    let mut filter = doc! {"_id": event_id, "delivery.version": 1,
-    "delivery.state": {"$in": ["waiting", "pending"]}};
+    let mut filter = preparation::due();
+    filter.insert("_id", event_id);
     if gateway_only {
         filter.insert("delivery.transport", "gateway");
     }
@@ -439,6 +448,15 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(mut d) = event.delivery.clone() else {
         return Ok(());
     };
+    if d.state == "sending" {
+        if preparation::unconfirmed(&state.db,event_id,None).await? {
+            x_diagnostics::for_event(&state.db,event_id,XOutcome::ReplyUnconfirmed).await;
+            audit(state,&event.user_id,"nyxbot_channel_answer_delivery",
+                json!({"event_id":event.id,"conversation_id":event.conversation_id,"turn_id":event.turn_id,
+                    "transport":d.transport,"outcome":"unknown","reason":"interrupted_dispatch"})).await;
+        }
+        return Ok(());
+    }
     let Some(conversation_id) = &event.conversation_id else {
         return Ok(());
     };
@@ -521,17 +539,17 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     } else {
         answer(&message.text, message.status != "completed")
     };
-    // Preflight above can be slow: re-resolve authority immediately before the
-    // irreversible barrier. Concurrent losers never reach a provider.
+    // Refresh the image target before claiming preparation. Text revalidates
+    // again at its exact provider boundary after credentials/request preparation.
     let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
         refuse(state, event_id).await?;
         return Ok(());
     };
     let claim = Uuid::new_v4().to_string();
-    if !delivery::claim_send(&state.db, event_id, &claim).await? {
+    let Some(saved) = preparation::acquire(&state.db,event_id,&message.id,&claim).await? else {
         return Ok(());
-    }
-    let report = event_images(
+    };
+    let report = crate::services::channel_reply_notice::supplemental(event_images(
         state,
         &event,
         &d,
@@ -540,21 +558,11 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         &conversation,
         &message,
         None,
-    )
+    ))
     .await;
-    let text = super::images::append_failure(&text, &report);
-    let result = if text.trim().is_empty() {
-        // Image-only output has already been dispatched through its own claims.
-        Ok(report.unknown == 0 && report.failed == 0)
-    } else {
-        dispatch(state, &event, &d, &channel, &conversation, &text).await
-    };
-    let status = match result {
-        Ok(true) => "sent",
-        Ok(false) | Err(_) => "unknown",
-    };
-    crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(if status == "sent" { crate::turn_trace::Outcome::Confirmed } else { crate::turn_trace::Outcome::Unknown }));
-    delivery::finish(&state.db, event_id, &claim, status).await?;
+    let Some(confirmed) = Box::pin(text::send(state,&event,&d,&channel,&thread,&conversation,&claim,saved,&text,&report)).await? else { return Ok(()); };
+    let status=if confirmed { "sent" } else { "unknown" };
+    crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(if confirmed { crate::turn_trace::Outcome::Confirmed } else { crate::turn_trace::Outcome::Unknown }));
     x_diagnostics::for_channel(&state.db, &channel, if status == "sent" { XOutcome::ReplySent } else { XOutcome::ReplyUnconfirmed }).await;
     events.update_one(doc! {"_id": event_id}, doc! {"$set": {"status": if message.status == "completed" { "completed" } else { "failed" }}}).await?;
     audit(
@@ -890,20 +898,6 @@ async fn fetch_target(
     d.target_ciphertext = Some(sealed);
     d.target_expires_at = Some(expires);
     Ok(())
-}
-
-async fn dispatch(
-    state: &AppState,
-    event: &NyxbotEvent,
-    d: &ChannelTurnDelivery,
-    channel: &NyxbotChannel,
-    conversation: &AssistantConversation,
-    text: &str,
-) -> AppResult<bool> {
-    Ok(
-        dispatch_occurrence(state, event, d, channel, conversation, text, None).await?
-            == "confirmed",
-    )
 }
 
 pub(super) async fn dispatch_occurrence(

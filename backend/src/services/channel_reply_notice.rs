@@ -115,3 +115,53 @@ pub async fn failed(
         tx::transaction_result(operation)
     })).await.map_err(tx::map_transaction_error)
 }
+
+/// The caller owns the event's terminal transition in this transaction. Only
+/// an existing owner-visible transcript with its saved answer receives a notice.
+pub(crate) async fn late_unconfirmed(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    event: &NyxbotEvent,
+) -> AppResult<()> {
+    let (Some(thread), Some(turn), Some(delivery)) = (
+        event.conversation_id.as_deref(),
+        event.turn_id.as_deref(),
+        event.delivery.as_ref(),
+    ) else {
+        return Ok(());
+    };
+    if delivery.guest
+        || delivery
+            .origin
+            .org_execution
+            .as_ref()
+            .is_some_and(|execution| execution.guest)
+    {
+        return Ok(());
+    }
+    let owner = super::org_channel_service::event_actor(event);
+    if db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {
+            "user_id":owner,"conversation_id":thread,"turn_id":turn,"role":"assistant",
+        })
+        .session(&mut *session)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let Some(conversation)=db.collection::<AssistantConversation>(CONVERSATIONS).find_one_and_update(
+        doc! {"_id":thread,"user_id":owner,"guest_turn":{"$ne":true},"guest":{"$ne":true},"platform_thread":bson::Bson::Null},
+        vec![doc! {"$set":{"message_count":{"$add":["$message_count",1]},"updated_at":"$$NOW"}}],
+    ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await? else {return Ok(());};
+    let id = uuid::Uuid::new_v4().to_string();
+    // This fixed transport notice adds no source message content or new access.
+    db.collection::<bson::Document>(MESSAGES).insert_one(doc! {
+        "_id":&id,"user_id":owner,"conversation_id":thread,
+        "turn_id":&id,"seq":conversation.message_count,"role":"event","status":"completed",
+        "text":"Delivery unconfirmed. Your answer is saved in this thread, but delivery to the channel could not be confirmed. Some or all of it may have arrived. It will not be sent again automatically.",
+        "created_at":bson::DateTime::from_chrono(conversation.updated_at),
+    }).session(&mut *session).await?;
+    Ok(())
+}

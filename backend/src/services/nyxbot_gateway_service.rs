@@ -223,6 +223,7 @@ pub(crate) async fn gateway_call_at_base(
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
         }
+        super::channel_turn_preparation::effect().await?;
         let response = request
             .send()
             .await

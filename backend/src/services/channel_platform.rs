@@ -92,6 +92,7 @@ pub(crate) async fn track_provider_attempt<F: std::future::Future>(
 /// this evidence even if its send future is cancelled or times out.
 pub(crate) async fn mark_provider_attempt() -> AppResult<()> {
     revalidate_post_effect().await?;
+    super::channel_turn_preparation::effect().await?;
     let _ = PROVIDER_ATTEMPT.try_with(|progress| {
         progress.store(true, std::sync::atomic::Ordering::Relaxed);
     });
