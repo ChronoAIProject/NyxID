@@ -172,85 +172,68 @@ async fn redact_invite_row(
     Ok(())
 }
 
-async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<()> {
-    let mut ids = group.row_ids.clone();
-    for chunk in ids.chunks_mut(APPLY_BATCH) {
-        let mut filter = Document::new();
-        filter.insert("_id", doc! {"$in": chunk.to_vec()});
+async fn apply_group(
+    db: &mongodb::Database,
+    group: &OrphanGroup,
+    lease: &Document,
+) -> AppResult<()> {
+    for chunk in group.row_ids.chunks(APPLY_BATCH) {
+        let mut filter = doc! {"_id": {"$in": chunk.to_vec()}};
         if group.joined_parent.is_none() {
             filter.insert(group.field, group.owner_id.as_str());
         }
-        let attribution = personal_data_registry::attribution(group.collection, group.field);
-        let invite = group.collection == "invite_codes";
-        if attribution.is_some() || invite {
-            let mut tx = db.client().start_session().await?;
-            tx.start_transaction()
-                .read_concern(mongodb::options::ReadConcern::snapshot())
-                .write_concern(mongodb::options::WriteConcern::majority())
-                .await?;
-            let result: AppResult<()> = async {
-                // Pre-job deletions have no job tombstone. Close the same
-                // durable admission fence before changing this bounded page.
-                for collection in [crate::models::user::COLLECTION_NAME, crate::models::service_account::COLLECTION_NAME] {
-                    if db.collection::<Document>(collection).find_one(doc! {"_id": &group.owner_id})
-                        .session(&mut tx).await?.is_some() { return Ok(()); }
+        let mut tx = db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
+        let result: AppResult<()> = async {
+            if db.collection::<Document>(jobs::JOBS).update_one(lease.clone(), doc! {"$inc": {"mutation_revision": 1_i64}})
+                .session(&mut tx).await?.matched_count != 1 {
+                return Err(AppError::Conflict("Orphan sweep lease expired".into()));
+            }
+            if let Some(parent) = group.joined_parent {
+                // A parent created after the review restores authoritative
+                // ownership. Check it in the same snapshot as the deletion.
+                if db.collection::<Document>(parent).find_one(doc! {"_id": &group.owner_id})
+                    .session(&mut tx).await?.is_none() {
+                    db.collection::<Document>(group.collection).delete_many(filter).session(&mut tx).await?;
                 }
-                super::erasure_admission::close_in_session(db, &group.owner_id, &mut tx).await?;
-                if let Some(spec) = attribution {
-                    db.collection::<Document>(group.collection).update_many(
-                        doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
-                        super::personal_attribution_service::update(spec),
-                    ).session(&mut tx).await?;
-                } else if group.field == "created_by" {
+                return Ok(());
+            }
+            for (collection, key) in [("users", "_id"), ("service_accounts", "_id"), ("personal_erasure_jobs", "user_id")] {
+                if db.collection::<Document>(collection).find_one(doc! {key: &group.owner_id})
+                    .session(&mut tx).await?.is_some() { return Ok(()); }
+            }
+            super::erasure_admission::close_in_session(db, &group.owner_id, &mut tx).await?;
+            db.collection::<Document>(super::erasure_admission::COLLECTION).update_one(
+                doc! {"_id": &group.owner_id, "erasure_accepted": true}, doc! {"$inc": {"cleanup_revision": 1_i64}},
+            ).session(&mut tx).await?;
+            if let Some(spec) = personal_data_registry::attribution(group.collection, group.field) {
+                db.collection::<Document>(group.collection).update_many(
+                    doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
+                    super::personal_attribution_service::update(spec),
+                ).session(&mut tx).await?;
+            } else if group.collection == "invite_codes" {
+                if group.field == "created_by" {
                     db.collection::<Document>("invite_codes").update_many(filter, doc! {"$unset": {"note": ""}}).session(&mut tx).await?;
                 } else {
-                    for id in chunk.iter() {
-                        redact_invite_row(db, id, &group.owner_id, &mut tx).await?;
-                    }
+                    for id in chunk { redact_invite_row(db, id, &group.owner_id, &mut tx).await?; }
                 }
-                Ok(())
-            }.await;
-            super::org_membership_authority::finish(tx, result).await?;
-            continue;
-        }
-        match group.disposition {
-            Erasure::JoinedChild { .. } => {
-                db.collection::<Document>(group.collection)
-                    .delete_many(filter)
-                    .await?;
-            }
-            Erasure::LocalInventory => {
-                db.collection::<Document>(group.collection)
-                    .delete_many(filter)
-                    .await?;
-            }
-            Erasure::Redacted
-                if group.collection == "service_change_events" && group.field == "owner_id" =>
-            {
-                db.collection::<Document>(group.collection)
-                    .delete_many(filter)
-                    .await?;
-            }
-            Erasure::Redacted => {
-                // Hybrid entries erase only the real resource-owner predicate;
-                // attribution selectors above can only redact human labels.
-                let owned: Vec<Document> =
-                    super::personal_erasure_service::local::inventory(&group.owner_id)
-                        .into_iter()
-                        .filter(|(collection, _)| *collection == group.collection)
-                        .map(|(_, filter)| filter)
-                        .collect();
-                if owned.is_empty() {
-                    return Err(AppError::Internal(
-                        "Orphan redaction predicate is not registered".into(),
-                    ));
+            } else if matches!(group.disposition, Erasure::LocalInventory | Erasure::Redacted) {
+                if !super::personal_erasure_service::local::remote_cleanup_clear(db, &group.owner_id, &mut tx).await? { return Ok(()); }
+                let mut predicates: Vec<Document> = super::personal_erasure_service::local::inventory(&group.owner_id)
+                    .into_iter().filter(|(collection, _)| *collection == group.collection).map(|(_, filter)| filter).collect();
+                if group.collection == "service_change_events" && group.field == "owner_id" {
+                    predicates.push(doc! {"owner_id": &group.owner_id});
                 }
-                db.collection::<Document>(group.collection)
-                    .delete_many(doc! {"$and": [filter, {"$or": owned}]})
-                    .await?;
+                if !predicates.is_empty() {
+                    db.collection::<Document>(group.collection).delete_many(doc! {"$and": [filter, {"$or": predicates}]}).session(&mut tx).await?;
+                }
             }
-            _ => {}
-        }
+            Ok(())
+        }.await;
+        super::org_membership_authority::finish(tx, result).await?;
     }
     Ok(())
 }

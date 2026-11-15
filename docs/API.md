@@ -9763,3 +9763,18 @@ exact decimal payloads, validation, audit and activation semantics.
 `POST /api/v1/users/me/export` returns the bounded `nyxid.account-export` JSON
 attachment described in [ACCOUNT_DATA_EXPORT.md](ACCOUNT_DATA_EXPORT.md). It is
 first-party human only and rate limited to three requests per account per hour.
+
+Orphan application appends a chained `user.account.erasure_orphan_sweep_started`
+event containing the reviewed digest before any mutation, and a chained
+`user.account.erasure_orphan_sweep` completion event afterwards. Application
+rechecks account, service-account and erasure-job liveness under the same
+majority transaction as the deletion or redaction and closes the durable writer
+admission barrier. Joined children are removed only if their authoritative
+parent is still absent inside that transaction. Every mutation also writes the
+current, unexpired sweep lease fence.
+
+Organization accounts count as live owners. Once an organization account is
+absent, structurally orphaned rows in the registry's permitted cleanup classes
+are in scope, subject to the same terminal-state and external-effect guards.
+Financial records, audit records, billing ledger entries and retained recovery
+receipts are never orphan-sweep deletion candidates.

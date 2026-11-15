@@ -486,17 +486,50 @@ async fn summarize(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
     Ok(())
 }
 
+async fn audit_apply(db: &mongodb::Database, job: &Job, started: bool) -> AppResult<()> {
+    let marker = if started {
+        "apply_started"
+    } else {
+        "apply_completed"
+    };
+    let event = if started {
+        "user.account.erasure_orphan_sweep_started"
+    } else {
+        "user.account.erasure_orphan_sweep"
+    };
+    let report = job
+        .report
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Orphan sweep has no report".into()))?;
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        let mut filter = job.fence();
+        filter.insert(marker, doc! {"$ne": true});
+        if db.collection::<Document>(JOBS).update_one(filter, doc! {"$set": {marker: true}}).session(&mut tx).await?.matched_count == 0 {
+            if db.collection::<Document>(JOBS).find_one(job.fence()).session(&mut tx).await?.is_none() {
+                return Err(AppError::Conflict("Orphan sweep lease expired".into()));
+            }
+            return Ok(());
+        }
+        let key = super::super::audit_service::audit_chain_hmac_key().ok_or_else(|| AppError::Internal("Audit key unavailable".into()))?;
+        super::super::audit_service::log_actor_event_in_session(db, &mut tx, key,
+            &super::super::audit_service::AuditActor {user_id: job.requested_by.clone(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None},
+            event, serde_json::json!({"job_id":job.id, "digest":report.digest, "candidate_count":report.candidate_count,
+                "collections":report.collections.iter().map(|row| serde_json::json!({"collection":row.collection, "candidate_count":row.candidate_count})).collect::<Vec<_>>()})
+        ).await?;
+        Ok(())
+    }.await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
+
 async fn apply_page(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
+    audit_apply(db, job, true).await?;
     if job.apply_page >= job.next_page {
-        let report = job
-            .report
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Orphan sweep has no report".into()))?;
-        super::super::audit_service::log_actor_event(db.clone(), &super::super::audit_service::AuditActor {
-            user_id: job.requested_by.clone(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None,
-        }, "user.account.erasure_orphan_sweep", Some(serde_json::json!({"digest": report.digest, "candidate_count": report.candidate_count,
-            "collections": report.collections.iter().map(|row| serde_json::json!({"collection": row.collection, "candidate_count": row.candidate_count})).collect::<Vec<_>>() })))
-            .await.map_err(|_| AppError::Internal("Orphan sweep audit append failed".into()))?;
+        audit_apply(db, job, false).await?;
         job.status = "complete".into();
         job.phase = "complete".into();
         return Ok(());
@@ -540,6 +573,7 @@ async fn apply_page(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
                 disposition: entry.erasure,
                 joined_parent: spec.parent,
             },
+            &job.fence(),
         )
         .await?;
     }
@@ -745,6 +779,178 @@ mod tests {
         }
         assert_eq!(count, 200_000);
         const { assert!(SCAN_VALUES <= 512 && LIVE_BATCH <= 128) };
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn mutation_transactions_recheck_liveness_parent_guards_lease_and_audit_order() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("orphan_mutation_fences").await;
+        let started = start(&db, "operator", true, Some("reviewed-digest"))
+            .await
+            .unwrap();
+        let mut job = claim(&db).await.unwrap().unwrap();
+        job.report = Some(OrphanSweepReport {
+            dry_run: false,
+            digest: "reviewed-digest".into(),
+            collections: Vec::new(),
+            candidate_count: 1,
+        });
+        audit_apply(&db, &job, true).await.unwrap();
+        audit_apply(&db, &job, true).await.unwrap();
+        let event = db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type":"user.account.erasure_orphan_sweep_started"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.get_document("event_data").unwrap().get_str("digest"),
+            Ok("reviewed-digest")
+        );
+        assert_eq!(
+            db.collection::<Document>("audit_log")
+                .count_documents(doc! {"event_type":"user.account.erasure_orphan_sweep_started"})
+                .await
+                .unwrap(),
+            1
+        );
+        for live_collection in ["users", "service_accounts", "personal_erasure_jobs"] {
+            let owner = Uuid::new_v4().to_string();
+            let row = doc! {"_id":format!("held-{live_collection}"),"user_id":&owner};
+            db.collection::<Document>("assistant_wire_logs")
+                .insert_one(row.clone())
+                .await
+                .unwrap();
+            let mut live = doc! {"_id": &owner};
+            if live_collection == "personal_erasure_jobs" {
+                live.insert("user_id", &owner);
+            }
+            db.collection::<Document>(live_collection)
+                .insert_one(live)
+                .await
+                .unwrap();
+            let group = OrphanGroup {
+                collection: "assistant_wire_logs",
+                field: "user_id",
+                owner_id: owner,
+                row_ids: vec![row.get("_id").unwrap().clone()],
+                disposition: Erasure::LocalInventory,
+                joined_parent: None,
+            };
+            apply_group(&db, &group, &job.fence()).await.unwrap();
+            assert_eq!(
+                db.collection::<Document>("assistant_wire_logs")
+                    .find_one(doc! {"_id":row.get("_id").unwrap()})
+                    .await
+                    .unwrap(),
+                Some(row)
+            );
+        }
+        let parent = Uuid::new_v4().to_string();
+        let child = doc! {"_id":"joined-child","installation_id":&parent};
+        db.collection::<Document>("platform_delivery_tests")
+            .insert_one(child.clone())
+            .await
+            .unwrap();
+        db.collection::<Document>("platform_bot_installations")
+            .insert_one(doc! {"_id":&parent})
+            .await
+            .unwrap();
+        let joined = OrphanGroup {
+            collection: "platform_delivery_tests",
+            field: "installation_id",
+            owner_id: parent,
+            row_ids: vec!["joined-child".into()],
+            disposition: Erasure::JoinedChild {
+                parent: "platform_bot_installations",
+            },
+            joined_parent: Some("platform_bot_installations"),
+        };
+        apply_group(&db, &joined, &job.fence()).await.unwrap();
+        assert_eq!(
+            db.collection::<Document>("platform_delivery_tests")
+                .find_one(doc! {"_id":"joined-child"})
+                .await
+                .unwrap(),
+            Some(child)
+        );
+        let owner = Uuid::new_v4().to_string();
+        let held =
+            doc! {"_id":"claimed-link","user_id":&owner,"completion_claim_id":"external-effect"};
+        db.collection::<Document>("connect_links")
+            .insert_one(held.clone())
+            .await
+            .unwrap();
+        apply_group(
+            &db,
+            &OrphanGroup {
+                collection: "connect_links",
+                field: "user_id",
+                owner_id: owner.clone(),
+                row_ids: vec!["claimed-link".into()],
+                disposition: Erasure::LocalInventory,
+                joined_parent: None,
+            },
+            &job.fence(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.collection::<Document>("connect_links")
+                .find_one(doc! {"_id":"claimed-link"})
+                .await
+                .unwrap(),
+            Some(held)
+        );
+        let row = doc! {"_id":"removable","user_id":&owner};
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(row.clone())
+            .await
+            .unwrap();
+        let group = OrphanGroup {
+            collection: "assistant_wire_logs",
+            field: "user_id",
+            owner_id: owner,
+            row_ids: vec!["removable".into()],
+            disposition: Erasure::LocalInventory,
+            joined_parent: None,
+        };
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id":&started.job_id},
+                doc! {"$set":{"lease_until":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            apply_group(&db, &group, &job.fence()).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id":"removable"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let mut successor = claim(&db).await.unwrap().unwrap();
+        successor.report = job.report;
+        apply_group(&db, &group, &successor.fence()).await.unwrap();
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id":"removable"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        audit_apply(&db, &successor, false).await.unwrap();
+        let completion = db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type":"user.account.erasure_orphan_sweep"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(event.get_i64("seq").unwrap() < completion.get_i64("seq").unwrap());
         db.drop().await.unwrap();
     }
 }
