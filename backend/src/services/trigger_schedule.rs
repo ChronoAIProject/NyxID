@@ -1560,6 +1560,7 @@ async fn record_terminal_in_session(
             .await?
         {
             let message = AssistantMessage {
+                supplemental_result_claims: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),

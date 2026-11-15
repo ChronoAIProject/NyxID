@@ -2866,6 +2866,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: lost.automation_work.clone(),
             execution_task: lost.execution_task.clone(),
             delegated_images: Default::default(),
@@ -3587,6 +3588,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: row
             .active_turn
             .as_ref()
@@ -4592,6 +4594,7 @@ artifact_recovery_target: None,
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+                    supplemental_result_claims: Vec::new(),
                     automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {

@@ -1419,6 +1419,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                         execution_task: None,
                         delegated_images: Default::default(),

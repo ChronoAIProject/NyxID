@@ -1361,6 +1361,7 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                     execution_task: None,
                     delegated_images: Default::default(),

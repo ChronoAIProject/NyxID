@@ -328,7 +328,10 @@ async fn supplemental_chat_reference_anchor_missing_deleted_mismatched_stale_and
         ] {
             let (f, platform, mut row) = Box::pin(notice_fixture()).await;
             mock_platform(&platform, "confirmed").await;
-            row.active_turn = None;
+            let turn = row.active_turn.as_mut().unwrap();
+            turn.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+            turn.channel_event_id = None;
+            turn.asked_from = None;
             let mut fields = doc! {"last_relay_message_id":bson::Bson::Null};
             match case {
                 "pointer_deleted" => {
@@ -732,6 +735,15 @@ async fn supplemental_direct_and_relay_era_keep_identical_request_bytes() {
             let requests = platform.received_requests().await.unwrap();
             assert_eq!(requests.len(), 2);
             assert_eq!(requests[0].body, requests[1].body);
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+                    .count_documents(doc! {"supplemental_result_claims":{"$exists":true}})
+                    .await
+                    .unwrap(),
+                0
+            );
             assert!(f.gateway.received_requests().await.unwrap().is_empty());
             f.state.db.drop().await.unwrap();
         }
@@ -934,5 +946,603 @@ async fn supplemental_notice_preserves_recovered_failure_and_one_failure_deliver
         no_event_replies(&f).await;
         f.state.db.drop().await.unwrap();
         baseline_fixture.state.db.drop().await.unwrap();
+    }).await;
+}
+
+async fn result_fixture(age: ChronoDuration) -> (Fixture, MockServer, AssistantConversation) {
+    let (f, platform, mut row) = Box::pin(notice_fixture()).await;
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+    turn.channel_event_id = None;
+    turn.asked_from = None;
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"active_turn":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    age_result_anchor(&f, age).await;
+    (f, platform, row)
+}
+
+async fn age_result_anchor(f: &Fixture, age: ChronoDuration) {
+    let at = Utc::now() - age;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.event.relay_message_id},
+            doc! {"$set":{"created_at":bson::DateTime::from_chrono(at)}},
+        )
+        .await
+        .unwrap();
+    let fields = sources::reference_fields(
+        f.state
+            .encryption_keys
+            .encrypt(b"cmaeg1.ev.original")
+            .await
+            .unwrap(),
+        at + ChronoDuration::minutes(29),
+        f.event.relay_message_id.as_deref(),
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"channel_id":&f.channel.id}, doc! {"$set":fields})
+        .await
+        .unwrap();
+}
+
+async fn result_hook(f: &Fixture, row: &AssistantConversation) {
+    Box::pin(crate::handlers::assistant_team::after_turn(
+        &f.state,
+        row,
+        "Useful answer",
+        None,
+    ))
+    .await;
+}
+
+async fn result_message(f: &Fixture, row: &AssistantConversation) -> bson::Document {
+    f.state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(doc! {"conversation_id":&row.id,"turn_id":&row.active_turn.as_ref().unwrap().turn_id,"role":"assistant"}).await.unwrap().unwrap()
+}
+
+fn result_reason(audit: &bson::Document) -> Option<&str> {
+    audit
+        .get_document("event_data")
+        .unwrap()
+        .get_str("reason")
+        .ok()
+}
+
+async fn assert_result_once(age: ChronoDuration) {
+    let (f, platform, row) = Box::pin(result_fixture(age)).await;
+    mock_platform(&platform, "confirmed").await;
+    result_hook(&f, &row).await;
+    let requests = platform.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["text"], "Useful answer");
+    assert_eq!(body["chat_id"], "123");
+    assert_eq!(body["reply_to_message_id"], 17);
+    assert_eq!(body["message_thread_id"], 77);
+    let audits = audit_decisions(&f).await;
+    assert_eq!(audits.len(), 1);
+    let data = audits[0].get_document("event_data").unwrap();
+    assert_eq!(data.get_str("egress"), Ok("local_relay"));
+    assert_eq!(data.get_str("outcome"), Ok("confirmed"));
+    assert_eq!(
+        result_message(&f, &row)
+            .await
+            .get_array("supplemental_result_claims")
+            .unwrap()
+            .len(),
+        1
+    );
+    no_event_replies(&f).await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn supplemental_result_window_unbound_at_30_minutes() {
+    Box::pin(assert_result_once(ChronoDuration::minutes(30))).await;
+}
+#[tokio::test]
+async fn supplemental_result_window_unbound_at_23_hours_59_minutes() {
+    Box::pin(assert_result_once(ChronoDuration::minutes(1439))).await;
+}
+#[tokio::test]
+async fn supplemental_result_window_at_and_past_24_hours_skips() {
+    Box::pin(async {
+        for age in [ChronoDuration::hours(24), ChronoDuration::hours(25)] {
+            let (f, platform, row) = result_fixture(age).await;
+            result_hook(&f, &row).await;
+            assert!(platform.received_requests().await.unwrap().is_empty());
+            assert_eq!(
+                result_reason(&audit_decisions(&f).await[0]),
+                Some("anchor_expired")
+            );
+            assert!(
+                !result_message(&f, &row)
+                    .await
+                    .contains_key("supplemental_result_claims")
+            );
+            f.state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_expired_absent_and_undecryptable_reference() {
+    Box::pin(async {
+        for reference in ["expired","absent","undecryptable"] {
+            let (f,platform,row)=result_fixture(ChronoDuration::minutes(30)).await;
+            mock_platform(&platform,"confirmed").await;
+            let fields=match reference {
+                "absent"=>doc! {"event_ref_ciphertext":bson::Bson::Null,"event_ref_expires_at":bson::Bson::Null,"last_message_id":bson::Bson::Null},
+                "undecryptable"=>doc! {"event_ref_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}},
+                _=>doc! {},
+            };
+            f.state.db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&f.channel.id},doc! {"$set":fields}).await.unwrap();
+            result_hook(&f,&row).await;
+            assert_eq!(platform.received_requests().await.unwrap().len(),1,"{reference}");
+            no_event_replies(&f).await;
+            f.state.db.drop().await.unwrap();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_expired_fallback_intact_or_stale_digest() {
+    Box::pin(async {
+        for stale in [false, true] {
+            let (f, platform, row) = result_fixture(ChronoDuration::minutes(30)).await;
+            mock_platform(&platform, "confirmed").await;
+            let mut fields = doc! {"last_relay_message_id":bson::Bson::Null};
+            if stale {
+                fields.insert("event_ref_relay_binding", "stale");
+            }
+            f.state
+                .db
+                .collection::<bson::Document>(THREADS)
+                .update_one(doc! {"channel_id":&f.channel.id}, doc! {"$set":fields})
+                .await
+                .unwrap();
+            result_hook(&f, &row).await;
+            assert_eq!(
+                platform.received_requests().await.unwrap().len(),
+                usize::from(!stale)
+            );
+            let audits = audit_decisions(&f).await;
+            if stale {
+                assert_eq!(result_reason(&audits[0]), Some("stale_reference_anchor"));
+            } else {
+                assert_eq!(
+                    audits[0]
+                        .get_document("event_data")
+                        .unwrap()
+                        .get_str("anchor"),
+                    Ok("chat_reference_event")
+                );
+            }
+            f.state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_source_bound_additional_at_30_minutes() {
+    Box::pin(async {
+        let (f, platform, mut row) = result_fixture(ChronoDuration::minutes(30)).await;
+        mock_platform(&platform, "confirmed").await;
+        let origin = f.event.delivery.as_ref().unwrap().origin.clone();
+        let mut event =
+            crate::services::assistant_team_service::event("result", "done".into(), None);
+        event.reply_to = vec![origin.clone()];
+        event.source_event_ids = vec![f.event.id.clone()];
+        row.active_turn.as_mut().unwrap().events = vec![event];
+        deliver_to_for(
+            &f.state,
+            &row,
+            &origin,
+            "Useful answer",
+            None,
+            Purpose::TeamAdditionalResult,
+        )
+        .await;
+        assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            audit_decisions(&f).await[0]
+                .get_document("event_data")
+                .unwrap()
+                .get_str("anchor"),
+            Ok("event_source")
+        );
+        no_event_replies(&f).await;
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_progress_keeps_all_three_original_windows() {
+    Box::pin(async {
+        for (purpose, name) in [
+            (Purpose::CheckingNotice, "checking_notice"),
+            (Purpose::CapacityNotice, "capacity_notice"),
+            (Purpose::MachineDesktopNotice, "machine_desktop_notice"),
+        ] {
+            let (f, platform, row) = result_fixture(ChronoDuration::minutes(30)).await;
+            deliver_to_for(
+                &f.state,
+                &row,
+                row.channel.as_ref().unwrap(),
+                "progress",
+                None,
+                purpose,
+            )
+            .await;
+            assert!(platform.received_requests().await.unwrap().is_empty());
+            let audits = audit_decisions(&f).await;
+            assert_eq!(result_reason(&audits[0]), Some("reference_expired"));
+            assert_eq!(
+                audits[0]
+                    .get_document("event_data")
+                    .unwrap()
+                    .get_str("purpose"),
+                Ok(name)
+            );
+            assert!(
+                !result_message(&f, &row)
+                    .await
+                    .contains_key("supplemental_result_claims")
+            );
+            f.state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
+async fn repeated_result(concurrent: bool, also: bool) {
+    let (f, platform, row) = Box::pin(result_fixture(ChronoDuration::minutes(30))).await;
+    mock_platform(&platform, "confirmed").await;
+    if also {
+        f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&row.id},doc! {"$set":{"deliver_also":[bson::to_bson(row.channel.as_ref().unwrap()).unwrap()]}}).await.unwrap();
+        result_hook(&f, &row).await;
+    } else if concurrent {
+        tokio::join!(result_hook(&f, &row), result_hook(&f, &row));
+    } else {
+        result_hook(&f, &row).await;
+        // A refreshed retained pointer is not a new logical destination.
+        let mut inbound = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"_id":&f.event.relay_message_id})
+            .await
+            .unwrap()
+            .unwrap();
+        inbound.insert("_id", Uuid::new_v4().to_string());
+        let id = inbound.get_str("_id").unwrap().to_owned();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(inbound)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(THREADS)
+            .update_one(
+                doc! {"channel_id":&f.channel.id},
+                doc! {"$set":{"last_relay_message_id":id}},
+            )
+            .await
+            .unwrap();
+        result_hook(&f, &row).await;
+    }
+    assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+    let audits = audit_decisions(&f).await;
+    assert_eq!(audits.len(), 2);
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|a| result_reason(a) == Some("already_claimed"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        result_message(&f, &row)
+            .await
+            .get_array("supplemental_result_claims")
+            .unwrap()
+            .len(),
+        1
+    );
+    no_event_replies(&f).await;
+    f.state.db.drop().await.unwrap();
+}
+#[tokio::test]
+async fn supplemental_result_claim_hook_twice_sequentially() {
+    Box::pin(repeated_result(false, false)).await;
+}
+#[tokio::test]
+async fn supplemental_result_claim_hook_twice_concurrently() {
+    Box::pin(repeated_result(true, false)).await;
+}
+#[tokio::test]
+async fn supplemental_result_claim_primary_and_additional_share_destination() {
+    Box::pin(repeated_result(false, true)).await;
+}
+
+#[tokio::test]
+async fn supplemental_result_claim_rejected_and_timed_out_attempts_never_retry() {
+    Box::pin(async {
+        for timeout in [false,true] {
+            let (f,platform,row)=result_fixture(ChronoDuration::minutes(30)).await;
+            let response=if timeout { ResponseTemplate::new(200).set_delay(Duration::from_secs(21)).set_body_json(json!({"ok":true,"result":{"message_id":99}})) }
+                else { ResponseTemplate::new(400).set_body_json(json!({"ok":false,"error_code":400,"description":"Bad Request: message refused"})) };
+            Mock::given(path("/bottoken/sendMessage")).respond_with(response).mount(&platform).await;
+            let before=result_message(&f,&row).await;
+            result_hook(&f,&row).await;
+            result_hook(&f,&row).await;
+            assert_eq!(platform.received_requests().await.unwrap().len(),1);
+            let audits=audit_decisions(&f).await;
+            assert_eq!(audits.len(),2);
+            assert!(audits.iter().any(|a|a.get_document("event_data").unwrap().get_str("outcome")==Ok(if timeout {"unknown"}else{"rejected"})));
+            assert_eq!(audits.iter().filter(|a|result_reason(a)==Some("already_claimed")).count(),1);
+            let mut after=result_message(&f,&row).await;
+            after.remove("supplemental_result_claims");
+            assert_eq!(before,after);
+            f.state.db.drop().await.unwrap();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn supplemental_result_claim_database_error_and_missing_reply_send_nothing() {
+    Box::pin(async {
+        for missing in [false,true] {
+            let (f,platform,row)=result_fixture(ChronoDuration::minutes(30)).await;
+            mock_platform(&platform,"confirmed").await;
+            let collection=crate::models::assistant_message::COLLECTION_NAME;
+            if missing { f.state.db.collection::<bson::Document>(collection).delete_many(doc! {}).await.unwrap(); }
+            else { f.state.db.run_command(doc! {"collMod":collection,"validator":{"supplemental_result_claims":{"$exists":false}},"validationLevel":"strict","validationAction":"error"}).await.unwrap(); }
+            result_hook(&f,&row).await;
+            assert!(platform.received_requests().await.unwrap().is_empty());
+            assert_eq!(result_reason(&audit_decisions(&f).await[0]),Some("source_unavailable"));
+            assert_eq!(f.state.db.collection::<bson::Document>(collection).count_documents(doc! {"supplemental_result_claims":{"$exists":true}}).await.unwrap(),0);
+            if !missing {
+                f.state.db.run_command(doc! {"collMod":collection,"validator":{}}).await.unwrap();
+                result_hook(&f,&row).await;
+                assert_eq!(platform.received_requests().await.unwrap().len(),1);
+            }
+            f.state.db.drop().await.unwrap();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn supplemental_result_claim_two_turns_and_private_legacy_field() {
+    Box::pin(async {
+        let (f, platform, mut row) = result_fixture(ChronoDuration::minutes(30)).await;
+        mock_platform(&platform, "confirmed").await;
+        let legacy = result_message(&f, &row).await;
+        let model: crate::models::assistant_message::AssistantMessage =
+            bson::from_document(legacy).unwrap();
+        assert!(model.supplemental_result_claims.is_empty());
+        assert!(
+            !bson::to_document(&model)
+                .unwrap()
+                .contains_key("supplemental_result_claims")
+        );
+        let baseline = serde_json::to_value(
+            crate::handlers::assistant_nyxagent::MessageResponse::from(model),
+        )
+        .unwrap();
+        result_hook(&f, &row).await;
+        let saved = result_message(&f, &row).await;
+        let model: crate::models::assistant_message::AssistantMessage =
+            bson::from_document(saved.clone()).unwrap();
+        assert!(!format!("{model:?}").contains(&model.supplemental_result_claims[0]));
+        let response = serde_json::to_value(
+            crate::handlers::assistant_nyxagent::MessageResponse::from(model),
+        )
+        .unwrap();
+        assert_eq!(response, baseline);
+        let api = Box::pin(crate::handlers::assistant_nyxagent::history(
+            State(f.state.clone()),
+            crate::handlers::assistant_team::owner_auth(OWNER).unwrap(),
+            Path(row.id.clone()),
+            axum::extract::Query(Default::default()),
+        ))
+        .await
+        .unwrap()
+        .0;
+        let api = serde_json::to_value(api).unwrap();
+        assert_eq!(api["messages"][0], baseline);
+        assert!(!api.to_string().contains("supplemental_result_claims"));
+        assert!(
+            audit_decisions(&f)
+                .await
+                .iter()
+                .all(|a| !a.to_string().contains("supplemental_result_claims"))
+        );
+        let mut second = saved;
+        let turn = Uuid::new_v4().to_string();
+        second.insert("_id", Uuid::new_v4().to_string());
+        second.insert("turn_id", &turn);
+        second.insert("seq", 2_i64);
+        second.remove("supplemental_result_claims");
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(second)
+            .await
+            .unwrap();
+        row.active_turn.as_mut().unwrap().turn_id = turn;
+        result_hook(&f, &row).await;
+        assert_eq!(platform.received_requests().await.unwrap().len(), 2);
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_images_precede_text_and_are_not_resent() {
+    Box::pin(async {
+        let (f, platform, row) = result_fixture(ChronoDuration::minutes(30)).await;
+        mock_platform(&platform, "confirmed").await;
+        mock_sends(&platform, "telegram", false, Duration::ZERO).await;
+        add_images(&f).await;
+        result_hook(&f, &row).await;
+        result_hook(&f, &row).await;
+        let requests = platform.received_requests().await.unwrap();
+        let sends: Vec<_> = requests
+            .iter()
+            .filter(|r| {
+                r.url.path().ends_with("sendPhoto") || r.url.path().ends_with("sendMessage")
+            })
+            .collect();
+        assert_eq!(sends.len(), 3);
+        assert!(sends[0].url.path().ends_with("sendPhoto"));
+        assert!(sends[1].url.path().ends_with("sendPhoto"));
+        assert!(sends[2].url.path().ends_with("sendMessage"));
+        no_event_replies(&f).await;
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_late_authority_guest_org_key_and_relink() {
+    Box::pin(async {
+        for mode in ["guest","org","guest_revoked","org_revoked","route_revoked","platform_manager","relinked","gateway_key_missing"] {
+            let (f,platform,mut row)=Box::pin(notice_fixture()).await;
+            age_result_anchor(&f,ChronoDuration::minutes(30)).await;
+            mock_platform(&platform,"confirmed").await;
+            let gateway=GatewayContract::mount(&f,false).await;
+            if mode.starts_with("guest") {
+                patch(&f,doc!{"delivery.guest":true,"delivery.sender_id":"guest"}).await;
+                f.state.db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME).update_one(doc!{"_id":&f.event.relay_message_id},doc!{"$set":{"sender_platform_id":"guest"}}).await.unwrap();
+                f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&f.channel.id},doc!{"$set":{"private_chats":if mode=="guest" {"everyone"}else{"owner"}}}).await.unwrap();
+                f.state.db.collection::<bson::Document>(THREADS).update_one(doc!{"channel_id":&f.channel.id},doc!{"$set":{"owner_chat":false,"allow_posts":false}}).await.unwrap();
+                row.guest_turn=true;
+            }
+            if mode.starts_with("org") {
+                let org=Uuid::new_v4().to_string();
+                f.state.db.collection(USERS).insert_one(test_user(&org,UserType::Org)).await.unwrap();
+                f.state.db.collection::<bson::Document>("org_memberships").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
+                f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&f.channel.id},doc!{"$set":{"bot_owner_id":&org}}).await.unwrap();
+                for (collection,filter) in [("channel_bots",doc!{"_id":&f.channel.channel_bot_id}),("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
+                    f.state.db.collection::<bson::Document>(collection).update_one(filter,doc!{"$set":{"user_id":&org}}).await.unwrap();
+                }
+                if mode=="org_revoked" {f.state.db.collection::<bson::Document>("org_memberships").delete_many(doc!{"org_user_id":&org}).await.unwrap();}
+            }
+            if mode=="route_revoked" {f.state.db.collection::<bson::Document>("api_keys").update_one(doc!{"_id":&f.channel.route_api_key_id},doc!{"$set":{"is_active":false}}).await.unwrap();}
+            if mode=="platform_manager" {f.state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&f.channel.channel_bot_id},doc!{"$set":{"platform_profile_id":"managed"}}).await.unwrap();}
+            if mode=="gateway_key_missing" { f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},doc! {"$set":{"agent_key_ciphertext":bson::Bson::Null}}).await.unwrap(); }
+            if mode=="relinked" { f.state.db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&f.channel.id},doc! {"$set":{"conversation_id":"different-conversation"}}).await.unwrap(); }
+            deliver_to_for(&f.state,&row,&f.event.delivery.as_ref().unwrap().origin,"Useful answer",None,Purpose::TeamResult).await;
+            assert_eq!(platform.received_requests().await.unwrap().len(),usize::from(matches!(mode,"guest"|"org")),"{mode}");
+            no_event_replies(&f).await;
+            assert_eq!(status(&f).await,"waiting");
+            if mode=="guest" { assert!(gateway.final_reply(&f,"guest answer").await); }
+            let saved=result_message(&f,&row).await;
+            assert_eq!(saved.contains_key("supplemental_result_claims"),matches!(mode,"guest"|"org"),"{mode}");
+            f.state.db.drop().await.unwrap();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn supplemental_result_claim_interrupted_before_dispatch_is_not_reclaimed() {
+    Box::pin(async {
+        let (f, platform, row) = result_fixture(ChronoDuration::minutes(30)).await;
+        let claim = sources::claim_result(
+            &f.state.db,
+            OWNER,
+            &row.id,
+            row.active_turn.as_ref().map(|turn| turn.turn_id.as_str()),
+            row.channel.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(claim.is_ok());
+        result_hook(&f, &row).await;
+        assert!(platform.received_requests().await.unwrap().is_empty());
+        assert_eq!(
+            result_reason(&audit_decisions(&f).await[0]),
+            Some("already_claimed")
+        );
+        assert_eq!(
+            result_message(&f, &row)
+                .await
+                .get_array("supplemental_result_claims")
+                .unwrap()
+                .len(),
+            1
+        );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_window_source_bound_expiry_is_anchor_expired() {
+    Box::pin(async {
+        let (f, platform, mut row) = result_fixture(ChronoDuration::hours(24)).await;
+        row.active_turn.as_mut().unwrap().channel_event_id = Some(f.event.id.clone());
+        patch(
+            &f,
+            doc! {"expires_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))},
+        )
+        .await;
+        deliver_to_for(
+            &f.state,
+            &row,
+            row.channel.as_ref().unwrap(),
+            "late answer",
+            None,
+            Purpose::TeamAdditionalResult,
+        )
+        .await;
+        assert!(platform.received_requests().await.unwrap().is_empty());
+        assert_eq!(
+            result_reason(&audit_decisions(&f).await[0]),
+            Some("anchor_expired")
+        );
+        assert!(
+            !result_message(&f, &row)
+                .await
+                .contains_key("supplemental_result_claims")
+        );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn supplemental_result_preparation_failure_does_not_claim() {
+    Box::pin(async {
+        let (f, platform, row) = result_fixture(ChronoDuration::minutes(30)).await;
+        mock_platform(&platform, "confirmed").await;
+        let bots = f.state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+        let bot = bots.find_one(doc! {"_id":&f.channel.channel_bot_id}).await.unwrap().unwrap();
+        bots.update_one(doc! {"_id":&f.channel.channel_bot_id}, doc! {"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}}}).await.unwrap();
+        result_hook(&f, &row).await;
+        assert!(platform.received_requests().await.unwrap().is_empty());
+        assert!(!result_message(&f, &row).await.contains_key("supplemental_result_claims"));
+        assert_eq!(result_reason(&audit_decisions(&f).await[0]), Some("source_unavailable"));
+        bots.update_one(doc! {"_id":&f.channel.channel_bot_id}, doc! {"$set":{"bot_token_encrypted":bot.get("bot_token_encrypted").unwrap()}}).await.unwrap();
+        result_hook(&f, &row).await;
+        assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+        f.state.db.drop().await.unwrap();
     }).await;
 }

@@ -6764,9 +6764,9 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
 }
 
 /// Deliver a supplemental reply to the conversation's chat. Relay-source
-/// gateway chats use a validated retained inbound within the existing reference
-/// window. Native sources retain their original event reply. Best effort: the
-/// result stays in the conversation history either way.
+/// gateway results use a validated retained inbound within 24 hours; progress
+/// retains its reference window. Native sources retain their original event reply.
+/// Best effort: the result stays in the conversation history either way.
 pub async fn deliver_update(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
@@ -6831,6 +6831,7 @@ pub async fn deliver_to_for(
     purpose: supplemental::Purpose,
 ) {
     let mut decision = supplemental::Decision::new(purpose);
+    decision.turn = row.active_turn.as_ref().map(|turn| turn.turn_id.clone());
     decision.event = origin.native_event_id.clone().or_else(|| {
         row.active_turn
             .as_ref()

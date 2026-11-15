@@ -1015,7 +1015,7 @@ Local supplemental sends never enter that journal. Their outcome cannot change
 NyxID's provider stream, recovery payload or primary late-delivery claim. A
 failed supplemental text send retains its normal per-part receipts and audit,
 but does not append a primary-answer delivery-failure notice to the transcript.
-The local call scopes this distinction without storing new delivery state.
+The local call scopes this distinction.
 
 Source-bound sends validate the admitted event's retained relay inbound.
 Unbound genuine chat results validate `last_relay_message_id`; only an absent
@@ -1028,10 +1028,27 @@ event-discovery lookup or index is needed; the retained anchor uses its
 existing `_id` lookup. Progress never uses that fallback. All sends retain live
 owner/guest, organization, route-key, bot, chat/topic/root authority checks.
 
-Eligibility windows are unchanged: generic gateway supplemental text needs a
-live thread reference (29 minutes after its last refresh); followed replies
-need their original event younger than 29 minutes. Permission occurrences keep
-their existing original-event or sealed-target window. Missing or expired
+Relay-source gateway team results and additional-chat results may reply for
+24 hours from the selected retained inbound's `created_at`; genuine followed
+results use the original retained event's `created_at`. At or past that boundary,
+text is skipped with `anchor_expired`. These results do not require a live or
+decryptable gateway reference. A paired fallback remains valid after reference
+expiry if its digest matches and the retained inbound is inside the result window.
+The agent-key presence check and every live delivery-authority check remain.
+Checking, capacity and machine-control progress keep their existing reference
+window (29 minutes); permission occurrences keep their existing event/target gates.
+
+Only these widened result paths atomically claim the settled assistant message
+for their stable destination before text dispatch (#2462). Primary and additional
+results to the same destination share the claim. A repeated attempt skips with
+`already_claimed`; database errors authorize no send. Confirmed, rejected,
+unknown and interrupted attempts keep the claim, with no retry or preparation
+lease. A crash after claiming but before sending can lose text. Claims contain
+only destination digests, never appear in APIs/logs/audit, and leave with the
+message on purge. Missing settled replies authorize no send. New replicas share
+the serde-defaulted list; old replicas ignore it and retain their 29-minute
+behavior until drained, including on rollback. This cannot retroactively fence
+pre-upgrade sends or old writers; there is no readiness gate. Missing or expired
 sources do not redirect replies. A missing permission source finishes refused;
 other supplemental text is skipped while the transcript remains available.
 Direct and relay-era replies, images and multipart receipts retain their prior
@@ -1047,8 +1064,8 @@ unknown-tool barrier. NyxID does not defer these results for a day or retry
 uncertain sends. `nyxbot_channel_supplemental_delivery` records purpose, egress,
 outcome, closed skip reason, anchor class and turn/event/conversation IDs,
 including retained native `gateway_event` sends. No content or references enter
-the audit. Old replicas still use the old egress until drained; paired fields
-are optional and ignored by old readers. No setting or reconnection is required.
+the audit. Paired reference fields remain optional and ignored by older readers.
+No setting or reconnection is required.
 
 **Precise CMA follow-up request (no CMA code changed here):** pass the remaining
 absolute ingress turn deadline in the provider request, and expose a durable,

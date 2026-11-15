@@ -2393,7 +2393,9 @@ async fn supplemental_bot_reference_writer_supplies_fallback_without_human_point
         Mock::given(path_regex("/bot.*/sendMessage")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}}))).mount(&platform).await;
         crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().insert(row.channel_bot_id.clone(),Arc::new(crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&platform.uri())));
         let mut conversation=channel_conversations(&state,&row.id).await.remove(0);
-        conversation.active_turn=None;
+        let saved=state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {"conversation_id":&conversation.id,"role":"assistant"}).sort(doc! {"seq":-1}).await.unwrap().unwrap();
+        conversation.active_turn=Some(bson::from_document(doc! {"turn_id":saved.get_str("turn_id").unwrap(),"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
         deliver_to(&state,&conversation,conversation.channel.as_ref().unwrap(),"team result",None).await;
         let requests=platform.received_requests().await.unwrap();
         assert_eq!(requests.len(),1);
