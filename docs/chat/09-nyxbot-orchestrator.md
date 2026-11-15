@@ -2142,6 +2142,65 @@ checks. Legacy invalid/revoked/node/moved services are dropped. The newest
 incompatible predecessor remains a boundary. Missing/suspended wallets disable
 restored exposure; an invalid old cap does so only before readiness. Sender
 verification is not copied; claimed/erased identities cannot become paid guests.
+
+**Automatic pre-#2288 restoration.** A failed v1 org-specialist row with
+`org_access_lost` and a pre-#2288 audit proof is considered by the existing
+leased maintenance worker only while fresh org, admin, bot, specialist and
+route authority still holds. The worker calls the same rebuild path as Reconnect,
+preserves the saved guest policy, never copies sender links, and creates no
+watch, action card, onboarding notice or waiting thread. It tries one row per
+30-second pass, with 1 minute, 5 minute, 15 minute, 1 hour and then 6 hour
+cooldowns. Readiness unavailable is deferred without an attempt or failure
+audit. A successful transition sends the existing channel-health notice once;
+it says that the bot is connected again, whether guest access is on or off as
+before, and that members must verify their chat account again. The member-facing
+membership prompt repeats that fresh-verification guidance for a previously
+linked sender until verification. Confirmed live loss, an existing replacement
+route or a manual reconnect ends restoration for that predecessor. A pending
+release defers it until cleanup settles.
+Completed predecessors are excluded permanently, including after a rule-version
+bump or an expired retry date, so restoration cannot undo a later manual disconnect.
+
+**Guest exposure during restoration.** The worker deliberately restores the
+saved `org_specialist.guests` policy because this is the state the linking
+admin would have received from a defect-free rebuild. The decision is kept in
+the shared `org_channel_service::management::restore_in_session` rebuild policy
+and can be changed in one place to restore with guests off. The restoration audit event and the one health notice
+record whether guests are on or off. Restored sender links are never copied;
+the preserved guest policy therefore never turns an old verified sender into a
+paid guest.
+
+The cutover constant is `2026-11-06 14:34:00 UTC`, when #2288 merged and went
+live after that build. The audit log has no
+`nyxbot_channel_org_access_lost` event after `2026-11-06 08:58:06 UTC`. A
+retirement between merge and rollout would therefore be excluded by this
+choice; production has none. A proof one second before the constant qualifies;
+at or after it does not. The proof query is served by the existing
+`{event_type: 1, created_at: -1}` audit index and reads one projected row.
+
+Each gateway request is bounded at 20 seconds. The usual five gateway requests
+budget 100 seconds, but database retries, source checks and cleanup mean there
+is no whole-rebuild deadline. A rebuild can exceed the 120-second claim lease.
+After expiry another claimant may enter; the existing bot insertion fence
+permits only one live binding, and each failed claimant cleans only its own
+provisional row. Success finalizes through the active replacement's exact claim,
+so an expired predecessor lease cannot leave an in-flight marker or lose the
+restoration audit. Cleanup requires the exact `org_restore_claim_id` and restored
+marker. A manual row has neither and cannot be retired by
+`cleanup_org_restore_provisional`. The release journal retains remote cleanup
+obligations until settlement. The restoration gate checks unsettled releases by
+bot through the existing release index, including attempts whose provisional
+channel document has already been removed.
+
+Rollback stops new claims and drains current work before downgrading.
+`GET /api/v1/admin/channel-bots` must show no `nyxbot_restore_state: in_flight`;
+`GET /api/v1/admin/nyxbot-gateway-releases?states=provisional,due,review_required`
+must show no unsettled release for the deployment's
+`nyxbot_channel_org_access_restoration` audit rows. Check all pages of both reads.
+Old replicas ignore the additive
+restoration fields and treat a restored row as an ordinary active binding; the
+new named partial/latest indexes are additive, so an old `ensure_indexes` call
+neither drops nor conflicts with them.
 Exact holds settle once against their original UTC admission day even across
 cutover, revocation or midnight. Removing the cap never removes funding holds.
 

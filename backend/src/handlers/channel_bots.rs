@@ -4,6 +4,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::TryStreamExt;
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -363,6 +365,12 @@ pub struct ChannelBotHealthResponse {
     pub recommended_action_text: String,
     /// Whether the caller may run the recovery action (owner write access).
     pub can_write: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_restore_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -391,14 +399,23 @@ pub async fn admin_list(
     let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
     let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, &ids).await?;
+    let mut nyxbot_states = std::collections::HashMap::new();
+    for row in nyxbot_rows.values() {
+        if let Some(code) = nyxbot_health_state(&state, row).await {
+            nyxbot_states.insert(row.channel_bot_id.clone(), code);
+        }
+    }
     Ok(Json(
         bots.iter()
             .map(|bot| {
-                health_with_intake(
+                health_with_nyxbot(
                     bot,
                     gateway.contains(&bot.id),
                     false,
                     intake.get(&bot.id).cloned(),
+                    nyxbot_rows.get(&bot.id),
+                    nyxbot_states.get(&bot.id).map(String::as_str),
                 )
             })
             .collect(),
@@ -414,7 +431,7 @@ pub async fn admin_health(
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_loaded(&state.db, &bot, gateway, false).await?))
+    Ok(Json(health_loaded(&state, &bot, gateway, false).await?))
 }
 
 /// GET /api/v1/admin/channel-bots/webhook-rejections
@@ -499,20 +516,107 @@ pub(crate) fn health_for(
     health_with_intake(bot, gateway, can_write, None)
 }
 
-async fn health_loaded(
-    db: &mongodb::Database,
+pub(crate) async fn health_loaded(
+    state: &AppState,
     bot: &crate::models::channel_bot::ChannelBot,
     gateway: bool,
     can_write: bool,
 ) -> AppResult<ChannelBotHealthResponse> {
     let mut intake =
-        crate::services::channel_bot_health::discord::load(db, std::slice::from_ref(bot)).await?;
-    Ok(health_with_intake(
+        crate::services::channel_bot_health::discord::load(&state.db, std::slice::from_ref(bot))
+            .await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, std::slice::from_ref(&bot.id)).await?;
+    let nyxbot_state = if let Some(row) = nyxbot_rows.get(&bot.id) {
+        nyxbot_health_state(state, row).await
+    } else {
+        None
+    };
+    Ok(health_with_nyxbot(
         bot,
         gateway,
         can_write,
         intake.remove(&bot.id),
+        nyxbot_rows.get(&bot.id),
+        nyxbot_state.as_deref(),
     ))
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct NyxbotHealthRow {
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+    channel_bot_id: String,
+    #[serde(default)]
+    bot_owner_id: Option<String>,
+    status: String,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    org_specialist: Option<crate::models::org_channel::Binding>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    org_restore_last_reason: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    org_restore_next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    org_restore_claim_id: Option<String>,
+    #[serde(default)]
+    org_restore_attempts: i32,
+}
+
+async fn latest_nyxbot_rows(
+    db: &mongodb::Database,
+    bot_ids: &[String],
+) -> AppResult<std::collections::HashMap<String, NyxbotHealthRow>> {
+    if bot_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    // `nyxbot_health_latest` supplies the indexed sort. Project before the
+    // group so encrypted gateway material and sender data never enter the
+    // aggregation; the final limit is bounded by the requested page.
+    let documents: Vec<mongodb::bson::Document> = db
+        .collection::<mongodb::bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .aggregate([
+            doc! {"$match": {"channel_bot_id": {"$in": bot_ids}}},
+            doc! {"$project": {
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "created_at": 1, "status": 1, "last_error": 1, "org_specialist": 1,
+                "agent_id": 1, "org_restore_last_reason": 1,
+                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
+                "org_restore_attempts": 1,
+            }},
+            doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
+            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"}}},
+            doc! {"$replaceWith": "$row"},
+            doc! {"$project": {
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "status": 1, "last_error": 1, "org_specialist": 1,
+                "agent_id": 1, "org_restore_last_reason": 1,
+                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
+                "org_restore_attempts": 1,
+            }},
+            doc! {"$limit": bot_ids.len() as i64},
+        ])
+        .hint(mongodb::options::Hint::Name(
+            "nyxbot_health_latest".to_owned(),
+        ))
+        .await?
+        .try_collect()
+        .await?;
+    let rows: Vec<NyxbotHealthRow> = documents
+        .into_iter()
+        .map(|document| {
+            mongodb::bson::from_document(document)
+                .map_err(|error| AppError::Internal(format!("invalid NyxBot health row: {error}")))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let mut latest = std::collections::HashMap::new();
+    for row in rows {
+        latest.entry(row.channel_bot_id.clone()).or_insert(row);
+    }
+    Ok(latest)
 }
 
 fn health_with_intake(
@@ -545,6 +649,148 @@ fn health_with_intake(
         recommended_action: recommendation.action,
         recommended_action_text: recommendation.text,
         can_write,
+        nyxbot_status: None,
+        nyxbot_last_error: None,
+        nyxbot_restore_state: None,
+    }
+}
+
+fn health_with_nyxbot(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+    intake: Option<crate::services::channel_bot_health::discord::Intake>,
+    nyxbot: Option<&NyxbotHealthRow>,
+    nyxbot_state: Option<&str>,
+) -> ChannelBotHealthResponse {
+    let mut facts =
+        crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    if intake.is_some() {
+        facts.discord_intake = intake;
+    }
+    let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
+    if let Some(row) = nyxbot {
+        if row.status == "failed" && row.last_error.as_deref() == Some("org_access_lost") {
+            facts.failure_reason = nyxbot_state.or(Some(
+                crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
+            ));
+            let recommendation = crate::services::channel_bot_health::recommend(&facts);
+            response.recommended_action = recommendation.action;
+            response.recommended_action_text = recommendation.text;
+        }
+        response.nyxbot_status = Some(row.status.clone());
+        response.nyxbot_last_error = row.last_error.clone();
+        response.nyxbot_restore_state = row
+            .org_restore_claim_id
+            .as_ref()
+            .map(|_| "in_flight".to_owned())
+            .or_else(|| row.org_restore_last_reason.clone());
+    }
+    response
+}
+
+async fn nyxbot_health_state_for_db(
+    db: &mongodb::Database,
+    row: &NyxbotHealthRow,
+) -> Option<String> {
+    if row.status != "failed" || row.last_error.as_deref() != Some("org_access_lost") {
+        return None;
+    }
+    if !crate::services::nyxbot_gateway_release_service::has_old_org_restore_proof(db, &row.id)
+        .await
+        .ok()?
+    {
+        return Some(crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST.to_owned());
+    }
+    let code = match row.org_restore_last_reason.as_deref() {
+        Some("readiness_unavailable") => {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+        }
+        Some(_)
+            if row
+                .org_restore_next_attempt_at
+                .is_some_and(|next| next > chrono::Utc::now()) =>
+        {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+        }
+        Some(reason) if reason != "readiness_unavailable" && reason != "restored" => {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+        }
+        Some("restored") => crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
+        None if row.org_restore_attempts == 0
+            && row
+                .org_restore_next_attempt_at
+                .is_none_or(|next| next <= chrono::Utc::now()) =>
+        {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_PENDING
+        }
+        _ => crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY,
+    };
+    Some(code.to_owned())
+}
+
+async fn nyxbot_health_state(state: &AppState, row: &NyxbotHealthRow) -> Option<String> {
+    let proof = nyxbot_health_state_for_db(&state.db, row).await?;
+    if proof == crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST {
+        return Some(proof);
+    }
+    match nyxbot_health_org_access(state, row).await.ok()? {
+        crate::services::org_channel_service::OrgAccess::Holds => Some(proof),
+        crate::services::org_channel_service::OrgAccess::Unavailable => Some(
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+                .to_owned(),
+        ),
+        crate::services::org_channel_service::OrgAccess::Lost => {
+            Some(crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST.to_owned())
+        }
+    }
+}
+
+async fn nyxbot_health_org_access(
+    state: &AppState,
+    row: &NyxbotHealthRow,
+) -> AppResult<crate::services::org_channel_service::OrgAccess> {
+    if !crate::services::platform_bot_authority::permits_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?
+    {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !crate::handlers::nyxbot::manages_bot_owner(state, &row.user_id, org).await?
+    {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    let Some(binding) = row.org_specialist.as_ref() else {
+        return Ok(crate::services::org_channel_service::OrgAccess::Holds);
+    };
+    if binding.version != 1 || row.bot_owner_id.as_ref() != Some(&binding.org_id) {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    let specialist_live = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.agent_id, "user_id": &binding.org_id, "kind":"specialist", "destroyed_at": null})
+        .await?
+        .is_some();
+    let bot_live = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.channel_bot_id, "user_id": &binding.org_id, "is_active": true, "status": "active"})
+        .await?
+        .is_some();
+    if !specialist_live || !bot_live {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    match crate::services::org_channel_service::enabled(&state.db, &row.user_id).await {
+        Ok(()) => Ok(crate::services::org_channel_service::OrgAccess::Holds),
+        Err(
+            crate::errors::AppError::Forbidden(_)
+            | crate::errors::AppError::SecurityReadinessUnavailable,
+        ) => Ok(crate::services::org_channel_service::OrgAccess::Unavailable),
+        Err(error) => Err(error),
     }
 }
 
@@ -1462,9 +1708,7 @@ pub async fn health(
         .await?
         .can_write();
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(
-        health_loaded(&state.db, &bot, gateway, can_write).await?,
-    ))
+    Ok(Json(health_loaded(&state, &bot, gateway, can_write).await?))
 }
 
 /// POST /api/v1/channel-bots/{id}/resubscribe
@@ -1501,9 +1745,7 @@ pub async fn resubscribe(
     outcome?;
     let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(
-        health_loaded(&state.db, &updated, gateway, true).await?,
-    ))
+    Ok(Json(health_loaded(&state, &updated, gateway, true).await?))
 }
 
 pub(crate) async fn resubscribe_with_adapter(

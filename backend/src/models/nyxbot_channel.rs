@@ -232,6 +232,26 @@ pub struct NyxbotChannel {
     /// When the agent was last told that delivery is failing.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub delivery_notified_at: Option<DateTime<Utc>>,
+    /// Recovery bookkeeping for the bounded pre-#2288 org-access repair. These
+    /// fields are operational only and are ignored by older replicas.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub org_restore_next_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub org_restore_attempts: i32,
+    /// Rule version that last evaluated this restoration candidate. Older
+    /// parked rows are reconsidered once by a newer binary.
+    #[serde(default)]
+    pub org_restore_rule_version: i32,
+    #[serde(default)]
+    pub org_restore_last_reason: Option<String>,
+    #[serde(default)]
+    pub org_restore_claim_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub org_restore_lease_until: Option<DateTime<Utc>>,
+    /// Set on the newly restored row so the member-facing prompt explains the
+    /// fresh verification boundary where members encounter it.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub org_restored_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

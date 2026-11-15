@@ -5,7 +5,10 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
-    test_utils::{connect_transaction_test_database, test_app_state, test_user},
+    test_utils::{
+        connect_transaction_test_database, connect_transaction_test_database_with_command_handler,
+        test_app_state, test_user,
+    },
 };
 use axum::{Router, response::sse::Event, routing::post};
 use std::sync::Arc;
@@ -42,6 +45,8 @@ mod x_bus_tests;
 mod custom_event_tests;
 #[path = "nyxbot_org_channel_tests.rs"]
 mod org_channel_tests;
+#[path = "nyxbot_org_restore_tests.rs"]
+mod org_restore_tests;
 
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
@@ -120,7 +125,52 @@ async fn setup_with_reply_impl(
     reply: &'static str,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = Box::pin(connect_transaction_test_database(name)).await;
+    setup_with_database(db, reply).await
+}
+
+pub(super) async fn setup_with_command_monitor(
+    name: &str,
+) -> (
+    (AppState, Calls, tokio::task::JoinHandle<()>),
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = commands.clone();
+    let handler = mongodb::event::EventHandler::callback(move |event| {
+        if let mongodb::event::command::CommandEvent::Started(event) = event
+            && matches!(event.command_name.as_str(), "find" | "aggregate")
+        {
+            recorded
+                .lock()
+                .unwrap()
+                .push(event.command_name.to_string());
+        }
+    });
+    let db = connect_transaction_test_database_with_command_handler(name, handler).await;
+    (
+        (setup_with_database(db, "Here is your answer").await),
+        commands,
+    )
+}
+
+async fn setup_with_database(
+    db: mongodb::Database,
+    reply: &'static str,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     Box::pin(engine::ensure_indexes(&db)).await.unwrap();
+    db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(mongodb::bson::doc! {"event_type": 1, "created_at": -1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .name("event_type_1_created_at_-1".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
     Box::pin(async {
         db.collection(USERS)
             .insert_one(test_user(OWNER, UserType::Person))
@@ -386,6 +436,13 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         delivery_seen_at: None,
         delivery_checked_at: None,
         delivery_notified_at: None,
+        org_restore_next_attempt_at: None,
+        org_restore_attempts: 0,
+        org_restore_rule_version: 0,
+        org_restore_last_reason: None,
+        org_restore_claim_id: None,
+        org_restore_lease_until: None,
+        org_restored_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -3516,6 +3573,13 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             delivery_seen_at: None,
             delivery_checked_at: None,
             delivery_notified_at: None,
+            org_restore_next_attempt_at: None,
+            org_restore_attempts: 0,
+            org_restore_rule_version: 0,
+            org_restore_last_reason: None,
+            org_restore_claim_id: None,
+            org_restore_lease_until: None,
+            org_restored_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -4524,6 +4588,7 @@ async fn mock_gateway_with_routing(
     let callback_base = base.clone();
     let create = {
         let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
+        let create_behavior = routing_behavior.clone();
         move |headers: HeaderMap, Json(body): Json<Value>| async move {
             if !routing_tests::request_matches_schema("ChannelCreateRequest", &body) {
                 return (
@@ -4542,10 +4607,16 @@ async fn mock_gateway_with_routing(
                 &claims
             ));
             assert_eq!(claims.sub, body["profile"]["metadata"]["owner"]["subject"]);
+            let mut recorded_body = body.clone();
+            recorded_body["_test_creator_subject"] = json!(claims.sub.clone());
             calls
                 .lock()
                 .await
-                .push(("POST".into(), "/channels".into(), body.clone()));
+                .push(("POST".into(), "/channels".into(), recorded_body));
+            if create_behavior.pause_create.load(Ordering::SeqCst) {
+                create_behavior.arrived.notify_one();
+                create_behavior.resume.notified().await;
+            }
             let key = Zeroizing::new(
                 body["credentials"]["agent_key"]
                     .as_str()

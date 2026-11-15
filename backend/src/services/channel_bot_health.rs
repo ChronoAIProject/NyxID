@@ -64,6 +64,12 @@ pub mod codes {
     pub const NATIVE_RELAY_CONFLICT: &str = "native_gateway_relay_conflict";
     /// Unexpected internal error.
     pub const INTERNAL: &str = "internal";
+    pub const NYXBOT_ORG_RESTORATION_PENDING: &str = "nyxbot_org_restoration_pending";
+    pub const NYXBOT_ORG_RESTORATION_WAITING_READINESS: &str =
+        "nyxbot_org_restoration_waiting_readiness";
+    pub const NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY: &str =
+        "nyxbot_org_restoration_retrying_gateway";
+    pub const NYXBOT_ORG_ACCESS_LOST: &str = "nyxbot_org_access_lost";
 }
 
 /// Stable code for an error surfaced by a channel-platform call.
@@ -193,6 +199,22 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
         "verify"
     };
     Some(match code {
+        codes::NYXBOT_ORG_RESTORATION_PENDING => advice(
+            "none",
+            "NyxBot is restoring this organization connection automatically; it normally returns in under a minute. Members must verify their chat account again when it returns.".into(),
+        ),
+        codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS => advice(
+            "none",
+            "NyxBot is waiting for required safety checks to become available before restoring this organization connection. NyxID will retry automatically; no administrator rights were lost.".into(),
+        ),
+        codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY => advice(
+            "none",
+            "NyxBot is retrying the channel connection. The retry schedule can take hours; no administrator rights were lost.".into(),
+        ),
+        codes::NYXBOT_ORG_ACCESS_LOST => advice(
+            "reconnect",
+            "This organization connection lost live administrator authority. An organization admin must reconnect it after restoring access.".into(),
+        ),
         "discord_event_webhooks_wrong_endpoint" => advice("verify", "Event Webhooks do not deliver ordinary bot chat messages. The Interactions Endpoint URL under General Information is optional and only needed for slash commands/components. Ordinary chat uses NyxBot's Discord gateway when enabled for your account; other relay bots need channel:discord-gateway. Enable Message Content Intent in Discord.".into()),
         "discord_gateway_intents_required" => advice("verify", "Enable Message Content Intent in Discord Developer Portal > Bot > Privileged Gateway Intents (verified apps need approval). NyxID retries automatically within five minutes.".into()),
         "discord_gateway_invalid_token" | "discord_gateway_identity_mismatch" => advice("reconnect", "Replace this Discord bot's token in NyxID with the token for the same bot. The Gateway session will restart automatically.".into()),
@@ -257,6 +279,18 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
 
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
+    if let Some(code) = facts.failure_reason
+        && let Some(found) = for_code(code, facts, false)
+        && matches!(
+            code,
+            codes::NYXBOT_ORG_RESTORATION_PENDING
+                | codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+                | codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+                | codes::NYXBOT_ORG_ACCESS_LOST
+        )
+    {
+        return found;
+    }
     if let Some(code) = facts
         .failure_reason
         .filter(|code| code.starts_with("discord_"))
@@ -390,6 +424,9 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
         platform_name: platform_name(&bot.platform),
         recommended_action: recommendation.action.to_string(),
         recommended_action_text: recommendation.text.clone(),
+        notice_kind: crate::services::notification_service::ChannelBotNoticeKind::Failure,
+        notice_title: None,
+        notice_body: None,
     };
     #[cfg(test)]
     let recorder = TEST_NOTICES.lock().unwrap().get(&bot.id).cloned();
@@ -434,6 +471,85 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
                 .await
             {
                 tracing::warn!(%error, bot_id = %context.bot_id, "channel bot failure notice failed");
+            }
+        }
+    });
+}
+
+/// One transition notice through the same channel-health notifier used for
+/// failures. The caller supplies the linking admin because an org bot's
+/// platform owner is a separate org account.
+pub fn notify_restored(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    linking_admin: &str,
+    guest_enabled: bool,
+) {
+    let guest = if guest_enabled { "on" } else { "off" };
+    let context = crate::services::notification_service::ChannelBotFailedNotificationContext {
+        bot_id: bot.id.clone(),
+        bot_label: bot.label.clone(),
+        platform_name: platform_name(&bot.platform),
+        recommended_action: "restored".into(),
+        recommended_action_text: "Members must verify their chat account again before chatting."
+            .into(),
+        notice_kind: crate::services::notification_service::ChannelBotNoticeKind::Restored,
+        notice_title: Some(format!(
+            "{} channel connected again",
+            platform_name(&bot.platform)
+        )),
+        notice_body: Some(format!(
+            "{} is connected again. Members must verify their chat account again in NyxID. Guest access is {guest} as before. Open the channel details for the current status.",
+            bot.label
+        )),
+    };
+    #[cfg(test)]
+    let recorder = TEST_NOTICES.lock().unwrap().get(&bot.id).cloned();
+    #[cfg(not(test))]
+    let recorder: Option<()> = None;
+    let notifier = NOTIFIER.get().cloned();
+    if recorder.is_none() && notifier.is_none() {
+        return;
+    }
+    let db = db.clone();
+    let linking_admin = linking_admin.to_owned();
+    let owner = bot.user_id.clone();
+    crate::services::shutdown::process().spawn(async move {
+        let mut recipients = match crate::services::org_service::list_admin_user_ids(&db, &owner)
+            .await
+        {
+            Ok(recipients) => recipients,
+            Err(error) => {
+                tracing::warn!(%error, "channel bot restoration notice could not resolve org admins");
+                Vec::new()
+            }
+        };
+        recipients.push(linking_admin);
+        if recipients.is_empty() {
+            recipients.push(owner);
+        }
+        recipients.sort();
+        recipients.dedup();
+        for recipient in recipients {
+            #[cfg(test)]
+            if let Some(recorder) = &recorder {
+                let _ = recorder.send((recipient.clone(), context.clone()));
+                continue;
+            }
+            let Some(notifier) = &notifier else { continue };
+            if let Err(error) =
+                crate::services::notification_service::send_channel_bot_failed_notification(
+                    &db,
+                    &notifier.config,
+                    &notifier.http_client,
+                    notifier.fcm_auth.as_deref(),
+                    notifier.apns_auth.as_deref(),
+                    &recipient,
+                    &context,
+                )
+                .await
+            {
+                tracing::warn!(%error, bot_id = %context.bot_id, "channel bot restoration notice failed");
             }
         }
     });

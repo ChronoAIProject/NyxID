@@ -561,7 +561,28 @@ and account-link controls. Reconnect is disabled without a live target or while
 a mutation is pending. Disconnect remains available. Known errors have readable
 explanations and a secondary stable code; a gateway 401 means authentication
 failed and a 403 means gateway permission is missing. Remote response bodies are
-never displayed. There is **no automatic reconnect** of failed rows.
+never displayed. There is no general automatic reconnect of failed rows. The bounded #2458
+exception restores only pre-#2288 org-specialist `org_access_lost` rows when a
+matching old audit proof and fresh live authority both hold. It runs in the
+existing leased release worker, invokes the normal `connect_inner` path with
+the server-held actor-scoped creator bearer, and never bypasses gateway release
+or Discord's confirmed-delete-plus-90-second drain guard. It preserves guest
+policy, starts a fresh sender-verification boundary, and leaves the predecessor
+business state untouched if setup fails (only additive retry bookkeeping changes).
+
+`connect_inner` was originally reachable from a human request. Restoration
+passes no source conversation and sets its restoration flag, suppressing the human-only
+`nyxbot_channel_connected` and owner-linked audits, creates no watch, setup
+thread, action card, onboarding/setup notice, or waiting card, and emits no
+link instructions to a person. It still creates the route, fresh route/agent
+keys, gateway channel when the selected transport is gateway, the fresh policy
+identity, and the normal activation record; those are the durable effects an
+admin reconnect would create. Telegram remains gateway-only and reuses the
+server-held creator bearer, so no new Telegram consent is requested. Discord
+native setup remains behind the existing confirmed remote-delete-or-absence
+plus 90-second drain guard; uncertain deletion blocks indefinitely. Lark uses
+the gateway only when the linking admin's `nyxbot:gateway-lark` flag is on and
+otherwise uses the relay.
 
 Confirmed missing/inactive/invalid local `cmaeg` configuration reports
 `gateway_configuration_required`; ask an administrator to verify the active
