@@ -9805,6 +9805,12 @@ means the reviewed page set was processed; skipped rows need a later apply after
 their blocker clears, even when a new dry-run has the same digest.
 Eight consecutive failed page attempts, including expired leases and abandoned
 claims, terminate the job as `failed` with `page_retry_limit_exceeded`.
+Deployment interruptions count: a worker killed mid-page leaves an abandoned
+claim, and the next claim records one failure when that lease expires. Each
+successful page checkpoint resets the consecutive-failure streak. After eight
+consecutive failures, inspect and resolve the cause, then start a fresh apply
+from the still-valid reviewed dry-run; if its pages have expired or been purged,
+run a new dry-run first. The failed job remains terminal; recovery uses a new job.
 Finished jobs and identifier-only pages are eligible for cleanup after seven
 days. Each worker pass purges at most 128 pages from each of at most 16 finished
 jobs; pending apply jobs pin their source dry-run pages. After retention expires,
