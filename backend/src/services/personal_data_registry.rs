@@ -3130,6 +3130,13 @@ pub fn export_sections() -> impl Iterator<Item = &'static str> {
         .into_iter()
 }
 
+/// The joined export access path needs these formerly unindexed child keys.
+/// Owning index initialization lives in platform_provisioning_service.
+pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
+    ("platform_delivery_tests", "installation_id"),
+    ("platform_setup_steps", "setup_id"),
+];
+
 /// Owner predicates that are not covered by an index in the origin/main
 /// startup definitions and need a new index because the collection is a large,
 /// per-event stream. This is an explicit rollout manifest rather than a
@@ -3163,7 +3170,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
 enum OwnerIndexBoundedReason {
     ShortTtl,
     SmallOrResourceBounded,
-    JoinedLifecycleBounded,
     ExistingIdPrefix,
 }
 
@@ -3405,16 +3411,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         "channel_send_claims",
         "conversation_id",
         OwnerIndexBoundedReason::ExistingIdPrefix,
-    ),
-    (
-        "platform_delivery_tests",
-        "installation_id",
-        OwnerIndexBoundedReason::JoinedLifecycleBounded,
-    ),
-    (
-        "platform_setup_steps",
-        "setup_id",
-        OwnerIndexBoundedReason::JoinedLifecycleBounded,
     ),
 ];
 
@@ -4352,6 +4348,7 @@ mod tests {
         after: &BTreeMap<String, Vec<mongodb::bson::Document>>,
     ) {
         let mut added = BTreeSet::new();
+        let mut export_joins = BTreeSet::new();
         for (collection, definitions) in after {
             for definition in definitions {
                 if before[collection].contains(definition) {
@@ -4361,6 +4358,28 @@ mod tests {
                 // Creating the first index on a formerly absent collection
                 // also creates MongoDB's mandatory identity index.
                 if before[collection].is_empty() && keys == &bson::doc! {"_id": 1} {
+                    continue;
+                }
+                if collection == "assistant_messages"
+                    && keys == &bson::doc! {"user_id":1,"created_at":-1,"_id":-1}
+                {
+                    assert_eq!(
+                        definition.get_str("name"),
+                        Ok("assistant_messages_account_export")
+                    );
+                    continue;
+                }
+                if keys.len() == 1
+                    && EXPORT_JOIN_INDEX_GAPS
+                        .contains(&(collection.as_str(), keys.keys().next().unwrap().as_str()))
+                {
+                    let field = keys.keys().next().unwrap();
+                    assert_eq!(
+                        definition.get_str("name"),
+                        Ok(format!("account_export_{collection}_{field}").as_str())
+                    );
+                    assert_eq!(keys.get_i32(field), Ok(1));
+                    export_joins.insert((collection.as_str(), field.as_str()));
                     continue;
                 }
                 assert_eq!(keys.len(), 1, "unexpected added index: {definition:?}");
@@ -4380,6 +4399,15 @@ mod tests {
             }
         }
         assert_eq!(added, OWNER_INDEX_GAPS.iter().copied().collect());
+        assert_eq!(
+            export_joins,
+            EXPORT_JOIN_INDEX_GAPS.iter().copied().collect()
+        );
+        assert!(
+            after["assistant_messages"]
+                .iter()
+                .any(|d| d.get_str("name") == Ok("assistant_messages_account_export"))
+        );
     }
 
     fn registry_owner_predicates() -> BTreeSet<(&'static str, &'static str)> {
@@ -4408,6 +4436,7 @@ mod tests {
     fn owner_index_manifest_predicates() -> BTreeSet<(&'static str, &'static str)> {
         OWNER_INDEX_GAPS
             .iter()
+            .chain(EXPORT_JOIN_INDEX_GAPS)
             .copied()
             .chain(
                 OWNER_INDEX_BOUNDED
@@ -4495,6 +4524,16 @@ mod tests {
             .filter(|line| line.starts_with("db.") && line.contains("personal_erasure_owner_"))
             .collect();
         assert_eq!(commands.len(), OWNER_INDEX_GAPS.len());
+        for (collection, field) in EXPORT_JOIN_INDEX_GAPS {
+            let command = format!(
+                "db.{collection}.createIndex({{{field}:1}}, {{name:\"account_export_{collection}_{field}\"}});"
+            );
+            assert!(
+                docs.lines().any(|line| line == command),
+                "missing joined export prebuild: {command}"
+            );
+        }
+        assert!(docs.contains("db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:\"assistant_messages_account_export\"});"));
         for (collection, field) in OWNER_INDEX_GAPS {
             let command = format!(
                 "db.{collection}.createIndex({{\"{field}\": 1}}, {{name: \"personal_erasure_owner_{collection}_{}\"}});",
@@ -4509,9 +4548,17 @@ mod tests {
 
     #[test]
     fn owner_index_manifest_classifies_every_origin_gap() {
-        let kept: BTreeSet<_> = OWNER_INDEX_GAPS.iter().copied().collect();
+        let kept: BTreeSet<_> = OWNER_INDEX_GAPS
+            .iter()
+            .chain(EXPORT_JOIN_INDEX_GAPS)
+            .copied()
+            .collect();
         let bounded = owner_index_bounded_predicates();
-        assert_eq!(kept.len(), OWNER_INDEX_GAPS.len(), "duplicate kept index");
+        assert_eq!(
+            kept.len(),
+            OWNER_INDEX_GAPS.len() + EXPORT_JOIN_INDEX_GAPS.len(),
+            "duplicate kept index"
+        );
         assert_eq!(
             bounded.len(),
             OWNER_INDEX_BOUNDED.len(),
@@ -4539,7 +4586,7 @@ mod tests {
 
     async fn assert_owner_prefix_coverage(db: &mongodb::Database) {
         let mut missing: Vec<(&str, &str)> = Vec::new();
-        for &(collection, field) in OWNER_INDEX_GAPS {
+        for &(collection, field) in OWNER_INDEX_GAPS.iter().chain(EXPORT_JOIN_INDEX_GAPS) {
             let covered = index_models(db, collection)
                 .await
                 .iter()
@@ -4612,6 +4659,7 @@ mod tests {
         for (collection, field) in registry_owner_predicates() {
             let covered = field == "_id" || snapshot_has_prefix(&origin[collection], field);
             let classified = OWNER_INDEX_GAPS.contains(&(collection, field))
+                || EXPORT_JOIN_INDEX_GAPS.contains(&(collection, field))
                 || owner_index_bounded_predicates().contains(&(collection, field));
             if !covered && !classified {
                 classification_errors.push(format!(
@@ -4628,6 +4676,7 @@ mod tests {
             }
             let covered = snapshot_has_prefix(&origin[spec.child], spec.child_parent_field);
             let classified = OWNER_INDEX_GAPS.contains(&(spec.child, spec.child_parent_field))
+                || EXPORT_JOIN_INDEX_GAPS.contains(&(spec.child, spec.child_parent_field))
                 || owner_index_bounded_predicates()
                     .contains(&(spec.child, spec.child_parent_field));
             assert!(

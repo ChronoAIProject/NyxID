@@ -560,3 +560,27 @@ It rechecks joined parents and account/service-account/erasure-job liveness in
 that transaction. Chained digest-bearing start and completion audits bracket the
 mutations. Organization accounts are live owners; after organization removal,
 only structurally orphaned rows in permitted cleanup classes are in scope.
+
+
+Two additional joined-export indexes replace full child-collection scans with
+indexed parent-key reads. They are feature-owned in
+`platform_provisioning_service::ensure_account_export_indexes`, awaited from
+`personal_erasure_service::ensure_startup_indexes` before listening, with the
+same synchronous-build/prebuild behavior as the message index. This extends the
+previous erasure-only decision to leave these small lifecycle collections
+unindexed: a repeated self-service export now requires selective child reads.
+These two keys are explicit export exceptions, not a blanket owner-index rule.
+
+| Collection | Key/name | Reason and startup behavior |
+| --- | --- | --- |
+| `platform_delivery_tests` | `installation_id`; `account_export_platform_delivery_tests_installation_id` | `platform_runtime_service::begin_test` creates per-attempt UUID rows with a 10-minute expiry; their ids cannot be derived from installation ids. Each export must select the person's rows without scanning other owners' tests. Startup awaits the build; prebuild on a large deployment as above. |
+| `platform_setup_steps` | `setup_id`; `account_export_platform_setup_steps_setup_id` | `platform_provisioning_service` stores step jobs keyed by creation-request UUID, with setup ids as the authoritative parent relation. Parent-scoped export reads need this separate join key. Startup awaits the build; prebuild on a large deployment as above. |
+
+```javascript
+db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_export_platform_delivery_tests_installation_id"});
+db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
+```
+
+The complete additive rollout set is 19 indexes: 16 erasure indexes and three
+export indexes. Existing definitions remain untouched; the upgrade tests compare
+all definitions before/after and replay the old startup fixture afterward.

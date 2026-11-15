@@ -16,6 +16,8 @@ pub const FORMAT: &str = "nyxid.account-export";
 pub const VERSION: u32 = 1;
 pub const MAX_BYTES: usize = 32 * 1024 * 1024;
 pub const SUBSECTION_ROW_CAP: i64 = 10_000;
+pub const PARENT_ID_CAP: usize = 10_000;
+pub const QUERY_BATCH_SIZE: u32 = 100;
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 pub const FILE_PAYLOADS_METADATA_ONLY: bool = true;
 
@@ -29,6 +31,8 @@ pub struct ExportSubsection {
     pub total_count: u64,
     pub truncated: bool,
     pub unavailable: bool,
+    /// Parent resolution was bounded; total_count covers only the resolved scope.
+    pub scope_truncated: bool,
 }
 #[derive(Debug, Serialize, Clone)]
 pub struct ExportLimits {
@@ -1350,9 +1354,8 @@ fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Opti
         ExportSelector::AuthoredOwnedGroup => {
             doc! {"user_id": account_id, "author_user_id": account_id}
         }
-        ExportSelector::JoinedPerson { owner_field, .. } => {
-            doc! {format!("_export_parent.{owner_field}"): account_id}
-        }
+        // Resolved once, before querying children; never a child-side lookup.
+        ExportSelector::JoinedPerson { .. } => return None,
     })
 }
 
@@ -1377,15 +1380,23 @@ fn private_conversation_filter(prefix: &str) -> Document {
     filter
 }
 
+/// Resolve only projected identities and cap the in-memory $in list. Parent
+/// owner predicates and child join keys have existing prefix indexes.
+async fn resolve_ids(db: &mongodb::Database, collection: &str, filter: Document) -> AppResult<(Vec<Bson>, bool)> {
+    let mut cursor = db.collection::<Document>(collection).find(filter)
+        .projection(doc! {"_id": 1}).sort(doc! {"_id": 1})
+        .limit(PARENT_ID_CAP as i64 + 1).batch_size(QUERY_BATCH_SIZE)
+        .max_time(QUERY_TIMEOUT).await?;
+    let mut ids = Vec::new();
+    while let Some(row) = cursor.try_next().await? {
+        if ids.len() == PARENT_ID_CAP { return Ok((ids, true)); }
+        if let Some(id) = row.get("_id") { ids.push(id.clone()); }
+    }
+    Ok((ids, false))
+}
+
 fn source_pipeline(collection: &str, filter: Document) -> Vec<Document> {
     let mut pipeline = Vec::new();
-    if let Some(personal_data_registry::Entry {
-        export_selector: personal_data_registry::ExportSelector::JoinedPerson { parent, field, .. },
-        ..
-    }) = personal_data_registry::find(collection)
-    {
-        pipeline.push(doc! {"$lookup": {"from": *parent, "localField": *field, "foreignField": "_id", "as": "_export_parent"}});
-    }
     pipeline.push(doc! {"$match": filter});
     if collection == "assistant_conversations" {
         // Shared titles can originate from a guest's first message.
@@ -1634,6 +1645,7 @@ async fn query_rows(
         total_count,
         truncated,
         unavailable: false,
+        scope_truncated: false,
     })
 }
 fn empty_sections() -> BTreeMap<String, BTreeMap<String, ExportSubsection>> {
@@ -1672,6 +1684,7 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
                                     total_count: value.total_count,
                                     truncated: value.truncated,
                                     unavailable: value.unavailable,
+                                    scope_truncated: value.scope_truncated,
                                 },
                             )
                         })
@@ -1785,15 +1798,37 @@ async fn build_with_limit(
             Some(additional_export_filter(view, account_id)),
         ));
     }
+    let mut scope_flags = vec![(false, false); sources.len()];
+    let mut parent_scopes = BTreeMap::new();
+    for (index, (collection, _, filter)) in sources.iter_mut().enumerate() {
+        if let Some(personal_data_registry::Entry {
+            export_selector: personal_data_registry::ExportSelector::JoinedPerson { parent, field, owner_field }, ..
+        }) = personal_data_registry::find(collection) {
+            let key = (*parent, *owner_field);
+            if let std::collections::btree_map::Entry::Vacant(scope) = parent_scopes.entry(key) {
+                let resolved = resolve_ids(db, parent, doc! {*owner_field: account_id}).await;
+                scope.insert(resolved.ok());
+            }
+            if let Some((ids, truncated)) = &parent_scopes[&key] {
+                *filter = Some(doc! {*field: {"$in": ids}});
+                scope_flags[index].0 = *truncated;
+            } else {
+                scope_flags[index].1 = true;
+            }
+        }
+    }
     let pages = allocate_pages(max_bytes, sources.len(), |index, limit| {
         let (collection, spec, filter) = &sources[index];
         let account = &account;
+        let (scope_truncated, unavailable) = scope_flags[index];
         async move {
             let mut budget = ExportBudget {
                 remaining: limit,
                 ..Default::default()
             };
-            let value = if *collection == "users" {
+            let mut value = if unavailable {
+                ExportSubsection { unavailable: true, ..Default::default() }
+            } else if *collection == "users" {
                 let profile = safe_item(account, PROFILE_FIELDS);
                 let admitted = budget.admit(&profile);
                 ExportSubsection {
@@ -1801,6 +1836,7 @@ async fn build_with_limit(
                     total_count: 1,
                     truncated: !admitted,
                     unavailable: false,
+                    scope_truncated: false,
                 }
             } else if let Some(filter) = filter {
                 rows(
@@ -1815,6 +1851,8 @@ async fn build_with_limit(
             } else {
                 ExportSubsection::default()
             };
+            value.scope_truncated = scope_truncated;
+            value.truncated |= scope_truncated;
             Ok(ExportPage::from_read(value, limit, budget))
         }
     })
@@ -2367,6 +2405,7 @@ mod tests {
                     total_count: 3,
                     truncated: false,
                     unavailable: false,
+                    scope_truncated: false,
                 },
             )]),
         );
@@ -2749,3 +2788,7 @@ mod tests {
 #[cfg(test)]
 #[path = "account_export_model_tests.rs"]
 mod model_tests;
+
+#[cfg(test)]
+#[path = "account_export_query_tests.rs"]
+mod query_tests;

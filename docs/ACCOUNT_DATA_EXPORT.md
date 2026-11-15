@@ -17,7 +17,8 @@ a source collection:
   "items": [],
   "total_count": 42,
   "truncated": false,
-  "unavailable": false
+  "unavailable": false,
+  "scope_truncated": false
 }
 ```
 
@@ -315,3 +316,12 @@ The audit records the same unavailable list without database diagnostics. Accoun
 lookup, encoding and mandatory audit failures fail the request; a server failure
 refunds only its original fixed-window slot. Slots are reserved atomically before
 work starts, so concurrent requests cannot bypass the hourly limit.
+
+Joined views resolve at most 10,000 parent IDs using the parent's indexed owner
+predicate, then match children by the indexed parent key. They never look up a
+parent for every child. If parent resolution reaches its cap, `scope_truncated`
+and `truncated` are true; `total_count` is a lower bound covering only the
+resolved parent scope. Source-query failures still mark the view unavailable.
+
+
+Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
