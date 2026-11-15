@@ -540,12 +540,14 @@ pub(crate) struct DomainRetryRequest {
     pub idempotency_key: String,
 }
 
+pub(crate) const REMOTE_CLEANUP_RETRY_MESSAGE: &str = "Erasure domain queued for evidence re-evaluation. Resolve the remaining remote cleanup dependencies. For a node-blocked Stop, bring the node online or, if permanently gone, have an administrator delete it via DELETE /api/v1/admin/nodes/{id}, then retry. Unresolved cleanup immediately returns to operator_action (remote_cleanup_wait_exceeded)";
+
 pub(crate) async fn retry_domain(
     db: &Database,
     actor: &str,
     user: &str,
     request: &DomainRetryRequest,
-) -> AppResult<()> {
+) -> AppResult<&'static str> {
     let domain = request.domain.as_str();
     let durable = super::super::transaction_service::durable_database(db);
     let db = &durable;
@@ -573,16 +575,20 @@ pub(crate) async fn retry_domain(
     super::super::transaction_service::run_db_only(db, &context, |tx, context| {
         let &(db, actor, user, domain, request, key_hash, request_digest) = context;
         Box::pin(async move {
-    let result: AppResult<()> = async {
+    let result: AppResult<&'static str> = async {
         let job = db.collection::<PersonalErasureJob>(JOBS).find_one(doc! {"_id":&request.job_id,"user_id":user}).session(&mut *tx).await?
             .ok_or_else(||AppError::Conflict("Erasure retry job changed".into()))?;
         let previous = job.domains.iter().find(|entry| entry.domain == domain)
             .ok_or_else(||AppError::Conflict("Erasure retry domain changed".into()))?;
+        let remote_cleanup_retry = matches!(previous.reason.as_deref(),
+            Some("remote_cleanup_wait_exceeded" | "remote_cleanup_verification_required"));
+        let retry_message = if remote_cleanup_retry { REMOTE_CLEANUP_RETRY_MESSAGE }
+            else { "Erasure domain queued for evidence re-evaluation" };
         if previous.last_retry_key_hash.as_deref() == Some(key_hash) {
             if previous.last_retry_request_digest.as_deref() != Some(request_digest) {
                 return Err(AppError::Conflict("Erasure retry idempotency key was reused".into()));
             }
-            return Ok(());
+            return Ok(retry_message);
         }
         if job.status != ErasureStatus::OperatorAction || previous.status != DomainStatus::OperatorAction
             || previous.retry_generation != request.expected_retry_generation {
@@ -597,7 +603,7 @@ pub(crate) async fn retry_domain(
         checkpoint.last_retry_key_hash = Some(key_hash.clone());
         checkpoint.last_retry_request_digest = Some(request_digest.clone());
         checkpoint.status = DomainStatus::Pending;
-        checkpoint.reason = None;
+        checkpoint.reason = remote_cleanup_retry.then(|| "remote_cleanup_verification_required".into());
         checkpoint.consecutive_failures = 0;
         if domain == "provider_credentials" {
             db.collection::<Document>(super::provider::EFFECTS).update_many(
@@ -615,7 +621,7 @@ pub(crate) async fn retry_domain(
         super::super::audit_service::log_actor_event_in_session(db, &mut *tx, key,
             &super::super::audit_service::AuditActor {user_id:actor.to_owned(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
             "user.account.erasure_domain_retry",serde_json::json!({"target_user_id":user,"domain":domain,"job_id":request.job_id,"expected_retry_generation":request.expected_retry_generation,"inventory_version":INVENTORY_VERSION})).await?;
-        Ok(())
+        Ok(retry_message)
     }.await;
     result
         })
@@ -1066,6 +1072,42 @@ mod tests {
         assert_eq!(stored.status, ErasureStatus::OperatorAction);
         assert_eq!(
             stored.domains[index].reason.as_deref(),
+            Some("remote_cleanup_wait_exceeded")
+        );
+        let request = DomainRetryRequest {
+            domain: "local_inventory".into(),
+            job_id: stored.id.clone(),
+            expected_retry_generation: stored.domains[index].retry_generation,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                retry_domain(&db, &user, &user, &request).await.unwrap(),
+                REMOTE_CLEANUP_RETRY_MESSAGE
+            );
+        }
+        let retried = super::super::status(&db, &user).await.unwrap().unwrap();
+        assert_eq!(
+            retried.domains[index].reason.as_deref(),
+            Some("remote_cleanup_verification_required")
+        );
+        assert_eq!(
+            retried.domains[index].remote_wait_started_at,
+            stored.domains[index].remote_wait_started_at
+        );
+        let claimed = claim(&db).await.unwrap().unwrap();
+        checkpoint(
+            &db,
+            &claimed,
+            index,
+            Outcome::Pending("remote_cleanup_pending"),
+        )
+        .await
+        .unwrap();
+        let escalated = super::super::status(&db, &user).await.unwrap().unwrap();
+        assert_eq!(escalated.status, ErasureStatus::OperatorAction);
+        assert_eq!(
+            escalated.domains[index].reason.as_deref(),
             Some("remote_cleanup_wait_exceeded")
         );
         db.drop().await.unwrap();

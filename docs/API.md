@@ -9802,3 +9802,11 @@ source whose page purge has started, checking retention and purge state again
 inside the admission transaction. Run a fresh dry-run before applying.
 No additional large-collection index is
 needed: page reads and deletion use the existing `_id` prefix.
+
+An erasure-domain retry following `remote_cleanup_wait_exceeded` returns:
+`Erasure domain queued for evidence re-evaluation. Resolve the remaining remote cleanup dependencies. For a node-blocked Stop, bring the node online or, if permanently gone, have an administrator delete it via DELETE /api/v1/admin/nodes/{id}, then retry. Unresolved cleanup immediately returns to operator_action (remote_cleanup_wait_exceeded)`.
+Pending domain status has reason `remote_cleanup_verification_required`.
+Retry preserves the original wait clock; it neither attests remote completion
+nor restarts the 24-hour bound. Follow the remote-cleanup operator procedure in
+[PERSONAL_ERASURE_INVENTORY.md](security/PERSONAL_ERASURE_INVENTORY.md) before
+submitting the retry, and poll status for verified progress.

@@ -581,7 +581,7 @@ and checks target, bystander and retained rows through job completion.
 | Public deployment proofs and activations, Discord control installation/current history | Shared deployment provenance retains opaque sponsor/activator/requester identifiers. The sponsor is an organization; an actor identifier confers no resource ownership or export access. |
 | Public probe consents | `actor_user_id` is personal consent; the local inventory erases it. Probe financial evidence retains the organization's sponsor and metering references. |
 | Manager ingress/delivery and public sessions | Restricted replay, admission and recovery bookkeeping retains external platform identifiers. Public-session bindings clear after the fixed lifetime and confirmed remote cleanup; public turns separately expire through their `expires_at` TTL. |
-| Personal platform bindings, link intents and challenges | The platform lifecycle revokes/cancels them first. Local deletion waits for durable platform cleanup and personal stop effects to complete, preserving the recovery inputs until then. |
+| Personal platform bindings, link intents and challenges | The platform lifecycle revokes/cancels them first. Local deletion waits for durable platform cleanup and for pending personal Stop effects that reference active, person-owned local nodes, preserving their signing credentials until then. Retained Stop captures do not depend on binding rows. |
 | MCP notifications | Ownership joins through `session_id` to `mcp_sessions`; there is no notification `user_id`. Children are removed before the credential-bearing session parent. |
 | Telegram creation requests | `owner_user_id` owns the request; `actor_user_id` is separate attribution. Shared destination snapshots are redacted for the departing actor. Unstarted requests are cancelled under the erasure barrier; started requests remain until confirmed bot cleanup permits retirement. Managed-bot observations retain external bot identifiers and monotonic replay evidence. |
 | Invite codes | Creator-authored notes are removed, usage email snapshots are redacted, and opaque creator/usage identifiers and counters remain. Exports contain only the caller's usage element. |
@@ -599,9 +599,65 @@ only structurally orphaned rows in permitted cleanup classes are in scope.
 Continuous remote cleanup waits are recorded on the pending local-inventory or source domain's
 `remote_wait_started_at` using MongoDB server time. After 24 hours, the job enters
 `operator_action` with `remote_cleanup_wait_exceeded`; an operator must resolve
-the external effect and retry. Pagination progress is not a remote wait and does
+the blocking dependency and retry. Pagination progress is not a remote wait and does
 not consume this bound. Source/recovery credentials remain fenced until cleanup
-is confirmed; escalation never treats a failed remote deletion as success.
+is confirmed or the documented admin node deactivation clears that local
+dependency; escalation never treats a failed remote deletion as success.
+
+The gate runs in each local delete transaction. It also rechecks the particular
+node immediately before draining or disconnecting it, because lifecycle recovery
+may still persist a captured Stop after account admission closes. New personal
+turns and machine scopes require the active-person/binding fence; accepted erasure
+writes the same user inactive. Stop capture itself deliberately remains available
+for previously admitted work. The pre-drain check therefore supplements, rather
+than assumes, the admission fence.
+
+Erasure acceptance already deactivates the person's ordinary nodes and sets
+`personal_erasure_drain_required` in the acceptance transaction. A node-blocked
+Stop therefore arises only for nodes still active from older acceptance paths;
+the operator procedure below covers those jobs.
+
+For `remote_cleanup_wait_exceeded`, use this operator procedure before retrying:
+
+1. Read the person's erasure status and retain its job id, affected domain and
+   current retry generation. Inspect the remaining remote recovery records by
+   their exact owner and resource identities.
+2. Check every predicate used by `personal_erasure_service::local::remote_cleanup_clear`:
+   incomplete `platform_bot_cleanup` by `owner_user_id`; incomplete
+   `platform_personal_stop_effects` by `active_turn.origin.user_id` only when a
+   captured `machine_scopes.node_id` points to a `nodes` row with this owner's
+   `user_id`, `is_active: true`, and a provisioning source other than
+   `remote_machine`; and active `telegram_bot_requests` by `owner_user_id`.
+   A binding's `active_turn` alone does not block deletion. Stop reconciliation
+   reconstructs the exact capture from the retained effect, treats an absent
+   conversation as settled, and does not read the binding. Missing, inactive,
+   other-owned and remote-machine nodes do not block this local gate.
+3. Resolve the underlying provider, gateway or machine connectivity/permission
+   failure and let its existing cleanup worker verify the exact stop or deletion.
+   Platform cleanup runs through `handlers::platform_bots::sweep_cleanup`;
+   personal stop effects through `platform_personal_binding_service`'s stop
+   reconciliation; Telegram creation recovery through
+   `telegram_new_worker::complete_pending_creations`. Confirm those lifecycle
+   records have reached their verified terminal state and the relevant predicates
+   are clear. For a node-blocked Stop, bring the node online so reconciliation can
+   send the exact cancel. If the node is permanently gone, an administrator must
+   use `DELETE /api/v1/admin/nodes/{id}` before the operator retries the domain.
+   This existing admin route has no owner-activity check and does not wait for
+   Stop completion: it soft-deletes the node (`is_active: false`, status offline),
+   deactivates its service bindings and disconnects it. Inactive nodes cannot
+   authenticate or receive a machine cancel. The retry then allows the local
+   pass to drain and delete the inactive node row. Its retained Stop effect may
+   remain pending: `NodeUnavailable` is nonterminal, not proof of cancellation.
+   Preserve encrypted capabilities and recovery inputs until the applicable
+   predicate clears; never edit completion flags manually.
+4. Submit the authenticated domain retry with the observed job id, current retry
+   generation and a fresh idempotency key. A retry returns the explicit message
+   that unresolved remote cleanup immediately returns to `operator_action`
+   (`remote_cleanup_wait_exceeded`). Pending status retains
+   `remote_cleanup_verification_required` until the worker evaluates it.
+5. Poll status until the affected domain advances. The retry keeps the original
+   remote-wait clock, so retrying before the remote effect clears immediately
+   re-escalates; it does not grant another 24-hour waiting period.
 
 Two existing protocols can remain nonterminal indefinitely: Telegram provisioning
 is explicitly excluded from `telegram_new_service::TelegramNewService::expire`
