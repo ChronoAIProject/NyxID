@@ -181,7 +181,7 @@ async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<(
             filter.insert(group.field, group.owner_id.as_str());
         }
         let attribution = personal_data_registry::attribution(group.collection, group.field);
-        let invite = group.collection == "invite_codes" && group.field == "usages.user_id";
+        let invite = group.collection == "invite_codes";
         if attribution.is_some() || invite {
             let mut tx = db.client().start_session().await?;
             tx.start_transaction()
@@ -201,6 +201,8 @@ async fn apply_group(db: &mongodb::Database, group: &OrphanGroup) -> AppResult<(
                         doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
                         super::personal_attribution_service::update(spec),
                     ).session(&mut tx).await?;
+                } else if group.field == "created_by" {
+                    db.collection::<Document>("invite_codes").update_many(filter, doc! {"$unset": {"note": ""}}).session(&mut tx).await?;
                 } else {
                     for id in chunk.iter() {
                         redact_invite_row(db, id, &group.owner_id, &mut tx).await?;

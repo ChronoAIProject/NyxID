@@ -504,3 +504,31 @@ backend/src/models/user_provider_token.rs: COLLECTION_NAME=user_provider_tokens 
 backend/src/models/user_service.rs: COLLECTION_NAME=user_services | created_by, identity_include_email, identity_include_user_id, user_id
 backend/src/models/user_service_connection.rs: COLLECTION_NAME=user_service_connections | user_id
 ```
+
+## Ownership and retained lifecycle evidence
+
+`ErasureDomain` names a real durable checkpoint and cleanup entry point. Domain
+handling may retire a capability or retain a lifecycle tombstone; it does not
+imply that every row is hard-deleted. The registry's rationale records that
+collection's result. The behavioral inventory test seeds each declared owner
+field independently, including nested fields and alternate legacy selectors,
+and checks target, bystander and retained rows through job completion.
+
+| Records | Ownership and disposition |
+| --- | --- |
+| Public deployment proofs and activations, Discord control installation/current history | Shared deployment provenance retains opaque sponsor/activator/requester identifiers. The sponsor is an organization; an actor identifier confers no resource ownership or export access. |
+| Public probe consents | `actor_user_id` is personal consent; the local inventory erases it. Probe financial evidence retains the organization's sponsor and metering references. |
+| Manager ingress/delivery and public sessions | Restricted replay, admission and recovery bookkeeping retains external platform identifiers. Public-session bindings clear after the fixed lifetime and confirmed remote cleanup; public turns separately expire through their `expires_at` TTL. |
+| Personal platform bindings, link intents and challenges | The platform lifecycle revokes/cancels them first. Local deletion waits for durable platform cleanup and personal stop effects to complete, preserving the recovery inputs until then. |
+| MCP notifications | Ownership joins through `session_id` to `mcp_sessions`; there is no notification `user_id`. Children are removed before the credential-bearing session parent. |
+| Telegram creation requests | `owner_user_id` owns the request; `actor_user_id` is separate attribution. Shared destination snapshots are redacted for the departing actor. Unstarted requests are cancelled under the erasure barrier; started requests remain until confirmed bot cleanup permits retirement. Managed-bot observations retain external bot identifiers and monotonic replay evidence. |
+| Invite codes | Creator-authored notes are removed, usage email snapshots are redacted, and opaque creator/usage identifiers and counters remain. Exports contain only the caller's usage element. |
+| Encryption migration records | Run records are global progress. Restricted findings retain keyed diagnostic identifiers and verification metadata. `encrypted_record_migration::lookup_finding` returns a 15-minute encrypted lookup cursor to the operator without persisting it; operator-derived owner lookup fields are not persisted ownership columns. |
+| Telemetry capture accounts and dispatches | Capture generation and settled dispatch evidence remain as restricted erasure bookkeeping. Vendor completion fences this evidence; it does not hard-delete it. |
+
+Orphan apply uses the same lifecycle predicates and durable admission barrier as
+local erasure, with a current sweep lease write in every mutation transaction.
+It rechecks joined parents and account/service-account/erasure-job liveness in
+that transaction. Chained digest-bearing start and completion audits bracket the
+mutations. Organization accounts are live owners; after organization removal,
+only structurally orphaned rows in permitted cleanup classes are in scope.

@@ -377,9 +377,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "assistant_groups" => Some(("assistant", "assistant_groups")),
         "assistant_invocation_turns" => Some(("assistant", "assistant_invocation_turns")),
         "assistant_invocations" => Some(("assistant", "assistant_invocations")),
-        "assistant_learning_migrations" => {
-            Some(("account_activity", "assistant_learning_migrations"))
-        }
         "assistant_learning_publication_targets" => {
             Some(("account_activity", "assistant_learning_publication_targets"))
         }
@@ -434,12 +431,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "credit_grants" => Some(("billing", "credit_grants")),
         "device_codes" => Some(("security", "device_codes")),
         "device_onboard_credentials" => Some(("account", "device_onboard_credentials")),
-        "encrypted_record_migration_findings" => {
-            Some(("account_activity", "encrypted_record_migration_findings"))
-        }
-        "encrypted_record_migration_runs" => {
-            Some(("account_activity", "encrypted_record_migration_runs"))
-        }
         "execution_permission_deliveries" => Some(("account", "execution_permission_deliveries")),
         "feature_flag_overrides" => Some(("account_activity", "feature_flag_overrides")),
         "generated_artifact_content_series" => {
@@ -481,17 +472,8 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "org_memberships" => Some(("account", "org_memberships")),
         "permission_key_policies" => Some(("account", "permission_key_policies")),
         "platform_bot_cleanup" => Some(("account", "platform_bot_cleanup")),
-        "platform_bot_configs" => Some(("account", "platform_bot_configs")),
         "platform_bot_installations" => Some(("account", "platform_bot_installations")),
         "platform_delivery_tests" => Some(("account_activity", "platform_delivery_tests")),
-        "platform_discord_control_installation_history" => {
-            Some(("account", "platform_discord_control_installation_history"))
-        }
-        "platform_discord_control_installations" => {
-            Some(("account", "platform_discord_control_installations"))
-        }
-        "platform_guide_selections" => Some(("account_activity", "platform_guide_selections")),
-        "platform_native_replies" => Some(("account_activity", "platform_native_replies")),
         "platform_onboarding_binding_requests" => {
             Some(("account_activity", "platform_onboarding_binding_requests"))
         }
@@ -507,14 +489,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "platform_personal_stop_effects" => {
             Some(("account_activity", "platform_personal_stop_effects"))
         }
-        "platform_public_deployment_activations" => {
-            Some(("account", "platform_public_deployment_activations"))
-        }
-        "platform_public_deployment_proofs" => {
-            Some(("account", "platform_public_deployment_proofs"))
-        }
         "platform_public_probe_consents" => Some(("account", "platform_public_probe_consents")),
-        "platform_public_readiness_probes" => Some(("account", "platform_public_readiness_probes")),
         "platform_setup_notices" => Some(("account_activity", "platform_setup_notices")),
         "platform_setup_steps" => Some(("account_activity", "platform_setup_steps")),
         "platform_setups" => Some(("account", "platform_setups")),
@@ -530,7 +505,6 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "sessions" => Some(("security", "sessions")),
         "telegram_bot_claims" => Some(("account_activity", "telegram_bot_claims")),
         "telegram_bot_requests" => Some(("account_activity", "telegram_bot_requests")),
-        "telegram_managed_bot_events" => Some(("account_activity", "telegram_managed_bot_events")),
         "trigger_deliveries" => Some(("account", "trigger_deliveries")),
         "trigger_owner_limits" => Some(("account", "trigger_owner_limits")),
         "trigger_runs" => Some(("account", "trigger_runs")),
@@ -713,7 +687,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             &["user_id", "conversation_id", "created_at", "expired_at"]
         }
         "assistant_attachments" => &["user_id", "content_type", "size", "created_at"],
-        "assistant_authored_draft_claims" => &["conversation_id"],
+        "assistant_authored_draft_claims" => &["claim.conversation_id"],
         "assistant_checkpoints" => &["user_id", "status", "updated_at"],
         "assistant_cma_agents" => &["user_id", "created_at", "updated_at"],
         "assistant_cma_creations" => &["user_id", "created_at", "updated_at"],
@@ -1757,7 +1731,6 @@ async fn build_with_limit(
             Some(doc! {"user_id": account_id}),
         ),
     ];
-
     for entry in personal_data_registry::entries() {
         let personal_data_registry::Export::Section(section) = entry.export else {
             continue;

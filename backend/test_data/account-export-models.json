@@ -515,10 +515,13 @@
   ],
   "assistant_authored_draft_claims": [
     {
-      "proposal_id": "fixture-value",
-      "conversation_id": "fixture-value",
-      "api_key_id": "fixture-value",
-      "turn_id": "fixture-value"
+      "owner_id": "fixture-person",
+      "claim": {
+        "proposal_id": "fixture-value",
+        "conversation_id": "fixture-value",
+        "api_key_id": "fixture-value",
+        "turn_id": "fixture-value"
+      }
     }
   ],
   "assistant_checkpoints": [
@@ -918,7 +921,8 @@
             }
           }
         }
-      ]
+      ],
+      "_id": "fixture-person"
     }
   ],
   "assistant_notification_push_sources": [
@@ -2934,7 +2938,8 @@
         "$date": {
           "$numberLong": "1700000000000"
         }
-      }
+      },
+      "_id": "fixture-person"
     }
   ],
   "platform_personal_setup_selections": [
@@ -3543,7 +3548,8 @@
   ],
   "trigger_owner_limits": [
     {
-      "version": 1
+      "version": 1,
+      "_id": "fixture-person"
     }
   ],
   "trigger_runs": [
@@ -4685,7 +4691,8 @@
         "$date": {
           "$numberLong": "1700000000000"
         }
-      }
+      },
+      "author_user_id": "fixture-value"
     }
   ],
   "org_channel_sender_links": [

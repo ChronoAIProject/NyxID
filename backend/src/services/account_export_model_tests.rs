@@ -32,6 +32,14 @@ struct AttachmentExpiry {
     expired_at: bson::DateTime,
 }
 
+/// assistant_skill_authoring_claims::reserve/save_claim persist an untyped
+/// owner envelope around the typed claim; DraftOrigin reads only the inner claim.
+#[derive(serde::Deserialize, Serialize)]
+struct DraftClaimEnvelope {
+    owner_id: String,
+    claim: crate::models::assistant_agent_learning::AuthoredDraftClaim,
+}
+
 /// assistant_agent_learning_review::backfill_package_format writes an untyped migration marker.
 #[derive(serde::Deserialize, Serialize)]
 struct LearningMigration {
@@ -41,6 +49,8 @@ struct LearningMigration {
 /// assistant_notification_service::claim_push writes untyped reservation timestamps.
 #[derive(serde::Deserialize, Serialize)]
 struct PushBudget {
+    #[serde(rename = "_id")]
+    id: String,
     reservations: Vec<PushReservation>,
 }
 
@@ -117,12 +127,16 @@ struct NativeReply {
 /// platform_link_intent_service writes an untyped last-decision timestamp keyed by the person.
 #[derive(serde::Deserialize, Serialize)]
 struct DecisionSpacing {
+    #[serde(rename = "_id")]
+    id: String,
     last_decision_at: bson::DateTime,
 }
 
 /// trigger_service::save writes an untyped owner version counter.
 #[derive(serde::Deserialize, Serialize)]
 struct TriggerOwnerLimit {
+    #[serde(rename = "_id")]
+    id: String,
     version: i64,
 }
 
@@ -157,6 +171,8 @@ struct OrgChallenge {
 #[derive(serde::Deserialize, Serialize)]
 struct OrgMessage {
     user_id: String,
+    #[serde(default)]
+    author_user_id: Option<String>,
     channel_id: String,
     conversation_id: String,
     actor_id: String,
@@ -222,9 +238,7 @@ fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> 
         "assistant_attachments" => {
             roundtrip::<crate::models::assistant_attachment::AssistantAttachment>(row)
         }
-        "assistant_authored_draft_claims" => {
-            roundtrip::<crate::models::assistant_agent_learning::AuthoredDraftClaim>(row)
-        }
+        "assistant_authored_draft_claims" => roundtrip::<DraftClaimEnvelope>(row),
         "assistant_checkpoints" => {
             roundtrip::<crate::models::assistant_checkpoint::AssistantCheckpoint>(row)
         }
@@ -611,6 +625,22 @@ fn every_export_path_exists_in_serialized_storage_models() {
     specs.push(("audit_log", fields_for("audit_log").unwrap()));
     for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
         specs.push((view.collection, additional_export_spec(view).fields));
+    }
+    // Access predicates must refer to persisted fields too; an invented owner
+    // key silently yields an empty section even with a correct projection.
+    for entry in personal_data_registry::entries() {
+        use personal_data_registry::ExportSelector as S;
+        let fields: Vec<&str> = match entry.export_selector {
+            S::Person(field) => vec![field],
+            S::AnyPerson(fields) => fields.to_vec(),
+            S::LegacyServiceAccount => vec!["owner_user_id", "created_by"],
+            S::AuthoredOwnedGroup => vec!["user_id", "author_user_id"],
+            S::JoinedPerson { field, .. } => vec![field],
+            S::None => Vec::new(),
+        };
+        if !fields.is_empty() {
+            specs.push((entry.collection, Box::leak(fields.into_boxed_slice())));
+        }
     }
     for (collection, fields) in specs {
         let Some(rows) = inputs().get(collection) else {

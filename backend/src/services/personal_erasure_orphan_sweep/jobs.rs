@@ -319,6 +319,9 @@ async fn scan_page(db: &mongodb::Database, job: &mut Job) -> AppResult<Vec<Candi
     if let Some(attribution) = personal_data_registry::attribution(spec.collection, spec.field) {
         filter = doc! {"$and": [filter, super::super::personal_attribution_service::pending_filter(attribution, None)]};
     }
+    if spec.collection == "invite_codes" && spec.field == "created_by" {
+        filter = doc! {"$and": [filter, {"note": {"$exists": true, "$ne": Bson::Null}}]};
+    }
     let mut projection = doc! {"_id": 1, spec.field: 1};
     if spec.collection == "invite_codes" {
         projection = doc! {"_id": 1, "usages.user_id": 1, "usages.email": 1};

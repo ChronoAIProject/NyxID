@@ -31,12 +31,49 @@ impl RetainedCategory {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErasureDomain {
+    Learning,
+    Voice,
+    Channel,
+    NodeDrain,
+    Nodes,
+    ChannelBots,
+    ServiceAccounts,
+    Oracle,
+    OrgChannel,
+    Platform,
+    Source,
+}
+
+#[cfg(test)]
+impl ErasureDomain {
+    pub const fn execution(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Learning => ("local_inventory", "learning::clear"),
+            Self::Voice => ("local_inventory", "local::pass"),
+            Self::Channel => ("local_inventory", "local::joined_parents"),
+            Self::NodeDrain => ("source", "local::source"),
+            Self::Nodes => ("local_inventory", "local::pass"),
+            Self::ChannelBots => ("channel_bots", "channel::pass"),
+            Self::ServiceAccounts => ("local_inventory", "local::pass"),
+            Self::Oracle => ("oracle", "oracle_pool_service::personal_erasure_pass"),
+            Self::OrgChannel => (
+                "local_inventory",
+                "org_channel_service::lifecycle::erase_person",
+            ),
+            Self::Platform => ("local_inventory", "local::joined_parents"),
+            Self::Source => ("source", "local::source"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Erasure {
     LocalInventory,
     JoinedChild {
         parent: &'static str,
     },
-    Domain(&'static str),
+    Domain(ErasureDomain),
     /// The owning feature expires this personal row after its documented TTL.
     FeatureRetention(&'static str),
     Redacted,
@@ -147,6 +184,12 @@ pub static ATTRIBUTIONS: &[Attribution] = &[
         ],
     },
     Attribution {
+        collection: "telegram_bot_requests",
+        person_field: "actor_user_id",
+        name_fields: &["destination"],
+        email_fields: &[],
+    },
+    Attribution {
         collection: "assistant_group_messages",
         person_field: "author_user_id",
         name_fields: &["author_display_name"],
@@ -171,6 +214,11 @@ pub struct JoinedChildSpec {
 }
 
 pub static JOINED_CHILD_SPECS: &[JoinedChildSpec] = &[
+    JoinedChildSpec {
+        parent: "mcp_sessions",
+        child: "mcp_session_notifications",
+        child_parent_field: "session_id",
+    },
     JoinedChildSpec {
         parent: "assistant_agents",
         child: "assistant_agent_learning_rejections",
@@ -602,16 +650,16 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "assistant_learning_migrations",
-        owner: OwnerSelector::Fields(&["owner_id"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("owner_id"),
-        why: "assistant_learning_migrations stores the person-owned assistant learning migrations record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("global package-format migration marker"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "assistant_learning_migrations: backfill_package_format writes a global publication-package-format marker and completed_at; no owner_id or personal content is stored.",
     },
     Entry {
         collection: "assistant_learning_publication_targets",
         owner: OwnerSelector::Fields(&["owner_id"]),
-        erasure: Erasure::Domain("assistant_learning_reconciliation"),
+        erasure: Erasure::Domain(ErasureDomain::Learning),
         export: Export::Section("account_activity"),
         export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_learning_publication_targets is cleaned by the assistant_learning_reconciliation lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -755,7 +803,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "assistant_voice_sessions",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("voice_purge"),
+        erasure: Erasure::Domain(ErasureDomain::Voice),
         export: Export::Section("account_activity"),
         export_selector: ExportSelector::Person("user_id"),
         why: "assistant_voice_sessions stores personal voice session metadata; voice purge settles and removes it.",
@@ -949,6 +997,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "billing_rate_epoch stores only the rate-cache singleton id and its generation counter to order platform price publication; neither field identifies a person or financial owner.",
     },
     Entry {
+        collection: "billing_stuck_request_recovery",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("singleton billing recovery coordination"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "billing_stuck_request_recovery stores the fixed ordinary singleton id, cursor_0/cursor_1/cursor_2 as opaque usage-meter row ids, next_source as a rotating source index, aggregate ended_requests/ended_rows counters, and last_ended_at; it has no person, owner, wallet, or request identifiers and no financial amounts.",
+    },
+    Entry {
         collection: "billing_tax_profiles",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
@@ -1038,11 +1094,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "channel_adapter_accounts",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "channel_adapter_accounts stores the person-owned channel adapter accounts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::Fields(&["configured_by"]),
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "channel_adapter_accounts: call_channels::management::configure_account writes shared platform provider trust configuration keyed by provider/account_id; configured_by is opaque administrator attribution, not personal resource ownership. Preserve the trusted account used by other bindings.",
     },
     Entry {
         collection: "channel_adapter_allocations",
@@ -1103,7 +1159,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "channel_conversations",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("channel lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::Channel),
         export: Export::Section("channels"),
         export_selector: ExportSelector::Person("user_id"),
         why: "channel_conversations is cleaned by the channel lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -1226,11 +1282,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "consent_revocation_fences",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::RetainedRecord),
         export_selector: ExportSelector::None,
-        why: "consent_revocation_fences is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+        why: "consent_revocation_fences: consent_service writes per-person revocation fences; local::inventory deletes them after credential revocation has completed.",
     },
     Entry {
         collection: "consents",
@@ -1348,7 +1404,7 @@ pub static ENTRIES: &[Entry] = &[
         collection: "durable_operation_executions",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
         why: "durable_operation_executions is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
@@ -1356,25 +1412,25 @@ pub static ENTRIES: &[Entry] = &[
         collection: "durable_operation_grants",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
         why: "durable_operation_grants is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
         collection: "encrypted_record_migration_findings",
-        owner: OwnerSelector::Fields(&["owner_uuid"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("owner_uuid"),
-        why: "encrypted_record_migration_findings stores the person-owned encrypted record migration findings record keyed by owner_uuid; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "encrypted_record_migration_findings: Encryption migration findings retain keyed diagnostic identifiers and verification metadata for unresolved records. lookup_finding returns a 15-minute encrypted lookup cursor to the operator, never persisting it; owner_uuid is computed only during lookup, never persisted. Repair evidence is restricted bookkeeping.",
     },
     Entry {
         collection: "encrypted_record_migration_runs",
-        owner: OwnerSelector::Fields(&["owner_uuid"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("owner_uuid"),
-        why: "encrypted_record_migration_runs stores the person-owned encrypted record migration runs record keyed by owner_uuid; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("global encryption migration progress"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "encrypted_record_migration_runs: Encryption migration runs store global generation, counters and lease progress. owner_uuid is not a persisted run field.",
     },
     Entry {
         collection: "event_dedup_records",
@@ -1450,11 +1506,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "invite_codes",
-        owner: OwnerSelector::Fields(&["usages.user_id"]),
+        owner: OwnerSelector::Fields(&["usages.user_id", "created_by"]),
         erasure: Erasure::Redacted,
         export: Export::Section("account_activity"),
         export_selector: ExportSelector::Person("usages.user_id"),
-        why: "invite_codes contains shared history; cleanup removes personal ownership or human-readable attribution while preserving shared counters and opaque identifiers.",
+        why: "invite_codes: Shared invitation codes preserve opaque creator and usage IDs and capacity counters. Erasure strips the deleted creator's free-text note and their usage email; export contains only the caller's own usage, never creator notes or other usages.",
     },
     Entry {
         collection: "invocation_diagnostics",
@@ -1499,34 +1555,34 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "machine_authority_leases",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
         export_selector: ExportSelector::None,
-        why: "machine_authority_leases is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_authority_leases retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_confirmations",
-        owner: OwnerSelector::Fields(&["owner_id"]),
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Section("machines"),
-        export_selector: ExportSelector::Person("owner_id"),
-        why: "machine_confirmations is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        export_selector: ExportSelector::Person("user_id"),
+        why: "machine_confirmations retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_contexts",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_contexts is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_contexts retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_desktops",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_desktops is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_desktops: Person-owned Machine session, setup, update or consent metadata is keyed by user_id and removed by the explicit local inventory after admission closes.",
     },
     Entry {
         collection: "machine_effect_outbox",
@@ -1539,26 +1595,26 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "machine_external_grants",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_external_grants is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_external_grants retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_free_slots",
-        owner: OwnerSelector::Fields(&["owner_id"]),
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["_id"]),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Section("machines"),
-        export_selector: ExportSelector::Person("owner_id"),
-        why: "machine_free_slots is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        export_selector: ExportSelector::Person("_id"),
+        why: "machine_free_slots retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_jobs",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Section("machines"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "machine_jobs is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_jobs retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_lifecycle_events",
@@ -1570,11 +1626,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "machine_oauth_consent_requests",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::TransientCoordination),
         export_selector: ExportSelector::None,
-        why: "machine_oauth_consent_requests is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_oauth_consent_requests: Person-owned Machine session, setup, update or consent metadata is keyed by user_id and removed by the explicit local inventory after admission closes.",
     },
     Entry {
         collection: "machine_operations",
@@ -1587,18 +1643,18 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "machine_orphan_inventory",
         owner: OwnerSelector::Fields(&["owner_id"]),
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Section("machines"),
         export_selector: ExportSelector::Person("owner_id"),
-        why: "machine_orphan_inventory is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_orphan_inventory retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_revocations",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_revocations is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_revocations retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_runtime_heads",
@@ -1643,34 +1699,34 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "machine_separation_compatibility",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_separation_compatibility is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_separation_compatibility retains signed Machine authority, execution, cleanup or investigation evidence under the existing Machine lifecycle; personal erasure does not assert its destruction.",
     },
     Entry {
         collection: "machine_setups",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_setups is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_setups: Person-owned Machine session, setup, update or consent metadata is keyed by user_id and removed by the explicit local inventory after admission closes.",
     },
     Entry {
         collection: "machine_update_attempts",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_update_attempts is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_update_attempts: Person-owned Machine session, setup, update or consent metadata is keyed by user_id and removed by the explicit local inventory after admission closes.",
     },
     Entry {
         collection: "machine_updates",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("machine"),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "machine_updates is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "machine_updates: Person-owned Machine session, setup, update or consent metadata is keyed by user_id and removed by the explicit local inventory after admission closes.",
     },
     Entry {
         collection: "managed_executions",
@@ -1698,11 +1754,17 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "mcp_session_notifications",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::JoinedChild {
+            parent: "mcp_sessions",
+        },
         export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "mcp_session_notifications stores the person-owned mcp session notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        export_selector: ExportSelector::JoinedPerson {
+            parent: "mcp_sessions",
+            field: "session_id",
+            owner_field: "user_id",
+        },
+        why: "mcp_session_notifications: McpSessionNotification is keyed by session_id, not a person ID; notifications are removed before their person-owned session. The session bearer is never exported.",
     },
     Entry {
         collection: "mcp_session_slots",
@@ -1739,9 +1801,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "node_credential_desired",
         owner: OwnerSelector::Fields(&["owner_id"]),
-        erasure: Erasure::Domain(
-            "local::pass node drain + personal_erasure_registry::final_metadata",
-        ),
+        erasure: Erasure::Domain(ErasureDomain::NodeDrain),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
         export_selector: ExportSelector::None,
         why: "node_credential_desired is metadata-only delivery intent: main's local::pass drains it by node_id and final_metadata deletes owner_id; org-owned rows retain only opaque actor_user_id, and the transient queue is excluded from export.",
@@ -1749,7 +1809,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "node_pending_credentials",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
-        erasure: Erasure::Domain("nodes"),
+        erasure: Erasure::Domain(ErasureDomain::Nodes),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
         export_selector: ExportSelector::None,
         why: "node_pending_credentials stores pending credential injection metadata and encrypted payloads; the entire transient row is excluded because its crypto bundle is secret material.",
@@ -1765,15 +1825,15 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "node_service_bindings",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("nodes"),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        erasure: Erasure::Domain(ErasureDomain::Nodes),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
         export_selector: ExportSelector::None,
         why: "node_service_bindings is cleaned by the nodes lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
         collection: "nodes",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("nodes"),
+        erasure: Erasure::Domain(ErasureDomain::Nodes),
         export: Export::Section("machines"),
         export_selector: ExportSelector::Person("user_id"),
         why: "nodes is cleaned by the nodes lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -1789,7 +1849,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "nyxbot_channels",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("channel_bots"),
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
         export: Export::Section("channels"),
         export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_channels is cleaned by the channel_bots lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -1869,7 +1929,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "oauth_clients",
         owner: OwnerSelector::Fields(&["created_by"]),
-        erasure: Erasure::Domain("local_service_account_lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::ServiceAccounts),
         export: Export::Section("services"),
         export_selector: ExportSelector::Person("created_by"),
         why: "oauth_clients stores person-created application metadata; redirect URIs and scopes are exported without secrets.",
@@ -1900,16 +1960,16 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "openclaw_channel_mappings",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["nyxid_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "openclaw_channel_mappings stores the person-owned openclaw channel mappings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        export_selector: ExportSelector::Person("nyxid_user_id"),
+        why: "openclaw_channel_mappings: OpenClawChannelMapping stores the NyxID owner in nyxid_user_id; local erasure uses that exact field.",
     },
     Entry {
         collection: "oracle_login_profiles",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("oracle_pool_cleanup"),
+        erasure: Erasure::Domain(ErasureDomain::Oracle),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
         export_selector: ExportSelector::None,
         why: "oracle_login_profiles stores an enrolled browser login profile, encrypted session material, and pool bindings; Oracle pool cleanup removes one profile per bounded cleanup chunk after the owner's pool is retired.",
@@ -1917,15 +1977,15 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "oracle_login_snapshots",
         owner: OwnerSelector::Fields(&["created_by_user_id"]),
-        erasure: Erasure::Domain("oracle lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("created_by_user_id"),
-        why: "oracle_login_snapshots stores an owner-created encrypted login snapshot and expiry metadata; Oracle lifecycle cleanup removes it with the pool.",
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "oracle_login_snapshots: This is a shared Oracle pool resource whose created_by_user_id is opaque administrator provenance, not resource ownership. The pool's existing lifecycle and expiry govern removal; personal erasure preserves other owners' shared pool data.",
     },
     Entry {
         collection: "oracle_pools",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("oracle"),
+        erasure: Erasure::Domain(ErasureDomain::Oracle),
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("user_id"),
         why: "oracle_pools is cleaned by the oracle lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -1949,15 +2009,15 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "oracle_worker_commands",
         owner: OwnerSelector::Fields(&["created_by_user_id"]),
-        erasure: Erasure::Domain("oracle lifecycle"),
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("created_by_user_id"),
-        why: "oracle_worker_commands stores a person's manager commands and delivery state for an enrolled browser; pool deletion expires overdue work and the seven-day command TTL removes terminal rows.",
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "oracle_worker_commands: This is a shared Oracle pool resource whose created_by_user_id is opaque administrator provenance, not resource ownership. The pool's existing lifecycle and expiry govern removal; personal erasure preserves other owners' shared pool data.",
     },
     Entry {
         collection: "oracle_workers",
         owner: OwnerSelector::Fields(&["enrollment.owner_user_id"]),
-        erasure: Erasure::Domain("oracle lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::Oracle),
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("enrollment.owner_user_id"),
         why: "oracle_workers stores enrolled browser-installation status and diagnostics; the Oracle lifecycle retires and removes the owner enrollment.",
@@ -1981,7 +2041,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "org_channel_lanes",
         owner: OwnerSelector::Fields(&["actor_id"]),
-        erasure: Erasure::Domain("org_channel lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::OrgChannel),
         export: Export::Section("channels"),
         export_selector: ExportSelector::Person("actor_id"),
         why: "org_channel_lanes stores a person’s organization-channel transcript lane; lifecycle erasure deletes the lane.",
@@ -1989,7 +2049,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "org_channel_link_challenges",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("org_channel lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::OrgChannel),
         export: Export::Section("account_activity"),
         export_selector: ExportSelector::Person("user_id"),
         why: "org_channel_link_challenges stores per-person organization-channel setup requests and short-lived codes.",
@@ -1997,7 +2057,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "org_channel_messages",
         owner: OwnerSelector::Fields(&["author_user_id", "actor_id"]),
-        erasure: Erasure::Domain("org_channel lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::OrgChannel),
         export: Export::Section("channels"),
         export_selector: ExportSelector::Person("author_user_id"),
         why: "org_channel_messages stores organization-channel transcript text and actor attribution; lifecycle erasure deletes rows authored or initiated by the departing person.",
@@ -2005,7 +2065,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "org_channel_sender_links",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("org_channel lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::OrgChannel),
         export: Export::Section("channels"),
         export_selector: ExportSelector::Person("user_id"),
         why: "org_channel_sender_links stores a person’s organization-channel sender linkage; lifecycle erasure revokes the link and keeps only its tombstone.",
@@ -2052,11 +2112,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "personal_erasure_effects",
-        owner: OwnerSelector::NotPersonal,
+        owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "personal_erasure_effects is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+        why: "personal_erasure_effects: Provider revocation effects retain opaque completion evidence after capability removal. local::inventory compacts only completed oauth_issuance receipts with credential_installed/protocol_no_issuance and no capability or completion_basis; all durable effect evidence remains.",
     },
     Entry {
         collection: "personal_erasure_jobs",
@@ -2072,7 +2132,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "Restartable orphan-sweep checkpoints, reviewed candidate identifiers and reports are retained as erasure accountability evidence; no document content is copied.",
+        why: "personal_erasure_orphan_sweep_jobs: Restartable orphan-sweep checkpoints, reviewed candidate identifiers and reports are retained as erasure accountability evidence; no document content is copied.",
     },
     Entry {
         collection: "personal_erasure_orphan_sweep_pages",
@@ -2080,7 +2140,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "Restartable orphan-sweep checkpoints, reviewed candidate identifiers and reports are retained as erasure accountability evidence; no document content is copied.",
+        why: "personal_erasure_orphan_sweep_pages: Restartable orphan-sweep checkpoints, reviewed candidate identifiers and reports are retained as erasure accountability evidence; no document content is copied.",
     },
     Entry {
         collection: "personal_erasure_local_receipts",
@@ -2100,11 +2160,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "personal_erasure_revocation_receipts",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::Domain(ErasureDomain::Source),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "personal_erasure_revocation_receipts is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
+        why: "personal_erasure_revocation_receipts: Provider revocation receipts survive until source cleanup; personal_erasure_registry::final_metadata removes user_id rows transactionally before account completion.",
     },
     Entry {
         collection: "personal_owner_write_fences",
@@ -2117,23 +2177,23 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_bot_cleanup",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("owner_user_id"),
-        why: "platform_bot_cleanup is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "platform_bot_cleanup: PlatformBotCleanup retains only exact remote-cleanup identifiers and completion evidence. It is restricted erasure bookkeeping, not a deleted person-owned payload; pending effects must complete before local parents are removed.",
     },
     Entry {
         collection: "platform_bot_configs",
-        owner: OwnerSelector::Fields(&["owner_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("owner_user_id"),
-        why: "platform_bot_configs is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        owner: OwnerSelector::Fields(&["configured_by", "funding_owner_user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "platform_bot_configs: PlatformBotConfig is shared administrative configuration. configured_by is an opaque actor ID and funding_owner_user_id is the sponsoring organization; neither makes the config a personal resource.",
     },
     Entry {
         collection: "platform_bot_installations",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::Platform),
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("owner_user_id"),
         why: "platform_bot_installations stores a person-owned platform installation and its approved child state.",
@@ -2141,10 +2201,10 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_bot_runtime_controls",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::NotPersonal),
         export_selector: ExportSelector::None,
-        why: "platform_bot_runtime_controls stores shared platform runtime policy and control revisions; the platform lifecycle owns this coordination state.",
+        why: "platform_bot_runtime_controls: Shared runtime revisions, retirement and emergency-stop fences survive as access-restriction bookkeeping; no private person-authored content is stored.",
     },
     Entry {
         collection: "platform_credentials",
@@ -2171,18 +2231,18 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_discord_control_installation_history",
         owner: OwnerSelector::Fields(&["requested_by"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("requested_by"),
-        why: "platform_discord_control_installation_history is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "platform_discord_control_installation_history: Discord command installation history retains opaque requested_by provenance for shared administrative attempts, not personal command content.",
     },
     Entry {
         collection: "platform_discord_control_installations",
         owner: OwnerSelector::Fields(&["requested_by"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("requested_by"),
-        why: "platform_discord_control_installations is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "platform_discord_control_installations: DiscordControlInstallation retains requested_by as an opaque administrator ID on a shared command-installation attempt; no person name, email or message content is stored.",
     },
     Entry {
         collection: "platform_entry_gateway_partitions",
@@ -2210,11 +2270,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_guide_selections",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "platform_guide_selections stores the person-owned platform guide selections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::FeatureRetention("platform_binding_service purge_after TTL"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "platform_guide_selections: guide_select_current stores binding_id, generation, setup_id and purge_after. It has no NyxID user_id; the selection is joined to a personal onboarding binding and its existing purge_after TTL.",
     },
     Entry {
         collection: "platform_help_assignments",
@@ -2243,18 +2303,18 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_manager_deliveries",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "platform_manager_deliveries is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
+        why: "platform_manager_deliveries: PlatformManagerDelivery stores external opaque sender/message IDs, delivery state and references, never reply bodies. Non-TTL delivery recovery and no-replay evidence outlives account authority; external sender IDs are personal metadata, not NyxID owner IDs.",
     },
     Entry {
         collection: "platform_manager_ingress_receipts",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        owner: OwnerSelector::Fields(&["audience.user_id", "execution.payer_user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "platform_manager_ingress_receipts is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
+        why: "platform_manager_ingress_receipts: PlatformManagerIngress contains opaque sender, execution payer and recovery identities. Non-TTL admission receipts fence replay and pending delivery; they contain no message body and survive as restricted access/recovery bookkeeping.",
     },
     Entry {
         collection: "platform_model_attempts",
@@ -2291,10 +2351,10 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_native_entry_receipts",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
+        erasure: Erasure::FeatureRetention("platform_native_receipt_service purge_after TTL"),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
         export_selector: ExportSelector::None,
-        why: "platform_native_entry_receipts stores expiring adapter provenance linked to a platform profile; lifecycle cleanup removes it with that profile.",
+        why: "platform_native_entry_receipts: External platform sender/event metadata is personal even without a NyxID person ID. platform_native_receipt_service::ensure_indexes applies the existing purge_after TTL to these keyed admission receipts.",
     },
     Entry {
         collection: "platform_native_receipts",
@@ -2306,11 +2366,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_native_replies",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "platform_native_replies stores the person-owned platform native replies record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::FeatureRetention("platform_binding_service purge_after TTL"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "platform_native_replies: admit_reply stores an external platform sender and source_id, with a one-day purge_after TTL. No NyxID user_id is written; no message body is retained.",
     },
     Entry {
         collection: "platform_native_reply_handles",
@@ -2322,11 +2382,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_onboarding_binding_requests",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "platform_onboarding_binding_requests stores the person-owned platform onboarding binding requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        export_selector: ExportSelector::Person("approved_user_id"),
+        why: "platform_onboarding_binding_requests: Platform binding requests record approved_user_id; owner retirement cancels pending approval before bounded local removal.",
     },
     Entry {
         collection: "platform_onboarding_bindings",
@@ -2347,34 +2407,34 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_personal_bindings",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("platform_personal_owner_lifecycle"),
+        erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "platform_personal_bindings stores a person’s platform binding and consent state; platform retirement revokes and removes it.",
+        why: "platform_personal_bindings: The platform domain first revokes active consent and captures required stop effects; local inventory removes terminal binding/link metadata once platform cleanup and active local-node dependencies are clear; retained stop captures do not need these rows.",
     },
     Entry {
         collection: "platform_personal_decision_spacing",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "platform_personal_decision_spacing stores the person-owned platform personal decision spacing record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        export_selector: ExportSelector::Person("_id"),
+        why: "platform_personal_decision_spacing: The personal decision-spacing writer uses the actor account ID as _id, with last_decision_at; it has no user_id field.",
     },
     Entry {
         collection: "platform_personal_link_challenges",
         owner: OwnerSelector::Fields(&["reviewed_user_id"]),
-        erasure: Erasure::Domain("platform_personal_owner_lifecycle"),
+        erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
         export_selector: ExportSelector::Person("reviewed_user_id"),
-        why: "platform_personal_link_challenges stores a person’s platform linking review and short-lived confirmation state.",
+        why: "platform_personal_link_challenges: The platform domain first revokes active consent and captures required stop effects; local inventory removes terminal binding/link metadata once platform cleanup and active local-node dependencies are clear; retained stop captures do not need these rows.",
     },
     Entry {
         collection: "platform_personal_link_intents",
         owner: OwnerSelector::Fields(&["claimant_user_id"]),
-        erasure: Erasure::Domain("platform_personal_owner_lifecycle"),
+        erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
         export_selector: ExportSelector::Person("claimant_user_id"),
-        why: "platform_personal_link_intents stores a person’s platform linking request and expiry state.",
+        why: "platform_personal_link_intents: The platform domain first revokes active consent and captures required stop effects; local inventory removes terminal binding/link metadata once platform cleanup and active local-node dependencies are clear; retained stop captures do not need these rows.",
     },
     Entry {
         collection: "platform_personal_setup_selections",
@@ -2387,10 +2447,10 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_personal_stop_effects",
         owner: OwnerSelector::Fields(&["active_turn.origin.user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("active_turn.origin.user_id"),
-        why: "platform_personal_stop_effects stores a person’s bounded stop and settlement progress.",
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "platform_personal_stop_effects: Exact stop captures and completion progress survive as restricted erasure bookkeeping; machine and delivery workers need these identifiers to settle captured effects.",
     },
     Entry {
         collection: "platform_public_budget_buckets",
@@ -2426,27 +2486,27 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_public_deployment_activations",
-        owner: OwnerSelector::Fields(&["actor_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("actor_user_id"),
-        why: "platform_public_deployment_activations is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        owner: OwnerSelector::Fields(&["activated_by"]),
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "platform_public_deployment_activations: PublicDeploymentActivation retains the opaque activated_by administrator ID as provenance of a shared organization deployment, without names or emails.",
     },
     Entry {
         collection: "platform_public_deployment_proofs",
-        owner: OwnerSelector::Fields(&["actor_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("actor_user_id"),
-        why: "platform_public_deployment_proofs is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        owner: OwnerSelector::Fields(&["evidence.binding.sponsor_owner_user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "platform_public_deployment_proofs: PublicDeploymentRecord has no actor_user_id; its proof binds an organization sponsor and contains deployment evidence, not a person-owned resource.",
     },
     Entry {
         collection: "platform_public_probe_consents",
         owner: OwnerSelector::Fields(&["actor_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
+        erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("actor_user_id"),
-        why: "platform_public_probe_consents is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "platform_public_probe_consents: ProbeConsent is the human actor's short-lived readiness consent; local erasure removes that actor's consent without deleting organization deployment proofs.",
     },
     Entry {
         collection: "platform_public_quotas",
@@ -2458,11 +2518,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_public_readiness_probes",
-        owner: OwnerSelector::Fields(&["actor_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
-        export: Export::Section("account"),
-        export_selector: ExportSelector::Person("actor_user_id"),
-        why: "platform_public_readiness_probes is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        owner: OwnerSelector::Fields(&["binding.sponsor_owner_user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "platform_public_readiness_probes: PublicProbe binds metered readiness work, maximum credits and meter_row_ids to the sponsoring organization; preserve financial evidence and opaque IDs, not a fictitious actor_user_id selector.",
     },
     Entry {
         collection: "platform_public_readiness_records",
@@ -2482,19 +2542,19 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "platform_public_sessions",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        owner: OwnerSelector::Fields(&["sponsor_owner_user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "platform_public_sessions is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
+        why: "platform_public_sessions: Public sessions bind external sender IDs to an organization sponsor. platform_public_agent_service revokes at the fixed 24-hour lifetime and clears encrypted bindings only after confirmed remote cleanup; the opaque revocation/recovery tombstone survives. They are not a person's private assistant history.",
     },
     Entry {
         collection: "platform_public_turns",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
-        export: Export::Excluded(ExclusionReason::NotPersonal),
+        owner: OwnerSelector::Fields(&["sponsor_owner_user_id"]),
+        erasure: Erasure::FeatureRetention("platform_public_credential_service expires_at TTL"),
+        export: Export::Excluded(ExclusionReason::SecretMaterial),
         export_selector: ExportSelector::None,
-        why: "platform_public_turns is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
+        why: "platform_public_turns: Encrypted public input/reply transcripts belong to a public session and organization sponsor, not a NyxID person. platform_public_credential_service::ensure_indexes expires them at expires_at; session authority and cleanup proof remain outside the TTL collection.",
     },
     Entry {
         collection: "platform_settings",
@@ -2535,7 +2595,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "platform_setups",
         owner: OwnerSelector::Fields(&["owner_user_id"]),
-        erasure: Erasure::Domain("platform_or_channel_lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::Platform),
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("owner_user_id"),
         why: "platform_setups is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -2677,6 +2737,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "security_replicas is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
+        collection: "security_effect_intents",
+        owner: OwnerSelector::Fields(&["event.user_id"]),
+        erasure: Erasure::Retained(RetainedCategory::Audit),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "security_effect_intents preserves pre-chain revocation audit events (event.user_id is the acting person, with bounded IP, user-agent and event metadata) and access-restriction notices (binding_id/client_id indirectly identify the subject through OAuth bindings/clients). Erasure must not discard unchained audit evidence or pending delivery bookkeeping. Audit append failures retry without a lifetime cap; pending/claimed work has no TTL. Delivered CAE notices and failed/uncertain outcomes expire 30 days after completed_at; successfully chained audit intents are deleted. The internal outbox is excluded from export; delivered audit event metadata is available through audit_log.",
+    },
+    Entry {
         collection: "security_rollouts",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
@@ -2695,7 +2763,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "service_account_tokens",
         owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::Domain("local_service_account_lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::ServiceAccounts),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
         export_selector: ExportSelector::None,
         why: "service_account_tokens is cleaned by the local_service_account_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -2703,7 +2771,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "service_accounts",
         owner: OwnerSelector::Fields(&["owner_user_id", "created_by"]),
-        erasure: Erasure::Domain("local_service_account_lifecycle"),
+        erasure: Erasure::Domain(ErasureDomain::ServiceAccounts),
         export: Export::Section("services"),
         export_selector: ExportSelector::LegacyServiceAccount,
         why: "service_accounts stores person-owned service-account metadata; credentials and tokens are excluded.",
@@ -2818,35 +2886,35 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "telegram_bot_requests",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
+        owner: OwnerSelector::Fields(&["owner_user_id", "actor_user_id"]),
+        erasure: Erasure::Redacted,
         export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "telegram_bot_requests stores the person-owned telegram bot requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        export_selector: ExportSelector::Person("owner_user_id"),
+        why: "telegram_bot_requests belongs to owner_user_id; actor_user_id is creator attribution and does not transfer an organization request. Active provisioning is retained until its existing lifecycle settles.",
     },
     Entry {
         collection: "telegram_managed_bot_events",
-        owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::LocalInventory,
-        export: Export::Section("account_activity"),
-        export_selector: ExportSelector::Person("user_id"),
-        why: "telegram_managed_bot_events stores the person-owned telegram managed bot events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "telegram_managed_bot_events: ManagedBotEvents stores Telegram bot/user identifiers and monotonic update/revision observations used to reject stale creation events. There is no NyxID user_id; the restricted creation/revocation receipt survives as replay evidence, not a personal request.",
     },
     Entry {
         collection: "telemetry_capture_accounts",
         owner: OwnerSelector::Fields(&["_id"]),
-        erasure: Erasure::Domain("telemetry_erasure_service"),
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "telemetry_capture_accounts is cleaned by the telemetry_erasure_service lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "telemetry_capture_accounts retains restricted capture-generation and dispatch outcome evidence used by vendor erasure to prevent replay and attest processing drain; the telemetry lifecycle does not hard-delete these receipts.",
     },
     Entry {
         collection: "telemetry_dispatches",
         owner: OwnerSelector::Fields(&["user_id"]),
-        erasure: Erasure::Domain("telemetry_erasure_service"),
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
         export_selector: ExportSelector::None,
-        why: "telemetry_dispatches is cleaned by the telemetry_erasure_service lifecycle, which applies the domain-specific external-effect and ownership fences.",
+        why: "telemetry_dispatches retains restricted capture-generation and dispatch outcome evidence used by vendor erasure to prevent replay and attest processing drain; the telemetry lifecycle does not hard-delete these receipts.",
     },
     Entry {
         collection: "telemetry_erasure_destinations",
@@ -2890,11 +2958,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "trigger_run_budgets",
-        owner: OwnerSelector::NotPersonal,
-        erasure: Erasure::NotPersonal("shared or coordination record"),
+        owner: OwnerSelector::Fields(&["_id"]),
+        erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::NotPersonal),
         export_selector: ExportSelector::None,
-        why: "trigger_run_budgets is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
+        why: "trigger_run_budgets: trigger_schedule::admit_budget writes a person-keyed expiring admission budget; local::inventory removes it on account erasure.",
     },
     Entry {
         collection: "trigger_runs",
@@ -3031,7 +3099,7 @@ pub static ENTRIES: &[Entry] = &[
     Entry {
         collection: "users",
         owner: OwnerSelector::Fields(&["_id"]),
-        erasure: Erasure::Domain("source"),
+        erasure: Erasure::Domain(ErasureDomain::Source),
         export: Export::Section("account"),
         export_selector: ExportSelector::Person("_id"),
         why: "users is cleaned by the source lifecycle, which applies the domain-specific external-effect and ownership fences.",
@@ -3078,7 +3146,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("channel_email_receipts", "user_id"),
     ("channel_email_sends", "user_id"),
     ("channel_reply_deliveries", "user_id"),
-    ("mcp_session_notifications", "user_id"),
     ("nyxbot_events", "user_id"),
     ("refresh_tokens", "user_id"),
     ("service_change_events", "actor.person_id"),
@@ -3208,11 +3275,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
-        "assistant_learning_migrations",
-        "owner_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
         "assistant_skill_draft_attempts",
         "user_id",
         OwnerIndexBoundedReason::ShortTtl,
@@ -3243,11 +3305,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         OwnerIndexBoundedReason::ShortTtl,
     ),
     (
-        "channel_adapter_accounts",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
         "channel_adapter_allocations",
         "user_id",
         OwnerIndexBoundedReason::SmallOrResourceBounded,
@@ -3263,18 +3320,13 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         OwnerIndexBoundedReason::ShortTtl,
     ),
     (
-        "encrypted_record_migration_findings",
-        "owner_uuid",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
-        "encrypted_record_migration_runs",
-        "owner_uuid",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
         "feature_flag_overrides",
         "target_key",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "invite_codes",
+        "created_by",
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
@@ -3293,13 +3345,23 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         OwnerIndexBoundedReason::ShortTtl,
     ),
     (
+        "machine_updates",
+        "user_id",
+        OwnerIndexBoundedReason::SmallOrResourceBounded,
+    ),
+    (
+        "machine_oauth_consent_requests",
+        "user_id",
+        OwnerIndexBoundedReason::ShortTtl,
+    ),
+    (
         "oauth_consent_requests",
         "user_id",
         OwnerIndexBoundedReason::ShortTtl,
     ),
     (
         "openclaw_channel_mappings",
-        "user_id",
+        "nyxid_user_id",
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
@@ -3308,23 +3370,10 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
-        "platform_guide_selections",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
-        "platform_native_replies",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
-        "platform_onboarding_binding_requests",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
-        "platform_personal_decision_spacing",
-        "user_id",
+        // Human readiness consent expires after five minutes and is purged by
+        // platform_public_contract_service::sweep_probes.
+        "platform_public_probe_consents",
+        "actor_user_id",
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
@@ -3349,13 +3398,8 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
     ),
     (
         "telegram_bot_requests",
-        "user_id",
+        "owner_user_id",
         OwnerIndexBoundedReason::ShortTtl,
-    ),
-    (
-        "telegram_managed_bot_events",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
         "channel_send_claims",
@@ -3853,6 +3897,33 @@ mod tests {
     }
 
     #[test]
+    fn domain_variants_are_bound_to_durable_dispatch_and_real_entry_points() {
+        let durable = include_str!("personal_erasure_service.rs");
+        let worker = include_str!("personal_erasure_service/worker.rs");
+        let local = include_str!("personal_erasure_service/local.rs");
+        for entry in entries() {
+            if let Erasure::Domain(domain) = entry.erasure {
+                let (checkpoint, handler) = domain.execution();
+                assert!(
+                    durable.contains(&format!("\"{checkpoint}\"")),
+                    "{}: unknown checkpoint",
+                    entry.collection
+                );
+                let normalized = format!("{worker}{local}")
+                    .split_whitespace()
+                    .collect::<String>();
+                assert!(
+                    normalized.contains(handler)
+                        || normalized
+                            .contains(&format!("{}(", handler.rsplit("::").next().unwrap())),
+                    "{}: handler {handler} is not invoked",
+                    entry.collection
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_scanner_resolves_aliases_and_associated_constants() {
         let sources = vec![
             (
@@ -3893,6 +3964,57 @@ mod tests {
     }
 
     #[test]
+    fn security_effect_outbox_retains_pre_chain_audit_and_excludes_internal_delivery_state() {
+        use crate::models::security_effect_intent::{COLLECTION_NAME, SecurityEffect};
+        use crate::services::{audit_service, security_effect_service};
+
+        let entry = find(COLLECTION_NAME).unwrap();
+        assert_eq!(entry.owner, OwnerSelector::Fields(&["event.user_id"]));
+        assert_eq!(entry.erasure, Erasure::Retained(RetainedCategory::Audit));
+        assert_eq!(
+            entry.export,
+            Export::Excluded(ExclusionReason::TransientCoordination)
+        );
+        assert_eq!(entry.export_selector, ExportSelector::None);
+        let actor = audit_service::AuditActor {
+            user_id: "departing-person".into(),
+            ip_address: Some("192.0.2.1".into()),
+            user_agent: Some("fixture-agent".into()),
+            api_key_id: None,
+            api_key_name: None,
+        };
+        let audit =
+            audit_service::required::intent(Some(&actor), "oauth_consent_revoked", None).unwrap();
+        let audit = bson::to_document(&audit).unwrap();
+        assert_eq!(
+            audit.get_document("event").unwrap().get_str("user_id"),
+            Ok("departing-person")
+        );
+        let cae = security_effect_service::new_intent(
+            "notice".into(),
+            SecurityEffect::Cae {
+                binding_id: "opaque-binding-hash".into(),
+                client_id: "application-id".into(),
+                revoke_source: "user".into(),
+            },
+        );
+        let cae = bson::to_document(&cae).unwrap();
+        assert_eq!(cae.get_str("binding_id"), Ok("opaque-binding-hash"));
+        assert_eq!(cae.get_str("client_id"), Ok("application-id"));
+        assert!(!cae.contains_key("user_id") && !cae.contains_key("event"));
+        assert!(
+            !crate::services::personal_erasure_service::local::inventory(&actor.user_id)
+                .iter()
+                .any(|(name, _)| *name == COLLECTION_NAME)
+        );
+        assert!(
+            !ADDITIONAL_EXPORT_VIEWS
+                .iter()
+                .any(|view| view.collection == COLLECTION_NAME)
+        );
+    }
+
+    #[test]
     fn local_inventory_and_registry_have_no_unclassified_collections() {
         let inventory = crate::services::personal_erasure_service::local::inventory("probe");
         let inventory_names: BTreeSet<_> = inventory.iter().map(|(name, _)| *name).collect();
@@ -3923,10 +4045,7 @@ mod tests {
         let collection = crate::models::node_credential_desired::COLLECTION_NAME;
         let entry = find(collection).expect("registered delivery intent");
         assert_eq!(entry.owner, OwnerSelector::Fields(&["owner_id"]));
-        assert_eq!(
-            entry.erasure,
-            Erasure::Domain("local::pass node drain + personal_erasure_registry::final_metadata")
-        );
+        assert_eq!(entry.erasure, Erasure::Domain(ErasureDomain::NodeDrain));
         assert_eq!(
             entry.export,
             Export::Excluded(ExclusionReason::TransientCoordination)
@@ -4353,6 +4472,7 @@ mod tests {
                 ("user_services", "last_change.actor.person_id"),
                 ("oauth_states", "history_context.actor.person_id"),
                 ("assistant_group_messages", "author_user_id"),
+                ("telegram_bot_requests", "actor_user_id"),
             ])
         );
         assert_eq!(paths.len(), ATTRIBUTIONS.len());
@@ -4468,18 +4588,19 @@ mod tests {
         // The checked-in classification is complete relative to the
         // origin/main fixture: every uncovered registry/join predicate is
         // either a kept large-stream index or an explicitly bounded drop.
+        let mut classification_errors = Vec::new();
         for (collection, field) in registry_owner_predicates() {
             let covered = field == "_id" || snapshot_has_prefix(&origin[collection], field);
             let classified = OWNER_INDEX_GAPS.contains(&(collection, field))
                 || owner_index_bounded_predicates().contains(&(collection, field));
-            assert!(
-                covered || classified,
-                "unclassified origin/main owner gap for {collection}.{field}"
-            );
-            assert!(
-                !covered || !classified,
-                "owner-index classification redundantly covers existing index for {collection}.{field}"
-            );
+            if !covered && !classified {
+                classification_errors.push(format!(
+                    "unclassified origin/main owner gap for {collection}.{field}"
+                ));
+            }
+            if covered && classified {
+                classification_errors.push(format!("owner-index classification redundantly covers existing index for {collection}.{field}"));
+            }
         }
         for spec in JOINED_CHILD_SPECS {
             if spec.child_parent_field == "_id" {
@@ -4502,6 +4623,12 @@ mod tests {
                 spec.child_parent_field
             );
         }
+
+        assert!(
+            classification_errors.is_empty(),
+            "{}",
+            classification_errors.join("\n")
+        );
 
         // The branch must be safe for an existing deployment and idempotent
         // when both a new and an old replica restart during the rollout.
@@ -4720,6 +4847,8 @@ mod tests {
             "target_key".to_owned(),
             "person_id".to_owned(),
             "credential_user_id".to_owned(),
+            // The storage model is in services::openclaw_channel_service.
+            "nyxid_user_id".to_owned(),
         ]);
         for entry in ENTRIES {
             let OwnerSelector::Fields(owner_fields) = entry.owner else {

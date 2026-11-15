@@ -15,7 +15,7 @@ async fn step(state: &crate::AppState) {
 }
 
 async fn until_source_removed(state: &crate::AppState, owner: &str) {
-    for _ in 0..240 {
+    for _ in 0..640 {
         if state
             .db
             .collection::<Document>(USERS)
@@ -27,11 +27,172 @@ async fn until_source_removed(state: &crate::AppState, owner: &str) {
             return;
         }
         step(state).await;
+        if state
+            .db
+            .collection::<Document>("assistant_voice_sessions")
+            .find_one(doc! {"user_id":owner,"fixture_voice":true,"purge_requested":true})
+            .await
+            .unwrap()
+            .is_some()
+        {
+            // Exercise the real recovery claim before closing an expired
+            // terminal session; a stored row's old lease cannot authorize close.
+            for voice in
+                crate::services::voice::session::claim_orphans(&state.db, "inventory-fixture")
+                    .await
+                    .unwrap()
+            {
+                assert_eq!(voice.user_id, owner);
+                crate::services::voice::session::close(&state.db, &voice, "account_erasure", true)
+                    .await
+                    .unwrap();
+            }
+        }
     }
     panic!(
         "source did not drain: {:?}",
         status(&state.db, owner).await.unwrap()
     );
+}
+
+#[tokio::test]
+async fn personal_erasure_preserves_revocation_outbox_until_audit_delivery() {
+    use crate::models::{oauth_broker_binding, refresh_token, security_effect_intent};
+    use crate::services::{audit_service, oauth_broker_service, security_effect_service};
+
+    let (db, owner) = super::tests::fixture().await;
+    let state = test_app_state(db.clone());
+    security_effect_service::ensure_indexes(&db).await.unwrap();
+    let binding_id =
+        oauth_broker_binding::hash_binding_id(&oauth_broker_binding::generate_binding_id());
+    let now = bson::DateTime::now();
+    let binding: oauth_broker_binding::OauthBrokerBinding = bson::from_document(doc! {
+        "_id": &binding_id, "user_id": &owner, "client_id": "outbox-client",
+        "refresh_token_jti": "outbox-refresh", "created_at": now, "revoked": false,
+    })
+    .unwrap();
+    db.collection::<oauth_broker_binding::OauthBrokerBinding>(
+        oauth_broker_binding::COLLECTION_NAME,
+    )
+    .insert_one(binding)
+    .await
+    .unwrap();
+    let tokens = db.collection::<refresh_token::RefreshToken>(refresh_token::COLLECTION_NAME);
+    for id in ["outbox-refresh", "acceptance-refresh"] {
+        let token: refresh_token::RefreshToken = bson::from_document(doc! {
+            "_id": id, "jti": id, "user_id": &owner, "client_id": "outbox-client",
+            "session_id": null, "expires_at": now, "revoked": false,
+            "replaced_by": null, "created_at": now,
+        })
+        .unwrap();
+        tokens.insert_one(token).await.unwrap();
+    }
+    oauth_broker_service::revoke_binding_by_user_as(
+        &db,
+        &audit_service::AuditActor {
+            user_id: owner.clone(),
+            ip_address: Some("192.0.2.1".into()),
+            user_agent: Some("fixture-agent".into()),
+            api_key_id: None,
+            api_key_name: None,
+        },
+        &binding_id,
+        "user_revoked",
+    )
+    .await
+    .unwrap();
+    let intents = db.collection::<Document>(security_effect_intent::COLLECTION_NAME);
+    let before = intents
+        .find(doc! {})
+        .sort(doc! {"_id":1})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        before.len(),
+        2,
+        "real revocation commits one audit and one notice"
+    );
+    let audit = before
+        .iter()
+        .find(|row| row.get_str("kind") == Ok("audit"))
+        .unwrap();
+    assert_eq!(
+        audit.get_document("event").unwrap().get_str("user_id"),
+        Ok(owner.as_str())
+    );
+
+    accept(
+        &db,
+        &owner,
+        &owner,
+        Some("machine-data-provider-revocation-v2"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        tokens
+            .find_one(doc! {"_id":"acceptance-refresh"})
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked
+    );
+    assert_eq!(
+        intents.count_documents(doc! {}).await.unwrap(),
+        2,
+        "session acceptance revokes authority directly without another outbox occurrence"
+    );
+    until_source_removed(&state, &owner).await;
+    assert!(
+        tokens
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.collection::<Document>(oauth_broker_binding::COLLECTION_NAME)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        intents
+            .find(doc! {})
+            .sort(doc! {"_id":1})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+        before,
+        "personal cleanup must preserve every immutable outbox occurrence"
+    );
+
+    security_effect_service::sweep(&db, &state.encryption_keys)
+        .await
+        .unwrap();
+    let event_id = audit.get_document("event").unwrap().get_str("_id").unwrap();
+    let chained = db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {"_id":event_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chained.get_i64("seq").unwrap() > 0);
+    assert_eq!(chained.get_str("user_id"), Ok(owner.as_str()));
+    assert!(
+        intents
+            .find_one(doc! {"kind":"audit"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    db.drop().await.unwrap();
 }
 
 fn replace_owner(value: &mut bson::Bson, source_owner: &str, target_owner: &str) {
@@ -104,7 +265,11 @@ fn seed_from_inventory_filter(
             };
             let mut value = value;
             replace_owner(&mut value, source_owner, target_owner);
-            output.insert(key, value);
+            crate::services::personal_attribution_service::test_support::put(
+                &mut output,
+                key,
+                value,
+            );
         }
         output
     }
@@ -163,12 +328,57 @@ fn assert_owner_row_is_absent_or_redacted(
     }
 }
 
+/// Expand disjunctive selectors so each independently selectable owner field
+/// must work. A row with every owner field populated would hide a broken branch.
+fn owner_branches(filter: &Document) -> Vec<Document> {
+    let mut branches = vec![Document::new()];
+    for (key, value) in filter {
+        if matches!(key.as_str(), "$or" | "$and") {
+            let clauses = value.as_array().unwrap();
+            let groups = if key == "$or" {
+                vec![
+                    clauses
+                        .iter()
+                        .flat_map(|clause| owner_branches(clause.as_document().unwrap()))
+                        .collect::<Vec<_>>(),
+                ]
+            } else {
+                clauses
+                    .iter()
+                    .map(|clause| owner_branches(clause.as_document().unwrap()))
+                    .collect()
+            };
+            for choices in groups {
+                branches = branches
+                    .iter()
+                    .flat_map(|base| {
+                        choices.iter().map(|choice| {
+                            let mut row = base.clone();
+                            row.extend(choice.clone());
+                            row
+                        })
+                    })
+                    .collect();
+            }
+        } else {
+            for branch in &mut branches {
+                branch.insert(key, value.clone());
+            }
+        }
+    }
+    branches
+}
+
 /// Registry-driven behavioral coverage. The inventory is the table of cases,
 /// so adding a new local predicate automatically adds a target/bystander case.
 #[tokio::test]
 async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
     let (db, owner) = tests::fixture().await;
     let state = test_app_state(db.clone());
+    let (clients, server) = crate::telemetry::erasure::test_support::clients().await;
+    super::super::telemetry_erasure_service::register_destinations(&db, &clients)
+        .await
+        .unwrap();
     let other = uuid::Uuid::new_v4().to_string();
     let org = uuid::Uuid::new_v4().to_string();
     db.collection::<User>(USERS)
@@ -185,7 +395,14 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
     let mut org_rows = Vec::new();
     let mut retained_rows = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for (index, (collection, filter)) in super::local::inventory(&owner).into_iter().enumerate() {
+    let cases = super::local::inventory(&owner)
+        .into_iter()
+        .flat_map(|(collection, filter)| {
+            owner_branches(&filter)
+                .into_iter()
+                .map(move |filter| (collection, filter))
+        });
+    for (index, (collection, filter)) in cases.enumerate() {
         let target_id = format!("registry-target-{index}");
         let bystander_id = format!("registry-bystander-{index}");
         let target = seed_from_inventory_filter(&filter, &owner, &owner, &target_id);
@@ -235,6 +452,214 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         }
     }
 
+    // Domain fixtures exercise each owner field independently. Real storage
+    // fixtures supply fields required by typed lifecycle readers; the terminal
+    // states below prove what each lifecycle retains rather than pretending
+    // every domain is a hard-delete handler.
+    let model_inputs: std::collections::BTreeMap<String, Vec<Document>> = serde_json::from_str(
+        include_str!("../../../test_data/account-export-models.json"),
+    )
+    .unwrap();
+    let mut domain_rows = Vec::new();
+    let mut covered_fields = std::collections::BTreeSet::new();
+    for (collection, fields) in super::local::inventory_owner_fields(&owner) {
+        for field in fields {
+            covered_fields.insert((collection, field));
+        }
+    }
+    for entry in crate::services::personal_data_registry::entries() {
+        use crate::services::personal_data_registry::{Erasure, OwnerSelector};
+        let OwnerSelector::Fields(fields) = entry.owner else {
+            continue;
+        };
+        for field in fields {
+            match entry.erasure {
+                Erasure::Retained(_) | Erasure::FeatureRetention(_) => {
+                    covered_fields.insert((entry.collection, (*field).to_owned()));
+                }
+                Erasure::Domain(_) => {
+                    covered_fields.insert((entry.collection, (*field).to_owned()));
+                    if entry.collection == "users" {
+                        continue;
+                    }
+                    for person in [&owner, &other] {
+                        let id = format!(
+                            "domain-{}-{}-{}",
+                            entry.collection,
+                            field,
+                            if person == &owner {
+                                "target"
+                            } else {
+                                "bystander"
+                            }
+                        );
+                        let mut row = model_inputs
+                            .get(entry.collection)
+                            .map(|rows| rows[0].clone())
+                            .unwrap_or_default();
+                        // Never populate both disjunctive owner fields with
+                        // the target: that would conceal a broken selector.
+                        for owner_field in fields {
+                            if !owner_field.contains('.') {
+                                row.remove(*owner_field);
+                            }
+                        }
+                        row.insert("_id", &id);
+                        crate::services::personal_attribution_service::test_support::put(
+                            &mut row,
+                            field,
+                            person.clone().into(),
+                        );
+                        match entry.collection {
+                            "assistant_learning_publication_targets" => {
+                                row.insert("state", "landed");
+                            }
+                            "assistant_voice_sessions" => {
+                                row.insert("state", "closed");
+                                row.insert("live_slot", false);
+                                row.insert("billing_finalized", true);
+                                row.insert("final_usage_confirmed", true);
+                                row.insert("fixture_voice", true);
+                            }
+                            "nodes" => {
+                                row.insert("is_active", false);
+                                row.insert("status", "offline");
+                            }
+                            "node_pending_credentials" | "node_service_bindings" => {
+                                row.insert(
+                                    "node_id",
+                                    format!(
+                                        "domain-nodes-user_id-{}",
+                                        if person == &owner {
+                                            "target"
+                                        } else {
+                                            "bystander"
+                                        }
+                                    ),
+                                );
+                            }
+                            "oracle_pools" => {
+                                row.insert("is_active", false);
+                                row.insert("deletion_cleanup_pending", false);
+                            }
+                            "oracle_workers" => {
+                                row.insert("pool_id", "shared-org-pool");
+                            }
+                            "service_accounts" => {
+                                row.insert("personal_erasure_credentials_preserved", true);
+                            }
+                            "org_channel_sender_links" => {
+                                row.insert("active", false);
+                            }
+                            "platform_setups" => {
+                                row.insert("state", "cancelled");
+                                row.insert("active", false);
+                            }
+                            "platform_bot_installations" => {
+                                row.insert("state", "owner_deleted");
+                            }
+                            _ => {}
+                        }
+                        let disposition = match entry.collection {
+                            "assistant_learning_publication_targets" | "oracle_pools" => "retained",
+                            "oracle_workers" => "oracle_credential",
+                            "org_channel_sender_links" => "link_tombstone",
+                            _ => "deleted",
+                        };
+                        db.collection::<Document>(entry.collection)
+                            .insert_one(row.clone())
+                            .await
+                            .unwrap();
+                        domain_rows.push((
+                            entry.collection,
+                            id,
+                            row,
+                            person == &owner,
+                            disposition,
+                        ));
+                    }
+                }
+                Erasure::Redacted => {
+                    if let Some(spec) = crate::services::personal_data_registry::attribution(
+                        entry.collection,
+                        field,
+                    ) {
+                        covered_fields.insert((entry.collection, (*field).to_owned()));
+                        for person in [&owner, &other] {
+                            let id = format!("attribution-{}-{}-{person}", entry.collection, field);
+                            let mut row = doc! {"_id": &id};
+                            crate::services::personal_attribution_service::test_support::put(
+                                &mut row,
+                                field,
+                                person.clone().into(),
+                            );
+                            for path in spec.name_fields {
+                                crate::services::personal_attribution_service::test_support::put(
+                                    &mut row,
+                                    path,
+                                    "Deleted Person".into(),
+                                );
+                            }
+                            for path in spec.email_fields {
+                                crate::services::personal_attribution_service::test_support::put(
+                                    &mut row,
+                                    path,
+                                    "deleted@example.test".into(),
+                                );
+                            }
+                            db.collection::<Document>(entry.collection)
+                                .insert_one(row.clone())
+                                .await
+                                .unwrap();
+                            domain_rows.push((
+                                entry.collection,
+                                id,
+                                row,
+                                person == &owner,
+                                "attribution",
+                            ));
+                        }
+                    } else if entry.collection == "service_change_events" && *field == "owner_id" {
+                        covered_fields.insert((entry.collection, (*field).to_owned()));
+                        for person in [&owner, &other] {
+                            let id = format!("history-owner-{person}");
+                            let row = doc! {"_id": &id, "owner_id": person};
+                            db.collection::<Document>(entry.collection)
+                                .insert_one(row.clone())
+                                .await
+                                .unwrap();
+                            domain_rows.push((
+                                entry.collection,
+                                id,
+                                row,
+                                person == &owner,
+                                "deleted",
+                            ));
+                        }
+                    } else if entry.collection == "invite_codes" {
+                        covered_fields.insert((entry.collection, (*field).to_owned()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let expected_fields: std::collections::BTreeSet<_> =
+        crate::services::personal_data_registry::entries()
+            .iter()
+            .flat_map(|entry| match entry.owner {
+                crate::services::personal_data_registry::OwnerSelector::Fields(fields) => fields
+                    .iter()
+                    .map(|field| (entry.collection, (*field).to_owned()))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+    assert_eq!(
+        covered_fields, expected_fields,
+        "every persisted owner field needs an independent behavioral case"
+    );
+
     let retained_checkpoint = doc! {
         "version": 1_i32, "sequence": 1_i64, "protocol": "responses",
         "final_report": true, "evidence": {"total": 37_i64}, "recovered": false,
@@ -247,32 +672,69 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         if !matches!(
             entry.erasure,
             crate::services::personal_data_registry::Erasure::Retained(_)
+                | crate::services::personal_data_registry::Erasure::FeatureRetention(_)
         ) {
             continue;
         }
-        let id = format!("registry-retained-{index}");
-        let mut row = doc! {"_id": &id, "fixture_marker": "registry-retained"};
-        if let crate::services::personal_data_registry::OwnerSelector::Fields(fields) = entry.owner
-        {
-            for field in fields {
-                if *field != "_id" && !field.contains('.') {
-                    row.insert(*field, &owner);
+        let fields = match entry.owner {
+            crate::services::personal_data_registry::OwnerSelector::Fields(fields) => fields,
+            _ => &[],
+        };
+        for (field_index, field) in fields.iter().enumerate() {
+            for person in [&owner, &other] {
+                let id = if *field == "_id" {
+                    person.clone()
+                } else {
+                    format!("registry-retained-{index}-{field_index}-{person}")
+                };
+                let mut row = if entry.collection == "managed_machines" {
+                    use crate::models::remote_machine::{AuthorizationState, ResourceState};
+                    let mut machine =
+                        crate::services::remote_machine_service::CreateMachineInput::fixed(
+                            person,
+                            true,
+                            "sha256:fixture",
+                        )
+                        .preview(&id, chrono::Utc::now());
+                    machine.resource_state = ResourceState::Deleted;
+                    machine.authorization_state = AuthorizationState::Revoked;
+                    machine.writer_admitted = false;
+                    machine.cleanup_state = "complete".into();
+                    machine.cleanup_evidence_digest = Some("verified-cleanup".into());
+                    bson::to_document(&machine).unwrap()
+                } else {
+                    doc! {"_id": &id}
+                };
+                row.insert("fixture_marker", "registry-retained");
+                crate::services::personal_attribution_service::test_support::put(
+                    &mut row,
+                    field,
+                    person.into(),
+                );
+                row.insert("completed", true);
+                if entry.collection == "personal_erasure_effects" {
+                    row.insert("status", "complete");
+                    row.insert("kind", "oauth_revocation");
                 }
+                if entry.collection == "telemetry_capture_accounts" {
+                    row.insert("generation", "registry-generation");
+                    row.insert("provider_drained_generation", "registry-generation");
+                }
+                if entry.collection == "usage_meter" {
+                    row.insert("usage_checkpoint", retained_checkpoint.clone());
+                }
+                db.collection::<Document>(entry.collection)
+                    .insert_one(row.clone())
+                    .await
+                    .unwrap();
+                retained_rows.push((entry.collection, id, row));
             }
         }
-        if entry.collection == "usage_meter" {
-            row.insert("usage_checkpoint", retained_checkpoint.clone());
-        }
-        db.collection::<Document>(entry.collection)
-            .insert_one(row)
-            .await
-            .unwrap();
-        retained_rows.push((entry.collection, id));
     }
 
     db.collection::<Document>("invite_codes")
         .insert_one(doc! {
-            "_id": "registry-invite",
+            "_id": "registry-invite", "created_by": &owner, "note": "Deleted Person",
             "used_count": 1_i32,
             "max_uses": 2_i32,
             "usages": [{"user_id": &owner, "email": "deleted@example.test", "used_at": bson::DateTime::now()}],
@@ -367,6 +829,47 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         .unwrap();
     until_source_removed(&state, &owner).await;
 
+    finish_with_vendor_evidence(&state, &owner, &clients, &server).await;
+    assert_eq!(
+        status(&db, &owner).await.unwrap().unwrap().status,
+        ErasureStatus::Complete
+    );
+    for (collection, id, before, target, disposition) in domain_rows {
+        let row = db
+            .collection::<Document>(collection)
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap();
+        if !target {
+            assert_eq!(row, Some(before), "bystander {collection}");
+            continue;
+        }
+        match disposition {
+            "deleted" => assert!(row.is_none(), "domain row survived in {collection}"),
+            "retained" => assert_eq!(row, Some(before), "retained domain {collection}"),
+            "oracle_credential" => {
+                let row = row.unwrap();
+                assert_eq!(row.get_str("desired_state"), Ok("draining"));
+                assert_eq!(
+                    row.get_document("enrollment")
+                        .unwrap()
+                        .get_bool("retired_for_owner_erasure"),
+                    Ok(true)
+                );
+            }
+            "link_tombstone" => {
+                let row = row.unwrap();
+                assert_eq!(row.get_str("user_id"), Ok("erased"));
+                assert_eq!(row.get_bool("active"), Ok(false));
+            }
+            "attribution" => {
+                let encoded = serde_json::to_string(&row.unwrap()).unwrap();
+                assert!(!encoded.contains("Deleted Person"));
+                assert!(!encoded.contains("deleted@example.test"));
+            }
+            _ => unreachable!(),
+        }
+    }
     for (collection, id) in target_rows {
         let row = db
             .collection::<Document>(collection)
@@ -406,13 +909,19 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
             "joined child survived in {collection}"
         );
     }
-    for (collection, id) in retained_rows {
+    for (collection, id, expected) in retained_rows {
         let row = db
             .collection::<Document>(collection)
             .find_one(doc! {"_id": id})
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("retained row disappeared from {collection}"));
+        let mut row_for_comparison = row.clone();
+        row_for_comparison.remove("erasure_completion_fence");
+        assert_eq!(
+            row_for_comparison, expected,
+            "retained row changed in {collection}"
+        );
         if collection == "usage_meter" {
             assert_eq!(
                 row.get_document("usage_checkpoint").unwrap(),

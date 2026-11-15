@@ -10,7 +10,7 @@ const PAGE: i64 = 32;
 
 /// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
 /// the durable domain shape and intentionally remains unchanged for old jobs.
-pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 3;
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 4;
 
 pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
@@ -446,15 +446,12 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ("assistant_action_receipts", doc! {"user_id": owner}),
         ("assistant_voice_windows", doc! {"user_id": owner}),
         ("assistant_wire_logs", doc! {"user_id": owner}),
-        ("channel_adapter_accounts", doc! {"user_id": owner}),
-        ("mcp_session_notifications", doc! {"user_id": owner}),
-        ("openclaw_channel_mappings", doc! {"user_id": owner}),
-        ("telegram_bot_requests", doc! {"user_id": owner}),
+        ("openclaw_channel_mappings", doc! {"nyxid_user_id": owner}),
+        ("telegram_bot_requests", doc! {"owner_user_id": owner, "active": false, "status": {"$in": ["connected", "cancelled", "expired", "suspended"]}}),
         (
             "telegram_bot_claims",
             doc! {"owner_user_id": owner, "status":"redeemed", "delivered": true},
         ),
-        ("telegram_managed_bot_events", doc! {"user_id": owner}),
         (
             "feature_flag_overrides",
             doc! {"target_kind": "user", "target_key": owner},
@@ -464,28 +461,26 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             "platform_personal_setup_selections",
             doc! {"user_id": owner},
         ),
-        ("platform_guide_selections", doc! {"user_id": owner}),
-        ("platform_native_replies", doc! {"user_id": owner}),
         (
             "platform_onboarding_binding_requests",
-            doc! {"user_id": owner},
+            doc! {"approved_user_id": owner},
         ),
         ("platform_onboarding_bindings", doc! {"user_id": owner}),
         (
             "platform_personal_decision_spacing",
-            doc! {"user_id": owner},
-        ),
-        (
-            "encrypted_record_migration_findings",
-            doc! {"owner_uuid": owner},
-        ),
-        (
-            "encrypted_record_migration_runs",
-            doc! {"owner_uuid": owner},
+            doc! {"_id": owner},
         ),
         ("assistant_group_agent_access", doc! {"owner_id": owner}),
-        ("assistant_learning_migrations", doc! {"owner_id": owner}),
     ]);
+    rows.extend([
+        ("platform_personal_bindings", doc! {"user_id": owner, "state": "revoked"}),
+        ("platform_personal_link_challenges", doc! {"reviewed_user_id": owner, "state": {"$nin": ["review", "awaiting_chat_confirmation"]}}),
+        ("platform_personal_link_intents", doc! {"claimant_user_id": owner, "state": {"$ne": "pending"}}),
+    ]);
+    rows.push((
+        "platform_public_probe_consents",
+        doc! {"actor_user_id": owner},
+    ));
     rows
 }
 
@@ -698,6 +693,17 @@ async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
             return Ok(true);
         }
     }
+    if redact_page(
+        db,
+        owner,
+        "invite_codes",
+        doc! {"created_by": owner, "note": {"$exists": true, "$ne": bson::Bson::Null}},
+        vec![doc! {"$unset": "note"}],
+    )
+    .await?
+    {
+        return Ok(true);
+    }
     // Invite usage is embedded in an invite owned by another account. Keep
     // used_count/max_uses and the code itself, but remove the person's usage
     // identity (including the legacy email field).
@@ -827,6 +833,10 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
                     "agent_id",
                 ),
             ],
+        ),
+        (
+            m::mcp_session::MCP_SESSION_COLLECTION,
+            &[("mcp_session_notifications", "session_id")],
         ),
         (
             m::channel_conversation::COLLECTION_NAME,
