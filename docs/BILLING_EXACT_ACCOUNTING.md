@@ -189,8 +189,8 @@ make that kind explicitly incomplete; unavailable reads show no totals and are
 retried on the next page read.
 These are amounts still held, not proof of abandonment or permission to charge
 or release them. Conservation diagnostics separately count affected resources
-and wallets, including resources without a wallet. Neither diagnostic changes
-benefit counters or adds work to billed requests.
+and wallets, including resources without a wallet. Reading these diagnostics changes no counters and adds no work to billed
+requests; the scheduled account pass separately repairs proved excess below.
 
 `billing_hold_conservation` reports unchanged mismatches seen in consecutive
 scheduled passes and at least five minutes of stability measured with MongoDB
@@ -204,16 +204,28 @@ pass preserves confirmation; hold repair waits while an asset mismatch holds
 the cursor. A balance change does not hide an unchanged hold mismatch but does
 restart repair confirmation.
 
-For unchanged financial/identity/policy/lock state, a positive wallet excess is
-returned after the second observation in a small snapshot/majority transaction
-that rechecks the live account lease, observation and holds, writes the
-`billing_wallet_hold_excess_repaired` audit event and deletes the observation.
-Deficits and benefit counters are never changed. Routine refresh/expiry clocks
-and provider/tax generations are excluded from confirmation because they can
-change without funds moving. Zero wallet shares are excluded from the live hold
-fingerprint. A clean observation also removes its diagnostic; a completed pass
-removes observations for resources no longer visited. Manual Integrity checks
-keep separate cursors and do not confirm or repair holds.
+For unchanged financial/identity/policy/lock state, positive wallet, grant total,
+grant rule and allowance-period excesses are returned after two consecutive distinct
+passes confirm the same state and its first unchanged observation is at least five
+minutes old in database time. A small snapshot/majority
+transaction rechecks the runner lease, observation, resource and live holds, writes
+one chained `billing_wallet_hold_excess_repaired`, `billing_grant_hold_excess_repaired`
+or `billing_allowance_hold_excess_repaired` audit event, and deletes the observation.
+Benefit audit metadata identifies the resource, optional wallet, per-counter amounts
+and both passes. Any deficit component, incomplete data, missing owner/allocation,
+unexplained receipt or active lock excludes that entire benefit resource. Remaining,
+consumed and asset checkpoints do not change; an expired grant can then finish in
+the existing expiry sweep. Benefit confirmation includes the canonical resource,
+allocation and receipt images; changes restart its database-time age.
+
+Wallet refresh/expiry clocks and provider/tax generations remain excluded from wallet
+confirmation because they can change without funds moving. Zero wallet shares stay
+excluded from its live hold fingerprint. A clean observation also removes its
+diagnostic; a completed pass removes observations for resources no longer visited.
+Manual Integrity checks keep separate cursors and do not confirm or repair holds.
+Benefit repair assumes the confirmed production fleet contains no pre-20-October
+binary that reserved benefits outside a transaction; all running builds are from
+this week, so ordinary rollout or rollback among those builds needs no operator step.
 
 Checks add no commands to admission, settlement or release. Each nonempty
 eligible page reads observations once and live-row presence once; idle resources

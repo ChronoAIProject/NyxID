@@ -13,7 +13,7 @@ async fn observe(f: &Fixture) -> bson::Document {
         .unwrap()
 }
 
-async fn expire_pass(f: &Fixture) {
+pub(super) async fn expire_pass(f: &Fixture) {
     f.db.collection::<bson::Document>("billing_account_verify_lease")
         .update_one(
             doc! {},
@@ -23,7 +23,7 @@ async fn expire_pass(f: &Fixture) {
         .unwrap();
 }
 
-async fn confirmed_before_repair(f: &Fixture) {
+pub(super) async fn confirmed_before_repair(f: &Fixture) {
     f.accounts_clean().await;
     let gate = Gate::new(Phase::BeforeHoldRepair);
     let mut pass = Box::pin(GATE.scope(
@@ -372,7 +372,7 @@ async fn hold_round3_malformed_resources_are_isolated_and_accounts_stay_clean() 
 }
 
 #[tokio::test]
-async fn hold_round3_orphan_benefits_and_signed_kinds_are_reported() {
+async fn hold_round3_missing_owner_benefits_and_signed_wallet_deficits_are_reported() {
     let f = Fixture::new().await;
     let (ctx, grant_id) = f.mixed_request().await;
     let opened = f.service.open(&ctx).await.unwrap();
@@ -435,8 +435,8 @@ async fn hold_round3_orphan_benefits_and_signed_kinds_are_reported() {
         "benefits without a wallet must be visible: {detail}"
     );
     for (kind, difference) in [
-        ("grant", "+2"),
-        ("allowance", "+3"),
+        ("grant", "unknown"),
+        ("allowance", "unknown"),
         ("wallet_deficit", "-1.09"),
     ] {
         assert!(
@@ -445,7 +445,11 @@ async fn hold_round3_orphan_benefits_and_signed_kinds_are_reported() {
         );
         let row =
             f.db.collection::<bson::Document>(OBS)
-                .find_one(doc! {"kind":kind,"difference":difference})
+                .find_one(if difference == "unknown" {
+                    doc! {"kind":kind,"exact":false}
+                } else {
+                    doc! {"kind":kind,"difference":difference}
+                })
                 .await
                 .unwrap();
         assert!(row.is_some(), "observation missing {kind}/{difference}");

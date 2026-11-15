@@ -1,3 +1,4 @@
+mod benefit_repair;
 mod round3;
 
 use super::*;
@@ -1018,7 +1019,7 @@ async fn hold_conservation_expiry_lock_never_authorizes_repair() {
 }
 
 #[tokio::test]
-async fn hold_conservation_benefit_counter_mismatches_are_diagnostic_only() {
+async fn hold_conservation_benefit_counter_excess_is_repaired() {
     let f = Fixture::new().await;
     let (ctx, grant_id) = f.mixed_request().await;
     f.service.open(&ctx).await.unwrap();
@@ -1038,19 +1039,12 @@ async fn hold_conservation_benefit_counter_mismatches_are_diagnostic_only() {
     let diagnostics = crate::services::billing::startup_diagnostics(&f.db)
         .await
         .unwrap();
-    let diagnostic = diagnostics
-        .iter()
-        .find(|d| d.code == "billing_hold_conservation")
-        .unwrap();
     assert!(
-        diagnostic
-            .detail
-            .contains("grant: 1 affected resources; 1 wallets;")
-            && diagnostic
-                .detail
-                .contains("allowance: 1 affected resources; 1 wallets;"),
-        "deduplicate resource owners per kind"
+        diagnostics
+            .iter()
+            .all(|d| d.code != "billing_hold_conservation")
     );
+    assert_eq!(benefit_repair::audits(&f).await.len(), 2);
     assert_eq!(repair_audits(&f).await, 0);
     assert_eq!(
         f.db.collection::<bson::Document>("usage_allowance_periods")
@@ -1060,19 +1054,8 @@ async fn hold_conservation_benefit_counter_mismatches_are_diagnostic_only() {
             .unwrap()
             .get_i64("reserved_quantity")
             .unwrap(),
-        2
+        1
     );
-    f.db.collection::<bson::Document>("credit_grants")
-        .update_one(
-            doc! {"_id":&grant_id},
-            doc! {"$inc":{"service_limits.0.reserved":-Credits::from_whole(1)}},
-        )
-        .await
-        .unwrap();
-    f.db.collection::<bson::Document>("usage_allowance_periods")
-        .update_one(doc! {}, doc! {"$inc":{"reserved_quantity":-1_i64}})
-        .await
-        .unwrap();
     f.holds_clean().await;
     f.db.drop().await.unwrap();
 }
