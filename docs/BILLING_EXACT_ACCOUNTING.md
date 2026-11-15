@@ -71,6 +71,18 @@ and held amounts; this diagnostic never changes usage. Missing registry evidence
 permits no death inference. Old live generations without registration times block
 legacy inference. No healthy stream gains a lifetime limit.
 
+The classification starts from potential wallet, grant and allowance holds,
+using three partial indexes that exclude zero reservations and settled benefit
+funding. It reads 128 candidates per source in rotation, at most 10,000 distinct
+rows within four seconds. Receipts and applied resource locks are deducted in a
+single pinned snapshot. Completed groups survive truncation as lower bounds,
+with a stable reason, stage, elapsed time and database code when available.
+Zero-hold forwarding history cannot consume the candidate limit. A separate
+index-only count examines at most 100,001 entries in each of the four indexes;
+subtracting the sum of potential-hold counts from the capped forwarded count
+provides a conservative hold-less lower bound. Overlapping funding and returned
+holds can undercount it. No payloads are read for that count.
+
 
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced

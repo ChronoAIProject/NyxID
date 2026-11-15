@@ -191,7 +191,7 @@ async fn stuck_request_inventory_is_indexed_bounded_and_read_only() {
         .replace_one(doc! {}, &raw)
         .await
         .unwrap();
-    let plan=f.db.run_command(doc!{"explain":{"aggregate":METERS,"pipeline":inventory::pipeline(),"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
+    let plan=f.db.run_command(doc!{"explain":{"aggregate":METERS,"pipeline":inventory::pipeline(selection::Source::Wallet, "", inventory::PAGE_ROWS),"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
     let plan = serde_json::to_string(&plan).unwrap();
     assert!(plan.contains("IXSCAN"), "{plan}");
     assert!(!plan.contains("COLLSCAN"), "{plan}");
@@ -406,19 +406,19 @@ async fn stuck_request_inventory_failure_reasons_are_metadata_only() {
     )
     .await;
     f.db.collection::<Document>(METERS)
-        .drop_index(inventory::INDEX)
+        .drop_index(selection::Source::Wallet.index())
         .await
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
         d[0].detail
-            .contains("reason=index_unavailable stage=inventory database_code=2 elapsed_ms="),
+            .contains("reason=index_unavailable stage=holdless_count database_code=2 elapsed_ms="),
         "{}",
         d[0].detail
     );
     assert!(!d[0].detail.contains(&f.owner));
     f.db.collection::<Document>(METERS)
-        .create_index(index())
+        .create_index(selection::Source::Wallet.model())
         .await
         .unwrap();
     f.db.collection::<Document>("security_replicas")
@@ -470,6 +470,12 @@ async fn stuck_request_inventory_timeout_is_explicit_and_bounded() {
     let result = READ_GATE.scope(gate, diagnostics(&f.db)).await.unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(6));
     assert!(
+        result[0].detail.contains("rows=1 distinct_requests=1"),
+        "{}",
+        result[0].detail
+    );
+    assert!(result[0].detail.contains("truncated=true"));
+    assert!(
         result[0]
             .detail
             .contains("reason=deadline_exceeded stage=inventory elapsed_ms="),
@@ -488,3 +494,196 @@ async fn stuck_request_inventory_timeout_is_explicit_and_bounded() {
 
 #[path = "scale_tests.rs"]
 mod scale;
+
+#[tokio::test]
+async fn stuck_request_inventory_held_rows_are_not_hidden_by_holdless_prefix() {
+    let f = Fixture::new().await;
+    let _metered = f.open(true).await;
+    roster(
+        &f,
+        "live",
+        Some(bson::DateTime::now()),
+        bson::DateTime::now(),
+    )
+    .await;
+    let mut raw =
+        f.db.collection::<Document>(METERS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    f.db.collection::<Document>(METERS)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    raw.insert("_id", "z-held");
+    raw.insert("transaction_id", "held");
+    raw.insert("billing_request_id", "held");
+    f.db.collection::<Document>(METERS)
+        .insert_one(&raw)
+        .await
+        .unwrap();
+    let rows: Vec<_> = (0..12_000)
+        .map(|i| {
+            let mut row = raw.clone();
+            row.insert("_id", format!("a-empty-{i:05}"));
+            row.insert("transaction_id", format!("empty-{i}"));
+            row.insert("billing_request_id", format!("empty-{i}"));
+            row.insert("reserved_credits", Credits::ZERO);
+            if i % 2 == 0 {
+                row.insert("wallet_id", Bson::Null);
+            }
+            row
+        })
+        .collect();
+    f.db.collection::<Document>(METERS)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let result = diagnostics(&f.db).await.unwrap();
+    let detail = result[0].detail.clone();
+    f.db.drop().await.unwrap();
+    assert!(detail.contains("rows=1 distinct_requests=1"), "{detail}");
+    assert!(detail.starts_with("complete=true"), "{detail}");
+    assert!(detail.contains("holdless_rows_at_least=12000"), "{detail}");
+}
+
+#[tokio::test]
+async fn stuck_request_inventory_zero_allocations_legacy_amount_and_index_only_counts() {
+    let f = Fixture::new().await;
+    let _metered = f.open(true).await;
+    roster(
+        &f,
+        "live",
+        Some(bson::DateTime::now()),
+        bson::DateTime::now(),
+    )
+    .await;
+    f.db.collection::<Document>("credit_grants")
+        .insert_one(doc! {"_id":"g","recipient_user_id":&f.owner})
+        .await
+        .unwrap();
+    f.db.collection::<Document>(METERS)
+        .update_many(
+            doc! {},
+            doc! {"$set":{
+                "reserved_credits":Credits::ZERO,
+                "funding.grant_reservations":[{"grant_id":"g","amount_micros":1_000_000_i64}],
+            }},
+        )
+        .await
+        .unwrap();
+    let mut zero =
+        f.db.collection::<Document>(METERS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    zero.insert("_id", "zero");
+    zero.insert("transaction_id", "zero");
+    zero.insert("billing_request_id", "zero");
+    zero.insert(
+        "funding",
+        doc! {"settled":false,
+            "grant_reservations":[{"grant_id":"g","amount":Credits::ZERO}],
+            "allowance_reservations":[{"allowance_id":"a","period_id":"p","quantity":0_i64}],
+        },
+    );
+    f.db.collection::<Document>(METERS)
+        .insert_one(zero)
+        .await
+        .unwrap();
+    let result = diagnostics(&f.db).await.unwrap();
+    assert!(
+        result[0].detail.contains("rows=1 distinct_requests=1"),
+        "{}",
+        result[0].detail
+    );
+    assert!(
+        result[0].detail.contains("holdless_rows_at_least=1"),
+        "{}",
+        result[0].detail
+    );
+    assert!(
+        result[0]
+            .detail
+            .contains("kind=grant unit=credits rows=1 requests=1 held=1 resources=1"),
+        "{}",
+        result[0].detail
+    );
+    for name in std::iter::once(inventory::INDEX).chain(selection::Source::ALL.map(|s| s.index())) {
+        let plan =
+            f.db.run_command(doc! {"explain":{
+                "aggregate":METERS,"pipeline":inventory::count_pipeline(),"hint":name,"cursor":{}
+            },"verbosity":"executionStats"})
+                .await
+                .unwrap();
+        let stats = plan.get_array("stages").unwrap()[0]
+            .as_document()
+            .unwrap()
+            .get_document("$cursor")
+            .unwrap()
+            .get_document("executionStats")
+            .unwrap();
+        assert_eq!(stats.get_i32("totalDocsExamined").unwrap(), 0, "{plan:?}");
+    }
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stuck_request_inventory_limit_keeps_held_lower_bound() {
+    let f = Fixture::new().await;
+    let _metered = f.open(true).await;
+    roster(
+        &f,
+        "live",
+        Some(bson::DateTime::now()),
+        bson::DateTime::now(),
+    )
+    .await;
+    let raw =
+        f.db.collection::<Document>(METERS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    let rows: Vec<_> = (0..MAX_ROWS)
+        .map(|i| {
+            let mut row = raw.clone();
+            row.insert("_id", format!("held-{i:05}"));
+            row.insert("transaction_id", format!("held-{i}"));
+            row.insert("billing_request_id", format!("held-{i}"));
+            row
+        })
+        .collect();
+    f.db.collection::<Document>(METERS)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let d = diagnostics(&f.db).await.unwrap();
+    assert!(d[0].detail.starts_with("complete=false"), "{}", d[0].detail);
+    assert!(d[0].detail.contains("truncated=true"), "{}", d[0].detail);
+    assert!(
+        d[0].detail.contains("counts_are_lower_bounds=true"),
+        "{}",
+        d[0].detail
+    );
+    assert!(
+        d[0].detail.contains("kind=wallet unit=credits"),
+        "{}",
+        d[0].detail
+    );
+    assert!(
+        d[0].detail.contains("reason=row_limit")
+            || d[0].detail.contains("reason=deadline_exceeded")
+            || d[0].detail.contains("reason=query_timeout"),
+        "{}",
+        d[0].detail
+    );
+    assert!(
+        d[0].detail.contains("holdless_rows_at_least=0"),
+        "{}",
+        d[0].detail
+    );
+    f.db.drop().await.unwrap();
+}

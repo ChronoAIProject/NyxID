@@ -1,14 +1,16 @@
 //! Classify uncompleted ordinary requests without inferring death from age alone.
 mod inventory;
 mod ownership;
+mod selection;
 use crate::{
     errors::{AppError, AppResult},
     models::{credits::Credits, service_billing::BillingMetric, usage_meter::UsageHold},
 };
 use futures::TryStreamExt;
-pub(crate) use inventory::{diagnostics, index};
+pub(crate) use inventory::diagnostics;
 use mongodb::bson::{self, Bson, Document, doc};
 use ownership::{Registry, registry};
+pub(crate) use selection::indexes;
 
 const METERS: &str = "usage_meter";
 const MAX_ROWS: usize = 10_000;
