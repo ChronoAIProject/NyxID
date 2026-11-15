@@ -6,6 +6,8 @@ use mongodb::options::{ReadConcern, ReturnDocument, WriteConcern};
 
 pub const JOBS: &str = "personal_erasure_orphan_sweep_jobs";
 pub const PAGES: &str = "personal_erasure_orphan_sweep_pages";
+/// One ephemeral apply holder per reviewed digest; the default _id index suffices.
+pub const APPLY_FENCES: &str = "personal_erasure_orphan_sweep_fences";
 const SCAN_VALUES: usize = 512;
 const LIVE_BATCH: usize = 128;
 const LEASE_SECONDS: i64 = 120;
@@ -131,7 +133,7 @@ fn page_range(job: &str) -> Document {
     doc! {"_id": {"$gte": format!("{job}:"), "$lt": format!("{job};")}}
 }
 
-const APPLY_ACTIVE: &str = "An apply is already pending for this dry-run";
+const APPLY_ACTIVE: &str = "An apply is already pending for this digest";
 
 const REVIEWED_UNAVAILABLE: &str = "Reviewed dry-run expired or unavailable; run a new dry-run";
 
@@ -164,16 +166,27 @@ pub async fn start(
     } else {
         None
     };
-    let mut report = reviewed.as_ref().and_then(|job| job.report.clone());
+    let job = new_job(actor, apply, expected, reviewed.as_ref())?;
+    admit(db, &job).await?;
+    Ok(job.status())
+}
+
+fn new_job(
+    actor: &str,
+    apply: bool,
+    expected: Option<&str>,
+    reviewed: Option<&Job>,
+) -> AppResult<Job> {
+    let mut report = reviewed.and_then(|job| job.report.clone());
     if let Some(report) = &mut report {
         report.dry_run = false;
     }
-    let job = Job {
+    Ok(Job {
         id: Uuid::new_v4().to_string(),
         requested_by: actor.into(),
         apply,
         expected_digest: expected.map(str::to_owned),
-        source_job_id: reviewed.as_ref().map(|job| job.id.clone()),
+        source_job_id: reviewed.map(|job| job.id.clone()),
         consecutive_failures: 0,
         noop_count: 0,
         skipped_count: 0,
@@ -186,7 +199,7 @@ pub async fn start(
             .unwrap_or(specs_digest()?),
         last_id: Bson::Null,
         owner_offset: 0,
-        next_page: reviewed.as_ref().map_or(0, |job| job.next_page),
+        next_page: reviewed.map_or(0, |job| job.next_page),
         apply_page: 0,
         report,
         failure: None,
@@ -194,14 +207,19 @@ pub async fn start(
         lease_until: None,
         created_at: bson::DateTime::now(),
         updated_at: bson::DateTime::now(),
-    };
+    })
+}
+
+async fn admit(db: &mongodb::Database, job: &Job) -> AppResult<()> {
     if job.source_job_id.is_some() {
         // A source-document CAS makes racing admissions conflict on one write,
         // rather than both passing a snapshot read of the apply-job collection.
         let context = (
             db.clone(),
             job.clone(),
-            expected.unwrap_or_default().to_owned(),
+            job.expected_digest
+                .clone()
+                .ok_or_else(|| AppError::Internal("Apply digest missing".into()))?,
         );
         super::super::transaction_service::run_db_only(db, &context, |tx, (db, job, digest)| {
             Box::pin(async move {
@@ -209,6 +227,22 @@ pub async fn start(
                     .source_job_id
                     .as_deref()
                     .ok_or_else(|| AppError::Internal("Apply source missing".into()))?;
+                // Colliding inserts serialize admissions even when different
+                // completed dry runs contain the same reviewed digest.
+                if let Err(error) = db
+                    .collection::<Document>(APPLY_FENCES)
+                    .insert_one(doc! {"_id":digest,"apply_job_id":&job.id})
+                    .session(&mut *tx)
+                    .await
+                {
+                    return Err(
+                        if crate::services::service_pool_service::is_duplicate_key(&error) {
+                            AppError::Conflict(APPLY_ACTIVE.into())
+                        } else {
+                            error.into()
+                        },
+                    );
+                }
                 let mut filter = reviewed_filter(digest);
                 filter.insert("_id", source);
                 filter.insert("active_apply_job_id", Bson::Null);
@@ -238,11 +272,11 @@ pub async fn start(
                         .into(),
                     ));
                 }
-                // Pending jobs admitted before the source fence existed also
-                // retain exclusive use of their reviewed pages.
+                // Also refuse pending applies admitted before digest fences
+                // existed, including those pinned to a different source job.
                 if db
                     .collection::<Document>(JOBS)
-                    .find_one(doc! {"source_job_id":source,"status":"pending"})
+                    .find_one(doc! {"apply":true,"expected_digest":digest,"status":"pending"})
                     .session(&mut *tx)
                     .await?
                     .is_some()
@@ -258,9 +292,9 @@ pub async fn start(
         })
         .await?;
     } else {
-        db.collection::<Job>(JOBS).insert_one(&job).await?;
+        db.collection::<Job>(JOBS).insert_one(job).await?;
     }
-    Ok(job.status())
+    Ok(())
 }
 
 pub async fn status(db: &mongodb::Database, id: &str) -> AppResult<SweepStatus> {
@@ -271,23 +305,28 @@ pub async fn status(db: &mongodb::Database, id: &str) -> AppResult<SweepStatus> 
         .ok_or_else(|| AppError::NotFound("Orphan sweep not found".into()))
 }
 
-/// Release only this apply's source fence, atomically with its terminal status.
+/// Release only this apply's source and digest fences with its terminal status.
 async fn release_source_in_session(
     db: &mongodb::Database,
     job: &Job,
     tx: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
-    if job.apply
-        && matches!(job.status.as_str(), "complete" | "failed")
-        && let Some(source) = &job.source_job_id
-    {
-        db.collection::<Document>(JOBS)
-            .update_one(
-                doc! {"_id":source,"active_apply_job_id":&job.id},
-                doc! {"$unset":{"active_apply_job_id":""}},
-            )
-            .session(tx)
-            .await?;
+    if job.apply && matches!(job.status.as_str(), "complete" | "failed") {
+        if let Some(source) = &job.source_job_id {
+            db.collection::<Document>(JOBS)
+                .update_one(
+                    doc! {"_id":source,"active_apply_job_id":&job.id},
+                    doc! {"$unset":{"active_apply_job_id":""}},
+                )
+                .session(&mut *tx)
+                .await?;
+        }
+        if let Some(digest) = &job.expected_digest {
+            db.collection::<Document>(APPLY_FENCES)
+                .delete_one(doc! {"_id":digest,"apply_job_id":&job.id})
+                .session(&mut *tx)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -1052,6 +1091,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_applies_from_different_sources_share_a_digest_fence() {
+        let db = crate::test_utils::connect_transaction_test_database("orphan_digest_fence").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let mut applies = Vec::new();
+        for actor in ["operator-a", "operator-b"] {
+            let dry = start(&db, actor, false, None).await.unwrap();
+            let report = finish(&db, &dry.job_id).await.unwrap();
+            let source = db
+                .collection::<Job>(JOBS)
+                .find_one(doc! {"_id":&dry.job_id})
+                .await
+                .unwrap()
+                .unwrap();
+            applies.push(new_job(actor, true, Some(&report.digest), Some(&source)).unwrap());
+        }
+        assert_ne!(applies[0].source_job_id, applies[1].source_job_id);
+        assert_eq!(applies[0].expected_digest, applies[1].expected_digest);
+        let (left, right) = tokio::join!(admit(&db, &applies[0]), admit(&db, &applies[1]));
+        let (winner, loser) = match (left, right) {
+            (Ok(()), Err(AppError::Conflict(message))) if message == APPLY_ACTIVE => (0, 1),
+            (Err(AppError::Conflict(message)), Ok(())) if message == APPLY_ACTIVE => (1, 0),
+            result => panic!("exactly one digest holder required: {result:?}"),
+        };
+        assert_eq!(
+            db.collection::<Document>(APPLY_FENCES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<Document>(JOBS)
+                .count_documents(doc! {"apply":true,"status":"pending"})
+                .await
+                .unwrap(),
+            1
+        );
+        finish(&db, &applies[winner].id).await.unwrap();
+        assert_eq!(
+            db.collection::<Document>(APPLY_FENCES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        admit(&db, &applies[loser]).await.unwrap();
+        finish(&db, &applies[loser].id).await.unwrap();
+        let indexes: Vec<_> = db
+            .collection::<Document>(APPLY_FENCES)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            indexes.len(),
+            1,
+            "digest coordination uses only the default index"
+        );
+        assert_eq!(indexes[0].keys, doc! {"_id":1});
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_pending_apply_refuses_matching_digest_without_leaving_a_fence() {
+        let db = crate::test_utils::connect_transaction_test_database("orphan_legacy_digest").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let dry = start(&db, "operator", false, None).await.unwrap();
+        let report = finish(&db, &dry.job_id).await.unwrap();
+        db.collection::<Document>(JOBS).insert_one(doc! {
+            "_id":"legacy-apply", "apply":true, "status":"pending", "expected_digest":&report.digest,
+            "source_job_id":"another-source"
+        }).await.unwrap();
+        assert!(
+            matches!(start(&db,"operator",true,Some(&report.digest)).await,
+            Err(AppError::Conflict(message)) if message == APPLY_ACTIVE)
+        );
+        assert_eq!(
+            db.collection::<Document>(APPLY_FENCES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            db.collection::<Document>(JOBS)
+                .find_one(doc! {"_id":&dry.job_id,"active_apply_job_id":{"$exists":true}})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_and_abandoned_applies_release_the_source_fence_atomically() {
         let db =
             crate::test_utils::connect_transaction_test_database("orphan_apply_terminal_fence")
@@ -1090,6 +1225,13 @@ mod tests {
                 None
             );
         }
+        assert_eq!(
+            db.collection::<Document>(APPLY_FENCES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
         // A terminal checkpoint and its fence release roll back together.
         let apply = start(&db, "operator", true, Some(&report.digest))
             .await
@@ -1114,7 +1256,22 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(
+            db.collection::<Document>(APPLY_FENCES)
+                .find_one(doc! {"_id":&report.digest})
+                .session(&mut tx)
+                .await
+                .unwrap()
+                .is_none()
+        );
         tx.abort_transaction().await.unwrap();
+        assert!(
+            db.collection::<Document>(APPLY_FENCES)
+                .find_one(doc! {"_id":&report.digest,"apply_job_id":&apply.job_id})
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(
             matches!(start(&db,"operator",true,Some(&report.digest)).await, Err(AppError::Conflict(message)) if message == APPLY_ACTIVE)
         );

@@ -2137,6 +2137,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "personal_erasure_jobs is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
+        collection: "personal_erasure_orphan_sweep_fences",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("ephemeral exclusive apply holder keyed by reviewed digest"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "personal_erasure_orphan_sweep_fences stores only a reviewed digest and apply job id; admission inserts the fence and terminal completion or failure removes it transactionally, without person identifiers or document content.",
+    },
+    Entry {
         collection: "personal_erasure_orphan_sweep_jobs",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),

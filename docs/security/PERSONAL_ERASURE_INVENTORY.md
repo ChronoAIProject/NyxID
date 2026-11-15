@@ -672,12 +672,15 @@ therefore surfaces both cases without discarding the remaining recovery evidence
 
 Orphan apply selects the completed dry-run by its returned SHA-256 digest and
 consumes that job's persisted candidate pages. It does not rescan the database;
-new orphans need a new dry-run. Only one pending apply can hold a given source
-dry-run: admission atomically claims `active_apply_job_id` on the source alongside
-inserting the apply. A concurrent apply returns `1004 conflict` with
-`An apply is already pending for this dry-run`. Every terminal transition,
-including failure after an expired claim reaches the retry cap, releases that
-source fence in the same transaction. A later apply can process previously
+new orphans need a new dry-run. Only one pending apply can hold a reviewed digest,
+even across different source dry runs. Admission inserts a fence keyed by digest
+in `personal_erasure_orphan_sweep_fences` and claims `active_apply_job_id` on the
+source in the same transaction as inserting the apply. The default `_id` index
+provides exclusivity; no secondary index is added. Admission also checks pending
+applies created before digest fences existed. A concurrent apply returns `1004 conflict` with
+`An apply is already pending for this digest`. Every terminal transition,
+including failure after an expired claim reaches the retry cap, releases both
+source and digest fences in the same transaction. A later apply can process previously
 blocked rows after their blocker clears. Every mutation still checks current
 account and parent liveness transactionally. `candidate_count` is the reviewed count;
 `noop_count` counts vanished, re-parented or already-redacted candidates;
