@@ -200,9 +200,17 @@ pub fn image_result(report: &ImageReport) -> serde_json::Value {
 }
 
 async fn audience_key(state: &AppState, ctx: &ImageSendContext<'_>) -> AppResult<String> {
+    audience_key_with(state, ctx, None).await
+}
+
+async fn audience_key_with(
+    state: &AppState,
+    ctx: &ImageSendContext<'_>,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<String> {
     match &ctx.anchor {
         ImageAnchor::Inbound { message_id } => {
-            let auth = super::route_key_auth(state, ctx.channel).await?;
+            let auth = super::route_key_auth_with(state, ctx.channel, checked).await?;
             let body = crate::handlers::channel_relay::AsyncReplyRequest {
                 message_id: message_id.clone(),
                 thread_reply: false,

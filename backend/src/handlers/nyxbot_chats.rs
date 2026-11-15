@@ -1761,6 +1761,17 @@ pub(crate) async fn validate_post(
     agent_id: Option<&str>,
 ) -> AppResult<()> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
+    validate_post_rows(state, owner, &row, &chat, agent_id, None).await
+}
+
+async fn validate_post_rows(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    agent_id: Option<&str>,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<()> {
     if row.status != "active" {
         return Err(AppError::Conflict("The channel bot is not active".into()));
     }
@@ -1780,7 +1791,7 @@ pub(crate) async fn validate_post(
             "Posting is off for this chat; the owner can allow it".into(),
         ));
     }
-    require_org_access(state, &row).await?;
+    require_org_access_with(state, row, checked).await?;
     if chat.platform_chat_id.is_none() {
         return Err(AppError::ValidationError(
             "Chat has no known address".into(),
@@ -2083,6 +2094,17 @@ pub(super) async fn load_post(
     agent_id: Option<&str>,
     admit: bool,
 ) -> AppResult<PostTarget> {
+    load_post_with(state, owner, chat_id, agent_id, admit, None).await
+}
+
+pub(super) async fn load_post_with(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    agent_id: Option<&str>,
+    admit: bool,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<PostTarget> {
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
@@ -2113,8 +2135,13 @@ pub(super) async fn load_post(
             .route_id
             .clone()
             .ok_or_else(|| AppError::Conflict("The channel bot has no route".into()))?;
-        require_org_access(state, &row).await?;
-        let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        require_org_access_with(state, &row, checked).await?;
+        let bot = crate::services::platform_bot_authority::bot_with(
+            &state.db,
+            &row.channel_bot_id,
+            checked,
+        )
+        .await?;
         if !bot.is_active || bot.status == "suspended" {
             return Err(AppError::ChannelBotInactive(
                 "Bot has been deactivated".to_string(),
@@ -2133,7 +2160,7 @@ pub(super) async fn load_post(
         if admit {
             crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
         }
-        let auth = super::route_key_auth(state, &row).await?;
+        let auth = super::route_key_auth_with(state, &row, checked).await?;
         let now = Utc::now();
         // The bot's own route, addressed at this chat; nothing is stored.
         let conversation = ChannelConversation {
@@ -2453,14 +2480,21 @@ async fn revalidate_post_target(
     target: &PostTarget,
     fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
 ) -> AppResult<()> {
-    validate_post(
-        state,
-        &target.channel.user_id,
-        &target.thread.id,
-        target.agent_id.as_deref(),
+    let (channel, thread) = load_chat(state, &target.channel.user_id, &target.thread.id).await?;
+    let checked = crate::services::platform_bot_authority::read_personal_routes(
+        &state.db,
+        &channel.channel_bot_id,
     )
     .await?;
-    let (channel, thread) = load_chat(state, &target.channel.user_id, &target.thread.id).await?;
+    validate_post_rows(
+        state,
+        &target.channel.user_id,
+        &channel,
+        &thread,
+        target.agent_id.as_deref(),
+        Some(&checked),
+    )
+    .await?;
     if channel.channel_bot_id != target.bot.id
         || channel.route_id != target.channel.route_id
         || channel.route_api_key_id != target.channel.route_api_key_id
@@ -2473,7 +2507,12 @@ async fn revalidate_post_target(
     {
         return Err(AppError::Conflict("Post target changed".into()));
     }
-    let bot = channel_bot_service::get_bot(&state.db, &target.bot.id).await?;
+    let bot = crate::services::platform_bot_authority::bot_with(
+        &state.db,
+        &target.bot.id,
+        Some(&checked),
+    )
+    .await?;
     if bot.user_id != target.bot.user_id
         || bot.platform != target.bot.platform
         || bot.platform_bot_id != target.bot.platform_bot_id
@@ -2495,7 +2534,7 @@ async fn revalidate_post_target(
         }
         // The internal route key is plumbing for this exact recipient-owned
         // destination, never authority donated by the shared agent's owner.
-        super::route_key_auth(state, &channel).await?;
+        super::route_key_auth_with(state, &channel, Some(&checked)).await?;
     }
     if let Some(access) = fence
         .and_then(|c| c.org_agent_access.as_ref())

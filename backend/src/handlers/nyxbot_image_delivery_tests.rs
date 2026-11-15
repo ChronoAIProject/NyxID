@@ -4217,3 +4217,28 @@ async fn attachment_preparation_accepted_upload_without_message_receipt_is_never
 
 #[path = "nyxbot_scheduled_preparation_tests.rs"]
 mod scheduled_preparation_tests;
+
+#[tokio::test]
+async fn attachment_authority_observation_is_discarded_between_effects() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = add_images(&f).await;
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    crate::services::durable_wake_tests::resume_after(
+        "image_second_preparation_claimed",
+        send_plan(&f, attachments, None),
+        async {
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&f.channel.channel_bot_id},
+                    doc! {"$set":{"platform_entry_pending":true}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}

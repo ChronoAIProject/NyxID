@@ -1,11 +1,17 @@
 //! Delivery adapters only; the service owns durable source/claim authorization.
 use super::*;
 use crate::{
+    models::channel_turn_preparation::Receipt,
     models::{
+        assistant_conversation::AssistantConversation,
         assistant_message::AssistantMessage,
         execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     },
-    services::execution_permission_channel::{self as channel, deliveries},
+    services::{
+        channel_platform::OutboundReply,
+        channel_reply_plan as plan, channel_turn_preparation as boundary,
+        execution_permission_channel::{self as channel, deliveries},
+    },
 };
 
 #[cfg(test)]
@@ -86,7 +92,9 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
         Err(
             AppError::Forbidden(_) | AppError::NotFound(_) | AppError::SecurityReadinessUnavailable,
         ) => {
-            deliveries::finish(&state.db, &d, "refused").await?;
+            if !deliveries::finish_owned(&state.db, &d, "refused").await? {
+                return Ok(());
+            }
             decision
                 .record_ids(state, &d.user_id, &d.conversation_id, Some(&d.turn_id))
                 .await;
@@ -96,108 +104,259 @@ pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
             return Err(error); // recoverable no-send preparation lease
         }
     };
-    let claim = {
-        #[cfg(test)]
-        if injected_failure(TestProcessFailure::Claim) {
-            Err(AppError::Internal("test claim failure".into()))
+    #[cfg(test)]
+    if injected_failure(TestProcessFailure::Claim) {
+        return Err(AppError::Internal("test claim failure".into()));
+    }
+    #[cfg(test)]
+    crate::services::durable_wake_tests::after("execution_result_transport_preparation").await;
+    let delivery = rows.event.delivery.as_ref().ok_or_else(channel::refused)?;
+    let outbound = OutboundReply {
+        text: Some(text),
+        attachments: vec![],
+        reply_to_platform_message_id: None,
+        metadata: if rows.channel.gateway_source.is_none() {
+            plan::assistant_metadata(&rows.channel.platform)
         } else {
-            deliveries::claim(&state.db, &d).await
-        }
-        #[cfg(not(test))]
-        {
-            deliveries::claim(&state.db, &d).await
-        }
+            None
+        },
     };
-    match claim {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
-        Err(
-            AppError::Forbidden(_) | AppError::NotFound(_) | AppError::SecurityReadinessUnavailable,
-        ) => {
-            deliveries::finish(&state.db, &d, "refused").await?;
-            decision
-                .record_ids(state, &d.user_id, &d.conversation_id, Some(&d.turn_id))
-                .await;
+    // Native WhatsApp exposes its own text parts; other native gateways retain
+    // their single-operation receipt. Never infer a prefix inside that operation.
+    let parts: AppResult<Vec<OutboundReply>> = (|| {
+        if rows.channel.gateway_source.is_some() {
+            if matches!(
+                rows.channel.gateway_source.as_ref(),
+                Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+            ) {
+                plan::text_parts(&outbound, "whatsapp")
+            } else {
+                Ok(vec![outbound])
+            }
+        } else {
+            Ok(plan::ordinary(
+                &outbound,
+                &rows.channel.platform,
+                rows.thread.platform_chat_id.as_deref().unwrap_or_default(),
+            )?
+            .unwrap_or_else(|| vec![outbound]))
+        }
+    })();
+    let parts = match parts {
+        Ok(parts) => parts,
+        Err(error) => {
+            if deliveries::finish_owned(&state.db, &d, "refused").await? {
+                decision.result(&Err(error));
+                decision
+                    .record_ids(state, &d.user_id, &d.conversation_id, Some(&d.turn_id))
+                    .await;
+            }
             return Ok(());
         }
-        Err(e) => {
-            return Err(e);
-        }
-    }
-    let delivery = rows.event.delivery.as_ref().ok_or_else(channel::refused)?;
-    let outcome = if let Some(anchor) = anchor {
-        decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
-        let sent = crate::services::channel_reply_notice::supplemental(Box::pin(async {
-            if delivery.origin.thread.is_some() {
-                thread_follow::send_bound_reply(
-                    state,
-                    &rows.channel,
-                    &d.user_id,
-                    &delivery.origin,
-                    &history.id,
-                    &crate::services::channel_platform::OutboundReply {
-                        text: Some(text.clone()),
-                        attachments: Vec::new(),
-                        reply_to_platform_message_id: None,
-                        metadata: crate::services::channel_reply_plan::assistant_metadata(
-                            &rows.channel.platform,
-                        ),
-                    },
-                )
-                .await
-                .and_then(|outcome| outcome.error.map_or(Ok(()), Err))
-            } else {
-                direct_reply(state, &rows.channel, &anchor, &text, None).await
-            }
-        }))
-        .await;
-        decision.result(&sent);
-        match sent {
-            Ok(()) => "confirmed",
-            Err(error) => match images::classify_outcome(&error) {
-                images::ImageOutcome::Failed(_) => "rejected",
-                _ => "unknown",
-            },
-        }
-    } else if rows.channel.gateway_source.is_some() {
-        decision.anchor = supplemental::Anchor::EventSource;
-        decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::GatewayEvent);
-        native_responses::send_occurrence(
-            state,
-            &rows.channel,
-            &delivery.origin,
-            &history.id,
-            &text,
-            &d.id,
-        )
-        .await
-        .unwrap_or("unknown")
-    } else {
-        decision.anchor = supplemental::Anchor::EventSource;
-        decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
-        late_delivery::dispatch_occurrence(
-            state,
-            &rows.event,
-            delivery,
-            &rows.channel,
-            &history,
-            &text,
-            Some(&d.id),
-        )
-        .await
-        .unwrap_or("unknown")
     };
-    deliveries::finish(&state.db, &d, outcome).await?;
-    decision.outcome(outcome);
-    decision
-        .record_ids(state, &d.user_id, &d.conversation_id, Some(&d.turn_id))
+    let total = parts.len() as u32;
+    let prepared = match deliveries::plan(&state.db, &d, &plan::fingerprint(&parts), total).await {
+        Ok(plan) => plan,
+        Err(error @ AppError::Conflict(_)) => {
+            // A changed plan cannot safely continue an accepted prefix. An old
+            // claimant cannot retire a survivor because finish is claim-fenced.
+            deliveries::finish_owned(&state.db, &d, "refused").await?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    for (index, part) in parts.into_iter().enumerate().skip(prepared.next as usize) {
+        let index = index as u32;
+        let boundary_error = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let guard = {
+            let db = state.db.clone();
+            let d = d.clone();
+            let error = boundary_error.clone();
+            std::sync::Arc::new(move || {
+                let db = db.clone();
+                let d = d.clone();
+                let error = error.clone();
+                Box::pin(async move {
+                    match deliveries::before_effect(&db, &d, index).await {
+                        Ok(()) => Ok(()),
+                        Err(cause) => {
+                            *error.lock().await = Some(cause);
+                            Err(channel::refused())
+                        }
+                    }
+                }) as futures::future::BoxFuture<'static, AppResult<()>>
+            })
+        };
+        decision.anchor = if delivery.origin.thread.is_some() {
+            supplemental::Anchor::ThreadBinding
+        } else {
+            supplemental::Anchor::EventSource
+        };
+        decision.dispatch(if rows.channel.gateway_source.is_some() {
+            supplemental::Egress::GatewayEvent
+        } else {
+            supplemental::Egress::LocalRelay
+        });
+        let result = boundary::with_effect(
+            guard,
+            crate::services::channel_reply_notice::supplemental(tokio::time::timeout(
+                std::time::Duration::from_secs(deliveries::SEND_SECS as u64),
+                Box::pin(send_part(
+                    state,
+                    &d,
+                    &rows,
+                    &history,
+                    anchor.as_deref(),
+                    part,
+                    index,
+                )),
+            )),
+        )
         .await;
-    tracing::info!(
-        outcome,
-        transport = rows.channel.transport,
-        "Execution permission channel result delivery settled"
-    );
+        let result = if let Some(error) = boundary_error.lock().await.take() {
+            Err(error)
+        } else {
+            result.unwrap_or_else(|_| {
+                Err(AppError::ChannelPlatformError(
+                    crate::services::channel_text_delivery::UNCERTAIN.into(),
+                ))
+            })
+        };
+        let outcome = match result {
+            Ok(receipt) => {
+                #[cfg(test)]
+                crate::services::durable_wake_tests::after(
+                    "execution_result_accepted_before_receipt",
+                )
+                .await;
+                if !deliveries::accepted(&state.db, &d, index, total, &receipt).await? {
+                    return Ok(());
+                }
+                #[cfg(test)]
+                crate::services::durable_wake_tests::after("execution_result_receipt_committed")
+                    .await;
+                if index + 1 < total {
+                    continue;
+                }
+                "confirmed"
+            }
+            Err(error) => {
+                let outcome = match images::classify_outcome(&error) {
+                    images::ImageOutcome::Failed(_) => "rejected",
+                    _ => "unknown",
+                };
+                if deliveries::finish_owned(&state.db, &d, outcome).await? {
+                    outcome
+                } else if error.is_forbidden()
+                    || matches!(
+                        error,
+                        AppError::NotFound(_)
+                            | AppError::ValidationError(_)
+                            | AppError::SecurityReadinessUnavailable
+                    )
+                {
+                    if !deliveries::finish_owned(&state.db, &d, "refused").await? {
+                        return Ok(());
+                    }
+                    "refused"
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        decision.outcome(outcome);
+        decision
+            .record_ids(state, &d.user_id, &d.conversation_id, Some(&d.turn_id))
+            .await;
+        tracing::info!(
+            outcome,
+            transport = rows.channel.transport,
+            "Execution permission channel result delivery settled"
+        );
+        return Ok(());
+    }
     Ok(())
+}
+
+async fn send_part(
+    state: &AppState,
+    d: &Delivery,
+    rows: &channel::SourceRows,
+    history: &AssistantConversation,
+    anchor: Option<&str>,
+    part: OutboundReply,
+    index: u32,
+) -> AppResult<Receipt> {
+    let origin = &rows
+        .event
+        .delivery
+        .as_ref()
+        .ok_or_else(channel::refused)?
+        .origin;
+    if rows.channel.gateway_source.is_some() {
+        let occurrence = if index == 0 {
+            d.id.clone()
+        } else {
+            format!("{}:part:{index}", d.id)
+        };
+        return match native_responses::send_occurrence(
+            state,
+            &rows.channel,
+            origin,
+            &history.id,
+            part.text.as_deref().unwrap_or_default(),
+            &occurrence,
+        )
+        .await?
+        {
+            "confirmed" => Ok(Receipt::default()),
+            "rejected" => Err(channel::refused()),
+            _ => Err(AppError::ChannelPlatformError(
+                crate::services::channel_text_delivery::UNCERTAIN.into(),
+            )),
+        };
+    }
+    if origin.thread.is_some() {
+        let result = thread_follow::send_bound_reply(
+            state,
+            &rows.channel,
+            &d.user_id,
+            origin,
+            &history.id,
+            &part,
+        )
+        .await?;
+        if let Some(error) = result.error {
+            return Err(error);
+        }
+        return Ok(Receipt {
+            platform_message_ids: result.message_ids,
+            outbound_message_id: None,
+        });
+    }
+    // Gateway-era and sealed sources retain the original local relay message.
+    // Carry the planned metadata so rendered entities are not parsed twice.
+    use crate::handlers::channel_relay as relay;
+    let auth = route_key_auth(state, &rows.channel).await?;
+    let headers = HeaderMap::new();
+    let body = relay::AsyncReplyRequest {
+        message_id: anchor.unwrap_or(&rows.event.event_id).to_owned(),
+        thread_reply: false,
+        reply: relay::AsyncReplyBody {
+            text: part.text.clone(),
+            metadata: part.metadata.clone(),
+            attachments: vec![],
+        },
+    };
+    let context = relay::resolve_reply_request_context(state, &headers, Some(&auth), &body).await?;
+    let adapter = relay::reply_adapter(state, &context)?;
+    let Json(result) =
+        relay::deliver_prepared_reply(state, &headers, context, part, false, adapter.as_ref())
+            .await?;
+    Ok(Receipt {
+        platform_message_ids: result.platform_message_id.into_iter().collect(),
+        outbound_message_id: Some(result.message_id),
+    })
 }
 
 pub(crate) async fn for_turn(state: &AppState, turn: &str) {

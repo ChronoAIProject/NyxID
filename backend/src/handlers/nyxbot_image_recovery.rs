@@ -49,6 +49,16 @@ async fn target(
     route: &ChannelRoute,
     with_plan: bool,
 ) -> AppResult<Target> {
+    target_with(state, owner, route, with_plan, None).await
+}
+
+async fn target_with(
+    state: &AppState,
+    owner: &str,
+    route: &ChannelRoute,
+    with_plan: bool,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<Target> {
     // A recovered attachment belongs to an already admitted logical post;
     // revalidate its target without spending another initiate limiter token.
     let conversation = engine::get(&state.db, owner, &route.conversation_id).await?;
@@ -71,7 +81,7 @@ async fn target(
             {
                 return Err(preparation::lost());
             }
-            bot::late_delivery::eligible(state, &event, d, &conversation)
+            bot::late_delivery::eligible_with(state, &event, d, &conversation, checked)
                 .await?
                 .ok_or_else(preparation::lost)?
         }
@@ -92,9 +102,14 @@ async fn target(
                 .await?;
                 (channel, thread)
             } else {
-                bot::delivery_target(state, &conversation, origin)
-                    .await?
-                    .ok_or_else(preparation::lost)?
+                crate::services::channel_turn_delivery::target_with(
+                    &state.db,
+                    &conversation,
+                    origin,
+                    checked,
+                )
+                .await?
+                .ok_or_else(preparation::lost)?
             }
         }
         Source::Post { api_key_id } => {
@@ -112,7 +127,7 @@ async fn target(
                 .as_ref()
                 .and_then(|a| a.channel())
                 .map_or(owner, |a| a.channel().user_id.as_str());
-            let destination = bot::chats::load_post(
+            let destination = bot::chats::load_post_with(
                 state,
                 transport_owner,
                 &route.thread_id,
@@ -120,6 +135,7 @@ async fn target(
                     && !crate::services::assistant_service_execution::is_shared_chat(&chat))
                 .then_some(chat.agent_id.as_str()),
                 false,
+                checked,
             )
             .await?;
             if (crate::services::assistant_service_execution::is_shared_chat(&chat)
@@ -169,7 +185,7 @@ async fn target(
                     .cloned()
                     .collect(),
             });
-            let destination = bot::chats::load_post(
+            let destination = bot::chats::load_post_with(
                 state,
                 owner,
                 &route.thread_id,
@@ -177,6 +193,7 @@ async fn target(
                     .as_deref()
                     .filter(|_| conversation.is_subagent()),
                 false,
+                checked,
             )
             .await?;
             let pair = (destination.channel.clone(), destination.thread.clone());
@@ -253,9 +270,15 @@ pub(super) fn guard(
             let Route::Channel { route } = route else {
                 return Err(preparation::lost());
             };
-            let current = Box::pin(target(&state, &owner, &route, false)).await?;
+            let checked = crate::services::platform_bot_authority::read_personal_routes(
+                &state.db,
+                &route.bot_id,
+            )
+            .await?;
+            let current =
+                Box::pin(target_with(&state, &owner, &route, false, Some(&checked))).await?;
             let ctx = context(&owner, &route, &current);
-            if audience_key(&state, &ctx).await? != audience
+            if audience_key_with(&state, &ctx, Some(&checked)).await? != audience
                 || !delegated_allowed(&state, &ctx, delegated.as_ref()).await
             {
                 return Err(preparation::lost());

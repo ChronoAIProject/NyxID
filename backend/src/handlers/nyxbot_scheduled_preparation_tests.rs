@@ -245,3 +245,35 @@ async fn scheduled_text_preparation_revoked_destination_stops_before_the_first_e
     assert_eq!(saved.outcome, RunOutcome::Failed);
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn scheduled_text_authority_observation_is_discarded_between_effects() {
+    let (f, server, run) = scheduled_fixture().await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id":&run.thread_id,"turn_id":&run.turn_id,"role":"assistant"},
+            doc! {"$set":{"text":"Saved result paragraph.\n\n".repeat(600)}},
+        )
+        .await
+        .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "text_suffix_prepared",
+        settle(&f, &run),
+        async {
+            f.state
+                .db
+                .collection::<bson::Document>(THREADS)
+                .update_one(
+                    doc! {"channel_id":&f.event.channel_id},
+                    doc! {"$set":{"allow_posts":false}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}

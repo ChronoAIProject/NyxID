@@ -865,23 +865,37 @@ and is capped by the original task and reply-source deadline.
 
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only
-references, not another copy of the answer. Preparation leases may be recovered;
-`dispatching` is irreversible, and an interrupted send becomes `unknown` without
-automatic resending. Source policy, task epoch, enrollment and readiness are
-fenced again before release. A completed task may release its stored receipt;
+references, not another copy of the answer. Version-5 deliveries keep a plan
+fingerprint, part count, confirmed-prefix position and receipt identifiers only.
+Their 180-second preparation lease uses MongoDB time and is recoverable until
+an exact claim/part fence commits `dispatching` immediately before provider I/O.
+That send has a fixed 120-second window. Each confirmed receipt advances the
+prefix atomically; recovery sends only the remaining suffix. A reclaimed lease
+fences the original preparer. `dispatching` is irreversible: a crash after that
+boundary, including acceptance without a saved receipt, becomes `unknown` and
+is never automatically resent. Source policy, task epoch, enrollment and
+readiness are fenced again before release. A completed task may release its stored receipt;
 a cancelled task or changed epoch may not. The original terminal stream/native
 replay claim is never reopened. Ordinary initial answers keep their existing
 transport behavior.
 
-Direct receipts reply to the original inbound message/topic. Gateway relay
-receipts use an original-event sealed reply target when available and a distinct
-occurrence idempotency key. Without a target they retain the original 29-minute
-bound. Eligible native receipts retain that short bound and exact native
-event; no latest-event, proactive-send or alternate-destination fallback is
+Direct and gateway-era relay receipts reply through the original local
+inbound message/topic, including sources with a sealed target; there is no
+fallback to the gateway or a newer local message. Native receipts use a distinct
+occurrence key on the original gateway event. Eligible native receipts retain
+the 29-minute bound and exact native event; no latest-event, proactive-send or alternate-destination fallback is
 allowed. Receipts are text-only; attachments remain accessible in the web thread.
 Expired/refused/unknown delivery is recovered through authenticated web history.
 Terminal outbox metadata is retained for at most 24 hours; TTL is cleanup only.
 
-Rollback: disable enrollment or remove channel readiness on upgraded binaries,
+For an ordinary rolling upgrade, operators do nothing. New workers promote only
+version-4 pending or expired-preparing rows; old workers ignore version-5 rows.
+Historical dispatching/unknown rows retain their original meaning. A binary
+rollback to version-4 delivery workers parks version-5 pending/preparing work
+until a supporting worker returns within the existing source expiry. Do not
+rewrite those rows or uncertain claims to force delivery.
+
+For rollback of the channel permission feature itself: disable enrollment or
+remove channel readiness on upgraded binaries,
 drain/cancel v4 work and preserve uncertain claims before rolling binaries back.
 Do not restart old readers/workers or policy writers while v4 work is outstanding.
