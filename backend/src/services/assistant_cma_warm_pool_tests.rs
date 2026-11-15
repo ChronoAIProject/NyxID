@@ -226,7 +226,10 @@ async fn warm_pool_resize_binds_wire_request_and_transport() {
             "path" => request
                 .url_mut()
                 .set_path("/api/v1/admin/warm-pools/pool_2"),
-            "body" => *request.body_mut() = Some(b"{}".to_vec().into()),
+            "body" => {
+                *request.body_mut() =
+                    Some(br#"{"expected_revision":1,"target_replicas":4}"#.to_vec().into());
+            }
             "query" => request.url_mut().set_query(Some("target=0")),
             "key" => {
                 request.headers_mut().remove("idempotency-key");
@@ -299,6 +302,27 @@ async fn warm_pool_resize_binds_wire_request_and_transport() {
             .is_err()
         );
     }
+    // The personal Agent file-upload exemption must not apply to a pool whose
+    // opaque id happens to be "files".
+    assert!(matches!(
+        admit(
+            &f.db,
+            &f.keys,
+            &f.jwt,
+            &f.config,
+            &f.owner,
+            true,
+            &f.target,
+            "PUT",
+            "/api/v1/admin/warm-pools/files",
+            None,
+            BODY,
+            &[],
+            false,
+        )
+        .await,
+        Err(AppError::BadRequest(_))
+    ));
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.db.drop().await.unwrap();
 }

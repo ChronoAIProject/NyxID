@@ -759,7 +759,9 @@ pub async fn admit(
         return Err(invalid());
     }
     let key = keys_in_headers.first().map(|value| (*value).clone());
-    if !matches!(operation, Operation::Read) && !path.ends_with("/files") {
+    if !matches!(operation, Operation::Read)
+        && (!path.ends_with("/files") || matches!(operation, Operation::ResizeWarmPool))
+    {
         validate_idempotency_key(key.as_deref().ok_or_else(|| {
             AppError::BadRequest("CMA changes require a stable Idempotency-Key".into())
         })?)?;
