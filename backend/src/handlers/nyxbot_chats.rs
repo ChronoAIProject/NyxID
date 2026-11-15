@@ -1943,6 +1943,9 @@ pub(crate) async fn post_current_turn(
             report = super::images::report_or_failure(
                 state,
                 super::images::ImageSendContext {
+                    source: crate::models::image_preparation::Source::Post {
+                        api_key_id: chat.api_key_id.clone(),
+                    },
                     owner: &chat.user_id,
                     conversation_id: &chat.conversation_id,
                     turn_id,
@@ -2070,6 +2073,16 @@ pub(super) async fn prepare_post(
     chat_id: &str,
     agent_id: Option<&str>,
 ) -> AppResult<PostTarget> {
+    load_post(state, owner, chat_id, agent_id, true).await
+}
+
+pub(super) async fn load_post(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    agent_id: Option<&str>,
+    admit: bool,
+) -> AppResult<PostTarget> {
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
@@ -2117,7 +2130,9 @@ pub(super) async fn prepare_post(
             .get(&bot.id)
             .cloned()
             .unwrap_or(adapter);
-        crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
+        if admit {
+            crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
+        }
         let auth = super::route_key_auth(state, &row).await?;
         let now = Utc::now();
         // The bot's own route, addressed at this chat; nothing is stored.
@@ -2731,9 +2746,9 @@ pub(crate) async fn post_automation_images(
                     continue;
                 }
             };
-            let pending = existing.as_ref().is_none_or(|claim| {
-                claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
-            });
+            let pending = existing
+                .as_ref()
+                .is_none_or(crate::services::channel_image_delivery::can_prepare);
             if let Some(existing) = existing.as_ref().filter(|_| !pending) {
                 report.outcomes.push(super::images::existing_item(existing));
                 continue;
@@ -2759,6 +2774,9 @@ pub(crate) async fn post_automation_images(
             let one = super::images::report_or_failure_with_stop(
                 state,
                 super::images::ImageSendContext {
+                    source: crate::models::image_preparation::Source::Automation {
+                        run_id: run.id.clone(),
+                    },
                     owner: &run.user_id,
                     conversation_id: &item.conversation_id,
                     turn_id: &item.turn_id,
@@ -2835,6 +2853,9 @@ pub(crate) async fn post_automation_images(
             let one = super::images::report_or_failure_with_stop(
                 state,
                 super::images::ImageSendContext {
+                    source: crate::models::image_preparation::Source::Automation {
+                        run_id: run.id.clone(),
+                    },
                     owner: &run.user_id,
                     conversation_id: &reference.assignment.recipient_conversation,
                     turn_id: &reference.recipient_turn,

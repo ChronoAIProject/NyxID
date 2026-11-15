@@ -6489,6 +6489,9 @@ pub async fn deliver_to_for(
                 let report = images::report_or_failure(
                     state,
                     images::ImageSendContext {
+                        source: crate::models::image_preparation::Source::Supplemental {
+                            origin: origin.clone(),
+                        },
                         owner: &row.user_id,
                         conversation_id: &row.id,
                         turn_id: &turn.turn_id,

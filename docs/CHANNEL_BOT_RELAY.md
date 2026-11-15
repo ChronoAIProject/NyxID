@@ -1213,22 +1213,40 @@ plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
 `state`, `attempt`, `code` and `created_at`, with cleanup indexes on
 `attachment_id` and `(user_id, conversation_id)` and **no TTL**
 (`services/channel_image_delivery.rs`, `models/nyxbot_image_delivery.rs`).
-States move `pending` -> `sending{attempt}` -> `sent | failed{code} |
-skipped{code} | unknown` through compare-and-set on the attempt token. Only the
-winner of the `pending -> sending` race dispatches; success is reported only
-after an acknowledged matching completion write, an ambiguous write settles
-locally as `unknown`, and a claim found `sending` reports
-`in_progress_or_unknown`. A later caller reports an existing claim's durable
-state (`previously_delivered`, the same failure or skip code, in progress or
-unknown) without resending and without repeating another path's failure line.
-A definite refusal before any provider request (cancelled, deadline,
-after-unknown, billing preflight or another pre-dispatch error) releases its
-own `sending{attempt}` back to `pending` with an attempt-token CAS, clearing
-attempt and code. This call reports the skip or failure; a later post or
-automation may acquire the pending image. Unsupported audiences, missing
-anchors and unavailable sources remain permanent refusals. Once provider I/O
-begins, even a timeout or failed settlement retains the durable barrier and
-never releases it for retry.
+New writers add `preparation.version: 1` to the existing `sending{attempt}`
+state. The `preparing` phase records the original routing identifiers and a
+180-second MongoDB-time lease before loading bytes. The existing 15-second
+channel worker scans one indexed page and reclaims expired preparations with a
+new exact attempt. It reconstructs the source from the saved reply, live turn,
+automation run or private manager delivery; no content is copied into the claim.
+Recovery also works when the parent stream or text delivery has already ended.
+
+Immediately before the first upload or message effect, the writer revalidates
+current authority and changes the exact, unexpired preparation to phase
+`sending`. Later calls within that attachment retain the same 60-second bound.
+The slow original worker cannot send after reclamation. A confirmed completion
+records `sent`; a crash after crossing the boundary remains uncertain and is
+never retried, even if no final message receipt exists. A documented refusal of
+the first provider request can release the preparation; a refusal after an
+accepted upload cannot. Historical `sending` and `unknown` rows without this
+proof are never reinterpreted.
+
+A proven pre-effect refusal retains outer state `sending` with phase `released`.
+This fences the old attempt and permits a later independently authorized post or
+automation to acquire the slot. Transient failures retry after 30 seconds.
+Cancellation, billing refusal, an uncertain earlier image, or a permanent source
+or authority refusal parks automatic recovery. A new authorized request may
+still acquire a released slot. Unsupported audiences, missing anchors and
+unavailable sources retain their permanent outcomes. The current call reports
+the same skip/failure counts; confirmed images are never resent.
+
+Older replicas understand every outer state and leave new preparations alone.
+An ordinary rolling update from the preceding build requires no operator step.
+A binary rollback also needs no data change; old workers leave these preparations
+pending until a supporting replica returns. Existing v1 image barriers still
+apply. After a crash, a recovered attachment can arrive after its text. Recovery
+never repeats that text or changes its pinned media notice.
+
 Claims live as long as their source image: they are deleted in the same
 transactions that delete `assistant_attachments` (retention, conversation and
 group deletion, user purge), a sender that finds its source gone after claiming

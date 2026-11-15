@@ -1822,8 +1822,8 @@ async fn send_claimed(
             row,
             claim_id,
             body.as_str(),
-            identity.as_ref(),
-            public.as_deref(),
+            identity.clone(),
+            public.clone(),
             token,
             api,
         )
@@ -2020,34 +2020,41 @@ async fn pace_part(state: &AppState, row: &Delivery, claim: &str) -> AppResult<(
         ).await?.matched_count != 1 {
             return Err(refused());
         }
-        let chat = super::coordination_service::RateWindowStore::admit(
-            &state.db,
-            "manager_part_chat",
-            &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
-            1,
-            std::time::Duration::from_secs(1),
-        )
-        .await?;
-        if chat.allowed {
-            let personal = matches!(row.reference, DeliveryReference::Reply { .. });
-            let lane = super::coordination_service::RateWindowStore::admit(
-                &state.db,
-                if personal {
-                    "manager_part_personal"
-                } else {
-                    "manager_part_public"
-                },
-                &manager_lane(row),
-                if personal { 24 } else { 4 },
-                std::time::Duration::from_secs(1),
-            )
-            .await?;
-            if lane.allowed {
-                return Ok(());
-            }
+        if part_rate_available(state, row).await? {
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
+}
+
+async fn part_rate_available(state: &AppState, row: &Delivery) -> AppResult<bool> {
+    let chat = super::coordination_service::RateWindowStore::admit(
+        &state.db,
+        "manager_part_chat",
+        &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
+        1,
+        std::time::Duration::from_secs(1),
+    )
+    .await?;
+    if chat.allowed {
+        let personal = matches!(row.reference, DeliveryReference::Reply { .. });
+        let lane = super::coordination_service::RateWindowStore::admit(
+            &state.db,
+            if personal {
+                "manager_part_personal"
+            } else {
+                "manager_part_public"
+            },
+            &manager_lane(row),
+            if personal { 24 } else { 4 },
+            std::time::Duration::from_secs(1),
+        )
+        .await?;
+        if lane.allowed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn revalidate_part(
@@ -2879,6 +2886,27 @@ fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
             "Manager delivery outcome uncertain; automatic replay disabled"
         ),
     }
+}
+
+pub(crate) async fn recover_attachment(
+    state: &AppState,
+    row: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+) -> AppResult<()> {
+    media::recover(
+        state,
+        row,
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn recover_attachment_with_api(
+    state: &AppState,
+    row: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<()> {
+    media::recover(state, row, api).await
 }
 
 pub async fn sweep(

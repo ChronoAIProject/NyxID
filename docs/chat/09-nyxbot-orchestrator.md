@@ -809,7 +809,10 @@ Per-destination MongoDB image claims are taken inside the existing text claim fo
 direct/late replies, gateway streams and automation results. Event-turn sends
 remain best-effort: images have durable claims, while their text keeps its prior
 best-effort semantics. A crash after event-turn images and before text can leave
-images without text, and neither is automatically resent. Direct/late replies,
+images without text. Text is not replayed. An attachment claimed by a new writer
+but not yet uploaded has a MongoDB-time preparation lease and is recovered
+independently under current authority; confirmed or uncertain uploads are never
+resent. See `docs/CHANNEL_BOT_RELAY.md` for the claim phases. Direct/late replies,
 streams and automations retain their existing text barriers.
 
 Gateway events persist the original NyxID relay message ID separately from the
@@ -883,7 +886,8 @@ parts. Provider sends are bounded to 120 seconds per part.
 
 No replica retries `sending`, `unknown` or `streamed`. An interrupted new send
 becomes terminal `unknown` after its database-time deadline; an old `sending`
-row without that deadline is classified after 2,100 seconds without a check.
+row without that deadline is classified only when its stored `checked_at` is a
+BSON date at least 2,100 seconds old. Missing or malformed timestamps do not match.
 This is an uncertainty decision, never proof of failure or permission to resend.
 When the saved result belongs to an existing owner-visible thread, the same
 transaction appends one fixed “Delivery unconfirmed” event there. It creates no

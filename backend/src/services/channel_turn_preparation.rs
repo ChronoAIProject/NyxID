@@ -29,7 +29,10 @@ fn stale_sending() -> Document {
     doc! {"delivery.state":"sending", "$expr":{"$cond":[
         {"$eq":["$delivery.preparation.version",1]},
         {"$lte":["$delivery.preparation.lease_until","$$NOW"]},
-        {"$lte":["$delivery.checked_at",{"$subtract":["$$NOW",LEGACY_UNCONFIRMED_SECS*1000]}]},
+        {"$and":[
+            {"$eq":[{"$type":"$delivery.checked_at"},"date"]},
+            {"$lte":["$delivery.checked_at",{"$subtract":["$$NOW",LEGACY_UNCONFIRMED_SECS*1000]}]}
+        ]},
     ]}}
 }
 fn exact(event: &str, claim: &str, state: &str) -> Document {

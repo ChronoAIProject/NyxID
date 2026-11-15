@@ -803,3 +803,92 @@ async fn concurrent_saved_reply_render_adopts_a_different_winning_notice_plan() 
     );
     j.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn manager_attachment_crash_during_loading_recovers_without_replaying_the_parent_text() {
+    use crate::models::nyxbot_image_delivery::{COLLECTION_NAME as IMAGES, NyxbotImageDelivery};
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, mut saved) = j.prepared_reply(7012).await;
+    attach(&j, &mut saved, "application/pdf", b"%PDF-1.7 result").await;
+    Mock::given(method("POST"))
+        .and(path("/bot100:manager-test-secret/sendDocument"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"ok":true,"result":{"message_id":899}})),
+        )
+        .expect(1)
+        .mount(&j.server)
+        .await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    crate::services::durable_wake_tests::drop_after(
+        "manager_image_preparation_claimed",
+        j.deliver(&destination, &reply, body),
+    )
+    .await;
+    j.state
+        .db
+        .collection::<Document>(IMAGES)
+        .update_many(
+            doc! {},
+            doc! {"$set":{"preparation.lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    // An old parent worker may finish with a missing-media note. Recovery must
+    // not depend on that worker rerunning, and must never replay its text.
+    j.state
+        .db
+        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+        .update_one(
+            doc! {"reference.reply_id":&saved.id},
+            doc! {"$set":{"state":"sent","multipart_media_missing":1_i64}},
+        )
+        .await
+        .unwrap();
+    let row = j
+        .state
+        .db
+        .collection::<NyxbotImageDelivery>(IMAGES)
+        .find_one(doc! {"conversation_id":&saved.conversation_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let before = j.sends().await.len();
+    let base = j.server.uri();
+    let api = crate::services::telegram_new_api::TelegramApi {
+        http: &j.state.http_client,
+        base_url: &base,
+    };
+    let (a, b) = tokio::join!(
+        delivery::recover_attachment_with_api(&j.state, &row, &api),
+        delivery::recover_attachment_with_api(&j.state, &row, &api)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(j.sends().await.len(), before);
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(IMAGES)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("state")
+            .unwrap(),
+        "sent"
+    );
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .count_documents(doc! {"namespace":"manager_part_chat"})
+            .await
+            .unwrap(),
+        1,
+        "Recovered attachments retain the shared per-chat provider pacing"
+    );
+    j.server.verify().await;
+    j.state.db.drop().await.unwrap();
+}
