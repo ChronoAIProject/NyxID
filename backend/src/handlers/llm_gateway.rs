@@ -441,6 +441,7 @@ async fn llm_proxy_request_inner(
     // Resolve the downstream service for this provider slug
     let (service, _provider) =
         llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&service);
 
     let service_id = service.id.clone();
 
@@ -1400,6 +1401,7 @@ async fn gateway_provider_request(
     // Resolve the downstream service
     let (service, _provider) =
         llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&service);
 
     let service_id = service.id.clone();
 
@@ -3513,6 +3515,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,

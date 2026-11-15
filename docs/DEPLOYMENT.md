@@ -490,6 +490,13 @@ with the platform's termination grace period. `0` emits no drain events.
 Start and finish records also include `open_http_at_start` and, at finish,
 `open_http_at_finish`: the largest 20 route-template/method/kind groups, their
 counts and oldest ages in whole seconds, plus `other_count` for omitted units.
+Groups also distinguish the resolved, unowned catalog `service` slug for active
+public `connection`/`internal` discovery entries regardless of creator (excluding
+internal `platform-*` and model-only rows, with empty/UUID-shaped slugs and every
+other resolved service reported as `custom`, omitted before resolution) on
+proxy/public/LLM routes and the fixed stream `content_type` family (`event-stream`,
+`json`, `other`), never private service slugs, user connection aliases or raw
+content-type headers.
 Kinds distinguish pending requests from response bodies/upgraded streams; age
 starts when that kind is registered. Raw paths, IDs, queries, headers and extension
 methods are never captured (`<unmatched>` / `OTHER` are fixed fallbacks).

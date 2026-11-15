@@ -145,6 +145,7 @@ pub(crate) async fn execute(
         &request,
     )
     .await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&plan.offering);
     if request.has_images() && body.len() as i64 > plan.tariff.tariff().bounds.max_request_bytes {
         return Err(AppError::RequestBodyTooLarge {
             max_bytes: plan.tariff.tariff().bounds.max_request_bytes as usize,

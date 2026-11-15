@@ -267,7 +267,7 @@ impl Runtime {
         let id = state.next_id;
         state.next_id += 1;
         let diagnostic = matches!(kind, Kind::Upgrade | Kind::CompletionUpgrade)
-            .then(|| self.http().insert("stream"));
+            .then(|| self.http().insert("stream", None));
         state.work.insert(id, kind);
         self.0.changed.notify_waiters();
         (
@@ -292,7 +292,7 @@ impl Runtime {
         }
     }
 
-    fn register_counted(&self, kind: Counter) -> Work {
+    fn register_counted(&self, kind: Counter, content_type: Option<&'static str>) -> Work {
         // These guards need no abort handle or turn identity. Keep the HTTP
         // handoff off the task map; register the body before dropping its request.
         if self.counter(kind).fetch_add(1, Ordering::SeqCst) == 0 {
@@ -302,8 +302,8 @@ impl Runtime {
             runtime: self.clone(),
             registration: Registration::Counted(kind),
             diagnostic: match kind {
-                Counter::Request => Some(self.http().insert("request")),
-                Counter::Stream => Some(self.http().insert("stream")),
+                Counter::Request => Some(self.http().insert("request", None)),
+                Counter::Stream => Some(self.http().insert("stream", content_type)),
                 Counter::Subscription => None,
             },
         }
@@ -379,15 +379,23 @@ impl Runtime {
     }
 
     pub fn request(&self) -> Work {
-        self.register_counted(Counter::Request)
+        self.register_counted(Counter::Request, None)
     }
 
+    #[cfg(test)]
     pub fn stream(&self) -> Work {
-        self.register_counted(Counter::Stream)
+        self.register_counted(Counter::Stream, None)
+    }
+
+    pub fn response_stream(&self, content_type: Option<&http::HeaderValue>) -> Work {
+        self.register_counted(
+            Counter::Stream,
+            Some(diagnostics::content_type_family(content_type)),
+        )
     }
 
     pub fn subscription(&self) -> Work {
-        self.register_counted(Counter::Subscription)
+        self.register_counted(Counter::Subscription, None)
     }
 
     pub async fn subscription_close(&self) {

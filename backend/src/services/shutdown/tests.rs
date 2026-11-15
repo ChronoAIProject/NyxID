@@ -717,12 +717,12 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
     let db = connect_transaction_test_database("shutdown_tracking_benchmark").await;
     let response = Router::new()
         .route(
-            "/benchmark/{id}",
+            "/api/v1/proxy/s/{slug}/{*path}",
             get(|route: axum::extract::MatchedPath| async move { axum::Extension(route) }),
         )
         .oneshot(
             Request::builder()
-                .uri("/benchmark/private-id")
+                .uri("/api/v1/proxy/s/private-id/events")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -746,6 +746,7 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
         for _ in 0..TASKS {
             let runtime = runtime.clone();
             let route = route.clone();
+            let catalog = crate::test_utils::test_auto_connected_catalog_service();
             tasks.spawn(async move {
                 let started = std::time::Instant::now();
                 let mut samples = Vec::new();
@@ -754,7 +755,10 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
                     // One response handoff, including both registrations and Drops.
                     diagnostics::scope(Some(route.clone()), &axum::http::Method::GET, async {
                         let request = runtime.request();
-                        let stream = runtime.stream();
+                        diagnostics::resolved_catalog(&catalog);
+                        let stream = runtime.response_stream(Some(
+                            &axum::http::HeaderValue::from_static("text/event-stream"),
+                        ));
                         drop(request);
                         drop(stream);
                     })

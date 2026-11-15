@@ -1872,7 +1872,7 @@ async fn proxy_request_through_pool(
                 );
             }
         }
-        let attempt_result = until_client_disconnect(
+        let attempt = until_client_disconnect(
             &pool_cancellation,
             pool_attempt::attempt_timeout(
                 &accounting,
@@ -1922,8 +1922,9 @@ async fn proxy_request_through_pool(
                     Ok::<_, AppError>((ticket.clone(), gated))
                 }),
             ),
-        )
-        .await;
+        );
+        let (attempt_result, diagnostic_service) =
+            crate::services::shutdown::diagnostics::candidate(attempt).await;
         let attempt_result = match attempt_result {
             Ok(result) => result,
             Err(_) => {
@@ -2103,6 +2104,7 @@ async fn proxy_request_through_pool(
                     &candidate.service.slug,
                 )?;
                 accounting.audit.commit();
+                diagnostic_service.publish();
                 return Ok(response);
             }
             Err(error) => {
@@ -2250,6 +2252,7 @@ async fn proxy_request_through_pool(
         }
         attach_pool_response_headers(&mut response, attempt_number, &candidate.service.slug)?;
         accounting.audit.commit();
+        diagnostic_service.publish();
         return Ok(response);
     }
 
@@ -3270,6 +3273,7 @@ async fn execute_proxy_inner(
             extra_outbound_headers,
         )
         .await?;
+        crate::services::shutdown::diagnostics::resolved_proxy(&resolved.target);
         super::invocation_diagnostics::Target::record_request(
             &request,
             resolved.resolved_user_service_id.as_deref(),
@@ -10455,6 +10459,7 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -12005,6 +12010,7 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
     use super::{

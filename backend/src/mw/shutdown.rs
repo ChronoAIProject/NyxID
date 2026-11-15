@@ -40,7 +40,7 @@ async fn track_route(runtime: Runtime, request: Request, next: Next) -> Response
         if subscription {
             runtime.subscription()
         } else {
-            runtime.stream()
+            runtime.response_stream(parts.headers.get(axum::http::header::CONTENT_TYPE))
         }
     });
     let stop = Box::pin(async move {

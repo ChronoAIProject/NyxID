@@ -1,6 +1,13 @@
-use std::{collections::BTreeMap, future::Future};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    sync::{Arc, OnceLock},
+};
 
-use axum::{extract::MatchedPath, http::Method};
+use axum::{
+    extract::MatchedPath,
+    http::{HeaderValue, Method},
+};
 use serde::Serialize;
 use tokio::time::Instant;
 
@@ -14,6 +21,7 @@ tokio::task_local! {
 struct Route {
     template: Option<MatchedPath>,
     method: &'static str,
+    service: Option<Arc<OnceLock<Service>>>,
 }
 
 pub(crate) async fn scope<F: Future>(
@@ -33,12 +41,137 @@ pub(crate) async fn scope<F: Future>(
         Method::PATCH => "PATCH",
         _ => "OTHER",
     };
-    HTTP_ROUTE.scope(Route { template, method }, future).await
+    let service = template
+        .as_ref()
+        .is_some_and(|route| service_route(route.as_str()))
+        .then(|| Arc::new(OnceLock::new()));
+    HTTP_ROUTE
+        .scope(
+            Route {
+                template,
+                method,
+                service,
+            },
+            future,
+        )
+        .await
+}
+
+fn service_route(route: &str) -> bool {
+    matches!(
+        route.trim_end_matches('/'),
+        "/api/v1/proxy/{service_id}"
+            | "/api/v1/proxy/{service_id}/{*path}"
+            | "/api/v1/proxy/s/{slug}"
+            | "/api/v1/proxy/s/{slug}/{*path}"
+            | "/public/s/{slug}"
+            | "/public/s/{slug}/{*path}"
+            | "/api/v1/llm/gateway/v1/{*path}"
+            | "/api/v1/llm/{provider_slug}/v1/{*path}"
+            | "/api/v1/public-nyxbot/models/{service_id}/{*path}"
+            | "/api/v1/proxy/nyxbot-voice/{service_id}"
+            | "/api/v1/proxy/nyxbot-voice/{service_id}/{*path}"
+    )
+}
+
+#[derive(Clone)]
+enum Service {
+    Catalog(Arc<str>),
+    Custom,
+}
+
+impl Service {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Catalog(slug) => slug,
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Accept only the resolver's catalog identity, never its user-facing alias.
+pub(crate) fn resolved_proxy(target: &crate::services::proxy_service::ProxyTarget) {
+    record_service(
+        target
+            .catalog_slug
+            .as_deref()
+            .filter(|_| target.catalog_is_public),
+    );
+}
+
+pub(crate) fn resolved_catalog(service: &crate::models::downstream_service::DownstreamService) {
+    record_service(
+        crate::services::catalog_service::is_public_unowned_discovery_entry(service)
+            .then_some(service.slug.as_str()),
+    );
+}
+
+fn record_service(catalog_slug: Option<&str>) {
+    let _ = HTTP_ROUTE.try_with(|route| {
+        if let Some(service) = &route.service {
+            service.get_or_init(|| match catalog_slug {
+                Some(slug) if !slug.is_empty() && uuid::Uuid::try_parse(slug).is_err() => {
+                    Service::Catalog(Arc::from(slug))
+                }
+                _ => Service::Custom,
+            });
+        }
+    });
+}
+
+pub(crate) struct ServiceSelection(Option<Arc<OnceLock<Service>>>);
+
+impl ServiceSelection {
+    pub(crate) fn publish(self) {
+        if let Some(label) = self.0.as_ref().and_then(|service| service.get()) {
+            let _ = HTTP_ROUTE.try_with(|route| {
+                if let Some(service) = &route.service {
+                    let _ = service.set(label.clone());
+                }
+            });
+        }
+    }
+}
+
+/// A failed pool candidate must not label the response from a later candidate.
+/// The outer request stays unresolved until the pool selects its response.
+pub(crate) async fn candidate<F: Future>(future: F) -> (F::Output, ServiceSelection) {
+    let Ok(mut route) = HTTP_ROUTE.try_with(Clone::clone) else {
+        return (future.await, ServiceSelection(None));
+    };
+    route.service = route.service.map(|_| Arc::new(OnceLock::new()));
+    let selection = ServiceSelection(route.service.clone());
+    (HTTP_ROUTE.scope(route, future).await, selection)
+}
+
+pub(super) fn content_type_family(value: Option<&HeaderValue>) -> &'static str {
+    let media = value
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if media.eq_ignore_ascii_case("text/event-stream") {
+        "event-stream"
+    } else if media.eq_ignore_ascii_case("application/json")
+        || media.eq_ignore_ascii_case("text/json")
+        || media.split_once('/').is_some_and(|(_, subtype)| {
+            subtype
+                .rsplit_once('+')
+                .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("json"))
+        })
+    {
+        "json"
+    } else {
+        "other"
+    }
 }
 
 struct Unit {
     route: Route,
     kind: &'static str,
+    content_type: Option<&'static str>,
     started: Instant,
 }
 
@@ -65,18 +198,28 @@ pub struct Entry {
     pub route: String,
     pub method: &'static str,
     pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<&'static str>,
     pub count: usize,
     pub oldest_age_secs: u64,
 }
 
 impl Registry {
-    pub(super) fn insert(&mut self, kind: &'static str) -> usize {
+    pub(super) fn insert(
+        &mut self,
+        kind: &'static str,
+        content_type: Option<&'static str>,
+    ) -> usize {
         let unit = Slot::Open(Unit {
             route: HTTP_ROUTE.try_with(Clone::clone).unwrap_or(Route {
                 template: None,
                 method: "OTHER",
+                service: None,
             }),
             kind,
+            content_type: (kind == "stream").then_some(content_type.unwrap_or("other")),
             started: Instant::now(),
         });
         if let Some(index) = self.free {
@@ -108,6 +251,12 @@ impl Registry {
                     .map_or("<unmatched>", MatchedPath::as_str),
                 unit.route.method,
                 unit.kind,
+                unit.route
+                    .service
+                    .as_ref()
+                    .and_then(|service| service.get())
+                    .map(Service::as_str),
+                unit.content_type,
             );
             let (count, age) = groups.entry(key).or_default();
             *count += 1;
@@ -126,13 +275,19 @@ impl Registry {
             entries: groups
                 .into_iter()
                 .take(MAX_ENTRIES)
-                .map(|((route, method, kind), (count, oldest_age_secs))| Entry {
-                    route: route.to_owned(),
-                    method,
-                    kind,
-                    count,
-                    oldest_age_secs,
-                })
+                .map(
+                    |((route, method, kind, service, content_type), (count, oldest_age_secs))| {
+                        Entry {
+                            route: route.to_owned(),
+                            method,
+                            kind,
+                            service: service.map(str::to_owned),
+                            content_type,
+                            count,
+                            oldest_age_secs,
+                        }
+                    },
+                )
                 .collect(),
         }
     }
