@@ -103,3 +103,16 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_default_actual_server_settles_stream_turn_and_held_claim_before_25_seconds)"
 threads-required = "num-cpus"
+
+# failCommand is one server-wide setting: appName scopes its effects, but a
+# second configureFailPoint replaces the first test's setting. Reserve the
+# runner slots while these fixtures install and clear their failure injection.
+[[profile.ci.overrides]]
+filter = """
+test(handlers::oauth::tests::round3_) |
+test(=tests::round2_stale_permissive_broker_read_failure_is_retryable) |
+test(=tests::broker_policy_reload_failure_expires_only_the_unhealthy_replica) |
+test(=services::channel_image_delivery::tests::channel_image_claims_fail_closed_on_uncommitted_and_committed_uncertain_writes) |
+test(=services::audit_service::durability_tests::rejected_commit_does_not_report_success_or_publish_partial_revocation)
+"""
+threads-required = "num-cpus"

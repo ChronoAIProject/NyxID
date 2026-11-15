@@ -166,8 +166,11 @@ async fn tax_ordering_retry_second_provider_failure_records_backoff() {
 async fn tax_ordering_retry_uses_remaining_provider_deadline() {
     let (db, wallet) = fixture(true).await;
     let provider = InvalidatingProvider {
-        first_delay: StdDuration::from_millis(4200),
-        second_delay: StdDuration::from_secs(2),
+        // Leave time for the real MongoDB invalidation/publication between
+        // reads. A reset five-second budget would still run for about seven
+        // seconds and fail the unchanged total-deadline assertion below.
+        first_delay: StdDuration::from_secs(2),
+        second_delay: StdDuration::from_secs(6),
         ..InvalidatingProvider::new(&db, 1)
     };
     let started = Instant::now();
