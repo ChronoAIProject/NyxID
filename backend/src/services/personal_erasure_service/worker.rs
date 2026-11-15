@@ -5,6 +5,35 @@ use mongodb::options::ReturnDocument;
 
 const LEASE_SECONDS: i64 = 120;
 const RECONCILIATION_PAGE_CAP: usize = 64;
+const RECONCILIATION_QUIET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+#[derive(Default)]
+struct CompletedReconciliationSchedule {
+    next_scan: Option<std::time::Instant>,
+}
+
+impl CompletedReconciliationSchedule {
+    fn due(&self, now: std::time::Instant) -> bool {
+        self.next_scan.is_none_or(|next| now >= next)
+    }
+
+    fn scanned(&mut self, now: std::time::Instant, found: bool) {
+        self.next_scan = (!found).then_some(now + RECONCILIATION_QUIET_INTERVAL);
+    }
+}
+
+async fn reconcile_completed_if_due(
+    state: &crate::AppState,
+    schedule: &mut CompletedReconciliationSchedule,
+    now: std::time::Instant,
+) -> AppResult<()> {
+    if schedule.due(now) {
+        let found = reconcile_completed_once(state).await?;
+        schedule.scanned(now, found);
+    }
+    Ok(())
+}
+
 
 async fn claim(db: &Database) -> AppResult<Option<PersonalErasureJob>> {
     let durable = super::super::transaction_service::durable_database(db);
@@ -266,7 +295,11 @@ fn next_domain_index(job: &PersonalErasureJob) -> Option<usize> {
     job.domains
         .iter()
         .enumerate()
-        .filter(|(_, domain)| domain.status != DomainStatus::Complete)
+        .filter(|(_, domain)| {
+            domain.status != DomainStatus::Complete
+                || (domain.domain == "local_inventory"
+                    && job.local_inventory_revision < super::local::LOCAL_INVENTORY_REVISION)
+        })
         .min_by_key(|(_, domain)| {
             DOMAINS
                 .iter()
@@ -514,6 +547,7 @@ pub(crate) fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()
     state.shutdown.clone().spawn_worker(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut reconciliation = CompletedReconciliationSchedule::default();
         loop {
             let Some(_work) = state.shutdown.tick(&mut timer).await else {
                 break;
@@ -527,7 +561,10 @@ pub(crate) fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()
             if process_one(&state).await.is_err() {
                 tracing::warn!("Personal erasure pass remains pending; durable lease will retry");
             }
-            if reconcile_completed_once(&state).await.is_err() {
+            if reconcile_completed_if_due(&state, &mut reconciliation, std::time::Instant::now())
+                .await
+                .is_err()
+            {
                 tracing::warn!(
                     "Completed personal erasure inventory reconciliation remains pending"
                 );
@@ -539,6 +576,116 @@ pub(crate) fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_reconciliation_quiet_interval_starts_only_after_empty_scan() {
+        let start = std::time::Instant::now();
+        let mut schedule = CompletedReconciliationSchedule::default();
+        assert!(schedule.due(start));
+        schedule.scanned(start, true);
+        assert!(schedule.due(start + std::time::Duration::from_secs(1)));
+        schedule.scanned(start, false);
+        assert!(
+            !schedule
+                .due(start + RECONCILIATION_QUIET_INTERVAL - std::time::Duration::from_nanos(1))
+        );
+        assert!(schedule.due(start + RECONCILIATION_QUIET_INTERVAL));
+        schedule.scanned(start + RECONCILIATION_QUIET_INTERVAL, true);
+        assert!(
+            schedule.due(start + RECONCILIATION_QUIET_INTERVAL + std::time::Duration::from_secs(1))
+        );
+        assert!(CompletedReconciliationSchedule::default().due(start));
+    }
+
+    async fn retry_now(db: &Database, id: &str) {
+        db.collection::<Document>(JOBS)
+            .update_one(doc! {"_id": id}, vec![doc! {"$set": {"retry_at": "$$NOW"}}])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_start_reconciles_immediately_and_current_completion_skips_quiet_window() {
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        db.collection::<Document>(JOBS).update_one(doc! {"_id": &accepted.id},
+            vec![doc! {"$set": {"status": "complete", "local_inventory_revision": 0_i32, "retry_at": "$$NOW"}}]).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut schedule = CompletedReconciliationSchedule::default();
+        let now = std::time::Instant::now();
+        reconcile_completed_if_due(&state, &mut schedule, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::status(&db, &user)
+                .await
+                .unwrap()
+                .unwrap()
+                .local_inventory_revision,
+            super::local::LOCAL_INVENTORY_REVISION
+        );
+        assert!(schedule.due(now));
+        reconcile_completed_if_due(&state, &mut schedule, now)
+            .await
+            .unwrap();
+        assert!(!schedule.due(now + std::time::Duration::from_secs(1)));
+        // Ordinary completion runs the real domains while repair scanning is quiet.
+        db.collection::<Document>(JOBS).update_one(doc! {"_id": &accepted.id},
+            doc! {"$set": {"status": "pending", "domains": bson::to_bson(&accepted.domains).unwrap(), "local_inventory_revision": 0_i32}}).await.unwrap();
+        for _ in 0..64 {
+            retry_now(&db, &accepted.id).await;
+            assert!(process_one(&state).await.unwrap());
+            if db
+                .collection::<Document>(USERS)
+                .find_one(doc! {"_id": &user})
+                .await
+                .unwrap()
+                .is_none()
+            {
+                break;
+            }
+        }
+        assert!(
+            db.collection::<Document>(USERS)
+                .find_one(doc! {"_id": &user})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        crate::services::telemetry_erasure_service::drain_once(&db, &Default::default())
+            .await
+            .unwrap();
+        crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+            &db,
+            &user,
+            "operator",
+            "evidence://deployment-inventory",
+            "Verified deployment history",
+        )
+        .await
+        .unwrap();
+        for _ in 0..16 {
+            retry_now(&db, &accepted.id).await;
+            assert!(process_one(&state).await.unwrap());
+            if super::super::status(&db, &user)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == ErasureStatus::Complete
+            {
+                break;
+            }
+        }
+        let complete = super::super::status(&db, &user).await.unwrap().unwrap();
+        assert_eq!(complete.status, ErasureStatus::Complete, "{complete:?}");
+        assert_eq!(
+            complete.local_inventory_revision,
+            super::local::LOCAL_INVENTORY_REVISION
+        );
+        assert!(!schedule.due(now + std::time::Duration::from_secs(1)));
+        db.drop().await.unwrap();
+    }
     async fn server_time(db: &Database) -> chrono::DateTime<chrono::Utc> {
         db.run_command(doc! {"hello":1})
             .await

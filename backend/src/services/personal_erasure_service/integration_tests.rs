@@ -630,6 +630,7 @@ async fn stuck_source_cleanup_recovers_without_repair_or_replaying_completed_dom
     db.collection::<Document>(JOBS).insert_one(doc! {
         "_id":&id,"user_id":&owner,"requested_by":&owner,"owner_deletion_policy":bson::Bson::Null,
         "status":"pending","inventory_version":INVENTORY_VERSION,"domains":domains,
+        "local_inventory_revision":super::local::LOCAL_INVENTORY_REVISION,
         "accepted_at":at,"updated_at":at,"completed_at":bson::Bson::Null,
         "lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,"retry_at":bson::Bson::Null,
     }).await.unwrap();
@@ -801,6 +802,119 @@ async fn stuck_source_cleanup_recovers_without_repair_or_replaying_completed_dom
     assert!(detected.is_empty());
     assert_delivery_bystanders_unchanged(&db, &preserved).await;
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn in_flight_old_inventory_reconciles_before_source_and_survives_legacy_writers() {
+    for (revision, orphan_intent) in [(None, false), (Some(2_i32), false), (None, true)] {
+        let (db, owner) = tests::fixture().await;
+        let state = test_app_state(db.clone());
+        let (clients, server) = crate::telemetry::erasure::test_support::clients().await;
+        super::super::telemetry_erasure_service::register_destinations(&db, &clients)
+            .await
+            .unwrap();
+        let accepted = accept(&db, &owner, &owner, None).await.unwrap();
+        // The completed platform checkpoint has already retired the account.
+        db.collection::<Document>(USERS).update_one(doc! {"_id":&owner}, doc! {"$set":{
+            "is_active":false,"platform_personal_deleting":true,"platform_personal_retirement_pending":false
+        }}).await.unwrap();
+        let preserved = if orphan_intent {
+            seed_orphan_delivery_intents(&db, &owner).await
+        } else {
+            Vec::new()
+        };
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(
+                doc! {"_id":"old-inventory-content","user_id":&owner,"payload":"personal-text"},
+            )
+            .await
+            .unwrap();
+        let mut domains = accepted.domains;
+        for domain in &mut domains[..5] {
+            domain.status = DomainStatus::Complete;
+            domain.completed_at = Some(chrono::Utc::now());
+        }
+        domains[5].status = DomainStatus::Pending;
+        domains[5].reason = Some("source_cleanup_pending".into());
+        let mut update = doc! {"$set": {
+            "domains":bson::to_bson(&domains).unwrap(),"status":"pending",
+            "retry_at":bson::DateTime::from_millis(0)
+        }};
+        if let Some(revision) = revision {
+            update
+                .get_document_mut("$set")
+                .unwrap()
+                .insert("local_inventory_revision", revision);
+        } else {
+            update.insert("$unset", doc! {"local_inventory_revision":""});
+        }
+        db.collection::<Document>(JOBS)
+            .update_one(doc! {"_id":&accepted.id}, update)
+            .await
+            .unwrap();
+
+        // A stale completed local checkpoint must be selected before source.
+        // One bounded pass can remove rows, but cannot stamp the revision yet.
+        step(&state).await;
+        let current = status(&db, &owner).await.unwrap().unwrap();
+        assert_eq!(current.domains[4].status, DomainStatus::Pending);
+        assert_eq!(
+            current.local_inventory_revision,
+            revision.unwrap_or(0) as u32
+        );
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"user_id":&owner})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        until_source_removed(&state, &owner).await;
+        finish_with_vendor_evidence(&state, &owner, &clients, &server).await;
+        let complete = status(&db, &owner).await.unwrap().unwrap();
+        assert_eq!(complete.status, ErasureStatus::Complete);
+        assert_eq!(
+            complete.local_inventory_revision,
+            super::local::LOCAL_INVENTORY_REVISION
+        );
+        assert_delivery_bystanders_unchanged(&db, &preserved).await;
+        assert_eq!(
+            db.collection::<Document>(crate::models::node_credential_desired::COLLECTION_NAME)
+                .count_documents(doc! {"owner_id":&owner})
+                .await
+                .unwrap(),
+            0
+        );
+
+        // Old serde readers ignore the additive revision field, and their
+        // field-level checkpoint writes preserve fields they do not know.
+        #[derive(serde::Deserialize)]
+        struct LegacyCheckpoint {
+            domains: Vec<DomainCheckpoint>,
+            status: ErasureStatus,
+        }
+        let stored = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id":&accepted.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let legacy: LegacyCheckpoint = bson::from_document(stored.clone()).unwrap();
+        assert_eq!(legacy.status, ErasureStatus::Complete);
+        db.collection::<Document>(JOBS).update_one(doc! {"_id":&accepted.id},
+            doc! {"$set":{"domains":bson::to_bson(&legacy.domains).unwrap(),"status":"complete"}})
+            .await.unwrap();
+        assert!(!process_one(&state).await.unwrap());
+        assert_eq!(
+            db.collection::<Document>(JOBS)
+                .find_one(doc! {"_id":&accepted.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        db.drop().await.unwrap();
+    }
 }
 
 #[tokio::test]

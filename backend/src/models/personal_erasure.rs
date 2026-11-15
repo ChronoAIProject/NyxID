@@ -54,9 +54,9 @@ pub struct PersonalErasureJob {
     pub owner_deletion_policy: Option<String>,
     pub status: ErasureStatus,
     pub inventory_version: u32,
-    /// Revision of the local personal-data inventory that was run after all
-    /// domains completed. Old replicas omit this field and therefore remain
-    /// eligible for the bounded reconciliation pass.
+    /// Revision that actually completed local cleanup. Old replicas omit this
+    /// field; both in-flight and completed jobs then rerun the bounded local
+    /// pass before advancing or stamping the current revision.
     #[serde(default)]
     pub local_inventory_revision: u32,
     pub domains: Vec<DomainCheckpoint>,
