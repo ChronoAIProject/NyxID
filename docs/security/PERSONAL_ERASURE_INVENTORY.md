@@ -122,20 +122,34 @@ registry):
 | `platform_delivery_tests`, `platform_setup_steps` | Joined installation/setup lifecycle children (`platform_installation::STEPS`, `platform_installation::TESTS` and `platform_installation::DeliveryTest`); bounded steps/tests per parent. |
 | `service_account_key_read_grants`, `service_pool_member_health` | Owner grant configuration (`models/service_account_key_read_grant.rs`) and one current health row per member/context, with one-hour expiry (`service_pool_health_service::HEALTH_RETENTION_MS` and `service_pool_health_service::issue_observation_ticket`); observations remain separately indexed. |
 | `telegram_bot_claims`, `telegram_bot_requests`, `telegram_managed_bot_events` | Bot provisioning/claim lifecycle; request admission lasts 15 minutes and terminal request purge follows lifecycle checks (`telegram_new_service::TelegramNewService::expire` and `telegram_new_service::TelegramNewService::begin_inner`), while managed events track bot creation. |
-| `channel_send_claims` | The model has no `conversation_id` field (`channel_send_claim::ChannelSendClaim`); cleanup uses an anchored composite `_id` regex (`services/personal_erasure_service/local.rs`, `personal_erasure_orphan_sweep::collect_groups`), served by `_id_`. |
+| `channel_send_claims` | The model has no `conversation_id` field (`channel_send_claim::ChannelSendClaim`); cleanup uses an anchored composite `_id` regex (`services/personal_erasure_service/local.rs`, `personal_erasure_orphan_sweep::jobs`), served by `_id_`. |
 
 ## Pre-job orphan sweep
 
 Rows left by account deletions that predate durable erasure jobs can be reviewed
 by an administrator with `POST /api/v1/admin/personal-erasure/orphans`. The
-request is a dry-run by default and returns candidate counts, orphan owner IDs,
-and a SHA-256 digest over the canonical sorted candidate set. An apply request
-must include that digest; the server recomputes it and refuses to mutate if the
-set changed. Only registry entries classified as `LocalInventory` or
-`Redacted` are considered. An owner still present in `users` or
-`service_accounts` is live and is never touched. Deletes and redactions are
-bounded and repeatable, and the completed set is recorded in the chained audit
-log as metadata (counts, digest, and actor only).
+request defaults to a dry-run and returns HTTP 202 with a job ID. Poll
+`GET /api/v1/admin/personal-erasure/orphans/{job_id}` for its persisted report:
+counts, a capped list of orphan identifiers, and a SHA-256 digest binding every
+candidate's collection, owner field, owner ID and exact row ID. Applying starts
+another job with that digest; no mutation occurs if the newly scanned set differs.
+
+The worker reuses `personal_erasure_service::worker`'s server-time claim,
+lease-token fencing and majority checkpoint protocol. Each pass scans at most
+512 rows/owner values with an `_id` keyset cursor, including an intra-row cursor
+for arrays. Liveness queries contain at most 128 IDs. Candidate pages contain
+at most 64 identifier pairs and are persisted with the scan checkpoint in one
+transaction; document bodies are never copied. Report construction streams pages
+and renews the same lease. Applying resumes the reviewed pages after a restart.
+A changed registry specification invalidates an unfinished scan. Jobs and pages
+are retained as erasure bookkeeping; their low-volume claim scan uses existing
+indexes and adds no startup index build.
+
+Only local-inventory, redaction and joined-child classifications are considered.
+An existing person, organization-user, service account or erasure job is live.
+The report's per-collection owner list is capped at 128, with exact candidate
+counts and an explicit cap flag. Deletes and redactions are repeatable, and the
+completed set is recorded in the chained audit log as metadata.
 
 ## Acceptance before account fencing
 

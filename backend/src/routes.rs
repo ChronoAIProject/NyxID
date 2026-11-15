@@ -1096,6 +1096,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_personal_erasure::orphan_sweep),
         )
         .route(
+            "/personal-erasure/orphans/{job_id}",
+            get(handlers::admin_personal_erasure::orphan_sweep_status),
+        )
+        .route(
             "/platform-models/credentials",
             get(handlers::platform_models::credentials::list)
                 .post(handlers::platform_models::credentials::create_request),

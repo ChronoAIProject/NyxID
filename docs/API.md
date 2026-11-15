@@ -6341,42 +6341,28 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-
 
 #### POST /api/v1/admin/personal-erasure/orphans
 
-Review and optionally remove personal rows left by account deletions that
-predate durable erasure jobs. The request body is optional and defaults to a
-dry-run. A dry-run returns candidate counts and orphan owner IDs by collection
-plus a SHA-256 digest of the exact sorted candidate set. Applying requires that
-digest; a changed set is rejected. Existing person, organization-user, and
-service-account owners are always treated as live. A successful apply records a
-metadata-only chained audit event and can be repeated safely with the same
-digest.
+Start a persisted, leased background dry-run (default `{}`) or digest-bound
+apply (`{"apply":true,"digest":"<dry-run digest>"}`). The request returns
+HTTP 202 immediately. No candidate content is included in the report; owner-ID
+lists are capped with an explicit flag, while candidate counts remain exact.
 
 **Auth:** Admin, first-party human
 
-**Request (dry-run):**
+**Response (202):**
 
 ```json
-{}
+{"job_id":"<uuid>","status":"pending","phase":"scan","report":null,"failure":null}
 ```
 
-**Request (apply):**
+#### GET /api/v1/admin/personal-erasure/orphans/{job_id}
 
-```json
-{
-  "apply": true,
-  "digest": "<sha256-from-dry-run>"
-}
-```
-
-**Response (200):**
-
-```json
-{
-  "dry_run": true,
-  "digest": "…",
-  "candidate_count": 0,
-  "collections": []
-}
-```
+Poll the job using the same admin, first-party-human authorization. A complete
+job has `status: "complete"` and `report` containing `dry_run`, `digest`,
+`candidate_count`, and `collections` (collection, candidate count, capped owner
+IDs and `owner_ids_truncated`). A changed candidate set or registry definition
+returns `status: "failed"` with a stable failure code. Existing person,
+organization-user, service-account and erasure-job owners remain live. Apply
+reuses the exact persisted set after interruption and records a chained audit.
 
 ---
 

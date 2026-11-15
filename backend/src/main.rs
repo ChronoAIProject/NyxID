@@ -1378,6 +1378,8 @@ async fn server_run(cli: Cli) {
         .spawn_worker(services::node_credential_delivery::run_worker(
             state.clone(),
         ));
+    let _orphan_sweep_worker =
+        services::personal_erasure_orphan_sweep::jobs::spawn_worker(state.clone());
     let _personal_erasure_worker = services::personal_erasure_service::spawn_worker(state.clone());
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), erasure_clients);
     let _usage_rollup_worker =

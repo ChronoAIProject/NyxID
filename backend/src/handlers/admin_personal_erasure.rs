@@ -1,11 +1,15 @@
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
 use serde::Deserialize;
 
 use crate::{
     AppState,
     errors::AppResult,
     mw::auth::AuthUser,
-    services::personal_erasure_orphan_sweep::{self, OrphanSweepReport},
+    services::personal_erasure_orphan_sweep::jobs::{self, SweepStatus},
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -23,19 +27,33 @@ pub async fn orphan_sweep(
     State(state): State<AppState>,
     auth: AuthUser,
     request: Option<Json<OrphanSweepRequest>>,
-) -> AppResult<Json<OrphanSweepReport>> {
+) -> AppResult<(StatusCode, Json<SweepStatus>)> {
     crate::handlers::admin_helpers::require_admin(&state, &auth).await?;
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let request = request.map(|Json(value)| value).unwrap_or_default();
-    Ok(Json(
-        personal_erasure_orphan_sweep::run(
-            &state,
-            &auth.user_id.to_string(),
-            request.apply,
-            request.digest.as_deref(),
-        )
-        .await?,
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            jobs::start(
+                &state.db,
+                &auth.user_id.to_string(),
+                request.apply,
+                request.digest.as_deref(),
+            )
+            .await?,
+        ),
     ))
+}
+
+/// GET /api/v1/admin/personal-erasure/orphans/{job_id}
+pub async fn orphan_sweep_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<SweepStatus>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth).await?;
+    crate::handlers::login_client_context::require_first_party_human(&auth)?;
+    Ok(Json(jobs::status(&state.db, &id).await?))
 }
 
 #[cfg(test)]
@@ -122,11 +140,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn orphan_sweep_http_starts_and_polls_persisted_job() {
+        let fixture = Fixture::new("orphan_sweep_http_poll").await;
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/admin/personal-erasure/orphans")
+                    .header("authorization", format!("Bearer {}", fixture.admin_token))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(started["status"], "pending");
+        let id = started["job_id"].as_str().unwrap();
+        crate::services::personal_erasure_orphan_sweep::jobs::finish(&fixture.state.db, id)
+            .await
+            .unwrap();
+        let path = format!("/api/v1/admin/personal-erasure/orphans/{id}");
+        let polled = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::get(&path)
+                    .header("authorization", format!("Bearer {}", fixture.admin_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(polled.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(polled.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let done: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(done["status"], "complete");
+        assert_eq!(done["report"]["candidate_count"], 0);
+        assert_eq!(
+            fixture
+                .app
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn orphan_sweep_http_requires_first_party_admin_human() {
         let fixture = Fixture::new("orphan_sweep_http_auth").await;
         assert_eq!(
             fixture.request(&[bearer(&fixture.admin_token)]).await,
-            StatusCode::OK
+            StatusCode::ACCEPTED
         );
 
         let plain = Uuid::new_v4().to_string();

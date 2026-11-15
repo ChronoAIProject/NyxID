@@ -2067,6 +2067,22 @@ pub static ENTRIES: &[Entry] = &[
         why: "personal_erasure_jobs is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
+        collection: "personal_erasure_orphan_sweep_jobs",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "Restartable orphan-sweep checkpoints, reviewed candidate identifiers and reports are retained as erasure accountability evidence; no document content is copied.",
+    },
+    Entry {
+        collection: "personal_erasure_orphan_sweep_pages",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "Restartable orphan-sweep checkpoints, reviewed candidate identifiers and reports are retained as erasure accountability evidence; no document content is copied.",
+    },
+    Entry {
         collection: "personal_erasure_local_receipts",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
