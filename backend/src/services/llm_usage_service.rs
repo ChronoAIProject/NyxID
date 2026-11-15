@@ -194,37 +194,37 @@ impl RealtimeLlmUsageCollector {
         }
     }
 
-    pub fn observe_downstream_text(&mut self, text: &str) {
+    pub fn observe_downstream_text(&mut self, text: &str) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
 
         self.add_segment_bytes(text.len());
         let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-            return;
+            return false;
         };
         let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
-            return;
+            return false;
         };
 
         if event_type != "response.done" {
             if event_type.starts_with("response.") {
                 self.segment_has_response_activity = true;
             }
-            return;
+            return false;
         }
 
         let segment_was_active = self.segment_has_response_activity;
         self.segment_has_response_activity = true;
         let Some(done) = extract_realtime_response_done(&value) else {
-            return;
+            return false;
         };
         if !self.seen_response_ids.insert(done.response_id) {
             self.segment_bytes = self
                 .segment_bytes
                 .saturating_sub(i64::try_from(text.len()).unwrap_or(i64::MAX));
             self.segment_has_response_activity = segment_was_active;
-            return;
+            return false;
         }
 
         match done.usage {
@@ -240,6 +240,19 @@ impl RealtimeLlmUsageCollector {
 
         self.segment_bytes = 0;
         self.segment_has_response_activity = false;
+        true
+    }
+
+    /// Snapshot only completed arrival segments; the unfinished tail is added
+    /// by normal close, never guessed by crash recovery.
+    pub(crate) fn completed_prefix(&self) -> RealtimeLlmUsageSummary {
+        RealtimeLlmUsageSummary {
+            collection_enabled: self.enabled,
+            reported_usage: self.reported_usage.clone().finalize(),
+            uncovered_bytes: self.uncovered_bytes,
+            reported_response_count: self.reported_response_count,
+            estimated_response_count: self.estimated_response_count,
+        }
     }
 
     pub fn observe_downstream_binary(&mut self, bytes: usize) {

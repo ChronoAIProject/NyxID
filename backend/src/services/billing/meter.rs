@@ -20,11 +20,21 @@ const SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE: i64 = 100;
 #[derive(Clone, Debug, Default)]
 pub struct MeteredProxyContext {
     pub route: Option<BillingRouteContext>,
+    // Actual admitted funding, not merely a configured billable route.
+    pub(crate) funded: bool,
 }
 
 impl MeteredProxyContext {
+    pub(crate) fn with_funding(mut self, funded: bool) -> Self {
+        self.funded = funded;
+        self
+    }
+
     pub fn disabled() -> Self {
-        Self { route: None }
+        Self {
+            route: None,
+            funded: false,
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -34,29 +44,32 @@ impl MeteredProxyContext {
     pub(crate) fn from_route(route: &BillingRouteContext) -> Self {
         Self {
             route: Some(route.clone()),
+            funded: false,
         }
     }
-}
-
-pub(crate) async fn has_complete_meter(
-    db: &mongodb::Database,
-    ctx: &BillingRouteContext,
-) -> AppResult<bool> {
-    complete_meter(db, ctx, false).await
 }
 
 pub(crate) async fn has_complete_funded_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<bool> {
-    complete_meter(db, ctx, true).await
+    complete_meter(db, ctx, true)
+        .await
+        .map(|value| value.is_some())
+}
+
+pub(crate) async fn complete_meter_funding(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<Option<bool>> {
+    complete_meter(db, ctx, false).await
 }
 
 async fn complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     require_funding: bool,
-) -> AppResult<bool> {
+) -> AppResult<Option<bool>> {
     let mut transaction_ids = Vec::with_capacity(2);
     if ctx.platform_metered() {
         for (_, code) in ctx.platform_specs() {
@@ -71,7 +84,7 @@ async fn complete_meter(
         ));
     }
     if transaction_ids.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let rows: Vec<UsageMeterRow> = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -80,7 +93,7 @@ async fn complete_meter(
         .try_collect()
         .await?;
     if rows.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if rows.iter().any(|row| {
         row.org_channel_guest != ctx.org_channel_guest.as_ref().map(|g| g.usage())
@@ -206,7 +219,7 @@ async fn complete_meter(
         })
         .count();
     if rows.len() == transaction_ids.len() && active_count == transaction_ids.len() {
-        return Ok(true);
+        return Ok(Some(rows.iter().any(|row| row.wallet_id.is_some())));
     }
     Err(AppError::Conflict(
         "billing request id belongs to released or incomplete usage; retry with a fresh billing request id"
@@ -307,7 +320,7 @@ pub async fn open(
         return Err(error);
     }
 
-    Ok(MeteredProxyContext::from_route(ctx))
+    Ok(MeteredProxyContext::from_route(ctx).with_funding(reservation.is_some()))
 }
 
 // Free tariffs still need a live binding fence and atomic component rows.
@@ -316,7 +329,7 @@ async fn open_free_model(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<MeteredProxyContext> {
-    if complete_meter(db, ctx, false).await? {
+    if complete_meter(db, ctx, false).await?.is_some() {
         return Ok(MeteredProxyContext::from_route(ctx));
     }
     let rows: Vec<_> = ctx
@@ -345,7 +358,7 @@ async fn open_free_model(
         },
     )
     .await;
-    if result.is_err() && complete_meter(db, ctx, false).await? {
+    if result.is_err() && complete_meter(db, ctx, false).await?.is_some() {
         return Ok(MeteredProxyContext::from_route(ctx));
     }
     result?;
@@ -968,6 +981,7 @@ pub(super) fn reserved_row(
         pending_resale_quantity: None,
         pending_platform_usage: None,
         usage_checkpoint: None,
+        realtime_session: None,
         pool_attempt: ctx.pool_attempt.clone(),
         machine_usage: ctx.machine_usage.clone(),
         status: UsageStatus::Reserved,
@@ -1246,7 +1260,7 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
     }
 }
 
-fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
+pub(super) fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
     match metric {
         BillingMetric::Bytes => usage.bytes.max(0),
         BillingMetric::Requests => usage.requests.max(0),

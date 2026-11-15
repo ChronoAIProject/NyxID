@@ -3,6 +3,7 @@ use crate::models::{chain_verify_status::ChainVerifyOutcome, credits::Credits};
 use crate::services::billing::{account_reconciliation, reservation};
 use std::sync::Mutex;
 
+pub(crate) mod realtime_ws;
 mod round2;
 
 pub(crate) async fn before_checkpoint_write(db: &mongodb::Database) {
@@ -73,14 +74,14 @@ pub(crate) async fn crash_after_checkpoint<T>(future: impl std::future::Future<O
     drop(future);
 }
 
-struct Fixture {
-    db: mongodb::Database,
-    service: BillingService,
-    owner: String,
-    commands: Arc<Mutex<Vec<String>>>,
+pub(crate) struct Fixture {
+    pub(crate) db: mongodb::Database,
+    pub(crate) service: BillingService,
+    pub(crate) owner: String,
+    pub(crate) commands: Arc<Mutex<Vec<String>>>,
 }
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let recorded = commands.clone();
         let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
@@ -120,7 +121,7 @@ impl Fixture {
             commands,
         }
     }
-    async fn open(&self, funded: bool) -> crate::services::billing::MeteredProxyContext {
+    pub(crate) async fn open(&self, funded: bool) -> crate::services::billing::MeteredProxyContext {
         let mut route = route_context(
             &CoverageCase {
                 ingress: BillingIngress::LlmGateway,
@@ -137,7 +138,7 @@ impl Fixture {
         self.service.mark_forwarded(&metered).await.unwrap();
         metered
     }
-    async fn row(&self) -> UsageMeterRow {
+    pub(crate) async fn row(&self) -> UsageMeterRow {
         self.db
             .collection::<UsageMeterRow>(USAGE_METER)
             .find_one(doc! {})
@@ -150,7 +151,7 @@ impl Fixture {
             .await
             .unwrap();
     }
-    async fn clean(&self) {
+    pub(crate) async fn clean(&self) {
         account_reconciliation::hold_pass_for_test(&self.db)
             .await
             .unwrap();
@@ -170,10 +171,10 @@ impl Fixture {
             status.break_detail
         );
     }
-    fn count(&self) -> usize {
+    pub(crate) fn count(&self) -> usize {
         std::mem::take(&mut *self.commands.lock().unwrap()).len()
     }
-    async fn charged(&self, n: i64) {
+    pub(crate) async fn charged(&self, n: i64) {
         let row = self.row().await;
         assert_eq!(row.quantity, Some(n));
         assert!(row.released);

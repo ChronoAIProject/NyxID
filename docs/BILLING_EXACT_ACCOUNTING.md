@@ -496,6 +496,47 @@ uses its checkpoint. New recovery never charges an already released row.
 Rollback needs no data change, and promoted final quantities remain recoverable
 by either binary. Voice retains its existing durable duration/response windows.
 
+### Realtime WebSocket session recovery
+
+Funded direct and node Realtime bridges initialize an optional `realtime_session`
+on the existing coordinator meter row in the transaction that marks the request
+forwarded. It has a database-time one-hour deadline and starts with zero observed
+usage. Each distinct `response.done` boundary saves one cumulative numeric prefix,
+including completed responses without usage; duplicates, content/audio frames,
+unsupported sockets and metering-only sessions add no checkpoint writes. Each
+write uses the same one-second best-effort bound as HTTP streams: failure logs
+metadata once and disables further checkpoints, while delivery and normal close
+continue. No payload or response-ID list is stored.
+
+The one-hour bridge limit covers blocked awaits and checks monotonic and wall
+clocks before resumed work. A healthy client still receives the ordinary close
+at the limit; close flushing is bounded to one second. Recovery starts only after
+the database deadline plus 60 seconds, on the existing reconciliation cadence.
+Normal close and recovery compete in one transaction that seals the session and
+publishes all final meter quantities. A late close cannot replace recovery; open
+prefixes are never final quantities. Ordinary settlement then charges once and
+returns unused wallet, grant and allowance holds.
+
+Recovery charges the recorded prefix by the existing close rule: one forwarded
+request, recorded transport bytes and reported token classes. Aggregate-token
+pricing adds `ceil(uncovered_bytes / 4)` once over the durably recorded uncovered
+segments; typed classes remain reported-only. A saved pricing flag preserves routes that
+already estimate all transport bytes, including resale; enabling durability does
+not switch their pricing to provider totals. The policy is named
+`recovered_session_usage` in `billing/realtime_usage.rs`. With no durable response
+boundary, zero observed bytes/tokens is the crash billing decision, not proof of
+no consumption. The unrecorded suffix is waived. A normal close uses its complete
+in-memory totals and never adds the checkpoint again.
+
+Old binaries ignore the optional state; sessions they start keep their existing
+behavior. Either version can settle published final quantities. Rollback pauses
+recovery of open marked sessions until capable workers return, without a data
+change or an operator step for an ordinary rolling update. A process pause between
+a deadline check and socket I/O can still allow an unobserved effect; the terminal
+fence prevents another settlement, not that external effect. Certified model
+sockets without the required native usage vector and other unsupported protocols
+retain their existing behavior; no generic quantities bypass their evidence rules.
+
 ### Usage dashboard filters and models
 
 The admin Usage page keeps its shared filters directly below the heading. Users

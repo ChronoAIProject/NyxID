@@ -861,6 +861,7 @@ pub(crate) async fn recover_retryable_settlements_at(
     db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<SettlementRecoveryStats> {
+    super::realtime_usage::recover_stale(db).await?;
     super::usage_checkpoint::recover_stale(db, now).await?;
     super::meter::recover_pending_resale_intents(db).await?;
 

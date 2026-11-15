@@ -1343,3 +1343,14 @@ async fn hold_conservation_rapid_passes_wait_for_database_time() {
     f.holds_clean().await;
     f.db.drop().await.unwrap();
 }
+
+// Reuse the exact existing money-boundary hooks for Realtime recovery tests.
+pub(crate) async fn crash_money_at<T>(phase: Phase, future: impl std::future::Future<Output = T>) {
+    let gate = Gate::new(phase);
+    let mut running = Box::pin(GATE.scope(gate.clone(), future));
+    tokio::select! {
+        _=&mut running=>panic!("money operation missed {phase:?}"),
+        ()=gate.entered()=>{},
+    }
+    drop(running);
+}

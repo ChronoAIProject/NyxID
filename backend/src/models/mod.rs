@@ -113,6 +113,7 @@ pub mod platform_settings;
 pub mod platform_setup;
 pub mod provider_config;
 pub mod pushed_authorization_request;
+pub mod realtime_session;
 pub mod refresh_token;
 pub mod reply_token_use;
 pub mod role;
