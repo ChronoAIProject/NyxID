@@ -1,5 +1,6 @@
-//! Snapshot hold verification and wallet excess repair.
+//! Snapshot hold verification and excess repair.
 mod backlog;
+mod benefits;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
@@ -233,7 +234,8 @@ async fn totals(
 }
 
 pub(super) struct Repair {
-    pub wallet_id: String,
+    pub collection: String,
+    pub resource_id: String,
     pub pass: String,
 }
 
@@ -268,6 +270,29 @@ fn repair_identity(resource: &Document) -> Document {
     identity
 }
 
+impl Totals {
+    fn excesses(&self) -> AppResult<Option<BTreeMap<String, Credits>>> {
+        if !self.exact || !self.stored.keys().eq(self.expected.keys()) {
+            return Ok(None);
+        }
+        let mut excesses = BTreeMap::new();
+        for (key, stored) in &self.stored {
+            let expected = self.expected[key];
+            if *stored < Credits::ZERO || expected < Credits::ZERO {
+                return Ok(None);
+            }
+            let excess = stored.checked_sub(expected)?;
+            if excess < Credits::ZERO {
+                return Ok(None);
+            }
+            if excess > Credits::ZERO {
+                excesses.insert(key.clone(), excess);
+            }
+        }
+        Ok((!excesses.is_empty()).then_some(excesses))
+    }
+}
+
 struct Snapshot {
     totals: Totals,
     exact: bool,
@@ -291,7 +316,7 @@ async fn read_snapshot(
     let projection = if collection == WALLETS {
         doc! {"_id":1,"billing_owner_id":1,"wallet_id":1,"reserved_credits":1,"released":1}
     } else {
-        doc! {"_id":1,"billing_owner_id":1,"reserved_credits":1,"funding":1}
+        doc! {"_id":1,"billing_owner_id":1,"reserved_credits":1,"funding":1,"service_id":1,"user_service_id":1,"service_slug":1}
     };
     let mut cursor = db
         .collection::<Document>(METERS)
@@ -306,27 +331,38 @@ async fn read_snapshot(
         .await?;
     let rows: Vec<Document> = cursor.stream(&mut *session).try_collect().await?;
     let bounded = rows.len() <= MAX_ROWS as usize;
-    let mut repair_fingerprint = if collection == WALLETS {
-        let mut hash = Sha256::new();
-        hash.update(
-            bson::to_vec(&repair_identity(resource))
-                .map_err(|e| AppError::Internal(e.to_string()))?,
-        );
-        Some(hash)
+    let identity = if collection == WALLETS {
+        repair_identity(resource)
     } else {
-        None
+        resource.clone()
     };
+    let identity = if collection == WALLETS {
+        identity
+    } else {
+        match benefits::canonical(Bson::Document(identity)) {
+            Bson::Document(value) => value,
+            _ => unreachable!(),
+        }
+    };
+    let identity = bson::to_vec(&identity).map_err(|e| AppError::Internal(e.to_string()))?;
+    let mut repair_fingerprint = Sha256::new();
+    repair_fingerprint.update(&identity);
+    let benefits_valid = collection == WALLETS
+        || (bounded && benefits::valid(db, session, collection, resource, &rows).await?);
     let mut live_fingerprint = Sha256::new();
     for row in &rows {
-        let bytes = bson::to_vec(row).map_err(|e| AppError::Internal(e.to_string()))?;
-        if let Some(hash) = &mut repair_fingerprint {
-            hash.update(&bytes);
-        }
+        let canonical = if collection == WALLETS {
+            Bson::Document(row.clone())
+        } else {
+            benefits::canonical(Bson::Document(row.clone()))
+        };
+        let bytes = bson::to_vec(&canonical).map_err(|e| AppError::Internal(e.to_string()))?;
+        repair_fingerprint.update(&bytes);
         live_fingerprint.update(&bytes);
     }
     let typed: Vec<UsageHold> = rows.into_iter().map(decode).collect::<AppResult<_>>()?;
     let totals = totals(db, session, collection, resource, &typed).await?;
-    let exact = bounded && totals.exact;
+    let exact = bounded && totals.exact && benefits_valid;
     let difference = totals.stored["total"].checked_sub(totals.expected["total"])?;
     // Financial activity can delay repair, but must not hide a persistent hold
     // mismatch. Report on counter/liability equality; repair additionally
@@ -337,11 +373,14 @@ async fn read_snapshot(
     fingerprint
         .update(bson::to_vec(&totals.expected).map_err(|e| AppError::Internal(e.to_string()))?);
     fingerprint.update(live_fingerprint.finalize());
+    if collection != WALLETS {
+        fingerprint.update(identity);
+    }
     Ok(Snapshot {
         totals,
         exact,
         fingerprint: hex::encode(fingerprint.finalize()),
-        repair_fingerprint: repair_fingerprint.map(|hash| hex::encode(hash.finalize())),
+        repair_fingerprint: Some(hex::encode(repair_fingerprint.finalize())),
         difference,
     })
 }
@@ -541,6 +580,17 @@ pub(super) async fn verify(
         .as_ref()
         .and_then(|s| s.repair_fingerprint.as_deref());
     let excess = snapshot.as_ref().filter(|s| s.exact).map(|s| s.difference);
+    let excesses = snapshot
+        .as_ref()
+        .filter(|s| s.exact)
+        .map(|s| s.totals.excesses())
+        .transpose()?
+        .flatten();
+    let stored_excesses = excesses
+        .as_ref()
+        .map(bson::to_document)
+        .transpose()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     let same = previous.is_some_and(|old| {
         old.get_str("fingerprint").ok() == Some(fingerprint.as_str())
             && old.get_bool("exact").unwrap_or(false) == exact
@@ -548,15 +598,16 @@ pub(super) async fn verify(
     if same && previous.is_some_and(|old| old.get_str("pass").ok() == Some(pass)) {
         // A held asset cursor revisits this pass. Preserve its confirmation,
         // including eligibility established by two distinct observations.
-        let repairable = collection == WALLETS
-            && exact
+        let repairable = exact
+            && excesses.is_some()
             && unlocked(resource)
             && previous.is_some_and(|old| {
                 old.get_bool("repairable").unwrap_or(false)
                     && old.get_str("repair_fingerprint").ok() == repair_fingerprint
             });
         return Ok(repairable.then(|| Repair {
-            wallet_id: id.to_owned(),
+            collection: collection.to_owned(),
+            resource_id: id.to_owned(),
             pass: pass.to_owned(),
         }));
     }
@@ -593,9 +644,8 @@ pub(super) async fn verify(
         None
     };
     let repairable = persistent
-        && collection == WALLETS
         && unlocked(resource)
-        && excess.is_some_and(|value| value > Credits::ZERO)
+        && excesses.is_some()
         && previous.is_some_and(|old| old.get_str("repair_fingerprint").ok() == repair_fingerprint);
     let kind = match collection {
         WALLETS => match excess {
@@ -616,11 +666,12 @@ pub(super) async fn verify(
     observations.update_one(doc! {"_id": &observation_id}, vec![doc! {"$set": {
         "wallet_id":wallet_id,"kind":kind,"difference":difference,
         "pass":pass,"previous_pass":previous_pass,"fingerprint":fingerprint,
-        "repair_fingerprint":repair_fingerprint,"repairable":repairable,
+        "repair_fingerprint":repair_fingerprint,"repairable":repairable,"excesses":stored_excesses,
         "exact":exact,"persistent":persistent,"stable_since":stable_since,"updated_at":"$$NOW",
     }}]).upsert(true).session(&mut *session).await?;
     Ok(repairable.then(|| Repair {
-        wallet_id: id.to_owned(),
+        collection: collection.to_owned(),
+        resource_id: id.to_owned(),
         pass: pass.to_owned(),
     }))
 }
@@ -632,11 +683,14 @@ pub(super) async fn repair(
     session: &mut ClientSession,
     candidate: &Repair,
 ) -> AppResult<()> {
-    let id = &candidate.wallet_id;
+    let id = &candidate.resource_id;
+    let collection = candidate.collection.as_str();
     let Some(observation) = db
         .collection::<Document>(OBSERVATIONS)
         .find_one(doc! {
-            "_id":format!("{WALLETS}:{id}"), "pass":&candidate.pass,
+            "_id":format!("{collection}:{id}"), "pass":&candidate.pass,
+            "stable_since":{"$type":"date"},
+            "$expr":{"$and":[{"$lte":["$stable_since",{"$subtract":["$$NOW",MIN_STABLE_MILLIS]}]}, {"$ne":["$pass","$previous_pass"]}]},
             "exact":true, "persistent":true, "repairable":true,
         })
         .session(&mut *session)
@@ -644,12 +698,14 @@ pub(super) async fn repair(
     else {
         return Ok(());
     };
+    let mut filter =
+        doc! {"_id":id,"active_settlement":Bson::Null,"active_topup_expiry":Bson::Null};
+    if collection == WALLETS {
+        filter.insert("exact_accounting_version", 2);
+    }
     let Some(resource) = db
-        .collection::<Document>(WALLETS)
-        .find_one(doc! {
-            "_id":id, "exact_accounting_version":2,
-            "active_settlement":Bson::Null, "active_topup_expiry":Bson::Null,
-        })
+        .collection::<Document>(collection)
+        .find_one(filter)
         .session(&mut *session)
         .await?
     else {
@@ -659,18 +715,25 @@ pub(super) async fn repair(
         totals,
         exact,
         repair_fingerprint,
-        difference: excess,
         ..
-    }) = checked_snapshot(db, session, WALLETS, &resource, id).await?
+    }) = checked_snapshot(db, session, collection, &resource, id).await?
     else {
         return Ok(());
     };
     if !exact || observation.get_str("repair_fingerprint").ok() != repair_fingerprint.as_deref() {
         return Ok(());
     }
-    if excess <= Credits::ZERO {
+    let Some(excesses) = totals.excesses()? else {
+        return Ok(());
+    };
+    let observed_excesses =
+        bson::to_document(&excesses).map_err(|e| AppError::Internal(e.to_string()))?;
+    if collection != WALLETS
+        && observation.get_document("excesses").ok() != Some(&observed_excesses)
+    {
         return Ok(());
     }
+
     let pass = &candidate.pass;
     let previous_pass = observation
         .get_str("previous_pass")
@@ -680,23 +743,24 @@ pub(super) async fn repair(
         crate::billing_integration_tests::hold_release::Phase::BeforeHoldRepair,
     )
     .await;
-    // This is the same snapshot as the resource and live-row reads above.
-    // Every new hold-changing protocol writes this wallet too, so its
-    // concurrent admission/release/lock acquisition aborts this transaction.
-    // A paused OLD two-write releaser is not fenced by this write.
-    let changed = db
-        .collection::<Document>(WALLETS)
-        .update_one(
-            doc! {"_id": id, "reserved_credits": totals.stored["total"],
-            "active_settlement": Bson::Null, "active_topup_expiry": Bson::Null},
-            doc! {"$inc":{"reserved_credits": -excess},
-            "$set":{"updated_at": bson::DateTime::now()}},
+    // Every current admission or hold handoff writes this resource. Its write
+    // conflicts with any movement since the snapshot, including a new row.
+    let (filter, update) = if collection == WALLETS {
+        (
+            doc! {"_id":id,"reserved_credits":totals.stored["total"],"active_settlement":Bson::Null,"active_topup_expiry":Bson::Null},
+            doc! {"$inc":{"reserved_credits": -excesses["total"]},"$set":{"updated_at":bson::DateTime::now()}},
         )
+    } else {
+        benefits::correction(collection, &resource, &totals.expected, &excesses)?
+    };
+    let changed = db
+        .collection::<Document>(collection)
+        .update_one(filter, update)
         .session(&mut *session)
         .await?;
     if changed.matched_count != 1 {
         return Err(AppError::Conflict(
-            "Wallet changed during hold repair".into(),
+            "Resource changed during hold repair".into(),
         ));
     }
     #[cfg(test)]
@@ -706,15 +770,23 @@ pub(super) async fn repair(
     .await;
     let key = crate::services::audit_service::audit_chain_hmac_key()
         .ok_or_else(|| AppError::Internal("audit key unavailable for hold repair".into()))?;
-    crate::services::audit_service::log_system_event_in_session(
-        db,
-        session,
-        key,
-        "billing_wallet_hold_excess_repaired",
-        serde_json::json!({"wallet_id":id, "amount":excess.to_string(),
-                "previous_pass":previous_pass, "pass":pass}),
-    )
-    .await?;
+    let (event, metadata) = if collection == WALLETS {
+        (
+            "billing_wallet_hold_excess_repaired",
+            serde_json::json!({"wallet_id":id,"amount":excesses["total"].to_string(),"previous_pass":previous_pass,"pass":pass}),
+        )
+    } else {
+        (
+            if collection == GRANTS {
+                "billing_grant_hold_excess_repaired"
+            } else {
+                "billing_allowance_hold_excess_repaired"
+            },
+            serde_json::json!({"resource_id":id,"wallet_id":observation.get_str("wallet_id").ok(),"amounts":excesses,"previous_pass":previous_pass,"pass":pass}),
+        )
+    };
+    crate::services::audit_service::log_system_event_in_session(db, session, key, event, metadata)
+        .await?;
     #[cfg(test)]
     crate::billing_integration_tests::hold_release::point(
         crate::billing_integration_tests::hold_release::Phase::AfterHoldRepairAudit,
@@ -723,7 +795,7 @@ pub(super) async fn repair(
 
     let removed = db
         .collection::<Document>(OBSERVATIONS)
-        .delete_one(doc! {"_id":format!("{WALLETS}:{id}"),"pass":pass})
+        .delete_one(doc! {"_id":format!("{collection}:{id}"),"pass":pass})
         .session(&mut *session)
         .await?;
     if removed.deleted_count != 1 {
@@ -754,12 +826,12 @@ pub(super) async fn diagnostics(db: &Database) -> AppResult<Vec<super::BillingSt
         (
             "grant",
             true,
-            "Grant total or rule hold mismatches are reported; grant counters are not changed.",
+            "Grant excess repair waits for stable exact counters, no deficit or lock and a clean asset result.",
         ),
         (
             "allowance",
             true,
-            "Allowance unit hold mismatches are reported; allowance counters are not changed.",
+            "Allowance excess repair waits for stable exact units, no deficit or lock and a clean asset result.",
         ),
         (
             "wallet",
