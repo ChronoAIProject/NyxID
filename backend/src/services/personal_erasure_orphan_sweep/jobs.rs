@@ -203,10 +203,7 @@ async fn save(db: &mongodb::Database, job: &Job, pages: Vec<CandidatePage>) -> A
         db.collection::<Document>(JOBS)
             .update_one(
                 doc! {"_id": &job.id},
-                vec![
-                    doc! {"$set": stored},
-                    doc! {"$set": {"updated_at": "$$NOW"}},
-                ],
+                doc! {"$set": stored, "$currentDate": {"updated_at": true}},
             )
             .session(&mut tx)
             .await?;
@@ -311,10 +308,8 @@ async fn scan_page(db: &mongodb::Database, job: &mut Job) -> AppResult<Vec<Candi
     let mut filter = doc! {spec.field: {"$exists": true}};
     if job.last_id != Bson::Null {
         let comparison = if job.owner_offset > 0 { "$gte" } else { "$gt" };
-        filter.insert(
-            "$expr",
-            doc! {comparison: [Bson::String("$_id".into()), job.last_id.clone()]},
-        );
+        // A persisted id is data, including ids beginning with '$'.
+        filter.insert("_id", doc! {comparison: job.last_id.clone()});
     }
     if let Some(attribution) = personal_data_registry::attribution(spec.collection, spec.field) {
         filter = doc! {"$and": [filter, super::super::personal_attribution_service::pending_filter(attribution, None)]};
@@ -660,6 +655,28 @@ pub fn spawn_worker(state: crate::AppState) -> tokio::task::JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dollar_prefixed_ids_and_checkpoint_values_remain_literal() {
+        let db = crate::test_utils::connect_transaction_test_database("orphan_literal").await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<Document>("assistant_wire_logs").insert_many([
+            doc! {"_id": "$first", "user_id": &owner},
+            doc! {"_id": "$second", "user_id": &owner},
+        ]).await.unwrap();
+        start(&db, "$operator", false, None).await.unwrap();
+        let mut job = claim(&db).await.unwrap().unwrap();
+        job.scan_spec = specs().iter().position(|s| s.collection == "assistant_wire_logs").unwrap();
+        job.last_id = "$first".into();
+        job.failure = Some("$checkpoint".into());
+        let pages = scan_page(&db, &mut job).await.unwrap();
+        assert_eq!(pages.iter().flat_map(|p| &p.rows).map(|r| r.row_id.clone()).collect::<Vec<_>>(), vec![Bson::from("$second")]);
+        save(&db, &job, pages).await.unwrap();
+        let stored = db.collection::<Job>(JOBS).find_one(doc! {"_id": &job.id}).await.unwrap().unwrap();
+        assert_eq!(stored.requested_by, "$operator");
+        assert_eq!(stored.failure.as_deref(), Some("$checkpoint"));
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn checkpoints_resume_and_expired_claims_cannot_commit() {
