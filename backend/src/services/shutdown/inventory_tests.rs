@@ -719,6 +719,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
         "main.rs",
         "server_run",
+        "services::personal_erasure_orphan_sweep::jobs::spawn_worker",
+        1,
+        "Leased orphan-sweep worker shares the erasure worker lifetime; shutdown stops claims and drains the bounded claimed pass before lease expiry permits recovery.",
+    ),
+    (
+        "main.rs",
+        "server_run",
         "services::personal_erasure_service::spawn_worker",
         1,
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
