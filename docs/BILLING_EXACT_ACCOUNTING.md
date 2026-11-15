@@ -84,6 +84,31 @@ provides a conservative hold-less lower bound. Overlapping funding and returned
 holds can undercount it. No payloads are read for that count.
 
 
+Ordinary unknown forwarded work with a positive reservation is ended only after its owning process generation
+is absent beyond the registry window and margin. Legacy work additionally predates
+every live registration by an hour. Final quantities, final checkpoints and durable
+intents recover first; tagged pool/Realtime, managed/certified execution, runtime
+and voice retain their own exits. A terminal transaction competes with the real
+finalizer and records a chained metadata audit; ordinary settlement then returns
+unused holds. `stuck_requests::policy::unknown_consumption_policy` is the single
+charging choice: the default final zero waives genuinely unknown consumption.
+The owner chose this rule on 2026-11-15: settle recorded final usage, charge nothing
+for genuinely unknown consumption, and release the unused hold.
+The tested but unused reserved-estimate alternative uses the recorded reservation
+quantity, or an exactly recoverable old reservation, and leaves ambiguous old
+estimates unresolved. A paused owner
+that resumes after losing the terminal race cannot charge again; its unrecorded
+consumption may be waived. Healthy streams retain ownership without a new lifetime
+limit. Old replicas ignore the additive ownership/estimate fields and respect the
+existing terminal status; rollback needs no data conversion or operator step.
+
+The sweep rotates wallet, grant and allowance candidate indexes, at most 100 rows
+and 50 requests in five seconds per pass, with a durable cursor per source.
+It leaves entirely hold-less requests unfinished; ending them is a separate
+housekeeping decision. Once a held request is selected, its existing terminal
+transaction closes all unfinished siblings, including zero-hold coordinators,
+so a resumed finalizer cannot publish new usage through them.
+
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced
 by the settlement claim. An aborted final row write rolls back the carry. A

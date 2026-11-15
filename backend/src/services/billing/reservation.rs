@@ -908,6 +908,7 @@ pub(crate) async fn recover_retryable_settlements_at(
             },
         }
     }
+    super::stuck_requests::recover(db).await?;
     Ok(stats)
 }
 

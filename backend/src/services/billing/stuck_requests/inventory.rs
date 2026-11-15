@@ -5,6 +5,7 @@ use mongodb::{
     options::{Hint, ReadConcern},
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::IntoFuture;
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 pub(crate) const INDEX: &str = "usage_meter_forwarded_unreleased";
 
@@ -336,12 +337,9 @@ pub(crate) async fn diagnostics(
         }),
     };
     inventory.truncated |= failure.is_some();
-    if failure.is_none()
-        && inventory.candidates.is_empty()
-        && inventory.holdless_lower_bound == Some(0)
-    {
-        return Ok(vec![]);
-    }
+    let present = failure.is_some()
+        || !inventory.candidates.is_empty()
+        || inventory.holdless_lower_bound != Some(0);
     let reason = if let Some(failure) = failure.as_ref().or(inventory.registry_failure.as_ref()) {
         failure.metadata()
     } else if inventory.invalid != 0 {
@@ -351,11 +349,44 @@ pub(crate) async fn diagnostics(
     } else {
         "reason=ok".into()
     };
-    let detail = format!(
+    let mut detail = format!(
         "{}\n{reason} elapsed_ms={}",
         inventory.detail(),
         started.elapsed().as_millis()
     );
+    let state = tokio::time::timeout(
+        TIMEOUT,
+        db.collection::<Document>(STATE)
+            .find_one(doc! {"_id": STATE_ID})
+            .max_time(std::time::Duration::from_secs(2))
+            .into_future(),
+    )
+    .await;
+    match state {
+        Ok(Ok(state)) => {
+            let ended = state
+                .as_ref()
+                .and_then(|s| s.get_i64("ended_requests").ok())
+                .unwrap_or(0);
+            let ended_rows = state
+                .as_ref()
+                .and_then(|s| s.get_i64("ended_rows").ok())
+                .unwrap_or(0);
+            if !present && ended == 0 {
+                return Ok(vec![]);
+            }
+            detail.push_str(&format!("\nended_requests={ended} ended_rows={ended_rows}; remaining rows and requests are classified above"));
+        }
+        Ok(Err(error)) => detail.push_str(&format!(
+            "\nended totals unavailable; {}",
+            ReadFailure::from_error(&AppError::DatabaseError(error), "ended_totals")
+                .detail(started.elapsed().as_millis())
+        )),
+        Err(_) => detail.push_str(&format!(
+            "\nended totals unavailable; reason=deadline_exceeded stage=ended_totals elapsed_ms={}",
+            started.elapsed().as_millis()
+        )),
+    }
     Ok(vec![super::super::BillingStartupDiagnostic{
         code:"billing_stuck_requests".into(),summary:"Held forwarded request recovery eligibility".into(),detail,
         remediation:"Read-only classification of potential wallet, grant and allowance holds. At most 10,000 distinct candidate rows, in 128-row pages, within four seconds; incomplete groups mean at least the reported counts and amounts. The separate hold-less lower bound uses at most 100,001 index keys per source and may undercount overlapping funding or returned holds. Siblings are bounded at 129 per row; locks and receipts are deducted in the same snapshot. Live includes the registry's 45-second window plus a two-minute margin. Legacy eligibility requires an extra hour before every live generation's registration. Missing or unreadable registry evidence authorizes no cleanup. No quantities or charges change.".into(),detected_at:chrono::Utc::now(),
@@ -405,7 +436,6 @@ impl ReadFailure {
         }
         value
     }
-    #[cfg(test)]
     fn detail(&self, elapsed: u128) -> String {
         format!(
             "complete=false; {} elapsed_ms={elapsed}; no cleanup eligibility established",

@@ -889,6 +889,7 @@ pub(super) fn reserved_row(
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
+            reserved_quantity: Some(item.estimated_quantity),
             wallet_only: ctx.model_tariff.is_some()
                 && super::amounts::rate_pico(
                     item.credits_per_unit_pico,
@@ -1059,6 +1060,11 @@ async fn finalize_matching(
         finalized_at,
     );
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let identity: bson::Document = filter
+        .iter()
+        .filter(|(key, _)| matches!(key.as_str(), "_id" | "transaction_id"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     let claimed = collection
         .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
         .with_options(
@@ -1069,6 +1075,9 @@ async fn finalize_matching(
         .await?;
 
     let Some(claimed) = claimed else {
+        // A recovered terminal decision wins over a paused finalizer. Read its
+        // state and stop; never publish the stale caller's quantity afterward.
+        let _winner = collection.find_one(identity).await?;
         return Ok(None);
     };
 

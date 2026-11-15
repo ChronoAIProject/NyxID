@@ -203,3 +203,14 @@ fn request_blocker(rows: &[Document]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+mod policy;
+mod recovery;
+mod terminal;
+pub(crate) use recovery::recover;
+const STATE: &str = "billing_stuck_request_recovery";
+const STATE_ID: &str = "ordinary";
+#[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
+use recovery_tests::{Phase, point as test_point};
