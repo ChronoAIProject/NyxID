@@ -231,7 +231,7 @@ test("Privacy export watchdog failures use the existing localized error toast", 
   for (const language of ["en", "zh-CN", "zh-TW"] as const) {
     const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", { language });
     try {
-      for (const reason of ["export_idle_timeout", "export_deadline_exceeded"]) {
+      for (const reason of ["export_headers_timeout", "export_idle_timeout", "export_deadline_exceeded"]) {
         env.mutationOptions[1]!.onError(new Error(reason));
         env.harness.render();
         const toast = env.all().find((node) => node.type === "ToastOverlay")!.props.toast;

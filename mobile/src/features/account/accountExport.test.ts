@@ -5,6 +5,7 @@ import {
   ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS,
   ACCOUNT_EXPORT_DEADLINE_MS,
   ACCOUNT_EXPORT_IDLE_TIMEOUT_MS,
+  ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS,
   cleanStaleAccountExports,
   shareAccountExport,
 } from "./accountExport";
@@ -164,7 +165,8 @@ function trackTimers(context: TestContext) {
 test("a hung native read aborts at the idle bound, removes the file and bounds cancellation", async (context) => {
   const timers = trackTimers(context);
   assert.equal(ACCOUNT_EXPORT_IDLE_TIMEOUT_MS, 30_000);
-  assert.equal(ACCOUNT_EXPORT_DEADLINE_MS, 150_000);
+  assert.equal(ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS, 75_000);
+  assert.equal(ACCOUNT_EXPORT_DEADLINE_MS, 195_000);
   assert.equal(ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS, 1_000);
   const f = fixture();
   const read = deferred<ReadResult>();
@@ -213,14 +215,14 @@ test("the overall deadline aborts slow progress that keeps resetting the idle wa
   });
   const rejected = assert.rejects(shareAccountExport(f.deps), /export_deadline_exceeded/);
   await flush();
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 9; i++) {
     context.mock.timers.tick(20_000);
     next.resolve({ done: false, value: new Uint8Array([i === 0 ? 123 : 32]) });
     await flush();
     assert.equal(f.signal()?.aborted, false);
   }
-  assert.equal(f.calls.filter((call) => call.startsWith("write:")).length, 7);
-  context.mock.timers.tick(10_000);
+  assert.equal(f.calls.filter((call) => call.startsWith("write:")).length, 9);
+  context.mock.timers.tick(15_000);
   await rejected;
   assert.equal(f.signal()?.aborted, true);
   assert.ok(f.calls.includes("remove"));
@@ -264,7 +266,7 @@ test("all failure exits clear their timers and remove every created file", async
   }
 });
 
-test("the idle watchdog also bounds a request that never returns response headers", async (context) => {
+test("the header watchdog bounds a request that never returns response headers", async (context) => {
   const timers = trackTimers(context);
   const f = fixture();
   const request = f.deps.request;
@@ -272,9 +274,12 @@ test("the idle watchdog also bounds a request that never returns response header
     await request(signal);
     return new Promise<never>(() => {});
   };
-  const rejected = assert.rejects(shareAccountExport(f.deps), /export_idle_timeout/);
+  const rejected = assert.rejects(shareAccountExport(f.deps), /export_headers_timeout/);
   await flush();
   context.mock.timers.tick(ACCOUNT_EXPORT_IDLE_TIMEOUT_MS);
+  await flush();
+  assert.equal(f.signal()?.aborted, false, "body idle timer is not armed before headers");
+  context.mock.timers.tick(ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS - ACCOUNT_EXPORT_IDLE_TIMEOUT_MS);
   await rejected;
   assert.equal(f.signal()?.aborted, true);
   assert.ok(!f.calls.includes("create"));
@@ -303,4 +308,25 @@ test("empty chunks do not renew the no-new-bytes watchdog", async (context) => {
   assert.ok(f.calls.includes("remove"));
   assert.ok(!f.calls.includes("share"));
   assert.equal(timers.pending(), 0);
+});
+
+test("45-second response headers succeed without triggering the body idle watchdog", async (context) => {
+  const timers = trackTimers(context);
+  const f = fixture();
+  const request = f.deps.request;
+  const ready = deferred<void>();
+  f.deps.request = async (signal) => { const result = await request(signal); await ready.promise; return result; };
+  const result = shareAccountExport(f.deps);
+  await flush();
+  context.mock.timers.tick(45_000);
+  await flush();
+  assert.equal(f.signal()?.aborted, false);
+  assert.ok(!f.calls.includes("create"));
+  assert.equal(timers.fired(), 0);
+  ready.resolve();
+  await result;
+  assert.ok(f.calls.includes("share"));
+  assert.equal(timers.pending(), 0);
+  context.mock.timers.tick(ACCOUNT_EXPORT_DEADLINE_MS * 2);
+  assert.equal(timers.fired(), 0);
 });

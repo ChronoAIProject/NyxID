@@ -1009,6 +1009,7 @@ async fn row_cap_marks_the_source_and_is_listed_without_final_byte_trimming() {
             max_bytes: MAX_BYTES,
             subsection_row_cap: SUBSECTION_ROW_CAP,
             query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
+            build_budget_ms: BUILD_BUDGET.as_millis() as u64,
             file_payloads: "metadata_only",
         },
         truncated_sections: Vec::new(),

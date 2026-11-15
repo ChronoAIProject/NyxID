@@ -377,6 +377,17 @@ Refund cleanup is tracked by graceful shutdown and affects only the original res
 
 Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
 
+`account_export_service::BUILD_BUDGET` allows 60 seconds total from admission
+for source reads, parent resolution and allocation rereads, rather than 60 seconds
+per source. At expiry the in-flight read is cancelled, and both unread subsections
+and a subsection whose redistribution reread is in flight are marked `unavailable`
+and listed in `unavailable_sections`. The earlier page of a subsection being reread
+was released before the reread to stay within the byte budget. Completed pages not
+being reread are kept, and no further redistribution reads start. These unavailable
+subsections count toward the existing mostly-unavailable delivery-slot refund. Finalizing the bounded
+JSON envelope follows without more database source reads. `limits.build_budget_ms`
+reports this budget.
+
 The response body has a total 120-second delivery deadline starting when it is
 created. The backend emits at most 64 KiB per slice and sets `Content-Length` to
 the exact serialized byte size. The API stack does not compress responses; the
@@ -399,10 +410,13 @@ a full JSON syntax check. On failure, mobile removes the temporary file and neve
 opens the share sheet.
 
 Mobile also bounds stalled native requests and readers independently of their
-AbortSignal support. `ACCOUNT_EXPORT_IDLE_TIMEOUT_MS` is 30 seconds without new
-bytes, starting with the request and renewed only by nonempty byte chunks.
-`ACCOUNT_EXPORT_DEADLINE_MS` is 150 seconds from starting the export, including
-admission and validation; progress cannot extend it. Both watchdogs abort the
+AbortSignal support. `ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS` bounds the header wait
+to 75 seconds: the server's 60-second build budget plus 15 seconds for admission
+and network overhead. `ACCOUNT_EXPORT_IDLE_TIMEOUT_MS` is 30 seconds without new
+bytes, armed only after headers arrive and renewed only by nonempty byte chunks.
+`ACCOUNT_EXPORT_DEADLINE_MS` is 195 seconds from starting the export: the 75-second
+header bound plus the server's 120-second delivery deadline, including validation;
+progress cannot extend it. All three watchdogs abort the
 request and race pending async work so even an unsettled native `read()` fails.
 The temporary file is closed and removed before waiting for native cancellation;
 `ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS` bounds that wait to one second, and a lock

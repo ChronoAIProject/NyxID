@@ -19,6 +19,8 @@ pub const SUBSECTION_ROW_CAP: i64 = 10_000;
 pub const PARENT_ID_CAP: usize = 10_000;
 pub const QUERY_BATCH_SIZE: u32 = 100;
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Total source-read budget, starting at export admission (before any reads).
+pub const BUILD_BUDGET: Duration = Duration::from_secs(60);
 pub const FILE_PAYLOADS_METADATA_ONLY: bool = true;
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +43,7 @@ pub struct ExportLimits {
     pub max_bytes: usize,
     pub subsection_row_cap: i64,
     pub query_timeout_ms: u64,
+    pub build_budget_ms: u64,
     pub file_payloads: &'static str,
 }
 #[derive(Debug, Serialize, Clone)]
@@ -1517,9 +1520,10 @@ impl ExportPage {
     }
 }
 
-async fn allocate_pages<F, Fut>(
+async fn allocate_pages_until<F, Fut>(
     max_bytes: usize,
     count: usize,
+    deadline: tokio::time::Instant,
     mut read: F,
 ) -> AppResult<Vec<ExportSubsection>>
 where
@@ -1530,11 +1534,11 @@ where
     let mut pages = Vec::with_capacity(count);
     let mut limits = vec![total / count; count];
     for (index, limit) in limits.iter().enumerate() {
-        pages.push(read(index, *limit).await?);
+        pages.push(read_page_until(deadline, || read(index, *limit)).await?);
     }
     for _ in 1..ALLOCATION_ROUNDS {
         let active = pages.iter().filter(|page| page.byte_truncated).count();
-        if active == 0 {
+        if active == 0 || tokio::time::Instant::now() >= deadline {
             break;
         }
         let fixed: usize = pages
@@ -1548,6 +1552,9 @@ where
         let limit = total.saturating_sub(fixed) / active;
         let mut progressed = false;
         for index in 0..count {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
             if !pages[index].byte_truncated || limit <= limits[index] {
                 continue;
             }
@@ -1555,7 +1562,7 @@ where
             // payload plus the new cursor page stays within the total budget.
             pages[index] = ExportPage::default();
             limits[index] = limit;
-            pages[index] = read(index, limit).await?;
+            pages[index] = read_page_until(deadline, || read(index, limit)).await?;
             progressed = true;
         }
         if !progressed {
@@ -1563,6 +1570,44 @@ where
         }
     }
     Ok(pages.into_iter().map(|page| page.value).collect())
+}
+
+async fn read_page_until<F, Fut>(deadline: tokio::time::Instant, read: F) -> AppResult<ExportPage>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = AppResult<ExportPage>>,
+{
+    if tokio::time::Instant::now() < deadline
+        && let Ok(page) = tokio::time::timeout_at(deadline, read()).await
+    {
+        return page;
+    }
+    Ok(ExportPage {
+        value: ExportSubsection {
+            unavailable: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+async fn allocate_pages<F, Fut>(
+    max_bytes: usize,
+    count: usize,
+    read: F,
+) -> AppResult<Vec<ExportSubsection>>
+where
+    F: FnMut(usize, usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<ExportPage>>,
+{
+    allocate_pages_until(
+        max_bytes,
+        count,
+        tokio::time::Instant::now() + BUILD_BUDGET,
+        read,
+    )
+    .await
 }
 
 fn truncated_names(export: &AccountExport) -> BTreeSet<String> {
@@ -1795,13 +1840,21 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
     export.truncated_sections = truncated.into_iter().collect();
 }
 
-async fn build_with_limit(
+async fn build_until(
     db: &mongodb::Database,
     account_id: &str,
     max_bytes: usize,
+    deadline: tokio::time::Instant,
 ) -> AppResult<AccountExport> {
     let mut sections = empty_sections();
-    let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let account = if tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, async { db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await }).await {
+            Ok(result) => Some(result?.ok_or_else(|| AppError::NotFound("User not found".into()))?),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     let mut sources = vec![(
         "users",
         ExplicitExportSpec {
@@ -1845,8 +1898,18 @@ async fn build_with_limit(
         {
             let key = (*parent, *owner_field);
             if let std::collections::btree_map::Entry::Vacant(scope) = parent_scopes.entry(key) {
-                let resolved = resolve_ids(db, parent, doc! {*owner_field: account_id}).await;
-                scope.insert(resolved.ok());
+                let resolved = if tokio::time::Instant::now() < deadline {
+                    tokio::time::timeout_at(
+                        deadline,
+                        resolve_ids(db, parent, doc! {*owner_field: account_id}),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                } else {
+                    None
+                };
+                scope.insert(resolved);
             }
             if let Some((ids, truncated)) = &parent_scopes[&key] {
                 *filter = Some(doc! {*field: {"$in": ids}});
@@ -1858,16 +1921,23 @@ async fn build_with_limit(
     }
     for (index, (collection, _, filter)) in sources.iter_mut().enumerate() {
         if *collection == "assistant_messages" {
-            match message_scope(db, account_id).await {
-                Ok((resolved, truncated)) => {
+            match tokio::time::timeout_at(deadline, async {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(AppError::Internal("Export build budget exhausted".into()));
+                }
+                message_scope(db, account_id).await
+            })
+            .await
+            {
+                Ok(Ok((resolved, truncated))) => {
                     *filter = Some(resolved);
                     scope_flags[index].0 = truncated;
                 }
-                Err(_) => scope_flags[index].1 = true,
+                _ => scope_flags[index].1 = true,
             }
         }
     }
-    let pages = allocate_pages(max_bytes, sources.len(), |index, limit| {
+    let pages = allocate_pages_until(max_bytes, sources.len(), deadline, |index, limit| {
         let (collection, spec, filter) = &sources[index];
         let account = &account;
         let (scope_truncated, unavailable) = scope_flags[index];
@@ -1881,7 +1951,7 @@ async fn build_with_limit(
                     unavailable: true,
                     ..Default::default()
                 }
-            } else if *collection == "users" {
+            } else if let Some(account) = account.as_ref().filter(|_| *collection == "users") {
                 let profile = safe_item(account, PROFILE_FIELDS);
                 let admitted = budget.admit(&profile);
                 ExportSubsection {
@@ -1927,6 +1997,7 @@ async fn build_with_limit(
             max_bytes,
             subsection_row_cap: SUBSECTION_ROW_CAP,
             query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
+            build_budget_ms: BUILD_BUDGET.as_millis() as u64,
             file_payloads: if FILE_PAYLOADS_METADATA_ONLY {
                 "metadata_only"
             } else {
@@ -1948,8 +2019,17 @@ async fn build_with_limit(
     Ok(export)
 }
 
-pub async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<AccountExport> {
-    build_with_limit(db, account_id, MAX_BYTES).await
+pub async fn build_admitted(
+    db: &mongodb::Database,
+    account_id: &str,
+    admitted_at: tokio::time::Instant,
+) -> AppResult<AccountExport> {
+    build_until(db, account_id, MAX_BYTES, admitted_at + BUILD_BUDGET).await
+}
+
+#[cfg(test)]
+async fn build(db: &mongodb::Database, account_id: &str) -> AppResult<AccountExport> {
+    build_admitted(db, account_id, tokio::time::Instant::now()).await
 }
 
 #[cfg(test)]
@@ -1957,6 +2037,110 @@ mod tests {
     use super::*;
     use crate::models::user::UserType;
     use std::str::FromStr;
+
+    #[tokio::test(start_paused = true)]
+    async fn total_build_budget_cancels_slow_sources_and_marks_unread_sections_unavailable() {
+        let start = tokio::time::Instant::now();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let pages = allocate_pages_until(MAX_BYTES, 4, start + BUILD_BUDGET, |index, limit| {
+            calls.borrow_mut().push(index);
+            async move {
+                if index == 1 {
+                    tokio::time::sleep(BUILD_BUDGET * 2).await;
+                }
+                Ok(allocation_page(limit, 1, 10, false))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(tokio::time::Instant::now() - start, BUILD_BUDGET);
+        assert_eq!(*calls.borrow(), vec![0, 1]);
+        assert!(!pages[0].unavailable);
+        assert!(pages[1..].iter().all(|page| page.unavailable));
+        let mut export = AccountExport {
+            format: FORMAT,
+            version: VERSION,
+            generated_at: String::new(),
+            account_id: String::new(),
+            limits: ExportLimits {
+                max_bytes: MAX_BYTES,
+                subsection_row_cap: SUBSECTION_ROW_CAP,
+                query_timeout_ms: 3000,
+                build_budget_ms: 60_000,
+                file_payloads: "metadata_only",
+            },
+            sections: BTreeMap::new(),
+            truncated_sections: Vec::new(),
+            unavailable_sections: Vec::new(),
+            excluded: Vec::new(),
+        };
+        for (index, page) in pages.into_iter().enumerate() {
+            export
+                .sections
+                .entry("test".into())
+                .or_default()
+                .insert(index.to_string(), page);
+        }
+        assert_eq!(
+            unavailable_names(&export),
+            vec!["test.1", "test.2", "test.3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn elapsed_admission_budget_finalizes_all_sources_as_unavailable() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("export_elapsed_admission").await;
+        let start = tokio::time::Instant::now();
+        let export = build_admitted(&db, "person", start - BUILD_BUDGET)
+            .await
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let count: usize = export.sections.values().map(BTreeMap::len).sum();
+        assert!(count > 100);
+        assert_eq!(export.unavailable_sections.len(), count);
+        assert!(
+            export
+                .sections
+                .values()
+                .flat_map(BTreeMap::values)
+                .all(|page| page.unavailable)
+        );
+        assert_eq!(export.limits.build_budget_ms, 60_000);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_build_budget_cancels_redistribution_and_retains_other_pages() {
+        let start = tokio::time::Instant::now();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let pages = allocate_pages_until(MAX_BYTES, 3, start + BUILD_BUDGET, |index, limit| {
+            let reread = calls.borrow().contains(&index);
+            calls.borrow_mut().push(index);
+            async move {
+                if reread {
+                    tokio::time::sleep(BUILD_BUDGET * 2).await;
+                }
+                Ok(allocation_page(
+                    limit,
+                    if index == 0 { 10_000 } else { 1 },
+                    4000,
+                    false,
+                ))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(tokio::time::Instant::now() - start, BUILD_BUDGET);
+        assert_eq!(*calls.borrow(), vec![0, 1, 2, 0]);
+        assert!(pages[0].unavailable);
+        assert!(
+            pages[1..]
+                .iter()
+                .all(|page| !page.unavailable && page.items.len() == 1)
+        );
+    }
+
     #[test]
     fn shared_attribution_does_not_grant_export_ownership() {
         for collection in ["user_services", "oauth_states"] {
@@ -2478,6 +2662,7 @@ mod tests {
                 max_bytes: MAX_BYTES,
                 subsection_row_cap: SUBSECTION_ROW_CAP,
                 query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
+                build_budget_ms: BUILD_BUDGET.as_millis() as u64,
                 file_payloads: "metadata_only",
             },
             truncated_sections: Vec::new(),

@@ -1,6 +1,8 @@
-/** Client network bounds; the total exceeds the server's 120-second body deadline. */
+/** Headers: server 60-second build budget plus 15 seconds for admission/network. */
+export const ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS = 75_000;
+/** Body idle time begins only after headers; overall includes 120-second delivery. */
 export const ACCOUNT_EXPORT_IDLE_TIMEOUT_MS = 30_000;
-export const ACCOUNT_EXPORT_DEADLINE_MS = 150_000;
+export const ACCOUNT_EXPORT_DEADLINE_MS = ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS + 120_000;
 /** Native cancellation can also hang after a failed read. */
 export const ACCOUNT_EXPORT_CANCEL_TIMEOUT_MS = 1_000;
 
@@ -25,10 +27,13 @@ export async function shareAccountExport(deps: {
   share(uri: string): Promise<void>;
 }) {
   const controller = new AbortController();
+  let headersTimer: ReturnType<typeof setTimeout> | undefined;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let timeoutError: Error | undefined;
   function clearWatchdogs() {
+    if (headersTimer !== undefined) clearTimeout(headersTimer);
+    headersTimer = undefined;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     idleTimer = undefined;
@@ -67,8 +72,11 @@ export async function shareAccountExport(deps: {
   deadlineTimer = setTimeout(() => expire("export_deadline_exceeded"), ACCOUNT_EXPORT_DEADLINE_MS);
   try {
     if (!(await waitFor(() => deps.available()))) throw new Error("sharing_unavailable");
-    resetIdle();
+    headersTimer = setTimeout(() => expire("export_headers_timeout"), ACCOUNT_EXPORT_HEADERS_TIMEOUT_MS);
     const { response, assertOwner } = await waitFor(() => deps.request(controller.signal));
+    clearTimeout(headersTimer);
+    headersTimer = undefined;
+    resetIdle();
     await waitFor(assertOwner);
     if (!response.body) throw new Error("export_stream_unavailable");
     const source = response.body.getReader();

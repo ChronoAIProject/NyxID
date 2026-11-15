@@ -9763,6 +9763,11 @@ exact decimal payloads, validation, audit and activation semantics.
 `POST /api/v1/users/me/export` returns the bounded `nyxid.account-export` JSON
 attachment described in [ACCOUNT_DATA_EXPORT.md](ACCOUNT_DATA_EXPORT.md). It is
 first-party human only and rate limited to three requests per account per hour.
+Source reads share a 60-second total build budget from admission; unread sources
+and any subsection whose redistribution reread is in flight become unavailable at
+expiry (its earlier page was released to stay within the byte budget), while
+completed pages not being reread are kept. Unavailable subsections count toward
+the mostly-unavailable refund.
 The response has an exact serialized-byte `Content-Length` and streams in slices
 of at most 64 KiB. A 120-second total delivery deadline discards the remaining
 buffer and aborts the body with an error; it refunds the delivery slot, while
@@ -9771,7 +9776,8 @@ buffering. Clients must reject body errors and a byte count differing from a
 present length. Web also parses the JSON. Without a length, mobile requires clean
 transport completion and a bounded check of the first and last non-whitespace
 bytes (`{` / `}`), tracked while writing; it never reads back or parses the full
-file. Mobile aborts after 30 seconds without new bytes or 150 seconds overall,
+file. Mobile bounds headers to 75 seconds (60-second server build budget plus margin),
+then aborts after 30 seconds without new bytes or 195 seconds overall,
 removes its temporary file, and bounds native reader cancellation to one second
 before showing the existing export error. Network deadlines stop before the
 user-controlled share sheet. See the export document for the client validation

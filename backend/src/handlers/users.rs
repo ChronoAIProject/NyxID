@@ -264,13 +264,14 @@ pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> Ap
     let Some(reservation) = reservation else {
         return Err(AppError::RateLimitedWithRetry { retry_after });
     };
+    let admitted_at = tokio::time::Instant::now();
     let mut guard = ExportReservationGuard {
         limiter: state.account_export_limiter.clone(),
         reservation: Some(reservation),
         shutdown: state.shutdown.clone(),
         _permit: permit,
     };
-    let result = export_reserved(&state, &auth_user, &account_id).await;
+    let result = export_reserved(&state, &auth_user, &account_id, admitted_at).await;
     match result {
         Ok((response, mostly_unavailable)) => {
             if mostly_unavailable {
@@ -297,8 +298,11 @@ async fn export_reserved(
     state: &AppState,
     auth_user: &AuthUser,
     account_id: &str,
+    admitted_at: tokio::time::Instant,
 ) -> AppResult<(Response<axum::body::Bytes>, bool)> {
-    let export = crate::services::account_export_service::build(&state.db, account_id).await?;
+    let export =
+        crate::services::account_export_service::build_admitted(&state.db, account_id, admitted_at)
+            .await?;
     let subsection_count: usize = export.sections.values().map(|section| section.len()).sum();
     let mostly_unavailable = export.unavailable_sections.len() * 2 > subsection_count;
     let counts: Vec<serde_json::Value> = export
