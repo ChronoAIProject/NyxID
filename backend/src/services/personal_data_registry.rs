@@ -4488,6 +4488,26 @@ mod tests {
     }
 
     #[test]
+    fn rollout_prebuild_commands_match_the_index_manifest() {
+        let docs = include_str!("../../../docs/security/PERSONAL_ERASURE_INVENTORY.md");
+        let commands: Vec<_> = docs
+            .lines()
+            .filter(|line| line.starts_with("db.") && line.contains("personal_erasure_owner_"))
+            .collect();
+        assert_eq!(commands.len(), OWNER_INDEX_GAPS.len());
+        for (collection, field) in OWNER_INDEX_GAPS {
+            let command = format!(
+                "db.{collection}.createIndex({{\"{field}\": 1}}, {{name: \"personal_erasure_owner_{collection}_{}\"}});",
+                field.replace('.', "_")
+            );
+            assert!(
+                commands.contains(&command.as_str()),
+                "missing prebuild command for {collection}.{field}"
+            );
+        }
+    }
+
+    #[test]
     fn owner_index_manifest_classifies_every_origin_gap() {
         let kept: BTreeSet<_> = OWNER_INDEX_GAPS.iter().copied().collect();
         let bounded = owner_index_bounded_predicates();

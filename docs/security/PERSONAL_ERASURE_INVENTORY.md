@@ -14,9 +14,9 @@ reuse any existing index whose first key is the erasure owner predicate and
 add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions. The manifest adds 17 indexes:
-16 per-event stream owner indexes plus the group-message author index used for
-attribution redaction. The 54 other classified gaps add no index.
+not change retention or ownership decisions. The manifest adds 16 indexes:
+15 stream indexes plus the group-message author index used for attribution
+redaction. Other classified gaps add no index.
 
 Each row below is a real missing prefix on a collection that grows with
 events, messages, requests, or deliveries. Without it, the owner query would
@@ -45,6 +45,35 @@ scans the existing data and consumes database CPU/I/O and index storage while
 other replicas continue serving; compatible existing prefixes skip creation.
 No production build duration is assumed here.
 
+For large deployments, pre-build the following indexes before deploying. Run
+these against the application database using the deployment's normal MongoDB
+administration access. Startup awaits builds before listening; identical
+pre-built indexes make the creation calls no-ops. A local measurement on one
+million rows took approximately 1.0 seconds per index; production time depends
+on collection size, hardware and concurrent load. The MCP notification join
+uses the existing `session_id` prefix index; no `user_id` index is needed because
+that collection has no such field. An already deployed extra index is left
+untouched.
+
+```javascript
+db.assistant_group_mention_notifications.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_mention_notifications_user_id"});
+db.assistant_group_messages.createIndex({"author_user_id": 1}, {name: "personal_erasure_owner_assistant_group_messages_author_user_id"});
+db.assistant_group_messages.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_messages_user_id"});
+db.assistant_group_requests.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_requests_user_id"});
+db.channel_adapter_events.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_adapter_events_user_id"});
+db.channel_delivery_receipts.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_delivery_receipts_user_id"});
+db.channel_email_batches.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_batches_user_id"});
+db.channel_email_receipts.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_receipts_user_id"});
+db.channel_email_sends.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_sends_user_id"});
+db.channel_reply_deliveries.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_reply_deliveries_user_id"});
+db.nyxbot_events.createIndex({"user_id": 1}, {name: "personal_erasure_owner_nyxbot_events_user_id"});
+db.refresh_tokens.createIndex({"user_id": 1}, {name: "personal_erasure_owner_refresh_tokens_user_id"});
+db.service_change_events.createIndex({"actor.person_id": 1}, {name: "personal_erasure_owner_service_change_events_actor_person_id"});
+db.service_pool_health_observations.createIndex({"pool_id": 1}, {name: "personal_erasure_owner_service_pool_health_observations_pool_id"});
+db.trigger_deliveries.createIndex({"user_id": 1}, {name: "personal_erasure_owner_trigger_deliveries_user_id"});
+db.trigger_work.createIndex({"user_id": 1}, {name: "personal_erasure_owner_trigger_work_user_id"});
+```
+
 The checked-in origin/main startup fixture in the registry tests is generated
 from `db::ensure_indexes` plus origin/main's security-readiness and personal
 erasure index calls. The upgrade tests run that fixture first, run the branch
@@ -69,7 +98,6 @@ rows retain only an opaque actor ID.
 | `channel_email_receipts` | `user_id` | `personal_erasure_owner_channel_email_receipts_user_id` | Per-inbound-email receipt writes (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::receive_batch`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_email_sends` | `user_id` | `personal_erasure_owner_channel_email_sends_user_id` | Per-email-send inserts (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::reply_once`), with no TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `channel_email_batches` | `user_id` | `personal_erasure_owner_channel_email_batches_user_id` | Per-webhook-batch upserts (`channel_adapters::aurinko_lifecycle::AurinkoAdapter::receive_batch`), with 31-day TTL; local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
-| `mcp_session_notifications` | `user_id` | `personal_erasure_owner_mcp_session_notifications_user_id` | Per-notification outbox; retention defaults to 30 days (`mcp_session::DEFAULT_MCP_NOTIFICATION_TTL_SECS` and `mcp_session::insert_notification_in_transaction`), allowing a large notification stream. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `mcp_session_notifications` block. |
 | `refresh_tokens` | `user_id` | `personal_erasure_owner_refresh_tokens_user_id` | Per-rotation inserts (`token_service::refresh_tokens`), with configurable expiry (default seven days); local cleanup needs `user_id`. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `refresh_tokens` block. |
 | `service_change_events` | `actor.person_id` | `personal_erasure_owner_service_change_events_actor_person_id` | Per-service-change journal (`models/service_change_event.rs`, `services/service_history/transaction.rs`), with no TTL; shared-history redaction filters by actor person ID. | Awaited before listeners; a large build can delay startup, following `billing::usage_rollup::ensure_indexes`. |
 | `service_pool_health_observations` | `pool_id` | `personal_erasure_owner_service_pool_health_observations_pool_id` | Per-request observation stream (`service_pool_health_service::issue_observation_ticket`); a one-hour TTL still admits all live request volume, and joined-child cleanup needs `pool_id`. | Awaited before listeners; a large build can delay startup, following `db::ensure_indexes`, `service_pool_health_observations` block. |
