@@ -323,8 +323,6 @@ parent for every child. If parent resolution reaches its cap, `scope_truncated`
 and `truncated` are true; `total_count` is a lower bound covering only the
 resolved parent scope. Source-query failures still mark the view unavailable.
 
-
-Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
 Assistant-message reads resolve up to 10,000 private conversation ids once per export, then use indexed message predicates with batches of 100. Explicit owner-authored inputs do not need a conversation join. If private scope is capped, `scope_truncated` is true.
 
 Reply classification uses each stored message’s origin, platform origin and platform reply fields (`assistant_nyxagent::begin_owner_turn_in_session` and settled-turn message writes), not the conversation’s mutable `reply_channel`. Replies to channel-origin turns, platform-routed replies and replies in shared/guest conversations are excluded. Changing a delivery preference cannot change which previously stored replies qualify.
@@ -357,3 +355,14 @@ They intentionally omit unknown fields during round-trip validation.
 | `trigger_work` | `trigger_schedule::insert_run/set_schedule_job`: queued scheduled occurrence document. |
 | `org_channel_lanes` | `org_channel_service::transcript::lane`: actor/routing selectors and generated conversation id. |
 | `org_channel_link_challenges` | `org_channel_service::links::issue`: one-time link challenge document. |
+
+Delivery slots are refunded if the request is cancelled during building or the
+response body is dropped before EOF, on server failures, or when more than half
+of all declared subsections are unavailable. A separate durable fixed-hourly
+limit allows at most 12 admitted attempts per person, including refunded attempts;
+three delivered exports remain the normal hourly limit. Busy requests consume
+neither budget. The two concurrency permits remain held through response EOF or
+drop, bounding builders and buffered deliveries together. Refund cleanup is
+tracked by graceful shutdown and affects only the original reservation window.
+
+Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.

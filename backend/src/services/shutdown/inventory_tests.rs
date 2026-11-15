@@ -416,6 +416,13 @@ fn all_sources(directory: &Path, out: &mut BTreeSet<PathBuf>) {
 // raw spawn beside an approved one still fails. Reasons describe ownership.
 const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
+        "handlers/users.rs",
+        "export_me",
+        "body_stream",
+        1,
+        "Bounded export body owns its reservation and semaphore permit through EOF/Drop; cancelled deliveries refund via tracked shutdown cleanup.",
+    ),
+    (
         "handlers/assistant_cma_agents.rs",
         "relay_events",
         "body_stream",

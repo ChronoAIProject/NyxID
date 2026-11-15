@@ -86,35 +86,112 @@ pub async fn save_security_preferences(
     Ok(Json(policy.into()))
 }
 
+/// Refund work that never reaches response EOF, including a cancelled build.
+struct ExportReservationGuard {
+    limiter: crate::mw::rate_limit::SharedPerKeyRateLimiter,
+    reservation: Option<crate::mw::rate_limit::RateReservation>,
+    shutdown: crate::services::shutdown::Runtime,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl ExportReservationGuard {
+    async fn refund(&mut self) -> AppResult<()> {
+        if let Some(reservation) = self.reservation.take() {
+            // The tracked task owns the token even if this waiting request is cancelled.
+            let limiter = self.limiter.clone();
+            self.shutdown
+                .spawn_cleanup(async move { limiter.refund(reservation).await })
+                .await
+                .map_err(|_| AppError::Internal("Export refund task failed".into()))??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ExportReservationGuard {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let limiter = self.limiter.clone();
+            self.shutdown.spawn_cleanup(async move {
+                if limiter.refund(reservation).await.is_err() {
+                    tracing::warn!("Account export slot refund failed");
+                }
+            });
+        }
+    }
+}
+
 /// POST /api/v1/users/me/export
 pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> AppResult<Response> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     let account_id = auth_user.user_id.to_string();
-    let _permit = state
+    let permit = state
         .account_export_semaphore
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::RateLimitedWithRetry { retry_after: 1 })?;
+    // Refunded attempts still consume this separate durable hourly budget.
+    let attempts = crate::mw::rate_limit::create_per_key_rate_limiter(
+        state.db.clone(),
+        "account_export_attempts",
+        12,
+        3600,
+    );
+    let (attempt, retry_after) = attempts.reserve(&account_id).await?;
+    if attempt.is_none() {
+        return Err(AppError::RateLimitedWithRetry { retry_after });
+    }
     let (reservation, retry_after) = state.account_export_limiter.reserve(&account_id).await?;
     let Some(reservation) = reservation else {
         return Err(AppError::RateLimitedWithRetry { retry_after });
     };
+    let mut guard = ExportReservationGuard {
+        limiter: state.account_export_limiter.clone(),
+        reservation: Some(reservation),
+        shutdown: state.shutdown.clone(),
+        _permit: permit,
+    };
     let result = export_reserved(&state, &auth_user, &account_id).await;
-    if result
-        .as_ref()
-        .is_err_and(|error| error.status_code().is_server_error())
-    {
-        state.account_export_limiter.refund(reservation).await?;
+    match result {
+        Ok((response, mostly_unavailable)) => {
+            if mostly_unavailable {
+                guard.refund().await?;
+            }
+            let (parts, body) = response.into_parts();
+            let stream = futures::stream::unfold(
+                (body.into_data_stream(), guard),
+                |(mut source, mut guard)| async move {
+                    use futures::StreamExt;
+                    match source.next().await {
+                        Some(chunk) => Some((chunk, (source, guard))),
+                        None => {
+                            guard.reservation.take();
+                            None
+                        }
+                    }
+                },
+            );
+            Ok(Response::from_parts(parts, Body::from_stream(stream)))
+        }
+        Err(error) => {
+            if error.status_code().is_server_error() {
+                guard.refund().await?;
+            } else {
+                guard.reservation.take();
+            }
+            Err(error)
+        }
     }
-    result
 }
 
 async fn export_reserved(
     state: &AppState,
     auth_user: &AuthUser,
     account_id: &str,
-) -> AppResult<Response> {
+) -> AppResult<(Response, bool)> {
     let export = crate::services::account_export_service::build(&state.db, account_id).await?;
+    let subsection_count: usize = export.sections.values().map(|section| section.len()).sum();
+    let mostly_unavailable = export.unavailable_sections.len() * 2 > subsection_count;
     let counts: Vec<serde_json::Value> = export
         .sections
         .iter()
@@ -155,6 +232,7 @@ async fn export_reserved(
         .header(header::CACHE_CONTROL, "no-store")
         .header("X-Content-Type-Options", "nosniff")
         .body(Body::from(bytes))
+        .map(|response| (response, mostly_unavailable))
         .map_err(|_| AppError::Internal("Account export response failed".into()))
 }
 
@@ -2025,6 +2103,119 @@ mod export_http_tests {
     }
 
     #[tokio::test]
+    async fn export_disconnect_refunds_but_twelve_attempts_bound_repeated_disconnects() {
+        let fixture = Fixture::new("export_disconnect").await;
+        let attempts = crate::mw::rate_limit::create_per_key_rate_limiter(
+            fixture.state.db.clone(),
+            "account_export_attempts",
+            12,
+            3600,
+        );
+        // Exercise real response-body cancellation once, then cancellation at
+        // the reserved-build boundary without repeating expensive source reads.
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/users/me/export")
+                    .header("authorization", format!("Bearer {}", fixture.human_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        fixture.state.shutdown.idle().await;
+        for _ in 1..12 {
+            assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_some());
+            let reservation = fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .unwrap();
+            let permit = fixture
+                .state
+                .account_export_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap();
+            drop(ExportReservationGuard {
+                limiter: fixture.state.account_export_limiter.clone(),
+                reservation: Some(reservation),
+                shutdown: fixture.state.shutdown.clone(),
+                _permit: permit,
+            });
+            fixture.state.shutdown.idle().await;
+        }
+        assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_none());
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_some()
+        );
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mostly_unavailable_exports_refund_the_delivery_slot() {
+        let fixture = Fixture::new("export_mostly_unavailable").await;
+        let db = &fixture.state.db;
+        db.collection::<Document>("invalid_export_source")
+            .insert_one(doc! {"_id":"bad","bad":"not-an-integer"})
+            .await
+            .unwrap();
+        let collections = crate::services::personal_data_registry::entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.export,
+                    crate::services::personal_data_registry::Export::Section(_)
+                ) && entry.collection != "users"
+            })
+            .map(|entry| entry.collection)
+            .collect::<Vec<_>>();
+        for collection in collections {
+            db.run_command(doc! {"create":collection,"viewOn":"invalid_export_source","pipeline":[{"$set":{"user_id":{"$toString":{"$toInt":"$bad"}}}}]}).await.unwrap();
+        }
+        for _ in 0..4 {
+            let (status, _, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+            assert_eq!(status, StatusCode::OK);
+            let export: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let count: usize = export["sections"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|section| section.as_object().unwrap().len())
+                .sum();
+            assert!(export["unavailable_sections"].as_array().unwrap().len() * 2 > count);
+        }
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn export_http_human_response_headers_and_credential_refusals() {
         let fixture = Fixture::new("account_export_http").await;
         let (status, headers, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
@@ -2236,6 +2427,7 @@ mod export_http_tests {
             .insert_many((0..80).map(|index| {
                 let mut row = message.clone();
                 row.id = format!("message-{index}");
+                row.seq = 80 - index;
                 row.created_at = chrono::Utc::now() - chrono::Duration::seconds(index);
                 row.text = format!("{index}:{}", row.text);
                 row
