@@ -3147,6 +3147,15 @@ pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
     ("platform_setup_steps", "setup_id"),
 ];
 
+/// Unbounded event-history selectors whose existing indexes do not serve the
+/// complete account export. Each addition is owned by its writer module.
+#[cfg(test)]
+pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
+    ("assistant_attachments", "user_id"),
+    ("assistant_group_requests", "actor_user_id"),
+    ("org_channel_messages", "author_user_id"),
+];
+
 /// Owner predicates that are not covered by an index in the origin/main
 /// startup definitions and need a new index because the collection is a large,
 /// per-event stream. This is an explicit rollout manifest rather than a
@@ -4149,6 +4158,7 @@ mod tests {
             .map(|(collection, _)| collection)
             .collect::<BTreeSet<_>>();
         collections.extend(JOINED_CHILD_SPECS.iter().map(|spec| spec.child));
+        collections.extend(export_index_coverage::collections());
         // Main-owned domain queues and retained meters fall outside the local
         // inventory. Their indexes must still survive branch and mixed-fleet startup.
         collections.insert(crate::models::node_credential_desired::COLLECTION_NAME);
@@ -4381,7 +4391,12 @@ mod tests {
                 }
                 if keys.len() == 1
                     && EXPORT_JOIN_INDEX_GAPS
-                        .contains(&(collection.as_str(), keys.keys().next().unwrap().as_str()))
+                        .iter()
+                        .chain(EXPORT_SELECTOR_INDEX_GAPS)
+                        .any(|predicate| {
+                            predicate
+                                == &(collection.as_str(), keys.keys().next().unwrap().as_str())
+                        })
                 {
                     let field = keys.keys().next().unwrap();
                     assert_eq!(
@@ -4411,7 +4426,11 @@ mod tests {
         assert_eq!(added, OWNER_INDEX_GAPS.iter().copied().collect());
         assert_eq!(
             export_joins,
-            EXPORT_JOIN_INDEX_GAPS.iter().copied().collect()
+            EXPORT_JOIN_INDEX_GAPS
+                .iter()
+                .chain(EXPORT_SELECTOR_INDEX_GAPS)
+                .copied()
+                .collect()
         );
         assert!(
             after["assistant_messages"]
@@ -4419,6 +4438,8 @@ mod tests {
                 .any(|d| d.get_str("name") == Ok("assistant_messages_account_export"))
         );
     }
+
+    include!("account_export_index_tests.rs");
 
     fn registry_owner_predicates() -> BTreeSet<(&'static str, &'static str)> {
         ENTRIES
@@ -4534,7 +4555,10 @@ mod tests {
             .filter(|line| line.starts_with("db.") && line.contains("personal_erasure_owner_"))
             .collect();
         assert_eq!(commands.len(), OWNER_INDEX_GAPS.len());
-        for (collection, field) in EXPORT_JOIN_INDEX_GAPS {
+        for (collection, field) in EXPORT_JOIN_INDEX_GAPS
+            .iter()
+            .chain(EXPORT_SELECTOR_INDEX_GAPS)
+        {
             let command = format!(
                 "db.{collection}.createIndex({{{field}:1}}, {{name:\"account_export_{collection}_{field}\"}});"
             );
@@ -4634,6 +4658,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("startup indexes second run: {error}"));
         assert_owner_prefix_coverage(&db).await;
+        export_index_coverage::assert_export_prefix_coverage(&db).await;
     }
 
     #[tokio::test]
@@ -4665,6 +4690,7 @@ mod tests {
         // The checked-in classification is complete relative to the
         // origin/main fixture: every uncovered registry/join predicate is
         // either a kept large-stream index or an explicitly bounded drop.
+        export_index_coverage::assert_export_origin_classification(&origin);
         let mut classification_errors = Vec::new();
         for (collection, field) in registry_owner_predicates() {
             let covered = field == "_id" || snapshot_has_prefix(&origin[collection], field);
@@ -4727,6 +4753,7 @@ mod tests {
         assert_only_manifest_indexes_added(&origin, &branch);
         assert_no_duplicate_keys(&branch);
         assert_owner_prefix_coverage(&db).await;
+        export_index_coverage::assert_export_prefix_coverage(&db).await;
 
         // A mixed fleet still invokes origin/main's sequence after the branch
         // has added its indexes; no old index may conflict with the additions.

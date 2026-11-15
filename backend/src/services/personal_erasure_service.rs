@@ -131,7 +131,10 @@ pub async fn ensure_startup_indexes(db: &Database) -> AppResult<()> {
     super::security_readiness_service::ensure_indexes(db).await?;
     ensure_indexes(db).await?;
     super::assistant_nyxagent::ensure_account_export_indexes(db).await?;
+    super::assistant_upload_retention::ensure_account_export_indexes(db).await?;
     super::platform_provisioning_service::ensure_account_export_indexes(db).await?;
+    super::collaboration_group_service::ensure_account_export_indexes(db).await?;
+    super::org_channel_service::ensure_account_export_indexes(db).await?;
     Ok(())
 }
 

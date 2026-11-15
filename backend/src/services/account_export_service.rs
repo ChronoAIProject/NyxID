@@ -580,7 +580,7 @@ fn additional_export_spec(
     }
 }
 
-fn additional_export_filter(
+pub(super) fn additional_export_filter(
     view: &personal_data_registry::AdditionalExportView,
     account_id: &str,
 ) -> Document {
@@ -1339,7 +1339,10 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         _ => return Err(ExportSpecError(collection.to_owned())),
     })
 }
-fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Option<Document> {
+pub(super) fn owner_filter(
+    entry: &personal_data_registry::Entry,
+    account_id: &str,
+) -> Option<Document> {
     use personal_data_registry::ExportSelector;
     Some(match entry.export_selector {
         ExportSelector::None => return None,

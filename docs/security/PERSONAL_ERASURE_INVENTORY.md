@@ -675,6 +675,106 @@ db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_expor
 db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
 ```
 
-The complete additive rollout set is 19 indexes: 16 erasure indexes and three
+The complete additive rollout set is 22 indexes: 16 erasure indexes and six
 export indexes. Existing definitions remain untouched; the upgrade tests compare
 all definitions before/after and replay the old startup fixture afterward.
+
+
+Three per-event collections also need export selector indexes. Actor selection is
+independent of resource ownership: an organization or group can retain many events
+authored by other people. Attachment selection must cover every origin, including
+tool images without a channel source. These are the only additional selector
+indexes; small configuration, relationship and lifecycle inventories retain their
+existing index sets.
+
+| Collection | Key/name | Writer/volume justification | Startup build behavior |
+| --- | --- | --- | --- |
+| `assistant_attachments` | `user_id`; `account_export_assistant_attachments_user_id` | `assistant_nyxagent::attach_routed_image` appends a UUID row for each tool image; `assistant_upload_service` also stores upload roots and chunks. `models::assistant_upload_retention::Policy::default` leaves `tool_image_days=None`, retaining tool images with the conversation, so this history has no fixed TTL or total cap. The existing owner-prefix index `assistant_channel_source_unique` is partial on `source.event_key` being a string and cannot serve an export across all origins. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_upload_retention::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
+| `assistant_group_requests` | `actor_user_id`; `account_export_assistant_group_requests_actor_user_id` | `collaboration_group_service::requests::enqueue_with_uploads_ready` appends a UUID request per authored group message. The pending queue cap covers active requests only; settled requests have no TTL. The existing `user_id` owner index and `collaboration.version/actor_user_id` index cannot serve the actor-only export predicate. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `collaboration_group_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
+| `org_channel_messages` | `author_user_id`; `account_export_org_channel_messages_author_user_id` | `org_channel_service::transcript::publish` persists each member-authored transcript row; no transcript TTL. Existing `_id`, `org_id` and `user_id` prefixes cannot select an author's history across organizations. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `org_channel_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
+
+This follows the existing awaited large-collection additions in
+`assistant_nyxagent::ensure_indexes` and the message-history export index above.
+Each owning initializer reuses any non-partial index with the required first key,
+regardless of its name. No existing index is dropped, renamed or rebuilt. The
+fresh, upgrade and mixed-fleet tests include these additions and preserve the
+original definitions. Prebuild on a large deployment before restarting replicas:
+
+```javascript
+db.assistant_attachments.createIndex({user_id:1}, {name:"account_export_assistant_attachments_user_id"});
+db.assistant_group_requests.createIndex({actor_user_id:1}, {name:"account_export_assistant_group_requests_actor_user_id"});
+db.org_channel_messages.createIndex({author_user_id:1}, {name:"account_export_org_channel_messages_author_user_id"});
+```
+
+The export-selector coverage test enumerates the actual filters for every
+registry subsection and additional view, including each `$or` branch. Joined
+views check both the parent owner prefix and the child foreign-key prefix;
+message scope checks the conversation-owner query too. Selective prefix reads
+bound the candidate set before the general newest-first top-k sort. The large
+message history additionally requires its compound owner/time/id index so its
+sort does not scan the person's entire transcript. Partial indexes do not count
+as coverage unless the export predicate guarantees their condition (currently
+none are needed). Adding or changing a selector without coverage or an explicit
+exception fails the startup/upgrade tests. A redundant or stale exception fails
+too. Group messages have no `approved_user_id` selector: owned-group queries
+anchor on `user_id`, and the additional authored-message view anchors on
+`author_user_id`; both are indexed.
+
+The following export exceptions are verified against production writer or index
+symbols by `export_exception_evidence_and_fixed_lifetimes_match_writers`. The
+short-TTL entries pin the actual writer lifetime expression/constant and its
+use, and startup tests verify the expiration field/index; a zero-second TTL
+index alone is not a lifetime bound. Resource-bounded means metadata at
+resource, relationship or configuration cadence, not a hard global row cap.
+Where histories or unresolved lifecycle rows have no TTL, the table says so;
+exports still retain their query timeouts and report unavailable subsections.
+
+| Collection / selector | Classification and verified evidence |
+| --- | --- |
+| `agent_key_login_requests.approved_user_id` | **SmallOrResourceBounded**: auth_agent_key_login_service::request writes REQUEST_TTL_SECS=600 login requests; sweep_expired revokes undelivered credentials before terminal-only TTL can purge them. Approved/incomplete cleanup is deliberately retained, so no unconditional short TTL is claimed. |
+| `assistant_agent_learning_members.member_user_id` | **SmallOrResourceBounded**: assistant_agent_learning::set_member_opt_in replaces one agent/member relationship by its deterministic id. |
+| `assistant_agent_learning_runs.owner_id` | **SmallOrResourceBounded**: assistant_agent_learning::create_run/reserve_run stores analysis-run metadata, not each source turn; at most MAX_PENDING=16 queued/analyzing runs per agent. Historical runs have no TTL or hard total cap. |
+| `assistant_agent_learning_skill_roots.owner_id` | **SmallOrResourceBounded**: assistant_agent_learning::ensure_indexes makes (agent_id,skill_id,version) unique; assistant_agent_learning_review writes one root per published skill version, not a turn log. |
+| `assistant_agent_private_notes.actor_user_id` | **SmallOrResourceBounded**: shared_agent_service::update_notes replaces the agent/actor notes document; ensure_indexes uniquely fences that pair. |
+| `assistant_agent_shares.owner_id` | **SmallOrResourceBounded**: shared_agent_service replaces each agent's audience; MAX_SHARES=500 and unique agent/subject pairs bound each current audience. |
+| `assistant_agent_sharing.owner_id` | **SmallOrResourceBounded**: shared_agent_service stores one current sharing policy with _id equal to the agent id. |
+| `assistant_async_quotas.user_id` | **SmallOrResourceBounded**: async_service_operation quota admission upserts _id=user_id; one counter per person. |
+| `assistant_checkpoints.user_id` | **SmallOrResourceBounded**: assistant_nyxagent replaces a conversation's checkpoint rather than appending checkpoints for each turn. |
+| `assistant_cma_agents.user_id` | **SmallOrResourceBounded**: assistant_cma_agent_service::register_live upserts one owner/service/remote-agent profile, not each task. Its existing owner prefix is partial on cma_agent_id being a string; the owner-only export does not guarantee that predicate. |
+| `assistant_cma_sandboxes.user_id` | **SmallOrResourceBounded**: assistant_cma_sandbox_service::indexes permits one occupied account slot per owner; creation stores numbered resource generations, not per-task events. Historical generations persist for receipt reconciliation. Existing owner prefixes are partial on occupied slots, idempotency keys or remote ids, none guaranteed by the export. |
+| `assistant_group_agent_access.owner_id` | **SmallOrResourceBounded**: collaboration_group_service has one current access relationship per group/agent, enforced by a unique index. |
+| `assistant_group_agent_proposals.proposed_by` | **SmallOrResourceBounded**: collaboration_group_service::membership upserts deterministic group/proposer/agent proposals with a seven-day expiry; this is membership metadata. |
+| `assistant_group_invites.accepted_by_user_id` | **SmallOrResourceBounded**: collaboration_group_service::membership records the sole accepting member on the same expiring invitation. |
+| `assistant_group_invites.intended_user_id` | **SmallOrResourceBounded**: collaboration_group_service::membership records an optional intended member on the same expiring invitation. |
+| `assistant_group_invites.issuer_user_id` | **SmallOrResourceBounded**: collaboration_group_service::membership stores seven-day, single-use group invitations with at most 32 pending per group, not group messages. |
+| `assistant_group_read_states.user_id` | **SmallOrResourceBounded**: collaboration_group_service::notifications updates one read position per group/member; ensure_indexes uniquely fences that pair. |
+| `assistant_learning_publication_targets.owner_id` | **SmallOrResourceBounded**: assistant_agent_learning_review reserves a single publication target per skill/version and removes released reservations; ids are target:version, not event UUIDs. |
+| `assistant_skill_draft_attempts.user_id` | **ShortTtl**: db::ensure_indexes fixes the created_at TTL at 86400 seconds; assistant_skill_authoring::record_format_rejection updates one conversation/turn counter. |
+| `assistant_voice_announcements.user_id` | **SmallOrResourceBounded**: voice::announcements stores one announcement per call/request id and expires it 24 hours after the call deadline. |
+| `assistant_voice_windows.user_id` | **SmallOrResourceBounded**: assistant_voice::ensure_indexes uniquely fences billing_request_id; billing::voice reserves deterministic call/window funding records, not audio frames. |
+| `assistant_wire_logs.user_id` | **ShortTtl**: assistant_wire_log_service::WIRE_LOG_TTL_SECS is 15 minutes and record sets expires_at from it. |
+| `auth_device_codes.approved_user_id` | **SmallOrResourceBounded**: auth_device_service writes 10-minute login requests but purge_at is set only after grant cleanup. Pending/approved cleanup can be retried, so AUTH_DEVICE_EXPIRES_IN_SECS is not a fixed retention bound; these are login lifecycle records. |
+| `auth_device_codes_v2.approved_user_id` | **SmallOrResourceBounded**: auth_device_service shares the ten-minute login writer with the legacy protocol, initially leaving purge_at unset. Cleanup must revoke undelivered grants before purge, so this is login lifecycle inventory rather than an unconditional TTL bound. |
+| `authorization_codes.user_id` | **ShortTtl**: oauth_service::authorize writes expires_at=now+Duration::minutes(5). |
+| `channel_adapter_allocations.user_id` | **SmallOrResourceBounded**: call_channels::session uniquely fences catalog/provider/account/resource allocations; management inserts on resource allocation, never for a call event. |
+| `channel_email_subscriptions.user_id` | **SmallOrResourceBounded**: channel_adapters::aurinko_lifecycle keys the one callback subscription binding by bot.id. |
+| `device_codes.approved_by_user_id` | **ShortTtl**: device_code_service uses DEVICE_CODE_EXPIRES_IN_SECS=900 while pending and DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS=86400 after approval. |
+| `feature_flag_overrides.target_key` | **SmallOrResourceBounded**: feature_flag_service updates the current flag/target configuration instead of appending evaluations. |
+| `invite_codes.usages.user_id` | **SmallOrResourceBounded**: invite_code_service stores signup invite configuration with embedded usage entries, not a separate per-request stream; max_uses controls redeemable uses. |
+| `invocation_diagnostics.actor_user_id` | **ShortTtl**: invocation_diagnostic_service::HANDLE_TTL_SECS=60; diagnostic handles expire from creation. |
+| `login_approvals.user_id` | **ShortTtl**: login_approval_service::begin caps request-bound approval expiry at ten minutes. |
+| `machine_orphan_inventory.owner_id` | **SmallOrResourceBounded**: remote_machine_events::record_investigation upserts one finding per controlled-resource identity; recurring sweeps refresh last_seen_at rather than append events. No TTL is claimed for unresolved findings. |
+| `mfa_challenges.user_id` | **ShortTtl**: token_service::insert_mfa_pending_session_with_method writes a five-minute pending session. |
+| `oauth_consent_requests.user_id` | **ShortTtl**: oauth_consent_request_service::create fixes expires_at at 24 hours. |
+| `openclaw_channel_mappings.nyxid_user_id` | **SmallOrResourceBounded**: openclaw_channel_service::upsert_mapping updates the current channel/external-user binding instead of creating a row per message. |
+| `oracle_workers.enrollment.owner_user_id` | **SmallOrResourceBounded**: oracle_worker_enrollment_service serializes enrollment on the pool and caps enrolled workers at MAX_ENROLLED_WORKERS=256; one enrollment embedded per worker. |
+| `org_channel_lanes.actor_id` | **SmallOrResourceBounded**: org_channel_service::transcript::lane upserts one current channel/partition/actor/agent/binding-generation/sender lane, not each message. |
+| `org_channel_link_challenges.user_id` | **ShortTtl**: org_channel_service::links::issue writes a ten-minute expires_at; the lifetime applies to issued, observed and confirmed rows. |
+| `org_channel_sender_links.user_id` | **SmallOrResourceBounded**: org_channel_service::links::confirm reuses the channel/sender binding; a unique channel_id/sender_hash key prevents per-link-attempt history. |
+| `org_invites.redeemed_by` | **SmallOrResourceBounded**: org_invite_service::redeem_invite records one redeemer on a single-use organization invitation. DEFAULT_INVITE_TTL=24h is caller-overridable, so it is not treated as a fixed short-TTL guarantee. |
+| `platform_personal_setup_selections.user_id` | **SmallOrResourceBounded**: platform_manager_management replaces the selected setup under _id=personal binding.id; the current context also expires after 30 days. |
+| `platform_public_probe_consents.actor_user_id` | **SmallOrResourceBounded**: platform_public_contract_service stores human readiness consent for five minutes; sweep_probes deletes expired consent rows. This uses an application purge, not a MongoDB TTL guarantee. |
+| `service_account_key_read_grants.owner_id` | **SmallOrResourceBounded**: service_account_key_read_service replaces the single current key-read grant with _id=service account id. |
+| `service_pool_member_health.owner_id` | **ShortTtl**: service_pool_health_service::HEALTH_RETENTION_MS=3600000; current health expires one hour after an observation. |
+| `telegram_bot_claims.owner_user_id` | **SmallOrResourceBounded**: telegram_new_claims uniquely fences manager/bot claims. Redeemed claims intentionally unset purge_after, so their bound is bot provisioning metadata, not the initial 15-minute expiry. |
+| `telegram_bot_requests.owner_user_id` | **SmallOrResourceBounded**: telegram_new_service keeps one active provisioning request per actor. Terminal requests purge after one day; provisioning/connected are exempt from expiry and are resource lifecycle records, not short-TTL event history. |

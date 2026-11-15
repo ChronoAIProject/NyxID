@@ -15,7 +15,7 @@ fn uses_index(value: &serde_json::Value) -> bool {
 async fn explain(db: &mongodb::Database, collection: &str, filter: Document) {
     let result = db
         .run_command(
-            doc! {"explain": {"find": collection, "filter": filter, "sort": if ["mcp_sessions","platform_bot_installations","platform_setups"].contains(&collection) {parent_scope_sort(collection)} else {doc! {}}, "limit":PARENT_ID_CAP as i64 + 1}, "verbosity": "executionStats"},
+            doc! {"explain": {"find": collection, "filter": filter, "sort": if ["mcp_sessions","platform_bot_installations","platform_setups"].contains(&collection) {parent_scope_sort(collection)} else if ["assistant_attachments","assistant_group_requests","org_channel_messages"].contains(&collection) {doc! {"created_at":-1,"_id":-1}} else {doc! {}}, "limit":PARENT_ID_CAP as i64 + 1}, "verbosity": "executionStats"},
         )
         .await
         .unwrap();
@@ -177,5 +177,69 @@ async fn fifty_thousand_messages_use_batched_indexed_reads_within_timeout() {
     assert_eq!(result.total_count, 50_000);
     assert_eq!(result.items.len(), 10_000);
     assert!(elapsed < QUERY_TIMEOUT, "{elapsed:?}");
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unbounded_export_selectors_use_selective_prefix_indexes() {
+    let db = crate::test_utils::connect_transaction_test_database("export_actor_plans").await;
+    super::super::assistant_upload_retention::ensure_account_export_indexes(&db)
+        .await
+        .unwrap();
+    super::super::collaboration_group_service::ensure_account_export_indexes(&db)
+        .await
+        .unwrap();
+    super::super::org_channel_service::ensure_account_export_indexes(&db)
+        .await
+        .unwrap();
+    for &(collection, field) in personal_data_registry::EXPORT_SELECTOR_INDEX_GAPS {
+        let entry = personal_data_registry::find(collection).unwrap();
+        let filter = owner_filter(entry, "person").unwrap();
+        assert_eq!(filter, doc! {field:"person"});
+        let rows = db.collection::<Document>(collection);
+        rows.insert_many((0..5_010).map(|i| {
+            let mut row = doc! {
+                "_id":format!("{collection}-{i}"), field:if i < 10 {"person"} else {"other"},
+                "created_at":bson::DateTime::now()
+            };
+            if field != "user_id" {
+                row.insert("user_id", "resource-owner");
+            }
+            row
+        }))
+        .await
+        .unwrap();
+        explain(&db, collection, filter.clone()).await;
+        assert_eq!(rows.count_documents(filter).await.unwrap(), 10);
+        // Reuse an existing selective prefix regardless of its name; no duplicate
+        // indexes, drops or rebuilds on repeated feature initialization.
+        let before = rows
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        super::super::assistant_upload_retention::ensure_account_export_indexes(&db)
+            .await
+            .unwrap();
+        super::super::collaboration_group_service::ensure_account_export_indexes(&db)
+            .await
+            .unwrap();
+        super::super::org_channel_service::ensure_account_export_indexes(&db)
+            .await
+            .unwrap();
+        let after = rows
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            bson::to_bson(&before).unwrap(),
+            bson::to_bson(&after).unwrap()
+        );
+    }
     db.drop().await.unwrap();
 }
