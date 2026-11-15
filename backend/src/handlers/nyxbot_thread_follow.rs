@@ -784,6 +784,9 @@ async fn send_impl(
         let report = super::images::report_or_failure(
             state,
             super::images::ImageSendContext {
+                source: crate::models::image_preparation::Source::Supplemental {
+                    origin: origin.clone(),
+                },
                 owner,
                 conversation_id: conversation,
                 turn_id: images.turn_id,

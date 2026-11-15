@@ -443,8 +443,11 @@ Successful `deliver_to: {"type":"chat"}` results send retained tool images,
 one per message, before the result text. Images use the same prepared target and
 live agent, org, bot and `allow_posts` checks. The text consumes one initiate
 limiter token for the logical result; its at most eight images consume none.
-Image claims are inside the single `result_claimed` attempt and never resend an
-ambiguous send. A partial image failure appends a count to the text; only an
+Image claims are created inside the result attempt. New claims retain a
+MongoDB-time preparation lease before the first upload, so a survivor can finish
+that attachment independently of the text claim, using the original run, source,
+destination and delivery expiry. Recovery rechecks current posting authority and
+never resends an ambiguous upload or repeats result text. A partial image failure appends a count to the text; only an
 owner-private chat mentions the automation's thread in the NyxID app. Failed
 runs and confirmation notices send text only. Thread results retain their web
 attachments; notification delivery remains text-only.

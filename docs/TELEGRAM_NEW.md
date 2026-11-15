@@ -364,7 +364,13 @@ the existing source/audience `nyxbot_image_deliveries_v2` claims, including lega
 claim reads across the owner's channel aliases. Manager uploads retain the same
 Telegram content protection as private text replies. The loader checks owner,
 conversation, turn, retention, MIME and size
-before upload. Ambiguous uploads are never retried. Successful attachments have
+before upload. New attachment claims retain a versioned, MongoDB-time preparation
+lease until the first possible upload. A survivor reloads the existing private
+saved result and current manager authority, then acquires the exact image attempt;
+it does not replay parent text or alter its pinned media counts. This works even
+if an older parent worker has already finished with a missing-media note. Public
+manager replies gain no new content or readback surface. Ambiguous uploads are
+never retried. Successful attachments have
 no placeholder; only unavailable/unconfirmed items get a fallback note. The
 turn's existing eight-attachment capture bound and media byte limit still apply.
 

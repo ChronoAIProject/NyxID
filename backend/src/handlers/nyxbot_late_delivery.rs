@@ -314,6 +314,9 @@ pub(crate) fn spawn_sweep(state: AppState) {
             if sweep(&state).await.is_err() {
                 tracing::warn!(stage = "sweep", "Channel answer delivery deferred");
             }
+            if super::images::recovery::sweep(&state).await.is_err() {
+                tracing::warn!(stage = "sweep", "Attachment recovery deferred");
+            }
         }
     });
 }
@@ -480,7 +483,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         conversation_id,
     )
     .await?;
-    let Some((channel, _)) = eligible(state, &event, &d, &conversation).await? else {
+    let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
         refuse(state, event_id).await?;
         return Ok(());
     };
@@ -539,12 +542,8 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     } else {
         answer(&message.text, message.status != "completed")
     };
-    // Refresh the image target before claiming preparation. Text revalidates
-    // again at its exact provider boundary after credentials/request preparation.
-    let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
-        refuse(state, event_id).await?;
-        return Ok(());
-    };
+    // The first check authorizes preparation; each provider boundary revalidates
+    // after credential and attachment loading.
     let claim = Uuid::new_v4().to_string();
     let Some(saved) = preparation::acquire(&state.db,event_id,&message.id,&claim).await? else {
         return Ok(());
@@ -600,6 +599,9 @@ async fn event_images(
     report_or_failure(
         state,
         ImageSendContext {
+            source: crate::models::image_preparation::Source::Event {
+                event_id: event.id.clone(),
+            },
             owner: crate::services::org_channel_service::event_actor(event),
             conversation_id: &conversation.id,
             turn_id: &message.turn_id,

@@ -1385,6 +1385,9 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
         let result = images::send_turn_images(
             &state,
             images::ImageSendContext {
+                source: crate::models::image_preparation::Source::Event {
+                    event_id: String::new(),
+                },
                 owner: OWNER,
                 conversation_id: stored.conversation_id.as_deref().unwrap(),
                 turn_id: "turn",

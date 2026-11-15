@@ -1419,6 +1419,60 @@ async fn late_normal_send_command_counts() {
     }
 }
 
+#[tokio::test]
+async fn late_legacy_sending_without_a_date_is_not_abandoned_or_selected_by_the_sweep() {
+    let f = fixture("late_legacy_timestamp").await;
+    settled(&f, false).await;
+    patch(
+        &f,
+        doc! {"delivery.state":"sending", "delivery.claim_id":"legacy"},
+    )
+    .await;
+    let events = f.state.db.collection::<bson::Document>(EVENTS);
+    for value in [
+        None,
+        Some(bson::Bson::Null),
+        Some(bson::Bson::Int64(0)),
+        Some(bson::Bson::String("invalid".into())),
+    ] {
+        let update = match value {
+            Some(value) => doc! {"$set":{"delivery.checked_at":value}},
+            None => doc! {"$unset":{"delivery.checked_at":""}},
+        };
+        events
+            .update_one(doc! {"_id":&f.event.id}, update)
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .count_documents(crate::services::channel_turn_preparation::due())
+                .await
+                .unwrap(),
+            0
+        );
+        late_delivery::sweep(&f.state).await.unwrap();
+        let row = events
+            .find_one(doc! {"_id":&f.event.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.get_document("delivery")
+                .unwrap()
+                .get_str("state")
+                .unwrap(),
+            "sending"
+        );
+    }
+    patch(
+        &f,
+        doc! {"delivery.checked_at":bson::DateTime::from_millis(0)},
+    )
+    .await;
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(status(&f).await, "unknown");
+}
+
 async fn expire_text_preparation(f: &Fixture) {
     patch(
         f,
