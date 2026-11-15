@@ -53,6 +53,25 @@ collection fallback. Uploaded and generated files are metadata only (name,
 MIME type, byte size, creation and expiry timestamps).
 
 
+### Export ownership
+
+Export selectors are explicit per collection and independent of deletion selectors.
+An invite-code record includes only the requesting person's usage elements; it
+never includes other redeemers, their emails or the administrator's note.
+Shared-agent consent records belong to the acting person, so owning an agent
+does not expose a recipient's private conversation. Relationship metadata omits
+other people's account identifiers.
+
+Service accounts follow `ServiceAccount::effective_owner_user_id`: an explicit
+`owner_user_id` wins, and only legacy rows without an owner fall back to
+`created_by`. Creating an org-owned or subsequently transferred service account
+does not grant export access. OAuth clients have no organization-owner field;
+`oauth_client_service::get_client_for_creator` and `list_clients_for_creator`
+use `created_by` as their actual access boundary, so creator-owned client
+metadata is included. Organization invites belong to the org; their issuer's
+attribution does not grant access. The redeemer can export their own redemption
+metadata, without the issuer's identity or the invitation token.
+
 ### Complete subsection map
 
 Every declared registry export view has one subsection; a source collection may have multiple explicitly scoped views. The following table is the version-1 field contract; fields containing dates use RFC3339 strings, Decimal128 values use decimal strings, and binary values are omitted. Per-collection allowlists include the visible authored fields for that source: conversation `title`; agent `name`, `description`, `display_name`, `persona`, `voice_instructions`, and the requesting person's own `memory.text`; private-note `notes.text`; feedback `comment`; trigger labels, schedules, and assistant instructions; endpoint labels and URLs; connection labels and metadata; node names; channel-bot labels; OAuth client names, redirect URIs and scopes; and service-account names and descriptions. Shared/team memory, system-injected instructions, and group messages whose `author_user_id` is another person are excluded.

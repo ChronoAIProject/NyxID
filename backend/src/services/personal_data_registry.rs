@@ -59,6 +59,21 @@ pub enum Export {
     Excluded(ExclusionReason),
 }
 
+/// Account-export access is separate from destructive ownership and attribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportSelector {
+    None,
+    Person(&'static str),
+    AnyPerson(&'static [&'static str]),
+    LegacyServiceAccount,
+    AuthoredOwnedGroup,
+    JoinedPerson {
+        parent: &'static str,
+        field: &'static str,
+        owner_field: &'static str,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExportViewSelector {
     AuthoredGroupMessagesOutsideOwnedGroups,
@@ -86,6 +101,7 @@ pub struct Entry {
     pub owner: OwnerSelector,
     pub erasure: Erasure,
     pub export: Export,
+    pub export_selector: ExportSelector,
     pub why: &'static str,
 }
 
@@ -203,6 +219,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("approved_user_id"),
         why: "agent_key_login_requests stores the person-owned agent key login requests record keyed by approved_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -210,6 +227,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "agent_service_bindings stores the person-owned agent service bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -217,6 +235,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "anonymous_endpoint_usage is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -224,6 +243,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "api_key_credentials stores the person-owned api key credentials record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -231,6 +251,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "api_keys stores the person-owned api keys record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -238,6 +259,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "approval_grants stores the person-owned approval grants record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -245,6 +267,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "approval_requests stores the person-owned approval requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -252,6 +275,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_acknowledgements stores the person-owned assistant acknowledgements record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -259,6 +283,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_action_receipts stores the person-owned assistant action receipts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -266,6 +291,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id", "owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "assistant_agent_consents stores the person-owned assistant agent consents record keyed by actor_user_id, owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -273,6 +299,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
         why: "assistant_agent_credentials stores the person-owned assistant agent credentials record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -280,6 +307,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_agent_learning stores the person-owned assistant agent learning record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -287,6 +315,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["member_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("member_user_id"),
         why: "assistant_agent_learning_members stores the person-owned assistant agent learning members record keyed by member_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -294,6 +323,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_agent_learning_proposals stores the person-owned assistant agent learning proposals record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -303,6 +333,7 @@ pub static ENTRIES: &[Entry] = &[
             parent: "assistant_agents",
         },
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "assistant_agent_learning_rejections is lifecycle data owned through assistant_agents; cleanup removes the child only after that parent is removed.",
     },
     Entry {
@@ -310,6 +341,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_agent_learning_runs stores the person-owned assistant agent learning runs record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -317,6 +349,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_agent_learning_skill_roots stores the person-owned assistant agent learning skill roots record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -324,6 +357,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "assistant_agent_private_notes stores the person-owned assistant agent private notes record keyed by actor_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -331,6 +365,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id", "subject_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::AnyPerson(&["owner_id", "subject_id"]),
         why: "assistant_agent_shares stores the person-owned assistant agent shares record keyed by owner_id, subject_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -338,6 +373,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_agent_sharing stores the person-owned assistant agent sharing record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -345,6 +381,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_agents stores the person-owned assistant agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -352,6 +389,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "assistant_analytics_settings is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -359,6 +397,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_artifact_deliveries stores the person-owned assistant artifact deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -366,6 +405,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_async_operations stores the person-owned assistant async operations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -373,6 +413,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_async_quotas stores the person-owned assistant async quotas record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -380,6 +421,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_attachment_expiry stores the person-owned assistant attachment expiry record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -387,6 +429,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_attachments stores the person-owned assistant attachments record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -394,6 +437,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_authored_draft_claims stores the person-owned assistant authored draft claims record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -401,6 +445,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_checkpoints stores the person-owned assistant checkpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -408,6 +453,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_cma_agents stores the person-owned assistant cma agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -415,6 +461,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_cma_creations stores the person-owned assistant cma creations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -422,6 +469,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_cma_sandboxes stores the person-owned assistant cma sandboxes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -429,6 +477,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_cma_session_origins stores the person-owned assistant cma session origins record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -436,6 +485,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_conversations stores the person-owned assistant conversations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -443,6 +493,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_direct_handoffs stores the person-owned assistant direct handoffs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -450,6 +501,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_group_agent_access stores the person-owned assistant group agent access record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -457,6 +509,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["proposed_by"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("proposed_by"),
         why: "assistant_group_agent_proposals stores the person-owned assistant group agent proposals record keyed by proposed_by; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -464,6 +517,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["original_requester_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("original_requester_id"),
         why: "assistant_group_execution_slots stores the person-owned assistant group execution slots record keyed by original_requester_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -475,6 +529,11 @@ pub static ENTRIES: &[Entry] = &[
         ]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::AnyPerson(&[
+            "issuer_user_id",
+            "accepted_by_user_id",
+            "intended_user_id",
+        ]),
         why: "assistant_group_invites stores the person-owned assistant group invites record keyed by issuer_user_id, accepted_by_user_id, intended_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -482,6 +541,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_group_mention_notifications stores the person-owned assistant group mention notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -489,6 +549,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id", "author_user_id"]),
         erasure: Erasure::Redacted,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::AuthoredOwnedGroup,
         why: "assistant_group_messages removes person-owned transcripts through the local inventory and redacts human author labels on surviving shared transcripts while keeping opaque author ids.",
     },
     Entry {
@@ -496,6 +557,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_group_read_states stores the person-owned assistant group read states record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -503,6 +565,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "assistant_group_requests stores the person-owned assistant group requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -510,6 +573,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "assistant_group_transfers is retained as SharedAttribution evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -517,6 +581,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_groups stores the person-owned assistant groups record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -524,6 +589,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_invocation_turns stores the person-owned assistant invocation turns record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -531,6 +597,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_invocations stores the person-owned assistant invocations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -538,6 +605,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_learning_migrations stores the person-owned assistant learning migrations record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -545,6 +613,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Domain("assistant_learning_reconciliation"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "assistant_learning_publication_targets is cleaned by the assistant_learning_reconciliation lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -552,6 +621,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_message_feedback stores the person-owned assistant message feedback record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -559,6 +629,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_messages stores the person-owned assistant messages record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -566,6 +637,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "assistant_migrations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -573,6 +645,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("_id"),
         why: "assistant_notification_push_budgets stores the person-owned assistant notification push budgets record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -580,6 +653,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_notification_push_sources stores the person-owned assistant notification push sources record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -587,6 +661,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "assistant_notification_worker is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -594,6 +669,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_notifications stores the person-owned assistant notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -601,6 +677,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("_id"),
         why: "assistant_onboarding stores the person-owned assistant onboarding record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -608,6 +685,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "assistant_profile_routes is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -615,6 +693,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_resources stores the person-owned assistant resources record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -622,6 +701,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_service_execution stores the person-owned assistant service execution record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -629,6 +709,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("_id"),
         why: "assistant_settings stores the person-owned assistant settings record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -636,6 +717,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_skill_draft_attempts stores the person-owned assistant skill draft attempts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -643,6 +725,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id", "actor_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("actor_id"),
         why: "assistant_tool_results stores the person-owned assistant tool results record keyed by user_id, actor_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -650,6 +733,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "assistant_upload_limits is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -657,6 +741,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_voice_announcements stores the person-owned assistant voice announcements record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -664,6 +749,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_voice_requests stores the person-owned assistant voice requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -671,6 +757,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("voice_purge"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_voice_sessions stores personal voice session metadata; voice purge settles and removes it.",
     },
     Entry {
@@ -678,6 +765,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_voice_windows stores the person-owned assistant voice windows record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -685,6 +773,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "assistant_wire_logs stores the person-owned assistant wire logs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -692,6 +781,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "async_service_operation_artifacts stores the person-owned async service operation artifacts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -699,6 +789,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::Audit),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "audit_log is retained as Audit evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -706,6 +797,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("transient device-code coordination with TTL"),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "auth_device_code_reservations stores only a one-way code uniqueness HMAC for transient coordination; its pending and terminal rows expire under the device-code TTL and contain no person owner field.",
     },
     Entry {
@@ -713,6 +805,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("approved_user_id"),
         why: "auth_device_codes stores the person-owned auth device codes record keyed by approved_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -720,6 +813,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("approved_user_id"),
         why: "auth_device_codes_v2 stores the person-owned auth device codes v2 record keyed by approved_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -727,6 +821,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "authorization_codes stores the person-owned authorization codes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -734,6 +829,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_account_balances is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -741,6 +837,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_account_verify_lease is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -748,6 +845,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_account_verify_state is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -755,6 +853,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_cutover_operations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -762,6 +861,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_hold_observations links wallet, grant, and allowance-period ids to retained financial and billing records; reconciliation removes resolved observations, and personal erasure must preserve outstanding hold-verification evidence.",
     },
     Entry {
@@ -769,6 +869,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_lago_carry is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -776,6 +877,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_ledger is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -783,6 +885,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_migration_errors is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -790,6 +893,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_migrations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -799,6 +903,7 @@ pub static ENTRIES: &[Entry] = &[
             "platform plan and metric pricing intents without person identifiers",
         ),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_plan_charges stores one desired or removed platform price per plan/metric, optional catalog service id, and repair backoff; it has no person, wallet, grant, period, or actor id.",
     },
     Entry {
@@ -808,6 +913,7 @@ pub static ENTRIES: &[Entry] = &[
             "platform plan synchronization generations without person identifiers",
         ),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_plan_sync is keyed by platform plan code and records synchronization generations, dirty/uncertain flags, and an opaque provider-attempt UUID, with no person or financial-owner id.",
     },
     Entry {
@@ -815,6 +921,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_pool_recovery is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -822,6 +929,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_rate_cache is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -829,6 +937,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_rate_diagnostics is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -836,6 +945,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("singleton platform rate-cache ordering generation"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_rate_epoch stores only the rate-cache singleton id and its generation counter to order platform price publication; neither field identifies a person or financial owner.",
     },
     Entry {
@@ -843,6 +953,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_tax_profiles is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -850,6 +961,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("singleton platform tax-plan ordering generation"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_tax_plan_epoch stores the all-plans singleton id, generation, and random publication guard token; it contains no tax profile, person, financial-owner, or actor id.",
     },
     Entry {
@@ -857,6 +969,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "billing_topup_sessions is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -864,6 +977,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Section("billing"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "billing_wallet is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -871,6 +985,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "billing_wallet_refresh_requests is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -878,6 +993,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "catalog_delegation_grants stores the person-owned catalog delegation grants record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -885,6 +1001,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "catalog_icons is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -892,6 +1009,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "catalog_skill_operations stores shared skill publication operations; retention keeps opaque attribution while redacting human names; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -899,6 +1017,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "catalog_skill_revisions stores shared published skill revision history; retention keeps opaque attribution while redacting human names; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -906,6 +1025,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "chain_verify_status is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -913,6 +1033,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_activity_notifications stores the person-owned channel activity notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -920,6 +1041,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_adapter_accounts stores the person-owned channel adapter accounts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -927,6 +1049,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_adapter_allocations stores the person-owned channel adapter allocations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -934,6 +1057,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_adapter_bindings stores the person-owned channel adapter bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -941,6 +1065,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_adapter_events stores the person-owned channel adapter events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -948,6 +1073,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_adapter_resource_claims stores the person-owned channel adapter resource claims record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -955,6 +1081,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_adapter_sessions stores the person-owned channel adapter sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -962,6 +1089,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_bots stores the person-owned channel bots record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -969,6 +1097,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_connect_links stores the person-owned channel connect links record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -976,6 +1105,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("channel lifecycle"),
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_conversations is cleaned by the channel lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -983,6 +1113,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_delivery_receipts stores the person-owned channel delivery receipts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -990,6 +1121,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_email_batches stores the person-owned channel email batches record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -997,6 +1129,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_email_receipts stores the person-owned channel email receipts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1004,6 +1137,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_email_sends stores the person-owned channel email sends record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1011,6 +1145,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_email_subscriptions stores the person-owned channel email subscriptions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1020,6 +1155,7 @@ pub static ENTRIES: &[Entry] = &[
             parent: "channel_conversations",
         },
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "channel_event_logs is lifecycle data owned through channel_conversations; cleanup removes the child only after that parent is removed.",
     },
     Entry {
@@ -1027,6 +1163,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_messages stores the person-owned channel messages record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1034,6 +1171,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_reply_deliveries stores the person-owned channel reply deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1043,6 +1181,7 @@ pub static ENTRIES: &[Entry] = &[
             parent: "channel_conversations",
         },
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "channel_send_claims is lifecycle data owned through channel_conversations; cleanup removes the child only after that parent is removed.",
     },
     Entry {
@@ -1050,6 +1189,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "channel_text_deliveries stores the person-owned channel text deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1057,6 +1197,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "channel_webhook_rejections is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1064,6 +1205,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "channel_whatsapp_native stores the person-owned channel whatsapp native record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1071,6 +1213,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "cli_pairings stores the person-owned cli pairings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1078,6 +1221,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "connect_links stores the person-owned connect links record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1085,6 +1229,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "consent_revocation_fences is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1092,6 +1237,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "consents stores the person-owned consents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1099,6 +1245,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "coordination_leases is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1106,6 +1253,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "coordination_rate_windows is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1113,6 +1261,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "coordination_replay_records is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1120,6 +1269,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "coordination_slots is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1127,6 +1277,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "coordination_token_buckets is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1134,6 +1285,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "credit_allocation_requests is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1141,6 +1293,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["recipient_user_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Section("billing"),
+        export_selector: ExportSelector::Person("recipient_user_id"),
         why: "credit_grants is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1148,6 +1301,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "credit_schedule_periods stores frozen scheduled-grant policy and recipient snapshots; financial retention preserves other recipients; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -1155,6 +1309,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "credit_schedules is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1162,6 +1317,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["approved_by_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("approved_by_user_id"),
         why: "device_codes stores the person-owned device codes record keyed by approved_by_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1169,6 +1325,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "device_onboard_credentials stores the person-owned device onboard credentials record keyed by owner_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1176,6 +1333,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "device_pubkey_lockouts is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1183,6 +1341,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "downstream_services is retained as SharedAttribution evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1190,6 +1349,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "durable_operation_executions is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1197,6 +1357,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "durable_operation_grants is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1204,6 +1365,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_uuid"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("owner_uuid"),
         why: "encrypted_record_migration_findings stores the person-owned encrypted record migration findings record keyed by owner_uuid; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1211,6 +1373,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_uuid"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("owner_uuid"),
         why: "encrypted_record_migration_runs stores the person-owned encrypted record migration runs record keyed by owner_uuid; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1218,6 +1381,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "event_dedup_records is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1225,6 +1389,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "execution_enrollment_jobs is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1232,6 +1397,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "execution_enrollment_repairs is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1239,6 +1405,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "execution_permission_deliveries stores the person-owned execution permission deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1246,6 +1413,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "feature_flag_definitions is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1253,6 +1421,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "feature_flag_metadata is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1260,6 +1429,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["target_key"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("target_key"),
         why: "feature_flag_overrides stores the person-owned feature flag overrides record keyed by target_key; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1267,6 +1437,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "generated_artifact_content_series stores the person-owned generated artifact content series record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1274,6 +1445,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "groups is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1281,6 +1453,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["usages.user_id"]),
         erasure: Erasure::Redacted,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("usages.user_id"),
         why: "invite_codes contains shared history; cleanup removes personal ownership or human-readable attribution while preserving shared counters and opaque identifiers.",
     },
     Entry {
@@ -1288,6 +1461,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "invocation_diagnostics stores the person-owned invocation diagnostics record keyed by actor_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1295,6 +1469,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "lark_base_write_photos stores the person-owned lark base write photos record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1302,6 +1477,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "lark_base_writes stores the person-owned lark base writes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1309,6 +1485,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "login_approvals stores the person-owned login approvals record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1316,6 +1493,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "login_codes stores the person-owned login codes record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1323,6 +1501,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "machine_authority_leases is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1330,6 +1509,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Domain("machine"),
         export: Export::Section("machines"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "machine_confirmations is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1337,6 +1517,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_contexts is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1344,6 +1525,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_desktops is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1351,6 +1533,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_effect_outbox is retained as MachineLifecycle evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1358,6 +1541,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_external_grants is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1365,6 +1549,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Domain("machine"),
         export: Export::Section("machines"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "machine_free_slots is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1372,6 +1557,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("machine"),
         export: Export::Section("machines"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "machine_jobs is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1379,6 +1565,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_lifecycle_events is retained as MachineLifecycle evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1386,6 +1573,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "machine_oauth_consent_requests is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1393,6 +1581,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_operations is retained as MachineLifecycle evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1400,6 +1589,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Domain("machine"),
         export: Export::Section("machines"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "machine_orphan_inventory is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1407,6 +1597,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_revocations is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1414,6 +1605,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_runtime_heads is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1421,6 +1613,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_runtime_intervals is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1428,6 +1621,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_runtime_quotes is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1435,6 +1629,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_runtime_rates is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1442,6 +1637,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "machine_runtime_runs is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1449,6 +1645,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_separation_compatibility is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1456,6 +1653,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_setups is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1463,6 +1661,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_update_attempts is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1470,6 +1669,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("machine"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "machine_updates is cleaned by the machine lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1477,6 +1677,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["billing_owner_id", "actor_user_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "managed_executions is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1484,6 +1685,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "managed_machine_bootstrap_deliveries is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1491,6 +1693,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::MachineLifecycle),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "managed_machines is retained as MachineLifecycle evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1498,6 +1701,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "mcp_session_notifications stores the person-owned mcp session notifications record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1505,6 +1709,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "mcp_session_slots stores the person-owned mcp session slots record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1512,6 +1717,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
         why: "mcp_sessions stores the person-owned mcp sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1519,6 +1725,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "mfa_challenges stores the person-owned mfa challenges record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1526,6 +1733,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "mfa_factors stores the person-owned mfa factors record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1535,6 +1743,7 @@ pub static ENTRIES: &[Entry] = &[
             "local::pass node drain + personal_erasure_registry::final_metadata",
         ),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "node_credential_desired is metadata-only delivery intent: main's local::pass drains it by node_id and final_metadata deletes owner_id; org-owned rows retain only opaque actor_user_id, and the transient queue is excluded from export.",
     },
     Entry {
@@ -1542,6 +1751,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("nodes"),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
         why: "node_pending_credentials stores pending credential injection metadata and encrypted payloads; the entire transient row is excluded because its crypto bundle is secret material.",
     },
     Entry {
@@ -1549,6 +1759,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id", "issuer_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "node_registration_tokens stores the person-owned node registration tokens record keyed by user_id, issuer_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1556,6 +1767,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("nodes"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "node_service_bindings is cleaned by the nodes lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1563,6 +1775,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("nodes"),
         export: Export::Section("machines"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nodes is cleaned by the nodes lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1570,6 +1783,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "notification_channels stores the person-owned notification channels record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1577,6 +1791,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("channel_bots"),
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_channels is cleaned by the channel_bots lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1584,6 +1799,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_event_bindings stores the person-owned nyxbot event bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1591,6 +1807,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_events stores the person-owned nyxbot events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1598,6 +1815,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "nyxbot_gateway_releases stores Discord gateway drain guards required to block unsafe reconnects; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -1605,6 +1823,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_gateway_responses stores the person-owned nyxbot gateway responses record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1612,6 +1831,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_image_deliveries stores the person-owned nyxbot image deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1619,6 +1839,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_image_deliveries_v2 stores the person-owned nyxbot image deliveries v2 record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1626,6 +1847,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_threads stores the person-owned nyxbot threads record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1633,6 +1855,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "nyxbot_watches stores the person-owned nyxbot watches record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1640,6 +1863,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "oauth_broker_bindings stores the person-owned oauth broker bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1647,6 +1871,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["created_by"]),
         erasure: Erasure::Domain("local_service_account_lifecycle"),
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("created_by"),
         why: "oauth_clients stores person-created application metadata; redirect URIs and scopes are exported without secrets.",
     },
     Entry {
@@ -1654,6 +1879,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "oauth_consent_requests stores the person-owned oauth consent requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1661,6 +1887,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "oauth_delegation_authorities stores the person-owned oauth delegation authorities record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1668,6 +1895,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id", "history_context.actor.person_id"]),
         erasure: Erasure::Redacted,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "oauth_states removes person-owned protocol rows through the local inventory and redacts saved history actor labels on surviving flows owned by another account.",
     },
     Entry {
@@ -1675,6 +1903,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "openclaw_channel_mappings stores the person-owned openclaw channel mappings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1682,6 +1911,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("oracle_pool_cleanup"),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
         why: "oracle_login_profiles stores an enrolled browser login profile, encrypted session material, and pool bindings; Oracle pool cleanup removes one profile per bounded cleanup chunk after the owner's pool is retired.",
     },
     Entry {
@@ -1689,6 +1919,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["created_by_user_id"]),
         erasure: Erasure::Domain("oracle lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("created_by_user_id"),
         why: "oracle_login_snapshots stores an owner-created encrypted login snapshot and expiry metadata; Oracle lifecycle cleanup removes it with the pool.",
     },
     Entry {
@@ -1696,6 +1927,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("oracle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "oracle_pools is cleaned by the oracle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1703,6 +1935,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "oracle_sessions stores a person's own Oracle conversation routing and lifecycle metadata keyed by owner_user_id; personal erasure removes only that person's rows while Oracle pool cleanup retains its existing pool semantics.",
     },
     Entry {
@@ -1710,6 +1943,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["submitter_user_id"]),
         erasure: Erasure::FeatureRetention("ORACLE_TASK_RETENTION_DAYS / expires_at"),
         export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("submitter_user_id"),
         why: "oracle_tasks stores submitted prompts and worker responses; terminal rows expire at the configured ORACLE_TASK_RETENTION_DAYS TTL.",
     },
     Entry {
@@ -1717,6 +1951,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["created_by_user_id"]),
         erasure: Erasure::Domain("oracle lifecycle"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("created_by_user_id"),
         why: "oracle_worker_commands stores a person's manager commands and delivery state for an enrolled browser; pool deletion expires overdue work and the seven-day command TTL removes terminal rows.",
     },
     Entry {
@@ -1724,6 +1959,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["enrollment.owner_user_id"]),
         erasure: Erasure::Domain("oracle lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("enrollment.owner_user_id"),
         why: "oracle_workers stores enrolled browser-installation status and diagnostics; the Oracle lifecycle retires and removes the owner enrollment.",
     },
     Entry {
@@ -1731,6 +1967,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "org_channel_guest_budgets stores organization-channel financial budget accounting; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -1738,6 +1975,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "org_channel_guest_holds stores organization-channel financial reservation holds; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -1745,6 +1983,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_id"]),
         erasure: Erasure::Domain("org_channel lifecycle"),
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("actor_id"),
         why: "org_channel_lanes stores a person’s organization-channel transcript lane; lifecycle erasure deletes the lane.",
     },
     Entry {
@@ -1752,6 +1991,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("org_channel lifecycle"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "org_channel_link_challenges stores per-person organization-channel setup requests and short-lived codes.",
     },
     Entry {
@@ -1759,6 +1999,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["author_user_id", "actor_id"]),
         erasure: Erasure::Domain("org_channel lifecycle"),
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("author_user_id"),
         why: "org_channel_messages stores organization-channel transcript text and actor attribution; lifecycle erasure deletes rows authored or initiated by the departing person.",
     },
     Entry {
@@ -1766,6 +2007,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("org_channel lifecycle"),
         export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "org_channel_sender_links stores a person’s organization-channel sender linkage; lifecycle erasure revokes the link and keeps only its tombstone.",
     },
     Entry {
@@ -1773,6 +2015,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["created_by"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("redeemed_by"),
         why: "org_invites stores the person-owned org invites record keyed by created_by; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1780,6 +2023,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["member_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("member_user_id"),
         why: "org_memberships stores the person-owned org memberships record keyed by member_user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1787,6 +2031,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "org_role_scopes is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1794,6 +2039,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "ownership_transfers stores shared ownership-transfer history; retention keeps opaque account ids while redacting human names; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -1801,6 +2047,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "permission_key_policies stores the person-owned permission key policies record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1808,6 +2055,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "personal_erasure_effects is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1815,6 +2063,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "personal_erasure_jobs is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1822,6 +2071,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "personal_erasure_local_receipts is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1829,6 +2079,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id", "user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "personal_erasure_preparations stores the person-owned personal erasure preparations record keyed by _id, user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1836,6 +2087,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "personal_erasure_revocation_receipts is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1843,6 +2095,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "personal_owner_write_fences is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -1850,6 +2103,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "platform_bot_cleanup is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1857,6 +2111,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "platform_bot_configs is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1864,6 +2119,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "platform_bot_installations stores a person-owned platform installation and its approved child state.",
     },
     Entry {
@@ -1871,6 +2127,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_bot_runtime_controls stores shared platform runtime policy and control revisions; the platform lifecycle owns this coordination state.",
     },
     Entry {
@@ -1878,6 +2135,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_credentials is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1887,6 +2145,11 @@ pub static ENTRIES: &[Entry] = &[
             parent: "platform_bot_installations",
         },
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::JoinedPerson {
+            parent: "platform_bot_installations",
+            field: "installation_id",
+            owner_field: "owner_user_id",
+        },
         why: "platform_delivery_tests stores short-lived delivery-test state joined to a person-owned platform installation.",
     },
     Entry {
@@ -1894,6 +2157,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["requested_by"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("requested_by"),
         why: "platform_discord_control_installation_history is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1901,6 +2165,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["requested_by"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("requested_by"),
         why: "platform_discord_control_installations is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -1908,6 +2173,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_entry_gateway_partitions is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1915,6 +2181,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_entry_gateway_transports is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1922,6 +2189,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_entry_migrations is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1929,6 +2197,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_guide_selections stores the person-owned platform guide selections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -1936,6 +2205,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_help_assignments is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1943,6 +2213,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_help_libraries is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1950,6 +2221,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_help_revisions is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1957,6 +2229,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_manager_deliveries is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1964,6 +2237,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_manager_ingress_receipts is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1971,6 +2245,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_model_attempts is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1978,6 +2253,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_model_routing_revisions is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1985,6 +2261,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_model_tariffs is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1992,6 +2269,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_models is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -1999,6 +2277,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "platform_native_entry_receipts stores expiring adapter provenance linked to a platform profile; lifecycle cleanup removes it with that profile.",
     },
     Entry {
@@ -2006,6 +2285,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_native_receipts is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2013,6 +2293,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_native_replies stores the person-owned platform native replies record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2020,6 +2301,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_native_reply_handles is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2027,6 +2309,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_onboarding_binding_requests stores the person-owned platform onboarding binding requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2034,6 +2317,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_onboarding_bindings stores the person-owned platform onboarding bindings record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2041,6 +2325,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_onboarding_decision_spacing is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2048,6 +2333,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("platform_personal_owner_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_personal_bindings stores a person’s platform binding and consent state; platform retirement revokes and removes it.",
     },
     Entry {
@@ -2055,6 +2341,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_personal_decision_spacing stores the person-owned platform personal decision spacing record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2062,6 +2349,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["reviewed_user_id"]),
         erasure: Erasure::Domain("platform_personal_owner_lifecycle"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("reviewed_user_id"),
         why: "platform_personal_link_challenges stores a person’s platform linking review and short-lived confirmation state.",
     },
     Entry {
@@ -2069,6 +2357,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["claimant_user_id"]),
         erasure: Erasure::Domain("platform_personal_owner_lifecycle"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("claimant_user_id"),
         why: "platform_personal_link_intents stores a person’s platform linking request and expiry state.",
     },
     Entry {
@@ -2076,6 +2365,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "platform_personal_setup_selections stores the person-owned platform personal setup selections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2083,6 +2373,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["active_turn.origin.user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("active_turn.origin.user_id"),
         why: "platform_personal_stop_effects stores a person’s bounded stop and settlement progress.",
     },
     Entry {
@@ -2090,6 +2381,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_budget_buckets is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2097,6 +2389,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_budget_loops is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2104,6 +2397,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_call_reservations is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2111,6 +2405,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_cleanup_records is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2118,6 +2413,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "platform_public_deployment_activations is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2125,6 +2421,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "platform_public_deployment_proofs is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2132,6 +2429,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "platform_public_probe_consents is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2139,6 +2437,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_quotas is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2146,6 +2445,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["actor_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("actor_user_id"),
         why: "platform_public_readiness_probes is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2153,6 +2453,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_readiness_records is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2160,6 +2461,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_revocation_scopes is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2167,6 +2469,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_sessions is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2174,6 +2477,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_public_turns is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2181,6 +2485,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "platform_settings is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2190,6 +2495,11 @@ pub static ENTRIES: &[Entry] = &[
             parent: "platform_setups",
         },
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::JoinedPerson {
+            parent: "platform_setups",
+            field: "setup_id",
+            owner_field: "owner_user_id",
+        },
         why: "platform_setup_notices stores short-lived setup notices joined to a person-owned setup.",
     },
     Entry {
@@ -2199,6 +2509,11 @@ pub static ENTRIES: &[Entry] = &[
             parent: "platform_setups",
         },
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::JoinedPerson {
+            parent: "platform_setups",
+            field: "setup_id",
+            owner_field: "owner_user_id",
+        },
         why: "platform_setup_steps stores short-lived setup work joined to a person-owned setup.",
     },
     Entry {
@@ -2206,6 +2521,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::Domain("platform_or_channel_lifecycle"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "platform_setups is cleaned by the platform_or_channel_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2213,6 +2529,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "pool_recovery_diagnostics is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2220,6 +2537,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("platform-wide configuration or coordination"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "provider_configs is platform-wide configuration or coordination and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2227,6 +2545,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "pushed_authorization_requests is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2234,6 +2553,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "refresh_tokens stores the person-owned refresh tokens record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2241,6 +2561,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "reply_token_uses is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2248,6 +2569,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "roles is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2255,6 +2577,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "sandbox_billing_cursors is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2262,6 +2585,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "sandbox_billing_evidence is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2269,6 +2593,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "sandbox_billing_quotes is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2276,6 +2601,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "sandbox_billing_settings is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2283,6 +2609,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "sandbox_billing_windows is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2290,6 +2617,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "sandbox_rate_cards is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2297,6 +2625,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "saved_logins stores the person-owned saved logins record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2304,6 +2633,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "schema_migrations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2311,6 +2641,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "security_hmac_keysets is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2318,6 +2649,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "security_remediation_progress is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2325,6 +2657,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "security_replicas is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2332,6 +2665,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "security_rollouts is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2339,6 +2673,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id", "owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "service_account_key_read_grants stores the person-owned service account key read grants record keyed by _id, owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2346,6 +2681,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Domain("local_service_account_lifecycle"),
         export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
         why: "service_account_tokens is cleaned by the local_service_account_lifecycle lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2353,6 +2689,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id", "created_by"]),
         erasure: Erasure::Domain("local_service_account_lifecycle"),
         export: Export::Section("services"),
+        export_selector: ExportSelector::LegacyServiceAccount,
         why: "service_accounts stores person-owned service-account metadata; credentials and tokens are excluded.",
     },
     Entry {
@@ -2360,6 +2697,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "service_approval_configs stores the person-owned service approval configs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2367,6 +2705,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id", "actor.person_id"]),
         erasure: Erasure::Redacted,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::AnyPerson(&["owner_id", "actor.person_id"]),
         why: "service_change_events contains shared history; cleanup removes personal ownership or human-readable attribution while preserving shared counters and opaque identifiers.",
     },
     Entry {
@@ -2374,6 +2713,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "service_concurrency_leases is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2381,6 +2721,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "service_endpoints is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2390,6 +2731,7 @@ pub static ENTRIES: &[Entry] = &[
             parent: "user_services",
         },
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "service_history_heads is lifecycle data owned through user_services; cleanup removes the child only after that parent is removed.",
     },
     Entry {
@@ -2399,6 +2741,7 @@ pub static ENTRIES: &[Entry] = &[
             parent: "service_pools",
         },
         export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
         why: "service_pool_health_observations is lifecycle data owned through service_pools; cleanup removes the child only after that parent is removed.",
     },
     Entry {
@@ -2406,6 +2749,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("owner_id"),
         why: "service_pool_member_health stores the person-owned service pool member health record keyed by owner_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2413,6 +2757,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "service_pools stores the person-owned service pools record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2420,6 +2765,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("_id"),
         why: "service_preferences stores the person-owned service preferences record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2427,6 +2773,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "service_provider_requirements is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2434,6 +2781,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("security"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "sessions stores the person-owned sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2441,6 +2789,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "startup_diagnostics is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2448,6 +2797,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["owner_user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("owner_user_id"),
         why: "telegram_bot_claims stores one-time Telegram setup claims and their owner linkage; every redeemed claim is erased with the owner, while pending or undelivered claims expire through the purge_after TTL.",
     },
     Entry {
@@ -2455,6 +2805,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "telegram_bot_requests stores the person-owned telegram bot requests record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2462,6 +2813,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "telegram_managed_bot_events stores the person-owned telegram managed bot events record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2469,6 +2821,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::Domain("telemetry_erasure_service"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "telemetry_capture_accounts is cleaned by the telemetry_erasure_service lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2476,6 +2829,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::Domain("telemetry_erasure_service"),
         export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
         why: "telemetry_dispatches is cleaned by the telemetry_erasure_service lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
     Entry {
@@ -2483,6 +2837,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "telemetry_erasure_destinations is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2490,6 +2845,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "telemetry_erasure_jobs is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2497,6 +2853,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "telemetry_erasure_reconciliations is retained as ErasureBookkeeping evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2504,6 +2861,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "trigger_deliveries stores the person-owned trigger deliveries record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2511,6 +2869,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("_id"),
         why: "trigger_owner_limits stores the person-owned trigger owner limits record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2518,6 +2877,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
         why: "trigger_run_budgets is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
@@ -2525,6 +2885,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "trigger_runs stores the person-owned trigger runs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2532,6 +2893,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "trigger_work stores the person-owned trigger work record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2539,6 +2901,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "triggers stores the person-owned triggers record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2546,6 +2909,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "usage_allowance_periods stores frozen allowance windows and settlement state shared by recipients; financial retention preserves accounting; deletion retains this record for its documented lifecycle.",
     },
     Entry {
@@ -2553,6 +2917,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "usage_allowances is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2560,6 +2925,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["billing_owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Section("billing"),
+        export_selector: ExportSelector::Person("billing_owner_id"),
         why: "usage_meter links billable usage and numeric stream-recovery checkpoints to billing_owner_id; financial and billing retention preserves settlement evidence, while export exposes only its explicit billing metadata allowlist.",
     },
     Entry {
@@ -2567,6 +2933,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "usage_rollup_daily is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2574,6 +2941,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "usage_rollup_hourly is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2581,6 +2949,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
         why: "usage_rollup_state is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
@@ -2588,6 +2957,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("billing"),
+        export_selector: ExportSelector::Person("_id"),
         why: "usage_workspaces stores the person-owned usage workspaces record keyed by _id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2595,6 +2965,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "user_api_keys stores the person-owned user api keys record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2602,6 +2973,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "user_endpoints stores the person-owned user endpoints record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2609,6 +2981,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "user_provider_credentials stores the person-owned user provider credentials record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2616,6 +2989,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "user_provider_tokens stores the person-owned user provider tokens record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2623,6 +2997,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "user_service_connections stores the person-owned user service connections record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
@@ -2634,6 +3009,7 @@ pub static ENTRIES: &[Entry] = &[
         ]),
         erasure: Erasure::Redacted,
         export: Export::Section("services"),
+        export_selector: ExportSelector::Person("user_id"),
         why: "user_services removes person-owned rows through the local inventory and redacts creator/last-change labels on surviving shared rows; actor ids remain opaque attribution.",
     },
     Entry {
@@ -2641,6 +3017,7 @@ pub static ENTRIES: &[Entry] = &[
         owner: OwnerSelector::Fields(&["_id"]),
         erasure: Erasure::Domain("source"),
         export: Export::Section("account"),
+        export_selector: ExportSelector::Person("_id"),
         why: "users is cleaned by the source lifecycle, which applies the domain-specific external-effect and ownership fences.",
     },
 ];

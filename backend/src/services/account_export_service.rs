@@ -663,7 +663,6 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             &["user_id", "action", "status", "created_at", "completed_at"]
         }
         "assistant_agent_consents" => &[
-            "owner_id",
             "actor_user_id",
             "conversation_id",
             "created_at",
@@ -673,9 +672,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "assistant_agent_learning" => &["owner_id", "created_at", "updated_at"],
         "assistant_agent_learning_members" => &["member_user_id", "created_at", "updated_at"],
         "assistant_agent_learning_proposals" => &["owner_id", "status", "created_at", "updated_at"],
-        "assistant_agent_learning_runs" => {
-            &["owner_id", "actor_id", "status", "created_at", "updated_at"]
-        }
+        "assistant_agent_learning_runs" => &["owner_id", "status", "created_at", "updated_at"],
         "assistant_agent_learning_skill_roots" => &["owner_id", "created_at"],
         "assistant_agent_private_notes" => &[
             "actor_user_id",
@@ -686,7 +683,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "notes.updated_at",
             "updated_at",
         ],
-        "assistant_agent_shares" => &["owner_id", "subject_id", "role", "created_at"],
+        "assistant_agent_shares" => &["role", "created_at"],
         "assistant_agent_sharing" => &["owner_id", "updated_at"],
         "assistant_agents" => &[
             "user_id",
@@ -745,7 +742,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "created_at",
         ],
         "assistant_group_read_states" => &["user_id"],
-        "assistant_group_requests" => &["user_id", "actor_user_id", "created_at"],
+        "assistant_group_requests" => &["actor_user_id", "created_at"],
         "assistant_groups" => &["user_id", "name", "created_at", "updated_at"],
         "assistant_invocation_turns" => &["user_id", "conversation_id", "state", "created_at"],
         "assistant_invocations" => &["user_id", "conversation_id", "created_at"],
@@ -792,7 +789,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "updated_at",
         ],
         "assistant_skill_draft_attempts" => &["user_id", "conversation_id", "created_at"],
-        "assistant_tool_results" => &["user_id", "actor_id", "conversation_id", "expires_at"],
+        "assistant_tool_results" => &["actor_id", "conversation_id", "expires_at"],
         "assistant_voice_announcements" => &[
             "user_id",
             "conversation_id",
@@ -1081,7 +1078,6 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "service_account_key_read_grants" => &["owner_id", "expires_at"],
         "service_accounts" => &[
             "owner_user_id",
-            "created_by",
             "name",
             "description",
             "role_ids",
@@ -1094,13 +1090,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "last_authenticated_at",
         ],
         "service_approval_configs" => &["user_id", "service_id", "created_at", "updated_at"],
-        "service_change_events" => &[
-            "owner_id",
-            "service_id",
-            "actor.person_id",
-            "actor.app_id",
-            "actor.name",
-        ],
+        "service_change_events" => &["service_id", "actor.app_id"],
         "service_pool_member_health" => &["owner_id", "updated_at", "expires_at"],
         "service_pools" => &[
             "user_id",
@@ -1333,10 +1323,8 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             &["user_id", "org_id", "state", "created_at", "expires_at"]
         }
         "org_channel_messages" => &[
-            "user_id",
             "channel_id",
             "conversation_id",
-            "actor_id",
             "role",
             "text",
             "created_at",
@@ -1372,44 +1360,53 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
     })
 }
 fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Option<Document> {
-    if entry.collection == "assistant_group_messages" {
-        // Group rows are keyed by the group owner, but the export is a
-        // person's authored record. Never include agent, notice, or another
-        // participant's text merely because it shares the group.
-        return Some(doc! {
-            "user_id": account_id,
-            "author_user_id": account_id,
+    use personal_data_registry::ExportSelector;
+    Some(match entry.export_selector {
+        ExportSelector::None => return None,
+        ExportSelector::Person(field) => doc! {field: account_id},
+        ExportSelector::AnyPerson(fields) => {
+            doc! {"$or": fields.iter().map(|field| doc! {*field: account_id}).collect::<Vec<_>>()}
+        }
+        // ServiceAccount::effective_owner_user_id uses the creator only for
+        // legacy rows without an explicit owner. A creator does not own an org's row.
+        ExportSelector::LegacyServiceAccount => doc! {"$or": [
+            {"owner_user_id": account_id},
+            {"owner_user_id": bson::Bson::Null, "created_by": account_id}
+        ]},
+        ExportSelector::AuthoredOwnedGroup => {
+            doc! {"user_id": account_id, "author_user_id": account_id}
+        }
+        ExportSelector::JoinedPerson { owner_field, .. } => {
+            doc! {format!("_export_parent.{owner_field}"): account_id}
+        }
+    })
+}
+
+fn source_pipeline(collection: &str, filter: Document) -> Vec<Document> {
+    let mut pipeline = Vec::new();
+    if let Some(personal_data_registry::Entry {
+        export_selector: personal_data_registry::ExportSelector::JoinedPerson { parent, field, .. },
+        ..
+    }) = personal_data_registry::find(collection)
+    {
+        pipeline.push(doc! {"$lookup": {"from": *parent, "localField": *field, "foreignField": "_id", "as": "_export_parent"}});
+    }
+    pipeline.push(doc! {"$match": filter});
+    pipeline
+}
+
+fn restrict_row(collection: &str, filter: &Document, row: &mut Document) {
+    if collection == "invite_codes"
+        && let (Ok(person), Some(Bson::Array(usages))) =
+            (filter.get_str("usages.user_id"), row.get_mut("usages"))
+    {
+        usages.retain(|usage| {
+            usage
+                .as_document()
+                .and_then(|usage| usage.get_str("user_id").ok())
+                == Some(person)
         });
     }
-    let fields = match entry.owner {
-        personal_data_registry::OwnerSelector::Fields(fields) if !fields.is_empty() => fields,
-        _ => return None,
-    };
-    if fields.len() == 1 && fields[0] == "_id" {
-        return Some(doc! {"_id": account_id});
-    }
-    let clauses: Vec<Document> = fields
-        .iter()
-        // Attribution on another owner's resource does not grant export access.
-        // The history journal intentionally exports the person's own events.
-        .filter(|field| {
-            entry.collection == "service_change_events"
-                || personal_data_registry::attribution(entry.collection, field).is_none()
-        })
-        .map(|field| {
-            let mut d = Document::new();
-            d.insert(*field, account_id);
-            d
-        })
-        .collect();
-    if clauses.is_empty() {
-        return None;
-    }
-    Some(if clauses.len() == 1 {
-        clauses.into_iter().next().unwrap()
-    } else {
-        doc! {"$or": clauses}
-    })
 }
 
 struct ExportBudget {
@@ -1446,30 +1443,40 @@ async fn rows(
     sort: Document,
     budget: &mut ExportBudget,
 ) -> AppResult<ExportSubsection> {
+    let base = source_pipeline(collection, filter.clone());
+    let mut count_pipeline = base.clone();
+    count_pipeline.push(doc! {"$count": "count"});
     let total_count = db
         .collection::<Document>(collection)
-        .count_documents(filter.clone())
+        .aggregate(count_pipeline)
         .max_time(QUERY_TIMEOUT)
-        .await?;
+        .await?
+        .try_next()
+        .await?
+        .and_then(|row| {
+            row.get_i64("count")
+                .ok()
+                .or_else(|| row.get_i32("count").ok().map(i64::from))
+        })
+        .unwrap_or(0) as u64;
     let mut projection = Document::new();
     for field in fields {
         projection.insert(*field, 1);
     }
+    let mut pipeline = base;
+    pipeline.push(doc! {"$sort": sort});
+    pipeline.push(doc! {"$limit": SUBSECTION_ROW_CAP + 1});
+    pipeline.push(doc! {"$project": projection});
     let mut cursor = db
         .collection::<Document>(collection)
-        .find(filter)
-        .projection(projection)
-        .sort(sort)
-        // Keep the driver's prefetch bounded as well as the accumulated
-        // export. Once the running budget rejects a row, no later batch is
-        // requested by this cursor.
-        .batch_size(64)
-        .limit(SUBSECTION_ROW_CAP + 1)
+        .aggregate(pipeline)
+        .batch_size(1)
         .max_time(QUERY_TIMEOUT)
         .await?;
     let mut items = Vec::new();
     let mut truncated = total_count > SUBSECTION_ROW_CAP as u64;
-    while let Some(row) = cursor.try_next().await? {
+    while let Some(mut row) = cursor.try_next().await? {
+        restrict_row(collection, &filter, &mut row);
         if items.len() == SUBSECTION_ROW_CAP as usize {
             truncated = true;
             break;
@@ -2343,9 +2350,17 @@ mod tests {
                 put_owner(&mut target, field, &owner);
                 put_owner(&mut other, field, &bystander);
             }
-            if entry.collection == "assistant_group_messages" {
-                put_owner(&mut target, "author_user_id", &owner);
-                put_owner(&mut other, "author_user_id", &bystander);
+            use personal_data_registry::ExportSelector;
+            let selected_fields: &[&str] = match entry.export_selector {
+                ExportSelector::Person(field) => &[field],
+                ExportSelector::AnyPerson(fields) => fields,
+                ExportSelector::LegacyServiceAccount => &["owner_user_id"],
+                ExportSelector::AuthoredOwnedGroup => &["user_id", "author_user_id"],
+                ExportSelector::None | ExportSelector::JoinedPerson { .. } => &[],
+            };
+            for field in selected_fields {
+                put_owner(&mut target, field, &owner);
+                put_owner(&mut other, field, &bystander);
             }
             db.collection::<Document>(entry.collection)
                 .insert_many([target, other])

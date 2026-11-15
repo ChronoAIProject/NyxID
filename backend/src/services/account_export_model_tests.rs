@@ -736,3 +736,160 @@ async fn model_rows_export_real_message_feedback_session_service_and_channel_fie
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn export_selectors_isolate_three_people_and_shared_relationships() {
+    use crate::models::{
+        assistant_sharing::{AgentConsent, AgentShare, ShareSubject},
+        invite_code::{InviteCode, InviteCodeUsage},
+        oauth_client::OauthClient,
+        org_invite::OrgInvite,
+        org_membership::OrgMembership,
+        service_account::ServiceAccount,
+        user::UserType,
+    };
+    let db =
+        crate::test_utils::connect_transaction_test_database("export_principal_selectors").await;
+    let people = (0..3)
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    let org = uuid::Uuid::new_v4().to_string();
+    let users = people
+        .iter()
+        .map(|id| crate::test_utils::test_user(id, UserType::Person))
+        .chain(std::iter::once(crate::test_utils::test_user(
+            &org,
+            UserType::Org,
+        )))
+        .collect::<Vec<_>>();
+    db.collection::<crate::models::user::User>("users")
+        .insert_many(users)
+        .await
+        .unwrap();
+    for (index, person) in people.iter().enumerate() {
+        if index < 2 {
+            let mut membership: OrgMembership =
+                bson::from_document(model_fixture("org_memberships")).unwrap();
+            membership.id = uuid::Uuid::new_v4().to_string();
+            membership.member_user_id = person.clone();
+            membership.org_user_id = org.clone();
+            db.collection::<OrgMembership>("org_memberships")
+                .insert_one(membership)
+                .await
+                .unwrap();
+        }
+        let mut client: OauthClient = bson::from_document(model_fixture("oauth_clients")).unwrap();
+        client.id = uuid::Uuid::new_v4().to_string();
+        client.created_by = Some(person.clone());
+        client.client_name = format!("own-client-{index}");
+        db.collection::<OauthClient>("oauth_clients")
+            .insert_one(client)
+            .await
+            .unwrap();
+        let mut consent: AgentConsent =
+            bson::from_document(model_fixture("assistant_agent_consents")).unwrap();
+        consent.id = uuid::Uuid::new_v4().to_string();
+        consent.actor_user_id = person.clone();
+        consent.owner_id = people[0].clone();
+        consent.conversation_id = format!("private-conversation-{index}");
+        db.collection::<AgentConsent>("assistant_agent_consents")
+            .insert_one(consent)
+            .await
+            .unwrap();
+        if index > 0 {
+            let mut share: AgentShare =
+                bson::from_document(model_fixture("assistant_agent_shares")).unwrap();
+            share.id = uuid::Uuid::new_v4().to_string();
+            share.owner_id = people[0].clone();
+            share.subject_kind = ShareSubject::Person;
+            share.subject_id = person.clone();
+            db.collection::<AgentShare>("assistant_agent_shares")
+                .insert_one(share)
+                .await
+                .unwrap();
+        }
+    }
+    let mut code: InviteCode = bson::from_document(model_fixture("invite_codes")).unwrap();
+    code.created_by = people[0].clone();
+    code.usages = people
+        .iter()
+        .enumerate()
+        .map(|(index, user_id)| InviteCodeUsage {
+            user_id: user_id.clone(),
+            used_at: Utc::now(),
+            email: Some(format!("person-{index}@example.test")),
+        })
+        .collect();
+    code.used_count = 3;
+    db.collection::<InviteCode>("invite_codes")
+        .insert_one(code)
+        .await
+        .unwrap();
+    for (owner, name) in [
+        (Some(org.clone()), "org-created-account"),
+        (Some(people[1].clone()), "transferred-account"),
+        (None, "legacy-own-account"),
+    ] {
+        let mut account: ServiceAccount =
+            bson::from_document(model_fixture("service_accounts")).unwrap();
+        account.id = uuid::Uuid::new_v4().to_string();
+        account.owner_user_id = owner;
+        account.created_by = people[0].clone();
+        account.name = name.into();
+        db.collection::<ServiceAccount>("service_accounts")
+            .insert_one(account)
+            .await
+            .unwrap();
+    }
+    let mut invite: OrgInvite = bson::from_document(model_fixture("org_invites")).unwrap();
+    invite.org_user_id = org.clone();
+    invite.created_by = people[0].clone();
+    invite.redeemed_by = Some(people[1].clone());
+    invite.redeemed_at = Some(Utc::now());
+    db.collection::<OrgInvite>("org_invites")
+        .insert_one(invite)
+        .await
+        .unwrap();
+    for (index, person) in people.iter().enumerate() {
+        let export = build(&db, person).await.unwrap();
+        let encoded = serde_json::to_string(&export).unwrap();
+        for other in people.iter().filter(|other| *other != person) {
+            assert!(
+                !encoded.contains(other),
+                "person {index} sees another person's identifier"
+            );
+        }
+        for other in (0..3).filter(|other| *other != index) {
+            assert!(!encoded.contains(&format!("private-conversation-{other}")));
+            assert!(!encoded.contains(&format!("own-client-{other}")));
+        }
+        let usages =
+            &export.sections["account_activity"]["invite_codes"].items[0]["usages"]["user_id"];
+        assert_eq!(usages, &serde_json::json!([person]));
+        assert_eq!(
+            export.sections["assistant"]["assistant_agent_consents"].total_count,
+            1
+        );
+        assert!(!encoded.contains("org-created-account"));
+        assert_eq!(encoded.contains("legacy-own-account"), index == 0);
+        assert_eq!(encoded.contains("transferred-account"), index == 1);
+        assert_eq!(
+            export.sections["account"]["org_invites"].total_count,
+            u64::from(index == 1)
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn every_primary_export_has_an_explicit_access_selector() {
+    use personal_data_registry::{Export, ExportSelector};
+    for entry in personal_data_registry::entries() {
+        assert_eq!(
+            matches!(entry.export, Export::Section(_)),
+            entry.export_selector != ExportSelector::None,
+            "{}",
+            entry.collection
+        );
+    }
+}
