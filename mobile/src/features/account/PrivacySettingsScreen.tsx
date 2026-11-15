@@ -153,7 +153,7 @@ export function PrivacySettingsScreen(
         <SettingsGroup
           title={t("Your data")}
           footer={t(
-            "Download a JSON copy of your account profile, services, activity, assistant and channel content, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.",
+            "Download a JSON copy of your account profile, services, activity, your assistant inputs, private assistant replies and channel metadata, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.",
           )}
         >
           <SettingsRow

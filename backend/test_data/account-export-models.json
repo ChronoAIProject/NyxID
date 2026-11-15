@@ -637,7 +637,11 @@
         "$date": {
           "$numberLong": "1700000000000"
         }
-      }
+      },
+      "shared_agent_thread": false,
+      "guest_turn": false,
+      "invocation_controlled": false,
+      "deliver_also": []
     }
   ],
   "assistant_direct_handoffs": [
@@ -901,14 +905,15 @@
       "user_id": "fixture-value",
       "seq": 1,
       "turn_id": "fixture-value",
-      "role": "fixture-value",
+      "role": "user",
       "text": "fixture-value",
       "status": "fixture-value",
       "created_at": {
         "$date": {
           "$numberLong": "1700000000000"
         }
-      }
+      },
+      "author": "owner"
     }
   ],
   "assistant_notification_push_budgets": [

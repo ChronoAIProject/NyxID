@@ -1043,3 +1043,140 @@ async fn row_cap_marks_the_source_and_is_listed_without_final_byte_trimming() {
     );
     db.drop().await.unwrap();
 }
+
+#[test]
+fn export_documentation_matches_every_declared_view_and_field() {
+    let mut rows = std::collections::BTreeSet::new();
+    for entry in personal_data_registry::entries() {
+        if !matches!(entry.export, personal_data_registry::Export::Section(_)) {
+            continue;
+        }
+        let spec = explicit_export_spec(entry.collection).unwrap();
+        rows.insert((spec.section, spec.subsection, spec.fields));
+    }
+    rows.insert((
+        "account_activity",
+        "audit_log",
+        fields_for("audit_log").unwrap(),
+    ));
+    for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
+        let spec = additional_export_spec(view);
+        rows.insert((spec.section, spec.subsection, spec.fields));
+    }
+    let mut table =
+        String::from("| Section | Subsection | Allowlisted fields |\n| --- | --- | --- |\n");
+    for (section, subsection, fields) in rows {
+        table.push_str(&format!(
+            "| `{section}` | `{subsection}` | {} |\n",
+            fields
+                .iter()
+                .map(|field| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/ACCOUNT_DATA_EXPORT.md");
+    let mut docs = std::fs::read_to_string(&path).unwrap();
+    let start =
+        docs.find("<!-- export-fields:start -->").unwrap() + "<!-- export-fields:start -->".len();
+    let end = docs.find("<!-- export-fields:end -->").unwrap();
+    if std::env::var_os("UPDATE_ACCOUNT_EXPORT_DOC").is_some() {
+        docs.replace_range(start..end, &format!("\n{table}"));
+        std::fs::write(&path, &docs).unwrap();
+    }
+    let end = docs.find("<!-- export-fields:end -->").unwrap();
+    assert_eq!(
+        docs[start..end].trim(),
+        table.trim(),
+        "regenerate the export field table with UPDATE_ACCOUNT_EXPORT_DOC=1"
+    );
+}
+
+#[tokio::test]
+async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_private_history_remain() {
+    use crate::models::{
+        assistant_conversation::{AssistantConversation, TurnOrigin},
+        assistant_message::{AssistantMessage, MessageAuthor},
+    };
+    let db = crate::test_utils::connect_transaction_test_database("export_authorship").await;
+    let person = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(crate::test_utils::test_user(
+            &person,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let mut private: AssistantConversation =
+        bson::from_document(model_fixture("assistant_conversations")).unwrap();
+    private.id = "private".into();
+    private.user_id = person.clone();
+    private.collaboration = None;
+    private.platform_thread = None;
+    private.shared_agent_thread = false;
+    private.channel = None;
+    private.reply_channel = None;
+    private.deliver_also.clear();
+    private.group_id = None;
+    private.guest_turn = false;
+    private.invocation_controlled = false;
+    private.title = "Private title".into();
+    let mut shared = private.clone();
+    shared.id = "shared".into();
+    shared.shared_agent_thread = true;
+    shared.title = "GUEST_TITLE_SENTINEL".into();
+    db.collection::<AssistantConversation>("assistant_conversations")
+        .insert_many([private, shared])
+        .await
+        .unwrap();
+    let cases = [
+        (
+            "shared",
+            "user",
+            Some(MessageAuthor::Guest),
+            "GUEST_INPUT_SENTINEL",
+            false,
+        ),
+        ("shared", "assistant", None, "GUEST_REPLY_SENTINEL", false),
+        ("shared", "user", None, "AMBIGUOUS_INPUT_SENTINEL", false),
+        (
+            "shared",
+            "user",
+            Some(MessageAuthor::Owner),
+            "MY_SHARED_INPUT",
+            true,
+        ),
+        ("private", "user", None, "MY_LEGACY_INPUT", true),
+        ("private", "assistant", None, "MY_PRIVATE_REPLY", true),
+    ];
+    for (index, (conversation, role, author, text, _)) in cases.iter().enumerate() {
+        let mut message: AssistantMessage =
+            bson::from_document(model_fixture("assistant_messages")).unwrap();
+        message.id = format!("message-{index}");
+        message.conversation_id = (*conversation).into();
+        message.user_id = person.clone();
+        message.role = (*role).into();
+        message.author = *author;
+        message.text = (*text).into();
+        message.origin = Some(TurnOrigin::User);
+        message.platform_origin = None;
+        message.platform_reply = None;
+        db.collection::<AssistantMessage>("assistant_messages")
+            .insert_one(message)
+            .await
+            .unwrap();
+    }
+    let export = build(&db, &person).await.unwrap();
+    let encoded = serde_json::to_string(&export).unwrap();
+    for (_, _, _, text, included) in cases {
+        assert_eq!(encoded.contains(text), included, "{text}");
+    }
+    assert!(!encoded.contains("GUEST_TITLE_SENTINEL"));
+    assert!(encoded.contains("Private title"));
+    assert_eq!(
+        export.sections["assistant"]["assistant_messages"].total_count,
+        3
+    );
+    db.drop().await.unwrap();
+}

@@ -28,7 +28,7 @@
   "Deleting...": "正在删除...",
   "Device": "设备",
   "Dictation": "听写",
-  "Download a JSON copy of your account profile, services, activity, assistant and channel content, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.": "下载账户资料、服务、活动、助手和频道内容、会话元数据、机器元数据及账单摘要的 JSON 副本。密码、令牌、密钥、机密、原始文件和临时协调记录不会包含在内；较大的分区可能会被截断。",
+  "Download a JSON copy of your account profile, services, activity, your assistant inputs, private assistant replies and channel metadata, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.": "下载账户资料、服务、活动、你编写的助手输入、私人对话中的助手回复及频道元数据、会话元数据、机器元数据及账单摘要的 JSON 副本。密码、令牌、密钥、机密、原始文件和临时协调记录不会包含在内；较大的分区可能会被截断。",
   "Enter the code from the NyxID account you just added. If you did not add it, cancel and start again.": "输入刚添加的 NyxID 账户的代码。如果尚未添加，请取消并重新开始。",
   "Export Recovery Codes": "导出恢复码",
   "Export my data": "导出我的数据",

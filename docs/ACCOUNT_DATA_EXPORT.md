@@ -57,7 +57,7 @@ timestamps.
 The remaining subsections are explicit registry mappings. They expose only
 user-visible metadata or content appropriate to that collection: service
 connections and service metadata; session lifecycle metadata; assistant
-conversation/message content and attachment metadata; channel message content
+private conversation titles, the person's explicitly owner-authored user inputs, private assistant replies and attachment metadata; channel message metadata
 and routing metadata; action, notification, machine-job and other account
 activity metadata; audit event type/time metadata for events authored by the
 person; and billing wallet summary, received grants and usage rollups. Every
@@ -90,200 +90,185 @@ metadata, without the issuer's identity or the invitation token.
 
 Every declared registry export view has one subsection; a source collection may have multiple explicitly scoped views. The following table is the version-1 field contract; fields containing dates use RFC3339 strings, Decimal128 values use decimal strings, and binary values are omitted. Per-collection allowlists include the visible authored fields for that source: conversation `title`; agent `name`, `description`, `display_name`, `persona`, `voice_instructions`, and the requesting person's own `memory.text`; private-note `notes.text`; feedback `comment`; trigger labels, schedules, and assistant instructions; endpoint labels and URLs; connection labels and metadata; node names; channel-bot labels; OAuth client names, redirect URIs and scopes; and service-account names and descriptions. Shared/team memory, system-injected instructions, and group messages whose `author_user_id` is another person are excluded.
 
+<!-- export-fields:start -->
 | Section | Subsection | Allowlisted fields |
-|---|---|---|
-| `account` | `agent_key_login_requests` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `agent_service_bindings` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `approval_grants` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `approval_requests` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `auth_device_codes` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `auth_device_codes_v2` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `authorization_codes` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `cli_pairings` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `connect_links` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `consents` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `device_onboard_credentials` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `execution_permission_deliveries` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `lark_base_write_photos` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `lark_base_writes` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `mcp_session_slots` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `mfa_challenges` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `node_registration_tokens` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `oracle_pools` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `org_invites` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `org_memberships` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `permission_key_policies` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_bot_cleanup` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_bot_configs` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_bot_installations` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_delivery_tests` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_personal_stop_effects` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_public_probe_consents` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_public_readiness_probes` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_setup_notices` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_setup_steps` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `platform_setups` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `saved_logins` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `trigger_deliveries` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `trigger_owner_limits` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `trigger_runs` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `trigger_work` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `account` | `triggers` | `user_id`, `label`, `status`, `source`, `schedule`, `schedule_state`, `overlap`, `delivery`, `created_at`, `updated_at` |
-| `account` | `users` | `email`, `display_name`, `avatar_url`, `email_verified`, `mfa_enabled`, `social_provider`, `created_at`, `updated_at`, `last_login_at`, `profile_config.security.skip_mfa_for_approved_sign_ins`, `profile_config.analytics.enabled`, `profile_config.services_view`, `profile_config.service_views`, `profile_config.onboarding.ai_services_completed_at` |
-| `account_activity` | `assistant_action_receipts` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `assistant_group_transfers` | explicit fields |
-| `account_activity` | `assistant_voice_windows` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `assistant_wire_logs` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `channel_adapter_accounts` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `feature_flag_overrides` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `invite_codes` | `used_count`, `max_uses`, `usages.user_id`, `usages.used_at`, `created_at`, `updated_at`, `expires_at` |
-| `account_activity` | `invocation_diagnostics` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `mcp_session_notifications` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `openclaw_channel_mappings` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `platform_guide_selections` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `platform_native_replies` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `service_change_events` | `owner_id`, `service_id`, `event_type`, `created_at`, `updated_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `telegram_bot_claims` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `telegram_bot_requests` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `account_activity` | `telegram_managed_bot_events` | `user_id`, `owner_id`, `owner_user_id`, `actor_user_id`, `actor_id`, `subject_id`, `service_id`, `conversation_id`, `kind`, `type`, `action`, `status`, `state`, `name`, `display_name`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `actor.person_id`, `actor.app_id`, `actor.name` |
-| `assistant` | `assistant_acknowledgements` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_agent_consents` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_agent_credentials` | explicit fields |
-| `assistant` | `assistant_agent_learning` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_agent_learning_runs` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
+| --- | --- | --- |
+| `account` | `agent_key_login_requests` | `approved_user_id`, `status`, `created_at`, `expires_at` |
+| `account` | `agent_service_bindings` | `user_id`, `created_at`, `updated_at` |
+| `account` | `approval_grants` | `user_id`, `service_id`, `expires_at` |
+| `account` | `approval_requests` | `user_id`, `service_id`, `service_slug`, `status`, `created_at`, `expires_at` |
+| `account` | `assistant_notification_push_budgets` | `reservations.at` |
+| `account` | `assistant_notification_push_sources` | `user_id`, `sent_at` |
+| `account` | `auth_device_codes` | `approved_user_id`, `status`, `created_at`, `expires_at` |
+| `account` | `auth_device_codes_v2` | `approved_user_id`, `status`, `created_at`, `expires_at` |
+| `account` | `authorization_codes` | `user_id`, `created_at`, `expires_at` |
+| `account` | `cli_pairings` | `user_id`, `kind`, `status`, `created_at`, `completed_at`, `expires_at` |
+| `account` | `connect_links` | `user_id`, `service_id`, `service_slug`, `status`, `created_at`, `completed_at`, `expires_at` |
+| `account` | `consents` | `user_id`, `expires_at` |
+| `account` | `device_onboard_credentials` | `owner_user_id`, `created_at`, `expires_at` |
+| `account` | `execution_permission_deliveries` | `user_id`, `conversation_id`, `state`, `created_at`, `expires_at` |
+| `account` | `generated_artifact_content_series` | `user_id`, `conversation_id`, `revision`, `purge_after` |
+| `account` | `lark_base_write_photos` | `user_id`, `created_at`, `expires_at` |
+| `account` | `lark_base_writes` | `user_id`, `state`, `created_at`, `updated_at`, `expires_at` |
+| `account` | `mcp_session_slots` | `user_id`, `expires_at` |
+| `account` | `mfa_challenges` | `user_id`, `created_at`, `expires_at` |
+| `account` | `node_registration_tokens` | `user_id`, `name`, `created_at`, `expires_at` |
+| `account` | `oracle_pools` | `user_id`, `slug`, `name`, `created_at`, `updated_at`, `deleted_at`, `is_active` |
+| `account` | `oracle_workers` | `enrollment.owner_user_id`, `worker_label`, `generation`, `last_seen_at`, `current_task_id`, `script_version`, `page_url`, `first_seen_at`, `provisioned_at`, `platform`, `capabilities`, `desired_state`, `logged_in`, `chrome_alive`, `last_error`, `cooldown_until` |
+| `account` | `org_invites` | `role`, `created_at`, `expires_at` |
+| `account` | `org_memberships` | `org_user_id`, `member_user_id`, `role`, `created_at` |
+| `account` | `permission_key_policies` | `user_id`, `created_at`, `updated_at` |
+| `account` | `platform_bot_installations` | `owner_user_id`, `state`, `created_at`, `updated_at` |
+| `account` | `platform_personal_bindings` | `user_id`, `conversation_id`, `state`, `created_at`, `updated_at` |
+| `account` | `platform_public_probe_consents` | `expires_at` |
+| `account` | `platform_setups` | `owner_user_id`, `state`, `created_at`, `updated_at`, `expires_at` |
+| `account` | `profile` | `email`, `display_name`, `avatar_url`, `email_verified`, `mfa_enabled`, `social_provider`, `created_at`, `updated_at`, `last_login_at`, `profile_config.security.skip_mfa_for_approved_sign_ins`, `profile_config.analytics.enabled`, `profile_config.services_view`, `profile_config.service_views`, `profile_config.onboarding.ai_services_completed_at` |
+| `account` | `saved_logins` | `user_id`, `created_at`, `updated_at` |
+| `account` | `trigger_deliveries` | `user_id`, `status`, `created_at`, `updated_at`, `expires_at` |
+| `account` | `trigger_owner_limits` | `version` |
+| `account` | `trigger_runs` | `user_id`, `expires_at` |
+| `account` | `trigger_work` | `trigger_id`, `user_id`, `kind`, `at` |
+| `account` | `triggers` | `user_id`, `label`, `status`, `source`, `schedule.kind`, `schedule.expression`, `schedule.timezone`, `schedule.amount`, `schedule.unit`, `schedule.anchor`, `schedule.at`, `schedule.start`, `schedule.end`, `schedule.max_runs`, `schedule.grace_seconds`, `schedule_state`, `overlap`, `delivery.type`, `delivery.url`, `delivery.conversation_id`, `delivery.confirmation_policy`, `delivery.agent_id`, `delivery.thread_policy`, `delivery.instruction`, `delivery.deliver_to`, `created_at`, `updated_at` |
+| `account_activity` | `assistant_action_receipts` | `user_id`, `action`, `status`, `created_at`, `completed_at` |
+| `account_activity` | `assistant_cma_session_origins` | `user_id`, `conversation_id`, `service_id`, `created_at` |
+| `account_activity` | `assistant_group_agent_access` | `owner_id`, `updated_at` |
+| `account_activity` | `assistant_group_execution_slots` | `conversation_id` |
+| `account_activity` | `assistant_learning_publication_targets` | `owner_id`, `state`, `created_at`, `updated_at` |
+| `account_activity` | `assistant_voice_sessions` | `user_id`, `conversation_id`, `protocol`, `dictation`, `measured_ms`, `state`, `created_at`, `deadline`, `last_user_at`, `closed_at`, `observed_seconds`, `playback_ms`, `final_usage_confirmed`, `billing_finalized` |
+| `account_activity` | `assistant_voice_windows` | `user_id` |
+| `account_activity` | `assistant_wire_logs` | `user_id`, `conversation_id`, `created_at`, `expires_at` |
+| `account_activity` | `audit_log` | `event_type`, `created_at` |
+| `account_activity` | `feature_flag_overrides` | `created_at`, `updated_at` |
+| `account_activity` | `invite_codes` | `used_count`, `max_uses`, `usages.user_id`, `usages.used_at`, `created_at`, `updated_at` |
+| `account_activity` | `invocation_diagnostics` | `actor_user_id`, `state`, `created_at`, `completed_at`, `expires_at` |
+| `account_activity` | `mcp_session_notifications` | `created_at`, `expires_at` |
+| `account_activity` | `openclaw_channel_mappings` | `nyxid_user_id`, `channel`, `channel_user_id`, `created_at`, `updated_at` |
+| `account_activity` | `org_channel_link_challenges` | `user_id`, `org_id`, `state`, `created_at`, `expires_at` |
+| `account_activity` | `platform_delivery_tests` | `state`, `expires_at` |
+| `account_activity` | `platform_onboarding_binding_requests` | `approved_user_id`, `state`, `created_at`, `expires_at` |
+| `account_activity` | `platform_onboarding_bindings` | `user_id`, `created_at`, `updated_at`, `expires_at`, `is_active` |
+| `account_activity` | `platform_personal_decision_spacing` | `last_decision_at` |
+| `account_activity` | `platform_personal_link_challenges` | `state`, `created_at`, `expires_at` |
+| `account_activity` | `platform_personal_link_intents` | `state`, `created_at`, `expires_at` |
+| `account_activity` | `platform_personal_setup_selections` | `user_id` |
+| `account_activity` | `platform_setup_notices` | `kind`, `expires_at` |
+| `account_activity` | `platform_setup_steps` | `created_at` |
+| `account_activity` | `service_change_events` | `service_id`, `actor.app_id` |
+| `account_activity` | `telegram_bot_claims` | `owner_user_id`, `actor_user_id`, `status`, `created_at`, `expires_at` |
+| `account_activity` | `telegram_bot_requests` | `owner_user_id`, `actor_user_id`, `status`, `created_at`, `expires_at` |
+| `assistant` | `assistant_acknowledgements` | `user_id`, `conversation_id`, `service_id`, `service_slug`, `kind`, `status`, `created_at`, `expires_at` |
+| `assistant` | `assistant_agent_consents` | `actor_user_id`, `conversation_id`, `created_at`, `updated_at`, `expires_at` |
+| `assistant` | `assistant_agent_learning` | `owner_id`, `created_at`, `updated_at` |
+| `assistant` | `assistant_agent_learning_members` | `member_user_id`, `created_at`, `updated_at` |
+| `assistant` | `assistant_agent_learning_proposals` | `owner_id`, `status`, `created_at`, `updated_at` |
+| `assistant` | `assistant_agent_learning_runs` | `owner_id`, `status`, `created_at`, `updated_at` |
+| `assistant` | `assistant_agent_learning_skill_roots` | `owner_id`, `created_at` |
 | `assistant` | `assistant_agent_private_notes` | `actor_user_id`, `agent_id`, `revision`, `notes.text`, `notes.created_at`, `notes.updated_at`, `updated_at` |
-| `assistant` | `assistant_agent_shares` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_agent_sharing` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
+| `assistant` | `assistant_agent_shares` | `role`, `created_at` |
+| `assistant` | `assistant_agent_sharing` | `owner_id`, `updated_at` |
 | `assistant` | `assistant_agents` | `user_id`, `name`, `display_name`, `description`, `specialty`, `persona`, `voice_instructions`, `memory.text`, `created_at`, `updated_at` |
-| `assistant` | `assistant_artifact_deliveries` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_async_operations` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_async_quotas` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_attachment_expiry` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_attachments` | `user_id`, `filename`, `content_type`, `size`, `created_at`, `expires_at` |
-| `assistant` | `assistant_authored_draft_claims` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_checkpoints` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_cma_agents` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_cma_creations` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_cma_sandboxes` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
+| `assistant` | `assistant_artifact_deliveries` | `user_id`, `conversation_id`, `expires_at` |
+| `assistant` | `assistant_async_operations` | `user_id`, `conversation_id`, `service_id`, `state`, `created_at`, `expires_at` |
+| `assistant` | `assistant_async_quotas` | `user_id`, `generation` |
+| `assistant` | `assistant_attachment_expiry` | `user_id`, `conversation_id`, `created_at`, `expired_at` |
+| `assistant` | `assistant_attachments` | `user_id`, `content_type`, `size`, `created_at` |
+| `assistant` | `assistant_authored_draft_claims` | `claim.conversation_id` |
+| `assistant` | `assistant_checkpoints` | `user_id`, `status`, `updated_at` |
+| `assistant` | `assistant_cma_agents` | `user_id`, `created_at`, `updated_at` |
+| `assistant` | `assistant_cma_creations` | `user_id`, `created_at`, `updated_at` |
+| `assistant` | `assistant_cma_sandboxes` | `user_id`, `created_at`, `updated_at` |
 | `assistant` | `assistant_conversations` | `user_id`, `title`, `model`, `created_at`, `updated_at`, `message_count` |
-| `assistant` | `assistant_direct_handoffs` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_group_agent_proposals` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_group_invites` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
+| `assistant` | `assistant_direct_handoffs` | `user_id`, `state`, `expires_at` |
+| `assistant` | `assistant_group_agent_proposals` | `expires_at` |
+| `assistant` | `assistant_group_invites` | `created_at`, `expires_at` |
+| `assistant` | `assistant_group_mention_notifications` | `user_id`, `created_at` |
 | `assistant` | `assistant_group_messages` | `user_id`, `group_id`, `author_user_id`, `role`, `text`, `created_at` |
-| `assistant` | `authored_group_messages` | `group_id`, `role`, `text`, `created_at` |
-| `assistant` | `assistant_group_read_states` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_group_requests` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_groups` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_invocation_turns` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_invocations` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_message_feedback` | `user_id`, `message_id`, `rating`, `comment`, `created_at`, `updated_at` |
-| `assistant` | `assistant_messages` | `user_id`, `conversation_id`, `role`, `content`, `created_at` |
-| `assistant` | `assistant_notifications` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_onboarding` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_resources` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_service_execution` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_settings` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_skill_draft_attempts` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_tool_results` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_voice_announcements` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_voice_requests` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_event_bindings` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_events` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_gateway_responses` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_image_deliveries` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_image_deliveries_v2` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_threads` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `nyxbot_watches` | `user_id`, `owner_id`, `actor_user_id`, `actor_id`, `subject_id`, `conversation_id`, `service_id`, `service_slug`, `name`, `display_name`, `kind`, `type`, `role`, `status`, `state`, `action`, `content`, `text`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `billing` | `credit_grants` | `recipient_user_id`, `target_kind`, `amount`, `remaining`, `reserved`, `scope`, `expires_at`, `reason`, `status`, `created_at`, `updated_at`, `consumed_at`, `expired_at`, `revoked_at` |
-| `billing` | `usage_meter` | `billing_owner_id`, `service_id`, `service_slug`, `metric`, `quantity`, `status`, `created_at`, `settled_at`, `wallet_funded`, `grant_funded`, `allowance_funded`, `wallet_charge_credits` |
-| `billing` | `usage_workspaces` | `user_id`, `owner_id`, `owner_user_id`, `approved_user_id`, `member_user_id`, `conversation_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `role`, `action`, `direction`, `content_type`, `filename`, `size`, `created_at`, `updated_at`, `completed_at`, `expires_at`, `deleted_at`, `email_verified`, `last_login_at`, `enabled`, `is_active` |
-| `billing` | `wallet` | `owner_id`, `plan_kind`, `balance_credits`, `reserved_credits`, `pending_lago_debits`, `pending_topup_expiry_credits`, `has_payment_instrument`, `overdraft_cap_credits`, `suspended`, `collection_state`, `balance_synced_at`, `created_at`, `updated_at` |
-| `channels` | `channel_activity_notifications` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_adapter_allocations` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_adapter_bindings` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_adapter_events` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_adapter_resource_claims` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_adapter_sessions` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_bots` | `user_id`, `label`, `platform`, `status`, `is_active`, `created_at`, `updated_at` |
-| `channels` | `channel_connect_links` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_conversations` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_delivery_receipts` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_email_batches` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_email_receipts` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_email_sends` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_email_subscriptions` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_messages` | `user_id`, `conversation_id`, `direction`, `text`, `created_at` |
-| `channels` | `channel_reply_deliveries` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_text_deliveries` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_webhook_rejections` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `channel_whatsapp_native` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `channels` | `nyxbot_channels` | `user_id`, `owner_id`, `conversation_id`, `channel_id`, `direction`, `text`, `content`, `content_type`, `status`, `state`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `machines` | `machine_confirmations` | `user_id`, `owner_id`, `owner_user_id`, `node_id`, `machine_id`, `service_id`, `kind`, `type`, `status`, `state`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `machines` | `machine_free_slots` | `user_id`, `owner_id`, `owner_user_id`, `node_id`, `machine_id`, `service_id`, `kind`, `type`, `status`, `state`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `machines` | `machine_jobs` | `user_id`, `owner_id`, `owner_user_id`, `node_id`, `machine_id`, `service_id`, `kind`, `type`, `status`, `state`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `machines` | `machine_orphan_inventory` | `user_id`, `owner_id`, `owner_user_id`, `node_id`, `machine_id`, `service_id`, `kind`, `type`, `status`, `state`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `machines` | `nodes` | `user_id`, `name`, `status`, `is_active`, `created_at`, `updated_at` |
-| `security` | `device_codes` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `security` | `login_approvals` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `security` | `login_codes` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `security` | `mfa_factors` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `security` | `notification_channels` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `security` | `refresh_tokens` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `security` | `sessions` | `user_id`, `owner_id`, `approved_user_id`, `approved_by_user_id`, `service_id`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `api_key_credentials` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `api_keys` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `catalog_delegation_grants` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `oauth_broker_bindings` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `oauth_consent_requests` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `oauth_delegation_authorities` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `oauth_states` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `service_account_key_read_grants` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `service_approval_configs` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `service_pool_member_health` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `service_pools` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `service_preferences` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `user_api_keys` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `user_endpoints` | `user_id`, `label`, `url`, `catalog_service_id`, `openapi_spec_url`, `recommended_skills`, `created_at`, `updated_at` |
-| `services` | `user_provider_credentials` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `user_provider_tokens` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `services` | `user_service_connections` | `user_id`, `service_id`, `credential_type`, `credential_label`, `metadata`, `is_active`, `created_at`, `updated_at` |
-| `services` | `user_services` | `user_id`, `owner_id`, `owner_user_id`, `service_id`, `service_slug`, `slug`, `name`, `display_name`, `kind`, `type`, `status`, `state`, `enabled`, `is_active`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
-| `assistant` | `assistant_agent_learning_members` | `member_user_id`, `agent_id`, `role`, `created_at`, `updated_at` |
-| `assistant` | `assistant_agent_learning_proposals` | `owner_id`, `agent_id`, `title`, `instructions`, `status`, `created_at`, `updated_at` |
-| `assistant` | `assistant_agent_learning_skill_roots` | `owner_id`, `agent_id`, `name`, `description`, `created_at`, `updated_at` |
-| `account_activity` | `assistant_cma_session_origins` | `user_id`, `session_id`, `origin`, `created_at`, `updated_at` |
-| `account_activity` | `assistant_group_agent_access` | `owner_id`, `group_id`, `agent_id`, `role`, `created_at`, `updated_at` |
-| `account_activity` | `assistant_group_execution_slots` | `original_requester_id`, `group_id`, `status`, `created_at`, `updated_at` |
-| `assistant` | `assistant_group_mention_notifications` | `user_id`, `group_id`, `message_id`, `created_at`, `updated_at` |
-| `account_activity` | `assistant_learning_migrations` | `owner_id`, `agent_id`, `status`, `created_at`, `updated_at` |
-| `account_activity` | `assistant_learning_publication_targets` | `owner_id`, `agent_id`, `target_id`, `status`, `created_at`, `updated_at` |
-| `account` | `assistant_notification_push_budgets` | `owner_id`, `limit`, `used`, `created_at`, `updated_at` |
-| `account` | `assistant_notification_push_sources` | `user_id`, `source`, `enabled`, `created_at`, `updated_at` |
-| `account_activity` | `assistant_voice_sessions` | `user_id`, `conversation_id`, `protocol`, `state`, `created_at`, `closed_at` |
+| `assistant` | `assistant_group_read_states` | `user_id` |
+| `assistant` | `assistant_group_requests` | `actor_user_id`, `created_at` |
+| `assistant` | `assistant_groups` | `user_id`, `name`, `created_at`, `updated_at` |
+| `assistant` | `assistant_invocation_turns` | `user_id`, `conversation_id`, `state`, `created_at` |
+| `assistant` | `assistant_invocations` | `user_id`, `conversation_id`, `created_at` |
+| `assistant` | `assistant_message_feedback` | `user_id`, `message_id`, `vote`, `comment`, `created_at`, `updated_at` |
+| `assistant` | `assistant_messages` | `user_id`, `conversation_id`, `role`, `text`, `created_at` |
+| `assistant` | `assistant_notifications` | `user_id`, `kind`, `created_at`, `updated_at`, `expires_at` |
+| `assistant` | `assistant_onboarding` | `intro_version`, `outcome`, `topics`, `work_style`, `created_at`, `updated_at` |
+| `assistant` | `assistant_resources` | `user_id`, `conversation_id`, `created_at`, `expires_at` |
+| `assistant` | `assistant_service_execution` | `user_id`, `conversation_id` |
+| `assistant` | `assistant_settings` | `access_mode`, `skip_destructive_confirmation`, `timezone`, `voice.model`, `voice.language`, `voice.voice`, `voice.input_mode`, `notifications.push.automation_result`, `notifications.push.automation_problem`, `notifications.push.needs_decision`, `notifications.push.agent_update`, `notifications.push.chat_update`, `notifications.push.group_mention`, `updated_at` |
+| `assistant` | `assistant_skill_draft_attempts` | `user_id`, `conversation_id`, `created_at` |
+| `assistant` | `assistant_tool_results` | `actor_id`, `conversation_id`, `expires_at` |
+| `assistant` | `assistant_voice_announcements` | `user_id`, `conversation_id`, `state`, `text`, `created_at`, `expires_at` |
+| `assistant` | `assistant_voice_requests` | `user_id`, `conversation_id`, `state`, `created_at`, `expires_at` |
 | `assistant` | `async_service_operation_artifacts` | `user_id`, `filename`, `content_type`, `size`, `created_at`, `expires_at` |
-| `account_activity` | `encrypted_record_migration_findings` | `owner_uuid`, `record_type`, `status`, `created_at`, `updated_at` |
-| `account_activity` | `encrypted_record_migration_runs` | `owner_uuid`, `status`, `created_at`, `updated_at` |
-| `account` | `generated_artifact_content_series` | `user_id`, `filename`, `content_type`, `size`, `created_at`, `expires_at` |
-| `services` | `oauth_clients` | `created_by`, `client_name`, `redirect_uris`, `allowed_scopes`, `grant_types`, `client_type`, `is_active`, `delegation_scopes`, `default_service_catalog_slugs`, `created_at`, `updated_at` |
-| `account` | `oracle_login_snapshots` | `created_by_user_id`, `format_version`, `envelope_size`, `created_at`, `expires_at` |
-| `assistant` | `oracle_sessions` | `owner_user_id`, `origin`, `tag`, `turn_count`, `chatgpt_url`, `closed_at`, `created_at`, `updated_at` |
-| `assistant` | `oracle_tasks` | `submitter_user_id`, `kind`, `target_url`, `prompt`, `model_label`, `project_url`, `tag`, `status`, `conversation_id`, `response`, `created_at`, `completed_at`, `expires_at` |
-| `account_activity` | `oracle_worker_commands` | `created_by_user_id`, `worker_label`, `kind`, `status`, `result_code`, `delivered_at`, `completed_at`, `deadline_at`, `expires_at` |
-| `account` | `oracle_workers` | `enrollment.owner_user_id`, `worker_label`, `generation`, `last_seen_at`, `current_task_id`, `page_url`, `platform`, `desired_state`, `created_at`, `updated_at` |
-| `channels` | `org_channel_lanes` | `actor_id`, `channel_id`, `conversation_id`, `state`, `status`, `created_at`, `updated_at`, `expires_at` |
-| `account_activity` | `org_channel_link_challenges` | `user_id`, `channel_id`, `org_id`, `state`, `created_at`, `expires_at` |
-| `channels` | `org_channel_messages` | `author_user_id`, `actor_id`, `channel_id`, `conversation_id`, `text`, `content`, `content_type`, `created_at` |
+| `assistant` | `authored_group_messages` | `group_id`, `role`, `text`, `created_at` |
+| `assistant` | `nyxbot_event_bindings` | `user_id`, `status`, `created_at`, `updated_at` |
+| `assistant` | `nyxbot_events` | `user_id`, `conversation_id`, `status`, `created_at`, `expires_at` |
+| `assistant` | `nyxbot_gateway_responses` | `user_id`, `conversation_id`, `created_at`, `expires_at` |
+| `assistant` | `nyxbot_image_deliveries` | `user_id`, `conversation_id`, `state`, `created_at` |
+| `assistant` | `nyxbot_image_deliveries_v2` | `user_id`, `conversation_id`, `state`, `created_at` |
+| `assistant` | `nyxbot_threads` | `user_id`, `conversation_id`, `kind`, `created_at`, `updated_at` |
+| `assistant` | `nyxbot_watches` | `user_id`, `conversation_id`, `kind`, `status`, `created_at`, `expires_at` |
+| `assistant` | `oracle_sessions` | `owner_user_id`, `origin`, `tag`, `turn_count`, `last_task_id`, `chatgpt_url`, `owner_worker_label`, `closed_at`, `created_at`, `updated_at` |
+| `assistant` | `oracle_tasks` | `submitter_user_id`, `kind`, `target_url`, `prompt`, `model_label`, `project_url`, `tag`, `pdf_name`, `attachment_name`, `status`, `conversation_id`, `required_worker_label`, `phase`, `phase_detail`, `response`, `response_chars`, `chatgpt_url`, `failure_reason`, `observed_model_switcher`, `observed_model_effort`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
+| `billing` | `credit_grants` | `recipient_user_id`, `target_kind`, `amount`, `remaining`, `reserved`, `scope`, `expires_at`, `reason`, `status`, `created_at`, `updated_at`, `consumed_at`, `expired_at`, `revoked_at` |
+| `billing` | `usage_meter` | `billing_owner_id`, `service_id`, `service_slug`, `metric`, `quantity`, `status`, `created_at` |
+| `billing` | `usage_workspaces` | `config`, `revision`, `updated_at` |
+| `billing` | `wallet` | `owner_id`, `plan_kind`, `balance_credits`, `reserved_credits`, `pending_lago_debits`, `pending_topup_expiry_credits`, `has_payment_instrument`, `overdraft_cap_credits`, `suspended`, `collection_state`, `balance_synced_at`, `created_at`, `updated_at` |
+| `channels` | `channel_activity_notifications` | `user_id`, `conversation_id`, `direction`, `content_type`, `platform`, `created_at` |
+| `channels` | `channel_adapter_allocations` | `user_id`, `created_at` |
+| `channels` | `channel_adapter_bindings` | `user_id`, `created_at`, `updated_at` |
+| `channels` | `channel_adapter_events` | `user_id`, `status`, `created_at` |
+| `channels` | `channel_adapter_resource_claims` | `user_id`, `created_at` |
+| `channels` | `channel_adapter_sessions` | `user_id`, `conversation_id`, `state`, `created_at`, `expires_at` |
+| `channels` | `channel_bots` | `user_id`, `label`, `platform`, `status`, `is_active`, `created_at`, `updated_at` |
+| `channels` | `channel_connect_links` | `user_id`, `status`, `created_at`, `expires_at` |
+| `channels` | `channel_conversations` | `user_id`, `created_at`, `updated_at` |
+| `channels` | `channel_delivery_receipts` | `user_id`, `expires_at` |
+| `channels` | `channel_email_batches` | `user_id`, `expires_at` |
+| `channels` | `channel_email_receipts` | `user_id`, `created_at` |
+| `channels` | `channel_email_sends` | `user_id`, `status`, `created_at`, `updated_at` |
+| `channels` | `channel_email_subscriptions` | `user_id`, `created_at` |
+| `channels` | `channel_messages` | `user_id`, `conversation_id`, `direction`, `platform`, `content_type`, `callback_status`, `created_at` |
+| `channels` | `channel_reply_deliveries` | `user_id`, `created_at` |
+| `channels` | `channel_text_deliveries` | `user_id`, `created_at` |
+| `channels` | `channel_whatsapp_native` | `owner_id`, `updated_at` |
+| `channels` | `nyxbot_channels` | `user_id`, `status`, `created_at`, `updated_at` |
+| `channels` | `org_channel_lanes` | `actor_id`, `conversation_id`, `created_at` |
+| `channels` | `org_channel_messages` | `channel_id`, `conversation_id`, `role`, `text`, `created_at` |
 | `channels` | `org_channel_sender_links` | `user_id`, `channel_id`, `org_id`, `active`, `created_at` |
-| `account` | `platform_discord_control_installation_history` | `requested_by`, `channel_bot_id`, `attempt_id`, `state`, `created_at`, `updated_at` |
-| `account` | `platform_discord_control_installations` | `requested_by`, `channel_bot_id`, `attempt_id`, `state`, `created_at`, `updated_at` |
-| `account_activity` | `platform_onboarding_binding_requests` | `user_id`, `status`, `created_at`, `updated_at`, `expires_at` |
-| `account_activity` | `platform_onboarding_bindings` | `user_id`, `status`, `created_at`, `updated_at`, `expires_at` |
-| `account` | `platform_personal_bindings` | `user_id`, `binding_id`, `state`, `created_at`, `updated_at` |
-| `account_activity` | `platform_personal_decision_spacing` | `user_id`, `decision`, `created_at`, `updated_at` |
-| `account_activity` | `platform_personal_link_challenges` | `reviewed_user_id`, `state`, `created_at`, `expires_at` |
-| `account_activity` | `platform_personal_link_intents` | `claimant_user_id`, `state`, `created_at`, `expires_at` |
-| `account_activity` | `platform_personal_setup_selections` | `user_id`, `setup_id`, `selection`, `created_at`, `updated_at` |
-| `services` | `service_accounts` | `owner_user_id`, `created_by`, `name`, `description`, `role_ids`, `allowed_scopes`, `is_active`, `purpose`, `created_at`, `updated_at`, `last_authenticated_at` |
+| `machines` | `machine_confirmations` | `user_id`, `node_id`, `state`, `created_at`, `expires_at` |
+| `machines` | `machine_free_slots` | `machine_id`, `state`, `created_at`, `updated_at` |
+| `machines` | `machine_jobs` | `user_id`, `node_id`, `state`, `created_at`, `expires_at` |
+| `machines` | `machine_orphan_inventory` | `owner_id`, `machine_id`, `state`, `reason`, `created_at`, `last_seen_at` |
+| `machines` | `nodes` | `user_id`, `name`, `status`, `is_active`, `created_at`, `updated_at` |
+| `security` | `device_codes` | `approved_by_user_id`, `status`, `created_at`, `expires_at` |
+| `security` | `login_approvals` | `user_id`, `expires_at` |
+| `security` | `login_codes` | `user_id`, `status`, `created_at`, `expires_at` |
+| `security` | `mfa_factors` | `user_id`, `is_active`, `created_at`, `updated_at` |
+| `security` | `notification_channels` | `user_id`, `created_at`, `updated_at` |
+| `security` | `refresh_tokens` | `user_id`, `created_at`, `expires_at` |
+| `security` | `sessions` | `user_id`, `purpose`, `ip_address`, `user_agent`, `revoked`, `created_at`, `expires_at`, `last_active_at` |
+| `services` | `api_key_credentials` | `user_id`, `kind`, `is_active`, `created_at`, `expires_at` |
+| `services` | `api_keys` | `user_id`, `name`, `is_active`, `created_at`, `updated_at`, `expires_at` |
+| `services` | `catalog_delegation_grants` | `user_id`, `created_at`, `expires_at` |
+| `services` | `oauth_broker_bindings` | `user_id`, `created_at` |
+| `services` | `oauth_clients` | `created_by`, `client_name`, `redirect_uris`, `allowed_scopes`, `grant_types`, `client_type`, `is_active`, `delegation_scopes`, `default_service_catalog_slugs`, `broker_capability_enabled`, `connection_webhook_url`, `revocation_webhook_url`, `connection_webhook_enabled`, `created_at`, `updated_at` |
+| `services` | `oauth_consent_requests` | `user_id`, `expires_at` |
+| `services` | `oauth_delegation_authorities` | `user_id`, `created_at`, `expires_at` |
+| `services` | `oauth_states` | `user_id`, `created_at`, `expires_at` |
+| `services` | `service_account_key_read_grants` | `owner_id`, `expires_at` |
+| `services` | `service_accounts` | `owner_user_id`, `name`, `description`, `role_ids`, `allowed_scopes`, `is_active`, `purpose`, `rate_limit_override`, `created_at`, `updated_at`, `last_authenticated_at` |
+| `services` | `service_approval_configs` | `user_id`, `service_id`, `created_at`, `updated_at` |
+| `services` | `service_pool_member_health` | `owner_id`, `updated_at`, `expires_at` |
+| `services` | `service_pools` | `user_id`, `slug`, `name`, `is_active`, `created_at`, `updated_at` |
+| `services` | `service_preferences` | `version`, `ordered`, `updated_at` |
+| `services` | `user_api_keys` | `user_id`, `status`, `created_at`, `updated_at`, `expires_at` |
+| `services` | `user_endpoints` | `user_id`, `label`, `url`, `catalog_service_id`, `openapi_spec_url`, `recommended_skills`, `created_at`, `updated_at` |
+| `services` | `user_provider_credentials` | `user_id`, `created_at`, `updated_at` |
+| `services` | `user_provider_tokens` | `user_id`, `status`, `created_at`, `updated_at`, `expires_at` |
+| `services` | `user_service_connections` | `user_id`, `service_id`, `credential_type`, `credential_label`, `metadata`, `is_active`, `created_at`, `updated_at` |
+| `services` | `user_services` | `user_id`, `slug`, `endpoint_id`, `catalog_service_id`, `service_type`, `is_active`, `created_at`, `updated_at` |
+<!-- export-fields:end -->
 
 The two group-message views read `assistant_group_messages` with disjoint
 filters. `assistant_group_messages` includes only messages both owned and
@@ -312,7 +297,7 @@ addresses remain visible in the web and mobile controls where those values are
 managed; operational Oracle browser/worker addresses are not claimed to have a
 full-address account view. Instructions and memory export only the requesting
 person's authored text; shared/team memory, system-injected instructions, and
-messages authored by other people are omitted. The successful response emits a chained
+messages authored by other people are omitted. Owner-keyed shared conversations can contain guest content: only explicitly owner-authored user inputs are exported there. Assistant replies and legacy inputs without authorship are exported only in private conversations, excluding collaboration, platform, channel, group, guest and invocation-controlled threads. Shared titles are excluded because they may derive from a guest message. The successful response emits a chained
 metadata-only `user.data_exported` audit event containing format/version,
 subsection counts, truncation names and serialized byte size; it never records
 export content.
@@ -320,7 +305,7 @@ export content.
 
 ## Orphan cleanup operations
 
-The operator orphan sweep uses owner-field indexes and a 60-second MongoDB statement bound. It groups only owner counts, filters live users and service accounts in batches, then streams sorted row ids for orphan owners. Run a dry run, apply its digest, and repeat the dry run until it reports no candidates; children of parents removed during an apply appear on the next pass.
+The operator orphan sweep starts a persisted leased job and returns HTTP 202; poll by job ID for its report. It scans bounded keyset pages and checks liveness in batches. Run a dry run, apply its digest, and repeat the dry run until it reports no candidates; children of parents removed during an apply appear on the next pass. See `API.md` for the start/poll contract and transactional mutation fences.
 
 A source query failure or timeout marks that kind of record `unavailable: true`
 and lists its full subsection name in `unavailable_sections`. Its items and count

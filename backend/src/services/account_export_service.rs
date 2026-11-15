@@ -1358,6 +1358,27 @@ fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Opti
     })
 }
 
+fn private_conversation_filter(prefix: &str) -> Document {
+    let mut filter = doc! {};
+    for field in [
+        "collaboration",
+        "platform_thread",
+        "channel",
+        "reply_channel",
+        "group_id",
+    ] {
+        filter.insert(format!("{prefix}{field}"), Bson::Null);
+    }
+    for field in ["shared_agent_thread", "guest_turn", "invocation_controlled"] {
+        filter.insert(format!("{prefix}{field}"), doc! {"$ne": true});
+    }
+    filter.insert(
+        format!("{prefix}deliver_also"),
+        doc! {"$in": [Bson::Null, Bson::Array(Vec::new())]},
+    );
+    filter
+}
+
 fn source_pipeline(collection: &str, filter: Document) -> Vec<Document> {
     let mut pipeline = Vec::new();
     if let Some(personal_data_registry::Entry {
@@ -1368,6 +1389,22 @@ fn source_pipeline(collection: &str, filter: Document) -> Vec<Document> {
         pipeline.push(doc! {"$lookup": {"from": *parent, "localField": *field, "foreignField": "_id", "as": "_export_parent"}});
     }
     pipeline.push(doc! {"$match": filter});
+    if collection == "assistant_conversations" {
+        // Shared titles can originate from a guest's first message.
+        pipeline.push(doc! {"$match": private_conversation_filter("")});
+    } else if collection == "assistant_messages" {
+        let mut private = private_conversation_filter("");
+        // A conversation must exist and must belong to the same person as the
+        // message. Null legacy authorship is safe only in that private scope.
+        private.insert("$expr", doc! {"$eq": ["$user_id", "$$owner"]});
+        pipeline.push(doc! {"$lookup": {"from":"assistant_conversations", "let":{"conversation":"$conversation_id", "owner":"$user_id"},
+            "pipeline":[{"$match":{"$expr":{"$eq":["$_id","$$conversation"]}}}, {"$match":private}], "as":"_export_private"}});
+        pipeline.push(doc! {"$match": {"$or": [
+            {"role":"user", "author":"owner"},
+            {"_export_private.0":{"$exists":true}, "author":{"$ne":"guest"}, "origin":{"$in":[Bson::Null,"user"]},
+                "platform_origin":Bson::Null,"platform_reply":Bson::Null, "role":{"$in":["user","assistant"]}}
+        ]}});
+    }
     pipeline
 }
 
