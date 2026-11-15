@@ -9,6 +9,8 @@ pub const PAGES: &str = "personal_erasure_orphan_sweep_pages";
 const SCAN_VALUES: usize = 512;
 const LIVE_BATCH: usize = 128;
 const LEASE_SECONDS: i64 = 120;
+const RETRY_CAP: u32 = 8;
+const RETENTION_DAYS: i64 = 7;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SweepStatus {
@@ -17,6 +19,7 @@ pub struct SweepStatus {
     pub phase: String,
     pub report: Option<OrphanSweepReport>,
     pub failure: Option<String>,
+    pub noop_count: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -26,6 +29,12 @@ struct Job {
     requested_by: String,
     apply: bool,
     expected_digest: Option<String>,
+    #[serde(default)]
+    source_job_id: Option<String>,
+    #[serde(default)]
+    consecutive_failures: u32,
+    #[serde(default)]
+    noop_count: usize,
     status: String,
     phase: String,
     scan_spec: usize,
@@ -50,6 +59,7 @@ impl Job {
             phase: self.phase,
             report: self.report,
             failure: self.failure,
+            noop_count: self.noop_count,
         }
     }
     fn fence(&self) -> Document {
@@ -128,27 +138,98 @@ pub async fn start(
             "Apply requires the dry-run digest".into(),
         ));
     }
+    // Pin the reviewed pages. A live scan is not an authorization artifact.
+    let reviewed = if apply {
+        Some(
+            db.collection::<Job>(JOBS)
+                .find_one(doc! {"apply":false,"status":"complete","report.digest":expected})
+                .sort(doc! {"updated_at":-1,"_id":-1})
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict("Reviewed dry-run is unavailable; run a new dry-run".into())
+                })?,
+        )
+    } else {
+        None
+    };
+    let already_applied = apply && was_applied(db, expected.unwrap_or_default()).await?;
+    let mut report = reviewed.as_ref().and_then(|job| job.report.clone());
+    if let Some(report) = &mut report {
+        report.dry_run = false;
+        if already_applied {
+            report.candidate_count = 0;
+            report.collections.clear();
+        }
+    }
     let job = Job {
         id: Uuid::new_v4().to_string(),
         requested_by: actor.into(),
         apply,
         expected_digest: expected.map(str::to_owned),
-        status: "pending".into(),
-        phase: "scan".into(),
+        source_job_id: reviewed.as_ref().map(|job| job.id.clone()),
+        consecutive_failures: 0,
+        noop_count: 0,
+        status: if already_applied {
+            "complete"
+        } else {
+            "pending"
+        }
+        .into(),
+        phase: if already_applied {
+            "complete"
+        } else if apply {
+            "apply"
+        } else {
+            "scan"
+        }
+        .into(),
         scan_spec: 0,
-        specs_digest: specs_digest()?,
+        specs_digest: reviewed
+            .as_ref()
+            .map(|job| job.specs_digest.clone())
+            .unwrap_or(specs_digest()?),
         last_id: Bson::Null,
         owner_offset: 0,
-        next_page: 0,
+        next_page: reviewed.as_ref().map_or(0, |job| job.next_page),
         apply_page: 0,
-        report: None,
+        report,
         failure: None,
         lease_token: None,
         lease_until: None,
         created_at: bson::DateTime::now(),
         updated_at: bson::DateTime::now(),
     };
-    db.collection::<Job>(JOBS).insert_one(&job).await?;
+    if let Some(source) = &job.source_job_id {
+        let mut tx = db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(ReadConcern::snapshot())
+            .write_concern(WriteConcern::majority())
+            .await?;
+        let result: AppResult<()> = async {
+            if db
+                .collection::<Document>(JOBS)
+                .update_one(
+                    doc! {"_id":source,"status":"complete"},
+                    doc! {"$inc":{"apply_references":1}},
+                )
+                .session(&mut tx)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Err(AppError::Conflict("Reviewed dry-run expired".into()));
+            }
+            db.collection::<Job>(JOBS)
+                .insert_one(&job)
+                .session(&mut tx)
+                .await?;
+            Ok(())
+        }
+        .await;
+        super::super::org_membership_authority::finish(tx, result).await?;
+    } else {
+        db.collection::<Job>(JOBS).insert_one(&job).await?;
+    }
     Ok(job.status())
 }
 
@@ -463,21 +544,8 @@ async fn summarize(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
         collections: reports.into_values().collect(),
         candidate_count: count,
     });
-    if !job.apply {
-        job.status = "complete".into();
-        job.phase = "complete".into();
-    } else if job.expected_digest.as_deref() == Some(&digest) {
-        job.phase = "apply".into();
-    } else if count == 0
-        && was_applied(db, job.expected_digest.as_deref().unwrap_or_default()).await?
-    {
-        job.report.as_mut().unwrap().digest = job.expected_digest.clone().unwrap_or_default();
-        job.status = "complete".into();
-        job.phase = "complete".into();
-    } else {
-        job.status = "failed".into();
-        job.failure = Some("candidate_set_changed".into());
-    }
+    job.status = "complete".into();
+    job.phase = "complete".into();
     Ok(())
 }
 
@@ -531,7 +599,9 @@ async fn apply_page(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
     }
     let page = db
         .collection::<CandidatePage>(PAGES)
-        .find_one(doc! {"_id": page_id(&job.id, job.apply_page)})
+        .find_one(
+            doc! {"_id": page_id(job.source_job_id.as_deref().unwrap_or(&job.id), job.apply_page)},
+        )
         .await?
         .ok_or_else(|| AppError::Conflict("Orphan candidate page is unavailable".into()))?;
     let entry = personal_data_registry::find(&page.collection)
@@ -547,6 +617,7 @@ async fn apply_page(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
     let live = live_ids(db, spec, &page.rows).await?;
     for row in page.rows {
         if live.contains(&row.owner_id) {
+            job.noop_count += 1;
             continue;
         }
         if db
@@ -558,7 +629,7 @@ async fn apply_page(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
         {
             return Err(AppError::Conflict("Orphan sweep lease expired".into()));
         }
-        apply_group(
+        let present = apply_group(
             db,
             &OrphanGroup {
                 collection: entry.collection,
@@ -571,35 +642,163 @@ async fn apply_page(db: &mongodb::Database, job: &mut Job) -> AppResult<()> {
             &job.fence(),
         )
         .await?;
+        if !present {
+            job.noop_count += 1;
+        }
     }
     job.apply_page += 1;
     Ok(())
 }
 
+/// Finished reports/pages remain reviewable for at least seven days. Delete at
+/// most 128 pages per pass, and never purge a dry-run referenced by pending apply.
+async fn purge_finished(db: &mongodb::Database) -> AppResult<()> {
+    let cutoff =
+        bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::days(RETENTION_DAYS));
+    let mut jobs = db
+        .collection::<Job>(JOBS)
+        .find(doc! {"status":{"$in":["complete","failed"]},"updated_at":{"$lt":cutoff}})
+        .limit(16)
+        .batch_size(16)
+        .max_time(AGGREGATE_TIMEOUT)
+        .await?;
+    while let Some(job) = jobs.try_next().await? {
+        let mut tx = db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(ReadConcern::snapshot())
+            .write_concern(WriteConcern::majority())
+            .await?;
+        let result: AppResult<()> = async {
+            // Compete with apply admission through the source-job document.
+            if db
+                .collection::<Document>(JOBS)
+                .update_one(
+                    doc! {"_id":&job.id,"updated_at":{"$lt":cutoff}},
+                    doc! {"$inc":{"purge_revision":1}},
+                )
+                .session(&mut tx)
+                .await?
+                .matched_count
+                == 0
+            {
+                return Ok(());
+            }
+            if db
+                .collection::<Document>(JOBS)
+                .find_one(doc! {"source_job_id":&job.id,"status":"pending"})
+                .session(&mut tx)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+            let mut cursor = db
+                .collection::<Document>(PAGES)
+                .find(page_range(&job.id))
+                .projection(doc! {"_id":1})
+                .limit(128)
+                .session(&mut tx)
+                .await?;
+            let mut ids = Vec::new();
+            while let Some(row) = cursor.next(&mut tx).await.transpose()? {
+                ids.push(row.get("_id").cloned().unwrap_or(Bson::Null));
+            }
+            if !ids.is_empty() {
+                db.collection::<Document>(PAGES)
+                    .delete_many(doc! {"_id":{"$in":ids}})
+                    .session(&mut tx)
+                    .await?;
+            }
+            if db
+                .collection::<Document>(PAGES)
+                .find_one(page_range(&job.id))
+                .session(&mut tx)
+                .await?
+                .is_none()
+            {
+                db.collection::<Document>(JOBS)
+                    .delete_one(doc! {"_id":&job.id})
+                    .session(&mut tx)
+                    .await?;
+            }
+            Ok(())
+        }
+        .await;
+        super::super::org_membership_authority::finish(tx, result).await?;
+    }
+    Ok(())
+}
+
 pub async fn run_once(db: &mongodb::Database) -> AppResult<bool> {
+    purge_finished(db).await?;
     let Some(mut job) = claim(db).await? else {
         return Ok(false);
     };
+    // Jobs accepted by an older writer cannot authorize a fresh live scan.
+    if job.apply && job.source_job_id.is_none() {
+        if let Some(source) = db
+            .collection::<Job>(JOBS)
+            .find_one(doc! {"apply":false,"status":"complete","report.digest":&job.expected_digest})
+            .await?
+        {
+            job.source_job_id = Some(source.id);
+            job.specs_digest = source.specs_digest;
+            job.next_page = source.next_page;
+            job.apply_page = 0;
+            job.phase = "apply".into();
+            job.report = source.report;
+            if let Some(report) = &mut job.report {
+                report.dry_run = false;
+            }
+        } else {
+            job.status = "failed".into();
+            job.failure = Some("reviewed_pages_unavailable".into());
+        }
+        save(db, &job, Vec::new()).await?;
+        return Ok(true);
+    }
     if job.specs_digest != specs_digest()? {
         job.status = "failed".into();
         job.failure = Some("ownership_specification_changed".into());
         save(db, &job, Vec::new()).await?;
         return Ok(true);
     }
-    let pages = match job.phase.as_str() {
-        "scan" => scan_page(db, &mut job).await?,
-        "summarize" => {
-            summarize(db, &mut job).await?;
-            Vec::new()
-        }
-        "apply" => {
-            apply_page(db, &mut job).await?;
-            Vec::new()
-        }
-        _ => {
-            return Err(AppError::Conflict(
+    let result: AppResult<Vec<CandidatePage>> = async {
+        match job.phase.as_str() {
+            "scan" => scan_page(db, &mut job).await,
+            "summarize" => {
+                summarize(db, &mut job).await?;
+                Ok(Vec::new())
+            }
+            "apply" => {
+                apply_page(db, &mut job).await?;
+                Ok(Vec::new())
+            }
+            _ => Err(AppError::Conflict(
                 "Orphan sweep phase is unsupported".into(),
-            ));
+            )),
+        }
+    }
+    .await;
+    let pages = match result {
+        Ok(pages) => {
+            job.consecutive_failures = 0;
+            pages
+        }
+        Err(_) => {
+            // Don't checkpoint a partially advanced cursor after a failed page.
+            let failures = job.consecutive_failures.saturating_add(1);
+            job = db
+                .collection::<Job>(JOBS)
+                .find_one(job.fence())
+                .await?
+                .ok_or_else(|| AppError::Conflict("Orphan sweep lease expired".into()))?;
+            job.consecutive_failures = failures;
+            if failures >= RETRY_CAP {
+                job.status = "failed".into();
+                job.failure = Some("page_retry_limit_exceeded".into());
+            }
+            Vec::new()
         }
     };
     save(db, &job, pages).await?;
@@ -657,22 +856,141 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn apply_consumes_reviewed_pages_and_counts_vanished_candidates() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("orphan_reviewed_pages").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(doc! {"_id":"expired","user_id":&owner})
+            .await
+            .unwrap();
+        let dry = scan(&db).await.unwrap();
+        db.collection::<Document>("assistant_wire_logs")
+            .delete_one(doc! {"_id":"expired"})
+            .await
+            .unwrap();
+        // New orphans were never reviewed and must not enter this apply.
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(doc! {"_id":"new","user_id":&owner})
+            .await
+            .unwrap();
+        let apply = start(&db, "operator", true, Some(&dry.digest))
+            .await
+            .unwrap();
+        let report = finish(&db, &apply.job_id).await.unwrap();
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(status(&db, &apply.job_id).await.unwrap().noop_count, 1);
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id":"new"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_page_errors_fail_after_the_cap_and_finished_pages_are_purged() {
+        let db = crate::test_utils::connect_transaction_test_database("orphan_retry_purge").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(doc! {"_id":"row","user_id":Uuid::new_v4().to_string()})
+            .await
+            .unwrap();
+        let dry = start(&db, "operator", false, None).await.unwrap();
+        let report = finish(&db, &dry.job_id).await.unwrap();
+        let apply = start(&db, "operator", true, Some(&report.digest))
+            .await
+            .unwrap();
+        let reviewed_page = db
+            .collection::<CandidatePage>(PAGES)
+            .find_one(page_range(&dry.job_id))
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<Document>(PAGES)
+            .delete_many(page_range(&dry.job_id))
+            .await
+            .unwrap();
+        for _ in 0..RETRY_CAP {
+            assert!(run_once(&db).await.unwrap());
+        }
+        let failed = status(&db, &apply.job_id).await.unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.failure.as_deref(), Some("page_retry_limit_exceeded"));
+        // Restore the saved identifier page so purge must actually remove data,
+        // rather than merely observing the already-empty page collection.
+        db.collection::<CandidatePage>(PAGES)
+            .insert_one(reviewed_page)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.collection::<Document>(PAGES)
+                .count_documents(page_range(&dry.job_id))
+                .await
+                .unwrap(),
+            1
+        );
+        let aged = bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::days(8));
+        db.collection::<Document>(JOBS)
+            .update_many(doc! {}, doc! {"$set":{"updated_at":aged}})
+            .await
+            .unwrap();
+        purge_finished(&db).await.unwrap();
+        assert_eq!(
+            db.collection::<Document>(JOBS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Document>(PAGES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn dollar_prefixed_ids_and_checkpoint_values_remain_literal() {
         let db = crate::test_utils::connect_transaction_test_database("orphan_literal").await;
         let owner = Uuid::new_v4().to_string();
-        db.collection::<Document>("assistant_wire_logs").insert_many([
-            doc! {"_id": "$first", "user_id": &owner},
-            doc! {"_id": "$second", "user_id": &owner},
-        ]).await.unwrap();
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_many([
+                doc! {"_id": "$first", "user_id": &owner},
+                doc! {"_id": "$second", "user_id": &owner},
+            ])
+            .await
+            .unwrap();
         start(&db, "$operator", false, None).await.unwrap();
         let mut job = claim(&db).await.unwrap().unwrap();
-        job.scan_spec = specs().iter().position(|s| s.collection == "assistant_wire_logs").unwrap();
+        job.scan_spec = specs()
+            .iter()
+            .position(|s| s.collection == "assistant_wire_logs")
+            .unwrap();
         job.last_id = "$first".into();
         job.failure = Some("$checkpoint".into());
         let pages = scan_page(&db, &mut job).await.unwrap();
-        assert_eq!(pages.iter().flat_map(|p| &p.rows).map(|r| r.row_id.clone()).collect::<Vec<_>>(), vec![Bson::from("$second")]);
+        assert_eq!(
+            pages
+                .iter()
+                .flat_map(|p| &p.rows)
+                .map(|r| r.row_id.clone())
+                .collect::<Vec<_>>(),
+            vec![Bson::from("$second")]
+        );
         save(&db, &job, pages).await.unwrap();
-        let stored = db.collection::<Job>(JOBS).find_one(doc! {"_id": &job.id}).await.unwrap().unwrap();
+        let stored = db
+            .collection::<Job>(JOBS)
+            .find_one(doc! {"_id": &job.id})
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.requested_by, "$operator");
         assert_eq!(stored.failure.as_deref(), Some("$checkpoint"));
         db.drop().await.unwrap();
@@ -802,7 +1120,8 @@ mod tests {
     async fn mutation_transactions_recheck_liveness_parent_guards_lease_and_audit_order() {
         let db =
             crate::test_utils::connect_transaction_test_database("orphan_mutation_fences").await;
-        let started = start(&db, "operator", true, Some("reviewed-digest"))
+        let dry = scan(&db).await.unwrap();
+        let started = start(&db, "operator", true, Some(&dry.digest))
             .await
             .unwrap();
         let mut job = claim(&db).await.unwrap().unwrap();

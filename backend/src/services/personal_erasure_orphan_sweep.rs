@@ -176,7 +176,8 @@ async fn apply_group(
     db: &mongodb::Database,
     group: &OrphanGroup,
     lease: &Document,
-) -> AppResult<()> {
+) -> AppResult<bool> {
+    let mut present = false;
     for chunk in group.row_ids.chunks(APPLY_BATCH) {
         let mut filter = doc! {"_id": {"$in": chunk.to_vec()}};
         if group.joined_parent.is_none() {
@@ -192,6 +193,8 @@ async fn apply_group(
                 .session(&mut tx).await?.matched_count != 1 {
                 return Err(AppError::Conflict("Orphan sweep lease expired".into()));
             }
+            if db.collection::<Document>(group.collection).find_one(filter.clone()).projection(doc! {"_id":1}).session(&mut tx).await?.is_none(){return Ok(());}
+            present = true;
             if let Some(parent) = group.joined_parent {
                 // A parent created after the review restores authoritative
                 // ownership. Check it in the same snapshot as the deletion.
@@ -235,7 +238,7 @@ async fn apply_group(
         }.await;
         super::org_membership_authority::finish(tx, result).await?;
     }
-    Ok(())
+    Ok(present)
 }
 
 #[cfg(test)]

@@ -653,3 +653,17 @@ no terminal attempt cap. `platform_bot_config_service::claim_cleanup` and
 retrying without a TTL or terminal attempt cap. Their per-call deadlines/claim
 leases bound individual work, not total recovery time. The erasure wait escalation
 therefore surfaces both cases without discarding the remaining recovery evidence.
+
+
+Orphan apply selects the completed dry-run by its returned SHA-256 digest and
+consumes that job's persisted candidate pages. It does not rescan the database;
+new orphans need a new dry-run. Every mutation still checks current account and
+parent liveness transactionally. `candidate_count` is the reviewed count;
+`noop_count` in job status counts vanished candidates and candidates skipped by
+batched liveness checks. Vanished rows are harmless. Eight consecutive failed
+page attempts terminate the job as `failed` with `page_retry_limit_exceeded`.
+Finished jobs and identifier-only pages are eligible for cleanup after seven
+days. Each worker pass purges at most 128 pages from each of at most 16 finished
+jobs; pending apply jobs pin their source dry-run pages. After retention expires,
+run a fresh dry-run before applying. No additional large-collection index is
+needed: page reads and deletion use the existing `_id` prefix.
