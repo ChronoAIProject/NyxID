@@ -422,13 +422,15 @@ async fn scan_once(
     Ok(result)
 }
 
-fn expired_snapshot(error: &AppError) -> bool {
+pub(in crate::services::billing) fn expired_snapshot(error: &AppError) -> bool {
     matches!(error, AppError::DatabaseError(error)
         if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command)
             if matches!(command.code, 239 | 246)))
 }
 
-async fn retry_snapshot_read<T, F, Fut>(mut read: F) -> AppResult<T>
+pub(in crate::services::billing) async fn retry_snapshot_read<T, F, Fut>(
+    mut read: F,
+) -> AppResult<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = AppResult<T>>,
@@ -496,6 +498,54 @@ pub(super) async fn diagnostics(
         detected_at:Utc::now(),
     }])
 }
+/// Share the hold verifier's decoders, receipt and applied-lock subtraction.
+/// The caller's one snapshot aggregate supplies the three indexed resource joins.
+pub(in crate::services::billing) fn request_holds(
+    value: &Document,
+) -> AppResult<Vec<(&'static str, BTreeMap<String, Credits>)>> {
+    let mut out = Vec::new();
+    for (kind, collection, alias) in [
+        ("wallet", WALLETS, "wallet_resources"),
+        ("grant", GRANTS, "grant_resources"),
+        ("allowance", PERIODS, "allowance_resources"),
+    ] {
+        let mut value = value.clone();
+        value.insert("resources", value.get(alias).cloned().ok_or_else(invalid)?);
+        let row: Row = bson::from_document(value).map_err(|_| invalid())?;
+        if row.hold.funding.as_ref().is_some_and(|f| {
+            [
+                f.grant_reservations.len(),
+                f.allowance_reservations.len(),
+                f.grant_consumptions.len(),
+                f.allowance_consumptions.len(),
+            ]
+            .iter()
+            .any(|n| *n > MAX_ALLOCATIONS)
+        }) {
+            return Err(invalid());
+        }
+        let mut holds = BTreeMap::new();
+        let present = match kind {
+            "wallet" => row.hold.reserved_credits != Credits::ZERO,
+            "grant" => row
+                .hold
+                .funding
+                .as_ref()
+                .is_some_and(|f| !f.settled && !f.grant_reservations.is_empty()),
+            _ => row
+                .hold
+                .funding
+                .as_ref()
+                .is_some_and(|f| !f.settled && !f.allowance_reservations.is_empty()),
+        };
+        if present {
+            holds = outstanding(collection, &row)?;
+        }
+        out.push((kind, holds));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

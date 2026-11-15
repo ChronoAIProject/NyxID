@@ -677,7 +677,10 @@ pub fn settle_usage_funding<'a>(
         }
         // Legacy rows retain wallet-only semantics across retries.
         if row.funding.is_none() {
+            // An explicit zero final quantity returns the saved hold without
+            // pricing consumption. Missing rates still block nonzero usage.
             if row.reserved_credits > Credits::ZERO
+                && row.quantity != Some(0)
                 && super::reservation::find_rate(db, &row.lago_metric_code, row.model.as_deref())
                     .await?
                     .is_none()

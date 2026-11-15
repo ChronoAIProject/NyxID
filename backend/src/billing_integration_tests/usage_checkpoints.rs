@@ -95,6 +95,18 @@ impl Fixture {
         .await;
         create_usage_index(&db).await;
         db.collection::<bson::Document>(USAGE_METER)
+            .create_index(crate::services::billing::stuck_requests::index())
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(USAGE_METER)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"billing_request_id":1})
+                    .build(),
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(USAGE_METER)
             .create_indexes(crate::db::billing_hold_indexes())
             .await
             .unwrap();
@@ -544,3 +556,5 @@ async fn usage_checkpoints_unreserved_fallback_without_lago_has_no_writes() {
     assert!(f.row().await.usage_checkpoint.is_none());
     f.db.drop().await.unwrap();
 }
+
+mod stuck_requests;

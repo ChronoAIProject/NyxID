@@ -1,0 +1,203 @@
+//! Classify uncompleted ordinary requests without inferring death from age alone.
+mod inventory;
+mod ownership;
+use crate::{
+    errors::{AppError, AppResult},
+    models::{credits::Credits, service_billing::BillingMetric, usage_meter::UsageHold},
+};
+use futures::TryStreamExt;
+pub(crate) use inventory::{diagnostics, index};
+use mongodb::bson::{self, Bson, Document, doc};
+use ownership::{Registry, registry};
+
+const METERS: &str = "usage_meter";
+const MAX_ROWS: usize = 10_000;
+const MAX_ALLOCATIONS: usize = 128;
+
+fn unavailable() -> AppError {
+    AppError::Internal("Request ownership inventory unavailable".into())
+}
+fn present(row: &Document, key: &str) -> bool {
+    row.get(key).is_some_and(|v| v != &Bson::Null)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Classification {
+    pub label: &'static str,
+    pub eligible: bool,
+}
+fn classified(label: &'static str) -> Classification {
+    Classification {
+        label,
+        eligible: label == "eligible_now",
+    }
+}
+
+pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult<Classification> {
+    if let Ok(siblings) = row.get_array("request_rows") {
+        let siblings: Vec<Document> = siblings
+            .iter()
+            .map(|v| v.as_document().cloned().ok_or_else(unavailable))
+            .collect::<AppResult<_>>()?;
+        if siblings.len() > 128 {
+            return Err(unavailable());
+        }
+        if let Some(label) = request_blocker(&siblings) {
+            return Ok(classified(label));
+        }
+    }
+    let metric: BillingMetric =
+        bson::from_bson(row.get("metric").cloned().ok_or_else(unavailable)?)
+            .map_err(|_| unavailable())?;
+    let request = row
+        .get_str("billing_request_id")
+        .map_err(|_| unavailable())?;
+    for (field, label) in [
+        ("pool_attempt", "excluded_pool"),
+        ("realtime_session", "excluded_realtime"),
+        ("managed_execution_id", "excluded_managed"),
+        ("model_tariff", "excluded_certified_model"),
+    ] {
+        if present(row, field) {
+            return Ok(classified(label));
+        }
+    }
+    if metric.is_runtime_allocation() {
+        return Ok(classified("excluded_runtime"));
+    }
+    if metric == BillingMetric::VoiceSeconds || request.starts_with("voice:") {
+        return Ok(classified("excluded_voice"));
+    }
+    if let Ok(owner) = row.get_document("forwarded_owner") {
+        match owner.get_str("ingress").map_err(|_| unavailable())? {
+            "proxy" | "llm_gateway" | "llm_provider" => {}
+            "mcp" => return Ok(classified("excluded_mcp")),
+            "ssh_exec" => return Ok(classified("excluded_ssh_exec")),
+            "ssh_tunnel" => return Ok(classified("excluded_ssh_tunnel")),
+            "ssh_web_terminal" => return Ok(classified("excluded_ssh_web_terminal")),
+            "channel_inbound" => return Ok(classified("excluded_channel_inbound")),
+            "channel_outbound" => return Ok(classified("excluded_channel_outbound")),
+            _ => return Ok(classified("excluded_unknown_ingress")),
+        }
+    }
+    if present(row, "quantity") {
+        return Ok(classified("final_quantity_awaiting_retry"));
+    }
+    if present(row, "pending_platform_usage") || present(row, "pending_resale_quantity") {
+        return Ok(classified("durable_finalization_intent"));
+    }
+    if row
+        .get_document("usage_checkpoint")
+        .ok()
+        .is_some_and(|c| c.get_bool("final_report").unwrap_or(false))
+    {
+        return Ok(classified("has_final_checkpoint"));
+    }
+    if row.get_str("status").ok() != Some("forwarded")
+        || row.get_bool("forwarded").ok() != Some(true)
+        || row.get_bool("released").ok() != Some(false)
+    {
+        return Ok(classified("other_terminal_state"));
+    }
+    let hold: UsageHold = bson::from_document(row.clone()).map_err(|_| unavailable())?;
+    if hold.id.is_empty()
+        || request.is_empty()
+        || hold.billing_owner_id.is_empty()
+        || hold.reserved_credits < Credits::ZERO
+    {
+        return Err(unavailable());
+    }
+    if row.get_str("wallet_id").ok().is_none_or(str::is_empty) {
+        return Ok(classified("excluded_metering_only"));
+    }
+    if let Some(f) = &hold.funding {
+        if f.allowance_reservations.len() > MAX_ALLOCATIONS
+            || f.grant_reservations.len() > MAX_ALLOCATIONS
+            || f.allowance_consumptions.len() > MAX_ALLOCATIONS
+            || f.grant_consumptions.len() > MAX_ALLOCATIONS
+            || f.allowance_reservations
+                .iter()
+                .any(|a| a.quantity < 0 || a.period_id.is_empty() || a.allowance_id.is_empty())
+            || f.grant_reservations.iter().any(|g| {
+                g.amount < Credits::ZERO
+                    || g.grant_id.is_empty()
+                    || g.service_limit_key.as_ref().is_some_and(String::is_empty)
+            })
+        {
+            return Err(unavailable());
+        }
+        let grants: std::collections::BTreeSet<_> =
+            f.grant_reservations.iter().map(|r| &r.grant_id).collect();
+        let periods: std::collections::BTreeSet<_> = f
+            .allowance_reservations
+            .iter()
+            .map(|r| &r.period_id)
+            .collect();
+        if grants.len() != f.grant_reservations.len()
+            || periods.len() != f.allowance_reservations.len()
+        {
+            return Err(unavailable());
+        }
+        if f.settled
+            || f.settlement_claim_id.is_some()
+            || !f.grant_consumptions.is_empty()
+            || !f.allowance_consumptions.is_empty()
+        {
+            return Ok(classified("money_protocol_in_progress"));
+        }
+    }
+    let Some(registry) = registry else {
+        return Ok(classified("registry_unavailable"));
+    };
+    let mut result = classified(registry.ownership(row)?);
+    if present(row, "usage_checkpoint") {
+        result.label = "has_nonfinal_checkpoint";
+    }
+    Ok(result)
+}
+
+// Ownership is at request scope: a Realtime/checkpoint coordinator or durable
+// component intent also protects its sibling rows without repeating metadata.
+fn request_blocker(rows: &[Document]) -> Option<&'static str> {
+    for (field, label) in [
+        ("pool_attempt", "excluded_pool"),
+        ("realtime_session", "excluded_realtime"),
+        ("managed_execution_id", "excluded_managed"),
+        ("model_tariff", "excluded_certified_model"),
+    ] {
+        if rows.iter().any(|r| present(r, field)) {
+            return Some(label);
+        }
+    }
+    for row in rows {
+        if let Ok(metric) =
+            bson::from_bson::<BillingMetric>(row.get("metric").cloned().unwrap_or(Bson::Null))
+        {
+            if metric.is_runtime_allocation() {
+                return Some("excluded_runtime");
+            }
+            if metric == BillingMetric::VoiceSeconds {
+                return Some("excluded_voice");
+            }
+        }
+        if row
+            .get_str("billing_request_id")
+            .ok()
+            .is_some_and(|s| s.starts_with("voice:"))
+        {
+            return Some("excluded_voice");
+        }
+        if present(row, "pending_platform_usage") || present(row, "pending_resale_quantity") {
+            return Some("durable_finalization_intent");
+        }
+        if row.get_document("usage_checkpoint").ok().is_some_and(|c| {
+            c.get_bool("final_report").unwrap_or(false) && !c.get_bool("recovered").unwrap_or(false)
+        }) {
+            return Some("has_final_checkpoint");
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests;

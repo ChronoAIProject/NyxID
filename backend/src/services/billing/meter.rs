@@ -372,20 +372,16 @@ pub async fn mark_forwarded(
     let Some(ctx) = &metered.route else {
         return Ok(());
     };
-
+    let mut set = doc! {"status":"forwarded","forwarded":true,"updated_at":"$$NOW"};
+    if let Some(generation) = crate::services::security_readiness_service::local_generation() {
+        set.insert("forwarded_owner",doc! {
+            "generation_id":{"$literal":generation},"ingress":ctx.ingress.as_str(),"marked_at":"$$NOW",
+        });
+    }
     db.collection::<UsageMeterRow>(USAGE_METER)
         .update_many(
-            doc! {
-                "billing_request_id": &ctx.billing_request_id,
-                "status": "reserved",
-            },
-            doc! {
-                "$set": {
-                    "status": "forwarded",
-                    "forwarded": true,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
+            doc! {"billing_request_id":&ctx.billing_request_id,"status":"reserved"},
+            vec![doc! {"$set":set}],
         )
         .await?;
     Ok(())

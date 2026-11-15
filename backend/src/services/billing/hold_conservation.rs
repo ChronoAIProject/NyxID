@@ -1,5 +1,5 @@
 //! Snapshot hold verification and excess repair.
-mod backlog;
+pub(super) mod backlog;
 mod benefits;
 use std::collections::{BTreeMap, BTreeSet};
 
