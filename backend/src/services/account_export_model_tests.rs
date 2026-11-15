@@ -1180,3 +1180,24 @@ async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_privat
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn personal_group_owner_inputs_from_the_real_writer_are_exported() {
+    use crate::models::assistant_group::{AssistantGroup, GroupMessage};
+    let db=crate::test_utils::connect_transaction_test_database("export_group_writer").await;
+    let person=uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users").insert_one(crate::test_utils::test_user(&person,crate::models::user::UserType::Person)).await.unwrap();
+    let mut group:AssistantGroup=bson::from_document(model_fixture("assistant_groups")).unwrap();
+    group.id=format!("nyxg-{}",uuid::Uuid::new_v4().simple());
+    group.user_id=person.clone(); group.collaboration=None;
+    db.collection::<AssistantGroup>("assistant_groups").insert_one(&group).await.unwrap();
+    let message=crate::services::assistant_group_service::append_with_recipients(&db,&person,&group.id,"user",None,"MY_PERSONAL_GROUP_INPUT",&[],&[]).await.unwrap();
+    assert!(message.author_user_id.is_none());
+    assert!(message.collaboration.is_none()); assert!(!message.org_group);
+    let mut other=message.clone();other.id=uuid::Uuid::new_v4().to_string();other.org_group=true;other.text="OTHER_ORG_MEMBER_INPUT".into();
+    db.collection::<GroupMessage>("assistant_group_messages").insert_one(other).await.unwrap();
+    let export=build(&db,&person).await.unwrap();
+    let text=serde_json::to_string(&export).unwrap();
+    assert!(text.contains("MY_PERSONAL_GROUP_INPUT")); assert!(!text.contains("OTHER_ORG_MEMBER_INPUT"));
+    db.drop().await.unwrap();
+}

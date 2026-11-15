@@ -1352,7 +1352,10 @@ fn owner_filter(entry: &personal_data_registry::Entry, account_id: &str) -> Opti
             {"owner_user_id": bson::Bson::Null, "created_by": account_id}
         ]},
         ExportSelector::AuthoredOwnedGroup => {
-            doc! {"user_id": account_id, "author_user_id": account_id}
+            doc! {"user_id": account_id, "$or": [
+                {"author_user_id": account_id},
+                {"role":"user", "author_user_id":Bson::Null, "collaboration":Bson::Null, "org_group":{"$ne":true}}
+            ]}
         }
         // Resolved once, before querying children; never a child-side lookup.
         ExportSelector::JoinedPerson { .. } => return None,
@@ -2233,16 +2236,20 @@ mod tests {
         let group = safe_item(&row, fields_for("assistant_group_messages").unwrap());
         assert_eq!(group["author_user_id"], "other-person");
         assert_eq!(group["text"], "OTHER_AUTHOR_MESSAGE");
-        // The runtime owner filter requires both identifiers to match. A row
-        // authored by another participant is therefore never queried.
+        // Explicit authors must match. Null authors are accepted only for
+        // owner inputs in personal groups, never collaboration/org content.
         let filter = owner_filter(
             personal_data_registry::find("assistant_group_messages").unwrap(),
             "account",
         )
         .unwrap();
-        assert_eq!(filter.get_document("$and").ok(), None);
-        assert_eq!(filter.get_str("user_id"), Ok("account"));
-        assert_eq!(filter.get_str("author_user_id"), Ok("account"));
+        assert_eq!(
+            filter,
+            doc! {"user_id":"account", "$or":[
+                {"author_user_id":"account"},
+                {"role":"user", "author_user_id":Bson::Null, "collaboration":Bson::Null, "org_group":{"$ne":true}}
+            ]}
+        );
     }
 
     #[test]
