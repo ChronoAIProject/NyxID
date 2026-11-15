@@ -571,6 +571,11 @@ async fn integrity_diagnostics_command_count() {
             .iter()
             .all(|d| !d.code.starts_with("billing_plan_repair:"))
     );
-    assert_read_only(&f);
+    // The request inventory aborts its read-only snapshot to release history.
+    // The clean plan audit's stricter command assertion remains unchanged.
+    assert!(f.command_names.lock().unwrap().iter().all(|c| matches!(
+        c.as_str(),
+        "find" | "getMore" | "aggregate" | "abortTransaction"
+    )));
     f.db.drop().await.unwrap();
 }
