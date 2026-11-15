@@ -366,3 +366,9 @@ drop, bounding builders and buffered deliveries together. Refund cleanup is
 tracked by graceful shutdown and affects only the original reservation window.
 
 Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
+
+The response body has a total 120-second delivery deadline starting when it is
+created. A stalled reader loses the response at that deadline and releases its
+replica concurrency permit even if it never polls again. Deadline expiry is a
+non-delivery: the delivery slot is refunded, while the separate hourly attempt
+remains charged. Receiving clients must discard an incomplete JSON response.

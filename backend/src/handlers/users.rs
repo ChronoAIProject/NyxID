@@ -121,6 +121,89 @@ impl Drop for ExportReservationGuard {
     }
 }
 
+const EXPORT_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The timer owns access to the reservation independently of body polling, so
+/// a reader that stops polling cannot retain a replica permit indefinitely.
+struct ExportDeliveryGuard {
+    reservation: std::sync::Arc<std::sync::Mutex<Option<ExportReservationGuard>>>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    deadline: tokio::time::Instant,
+}
+
+impl ExportDeliveryGuard {
+    fn finish(&mut self, delivered: bool) {
+        if let Some(mut guard) = self
+            .reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            if delivered {
+                guard.reservation.take();
+            }
+            drop(guard);
+        }
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+impl Drop for ExportDeliveryGuard {
+    fn drop(&mut self) {
+        self.finish(false);
+    }
+}
+
+fn export_body_with_deadline(
+    body: Body,
+    guard: ExportReservationGuard,
+    duration: std::time::Duration,
+) -> Body {
+    let deadline = tokio::time::Instant::now() + duration;
+    let shutdown = guard.shutdown.clone();
+    let reservation = std::sync::Arc::new(std::sync::Mutex::new(Some(guard)));
+    let timed_reservation = reservation.clone();
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    shutdown.spawn_cleanup(async move {
+        tokio::select! {
+            _ = cancelled => {}
+            _ = tokio::time::sleep_until(deadline) => {
+                // Drop refunds the delivery slot; the independent attempt
+                // reservation remains consumed.
+                drop(timed_reservation.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+            }
+        }
+    });
+    let delivery = ExportDeliveryGuard {
+        reservation,
+        cancel: Some(cancel),
+        deadline,
+    };
+    Body::from_stream(futures::stream::unfold(
+        (body.into_data_stream(), delivery),
+        |(mut source, mut delivery)| async move {
+            use futures::StreamExt;
+            if tokio::time::Instant::now() >= delivery.deadline {
+                return None;
+            }
+            match tokio::time::timeout_at(delivery.deadline, source.next()).await {
+                Ok(Some(Ok(chunk))) => Some((Ok::<_, axum::Error>(chunk), (source, delivery))),
+                Ok(None) => {
+                    delivery.finish(true);
+                    None
+                }
+                Ok(Some(Err(error))) => {
+                    delivery.finish(false);
+                    Some((Err(error), (source, delivery)))
+                }
+                Err(_) => None,
+            }
+        },
+    ))
+}
+
 /// POST /api/v1/users/me/export
 pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> AppResult<Response> {
     super::login_client_context::require_first_party_human(&auth_user)?;
@@ -158,20 +241,10 @@ pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> Ap
                 guard.refund().await?;
             }
             let (parts, body) = response.into_parts();
-            let stream = futures::stream::unfold(
-                (body.into_data_stream(), guard),
-                |(mut source, mut guard)| async move {
-                    use futures::StreamExt;
-                    match source.next().await {
-                        Some(chunk) => Some((chunk, (source, guard))),
-                        None => {
-                            guard.reservation.take();
-                            None
-                        }
-                    }
-                },
-            );
-            Ok(Response::from_parts(parts, Body::from_stream(stream)))
+            Ok(Response::from_parts(
+                parts,
+                export_body_with_deadline(body, guard, EXPORT_BODY_DEADLINE),
+            ))
         }
         Err(error) => {
             if error.status_code().is_server_error() {
@@ -2166,6 +2239,99 @@ mod export_http_tests {
             fixture.request(&[bearer(&fixture.human_token)]).await.0,
             StatusCode::TOO_MANY_REQUESTS
         );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_export_readers_expire_release_permits_and_refund_only_delivery_slots() {
+        assert_eq!(EXPORT_BODY_DEADLINE, std::time::Duration::from_secs(120));
+        let fixture = Fixture::new("export_stalled_reader").await;
+        let attempts = crate::mw::rate_limit::create_per_key_rate_limiter(
+            fixture.state.db.clone(),
+            "account_export_attempts",
+            12,
+            3600,
+        );
+        let mut guards = Vec::new();
+        for _ in 0..2 {
+            assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_some());
+            let reservation = fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .unwrap();
+            let permit = fixture
+                .state
+                .account_export_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap();
+            guards.push(ExportReservationGuard {
+                limiter: fixture.state.account_export_limiter.clone(),
+                reservation: Some(reservation),
+                shutdown: fixture.state.shutdown.clone(),
+                _permit: permit,
+            });
+        }
+        let bodies: Vec<_> = guards
+            .into_iter()
+            .map(|guard| {
+                export_body_with_deadline(
+                    Body::from("unread"),
+                    guard,
+                    std::time::Duration::from_millis(30),
+                )
+            })
+            .collect();
+        assert_eq!(
+            fixture.state.account_export_semaphore.available_permits(),
+            0
+        );
+        // Keep both bodies alive without polling them, exactly as stalled readers do.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        fixture.state.shutdown.idle().await;
+        assert_eq!(
+            fixture.state.account_export_semaphore.available_permits(),
+            2
+        );
+        for body in bodies {
+            assert!(to_bytes(body, 1024).await.unwrap().is_empty());
+        }
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::OK
+        );
+        // The delivered request used one of three slots; both timed-out slots
+        // were refunded, while all three attempts remain charged.
+        for _ in 0..2 {
+            assert!(
+                fixture
+                    .state
+                    .account_export_limiter
+                    .reserve(&fixture.owner)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_some()
+            );
+        }
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_none()
+        );
+        for _ in 0..9 {
+            assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_some());
+        }
+        assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_none());
         fixture.state.db.drop().await.unwrap();
     }
 
