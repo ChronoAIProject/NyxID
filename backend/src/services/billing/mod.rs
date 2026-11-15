@@ -30,6 +30,7 @@ pub mod sandbox_runtime;
 mod sandbox_runtime_math;
 pub mod sandbox_settings;
 pub mod schedules;
+pub(crate) mod stuck_requests;
 mod targets;
 pub mod taxes;
 pub mod topup_expiry;
@@ -200,6 +201,7 @@ pub async fn startup_diagnostics(
     }
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
     items.extend(hold_conservation::diagnostics(db).await?);
+    items.extend(stuck_requests::diagnostics(db).await?);
     Ok(items)
 }
 

@@ -3376,6 +3376,9 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
     usage_meter.create_indexes(billing_hold_indexes()).await?;
     usage_meter
+        .create_index(crate::services::billing::stuck_requests::index())
+        .await?;
+    usage_meter
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"realtime_session.recover_after":1,"_id":1})

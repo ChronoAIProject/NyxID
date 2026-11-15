@@ -1,3 +1,5 @@
+mod dead_letters;
+
 use crate::models::credits::Credits;
 use std::collections::BTreeSet;
 
@@ -881,7 +883,7 @@ pub(crate) async fn recover_retryable_settlements_at(
         .try_collect()
         .await?;
 
-    let mut stats = SettlementRecoveryStats::default();
+    let mut stats = dead_letters::recover_dead_letters(db).await?;
     for row in rows {
         if !super::reconcile::continue_reconcile() {
             break;

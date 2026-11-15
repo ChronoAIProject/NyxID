@@ -94,6 +94,11 @@ pub fn initialize(runtime: Runtime) {
         .set(runtime)
         .expect("security rollout runtime initialized twice");
 }
+pub(crate) fn local_generation() -> Option<&'static str> {
+    RUNTIME
+        .get()
+        .map(|runtime| runtime.identity.generation_id.as_str())
+}
 fn runtime() -> AppResult<&'static Runtime> {
     RUNTIME.get().ok_or(AppError::SecurityReadinessUnavailable)
 }
@@ -149,7 +154,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::channel_media_authority::READINESS,
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
-const MAX_AGE_SECS: i64 = 45;
+pub(crate) const MAX_AGE_SECS: i64 = 45;
 const ACTIVATION_SETTLE_WINDOW: std::time::Duration =
     std::time::Duration::from_secs(2 * MAX_AGE_SECS as u64);
 
@@ -306,8 +311,20 @@ async fn publish_observation(
         platform_policy_required: *platform_policy_required,
         observed_at: Utc::now(),
     };
+    // Registration precedes serving. Preserve the database-time lower bound
+    // on this generation's admission lifetime across every heartbeat. Old
+    // generations without it remain unprovable for legacy usage recovery.
+    let fields = bson::to_document(&row).map_err(|_| AppError::SecurityReadinessUnavailable)?;
+    let mut set = bson::Document::new();
+    for (key, value) in fields {
+        if key != "_id" && key != "observed_at" {
+            set.insert(key, doc! {"$literal": value});
+        }
+    }
+    set.insert("observed_at", "$$NOW");
+    set.insert("started_at", doc! {"$ifNull": ["$started_at", "$$NOW"]});
     db.collection::<SecurityReplica>(COLLECTION_NAME)
-        .replace_one(doc! {"_id": &row.id}, &row)
+        .update_one(doc! {"_id": &row.id}, vec![doc! {"$set": set}])
         .upsert(true)
         .await?;
     Ok(())

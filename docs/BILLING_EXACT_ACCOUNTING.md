@@ -57,6 +57,20 @@ Rows with no wallet are metering-only: settlement charges zero and never reads
 or consumes benefits. Legacy rows with a wallet but no funding snapshot retain
 wallet-only semantics. Their durable `wallet_only` marker prevents retries from
 claiming newly available benefits. Their wallet charge is exact quantity × rate.
+An explicit final quantity of zero returns a legacy wallet hold even if its
+historical rate is unavailable. Unreleased quantities that exhaust settlement
+retries are retried in a slow lane (at most 25 rows and five seconds per
+reconcile pass, one hour between attempts); the final quantity is preserved.
+Provider-delivery dead letters whose money settlement has completed are separate.
+
+Ordinary forwarding records the API process generation in its existing write.
+The registry records database-time registration before serving and retains that
+time across heartbeats. Integrity classifies forwarded unfinished requests by
+ownership, final evidence and recovery protocol, with bounded row/request counts
+and held amounts; this diagnostic never changes usage. Missing registry evidence
+permits no death inference. Old live generations without registration times block
+legacy inference. No healthy stream gains a lifetime limit.
+
 
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced
