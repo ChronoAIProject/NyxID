@@ -1709,6 +1709,14 @@ closed. Cached upstream replay may contain only a terminal response, so terminal
 output is authoritative. Returned `conversation.id` and `response.id` are always
 stored on success. Locally guessing the first session ID is incorrect.
 
+Completed reply text selects assistant messages marked `phase: final_answer`
+when present and excludes explicit commentary and unknown phases. Older output
+without phase metadata retains every assistant message and text part in order,
+including multipart and CJK answers across image/budget continuations. Message
+position alone cannot safely identify legacy progress. Filtering progress from
+those providers therefore requires the upstream message-phase deployment;
+neither streaming deltas nor prose heuristics override terminal output.
+
 NyxID events have a strictly increasing `cursor`: `turn.status` (also carries
 `conversation_id`), `message.started`, `block.started`, `block.delta`,
 `block.completed`, `message.completed`, `turn.completed`, and `turn.continuing`. They reuse the Direct

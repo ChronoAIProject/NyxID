@@ -13,14 +13,13 @@ pub(crate) fn final_text(output: &Value) -> Result<String, ()> {
         .copied()
         .filter(|item| item["phase"] == "final_answer")
         .collect();
-    // Older NyxAgent responses omit phase. Match its native channel delivery:
-    // use the last assistant message, keeping all text parts in that message.
+    // Older responses omit phase and may split one answer over several
+    // messages. Preserve their complete output: position alone cannot tell
+    // progress from answer content without losing valid legacy text.
     let selected = if finals.is_empty() {
         messages
             .into_iter()
-            .rev()
-            .find(|item| item["phase"].is_null())
-            .into_iter()
+            .filter(|item| item["phase"].is_null())
             .collect()
     } else {
         finals
@@ -56,15 +55,40 @@ mod tests {
     }
 
     #[test]
-    fn legacy_messages_use_last_answer_and_preserve_all_its_parts() {
+    fn legacy_messages_preserve_all_messages_and_text_parts() {
         let mut answer = message(Value::Null, "First part.");
         answer["content"].as_array_mut().unwrap().push(json!({
             "type":"output_text","text":"Second part."
         }));
-        let output = json!([message(Value::Null, "Progress."), answer]);
+        let output = json!([message(Value::Null, "First message."), answer]);
         assert_eq!(
             final_text(&output),
-            Ok("First part.\n\nSecond part.".into())
+            Ok("First message.\n\nFirst part.\n\nSecond part.".into())
+        );
+    }
+
+    #[test]
+    fn legacy_multipart_output_preserves_every_message_across_continuation_rounds() {
+        let output = json!([
+            message(Value::Null, "First item"),
+            message(Value::Null, &"文".repeat(256)),
+        ]);
+        assert_eq!(
+            final_text(&output),
+            Ok(format!("First item\n\n{}", "文".repeat(256)))
+        );
+    }
+
+    #[test]
+    fn explicit_final_preserves_multiple_answer_messages_and_cjk() {
+        let output = json!([
+            message(json!("commentary"), "Checking."),
+            message(json!("final_answer"), "First item"),
+            message(json!("final_answer"), &"文".repeat(256)),
+        ]);
+        assert_eq!(
+            final_text(&output),
+            Ok(format!("First item\n\n{}", "文".repeat(256)))
         );
     }
 

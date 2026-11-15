@@ -148,7 +148,14 @@ fn terminal_answer_excludes_progress_messages_with_native_and_legacy_items() {
             ))
             .unwrap();
         stream.push(&frame(done)).unwrap();
-        assert_eq!(stream.terminal.unwrap().text, "The verified result.");
+        assert_eq!(
+            stream.terminal.unwrap().text,
+            if phased {
+                "The verified result."
+            } else {
+                "Checking records.\n\nThe verified result."
+            }
+        );
     }
 }
 
