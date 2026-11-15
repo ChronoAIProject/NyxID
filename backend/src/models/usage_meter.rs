@@ -326,6 +326,9 @@ pub struct UsageMeterRow {
     #[schema(ignore, value_type = Object)]
     pub usage_checkpoint: Option<Box<crate::models::usage_checkpoint::UsageCheckpoint>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore, value_type = Object)]
+    pub realtime_session: Option<Box<crate::models::realtime_session::RealtimeSession>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_attempt: Option<PoolAttemptAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_usage: Option<MachineUsageAttribution>,

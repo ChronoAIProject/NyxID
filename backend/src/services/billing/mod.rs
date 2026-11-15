@@ -20,6 +20,7 @@ pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
 pub(crate) mod rate_cache;
+pub(crate) mod realtime_usage;
 pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
@@ -686,8 +687,10 @@ impl BillingService {
         // not acquire a second wallet/grant/allowance reservation. The unique
         // transaction-id index remains the concurrent-race backstop in
         // `meter::open`.
-        if self.config.billing_enabled && meter::has_complete_meter(&self.db, &ctx).await? {
-            return Ok(MeteredProxyContext::from_route(&ctx));
+        if self.config.billing_enabled
+            && let Some(funded) = meter::complete_meter_funding(&self.db, &ctx).await?
+        {
+            return Ok(MeteredProxyContext::from_route(&ctx).with_funding(funded));
         }
 
         let reservation = if self.config.billing_enabled {
@@ -699,8 +702,10 @@ impl BillingService {
                 self.config.billing_rate_cache_ttl_secs,
             )
             .await;
-            if result.is_err() && meter::has_complete_meter(&self.db, &ctx).await? {
-                return Ok(MeteredProxyContext::from_route(&ctx));
+            if result.is_err()
+                && let Some(funded) = meter::complete_meter_funding(&self.db, &ctx).await?
+            {
+                return Ok(MeteredProxyContext::from_route(&ctx).with_funding(funded));
             }
             result?
         } else {
@@ -723,7 +728,7 @@ impl BillingService {
         if reservation.is_some() {
             // All funded admission holds and meter rows committed together.
             // Recovery owns their durable usage intent after this handoff.
-            return Ok(MeteredProxyContext::from_route(&ctx));
+            return Ok(MeteredProxyContext::from_route(&ctx).with_funding(true));
         }
         meter::open(&self.db, &ctx, None).await
     }
@@ -768,6 +773,33 @@ impl BillingService {
             eligible && self.config.billing_enabled && self.lago.is_some(),
             self.config.billing_reservation_abandon_secs,
         )
+    }
+
+    pub(crate) async fn mark_realtime_forwarded(
+        &self,
+        metered: &MeteredProxyContext,
+        eligible: bool,
+        use_reported_usage: bool,
+    ) -> AppResult<Option<realtime_usage::Session>> {
+        if eligible
+            && self.config.billing_enabled
+            && self.lago.is_some()
+            && metered.funded
+            && metered
+                .route
+                .as_ref()
+                .is_some_and(|route| route.model_tariff.is_none())
+        {
+            let session = realtime_usage::start(&self.db, metered, use_reported_usage).await?;
+            #[cfg(test)]
+            if let Some(gate) = &self.before_send_gate {
+                gate.wait().await?;
+            }
+            Ok(Some(session))
+        } else {
+            self.mark_forwarded(metered).await?;
+            Ok(None)
+        }
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
