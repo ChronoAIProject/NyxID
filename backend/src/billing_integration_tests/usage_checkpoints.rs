@@ -95,7 +95,7 @@ impl Fixture {
         .await;
         create_usage_index(&db).await;
         db.collection::<bson::Document>(USAGE_METER)
-            .create_index(crate::services::billing::stuck_requests::index())
+            .create_indexes(crate::services::billing::stuck_requests::indexes())
             .await
             .unwrap();
         db.collection::<bson::Document>(USAGE_METER)

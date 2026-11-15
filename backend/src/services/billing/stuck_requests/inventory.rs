@@ -1,3 +1,4 @@
+use super::selection::Source;
 use super::*;
 use mongodb::{
     ClientSession,
@@ -18,7 +19,9 @@ pub(crate) fn index() -> mongodb::IndexModel {
         )
         .build()
 }
-pub(super) fn pipeline() -> Vec<Document> {
+pub(super) const PAGE_ROWS: usize = 128;
+const COUNT_KEYS: i64 = 100_001;
+pub(super) fn pipeline(source: Source, after: &str, limit: usize) -> Vec<Document> {
     let mut projection = doc! {"_id":1,"billing_request_id":1,"billing_owner_id":1,"wallet_id":1,
     "status":1,"forwarded":1,"released":1,"metric":1,"created_at":1,"forwarded_owner":1,
     "quantity":1,"pending_platform_usage":1,"pending_resale_quantity":1,
@@ -38,9 +41,9 @@ pub(super) fn pipeline() -> Vec<Document> {
         );
     }
     let mut stages = vec![
-        doc! {"$match":{"forwarded":true,"released":false}},
+        doc! {"$match":source.page_filter(after)},
         doc! {"$sort":{"_id":1}},
-        doc! {"$limit":(MAX_ROWS+1) as i64},
+        doc! {"$limit":limit as i64},
         doc! {"$project":projection},
     ];
     for (collection, path, owner, alias) in [
@@ -82,6 +85,9 @@ struct Group {
 #[derive(Default)]
 struct Inventory {
     rows: usize,
+    candidates: BTreeSet<String>,
+    holdless_lower_bound: Option<i64>,
+    forwarded_count_capped: bool,
     invalid: usize,
     truncated: bool,
     registry_readable: bool,
@@ -105,6 +111,10 @@ fn age(now: bson::DateTime, created: bson::DateTime) -> &'static str {
 }
 impl Inventory {
     fn add(&mut self, row: Document, registry: Option<&Registry>) -> AppResult<()> {
+        let holds = super::super::hold_conservation::backlog::request_holds(&row)?;
+        if holds.iter().all(|(_, amounts)| amounts.is_empty()) {
+            return Ok(());
+        }
         let c = classify(&row, registry)?;
         let request = row
             .get_str("billing_request_id")
@@ -114,7 +124,7 @@ impl Inventory {
         let created = *row.get_datetime("created_at").map_err(|_| unavailable())?;
         let age = age(now, created).to_owned();
         let metric = row.get_str("metric").map_err(|_| unavailable())?;
-        let holds = super::super::hold_conservation::backlog::request_holds(&row)?;
+        self.rows += 1;
         self.requests.insert(request.clone());
         let key = (c.label.to_owned(), c.eligible, age.clone());
         let g = self.groups.entry(key).or_default();
@@ -160,6 +170,16 @@ impl Inventory {
             MAX_ROWS,
             self.truncated
         )];
+        lines.push(format!(
+            "candidate_rows={} counts_are_lower_bounds={} page_rows={PAGE_ROWS}",
+            self.candidates.len(),
+            self.truncated || self.invalid != 0
+        ));
+        if let Some(bound) = self.holdless_lower_bound {
+            lines.push(format!("holdless_rows_at_least={bound} forwarded_count_capped={} count_key_limit={COUNT_KEYS}; conservative bound excludes all potential holds, including receipts and overlapping funding", self.forwarded_count_capped));
+        } else {
+            lines.push("holdless_rows_at_least=unknown".into());
+        }
         for ((class, eligible, age), g) in &self.groups {
             lines.push(format!(
                 "class={class} eligible={eligible} age={age} rows={} requests={}",
@@ -173,114 +193,172 @@ impl Inventory {
         lines.join("\n")
     }
 }
+pub(super) fn count_pipeline() -> Vec<Document> {
+    vec![doc! {"$limit":COUNT_KEYS}, doc! {"$count":"rows"}]
+}
+async fn count_keys(db: &mongodb::Database, tx: &mut ClientSession, index: &str) -> AppResult<i64> {
+    let mut cursor = db
+        .collection::<Document>(METERS)
+        .aggregate(count_pipeline())
+        .hint(Hint::Name(index.to_owned()))
+        .max_time(std::time::Duration::from_millis(500))
+        .session(&mut *tx)
+        .await?;
+    let row = cursor.stream(&mut *tx).try_next().await?;
+    match row {
+        None => Ok(0),
+        Some(row) => match row.get("rows") {
+            Some(Bson::Int32(n)) => Ok(i64::from(*n)),
+            Some(Bson::Int64(n)) => Ok(*n),
+            _ => Err(unavailable()),
+        },
+    }
+}
 async fn scan_once(
     db: &mongodb::Database,
     tx: &mut ClientSession,
     stage: &std::sync::Mutex<&'static str>,
-) -> AppResult<Inventory> {
-    // Registry liveness is observational here; terminal recovery rechecks it
-    // transactionally. The inventory transaction pins meter/resource history across
-    // cursor batches, including on servers with no retained snapshot window.
+    out: &mut Inventory,
+) -> AppResult<()> {
+    // Registry liveness is observational; terminal recovery rechecks it in its
+    // transaction. Meter rows, receipts, resource locks and counts share one
+    // pinned read-only snapshot, including between pages and candidate sources.
     *stage.lock().unwrap() = "registry";
     let mut owner_session = db.client().start_session().await?;
     let registry = registry(db, &mut owner_session).await;
-    if let Err(error) = &registry
-        && super::super::hold_conservation::backlog::expired_snapshot(error)
-    {
-        return Err(registry.err().unwrap());
-    }
-    let registry_failure = registry
+    out.registry_failure = registry
         .as_ref()
         .err()
         .map(|error| ReadFailure::from_error(error, "registry"));
     let registry = registry.ok();
-    let mut out = Inventory {
-        registry_readable: registry.is_some(),
-        registry_failure,
-        ..Default::default()
-    };
+    out.registry_readable = registry.is_some();
+
+    *stage.lock().unwrap() = "holdless_count";
+    let forwarded = count_keys(db, tx, INDEX).await?;
+    let mut potential = 0;
+    // Deliberately count entries in each named partial index, with no filter:
+    // count its entries, without re-fetching documents to evaluate the partial
+    // expression. These indexes are non-multikey, one entry per candidate row.
+    // Sum is an upper bound on the union (overlapping sources count twice).
+    // If any source is capped, it alone exhausts the capped total: report zero,
+    // never subtract a truncated candidate scan and overstate hold-less rows.
+    for source in Source::ALL {
+        potential += count_keys(db, tx, source.index()).await?;
+    }
+    out.holdless_lower_bound = Some((forwarded - potential).max(0));
+    out.forwarded_count_capped = forwarded == COUNT_KEYS;
+
     *stage.lock().unwrap() = "inventory";
-    let mut cursor = db
-        .collection::<Document>(METERS)
-        .aggregate(pipeline())
-        .hint(Hint::Name(INDEX.to_owned()))
-        .max_time(std::time::Duration::from_secs(3))
-        .batch_size(256)
-        .session(&mut *tx)
-        .await?;
-    while let Some(row) = cursor.stream(&mut *tx).try_next().await? {
-        if out.rows == MAX_ROWS {
-            out.truncated = true;
-            break;
-        }
-        out.rows += 1;
-        #[cfg(test)]
-        if out.rows == 1 {
-            super::tests::after_first_row().await;
-        }
-        if out.add(row, registry.as_ref()).is_err() {
-            out.invalid += 1;
+    let mut after = [String::new(), String::new(), String::new()];
+    let mut done = [false; 3];
+    while done.iter().any(|finished| !finished) {
+        for (i, source) in Source::ALL.into_iter().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let mut cursor = db
+                .collection::<Document>(METERS)
+                .aggregate(pipeline(source, &after[i], PAGE_ROWS))
+                .hint(Hint::Name(source.index().to_owned()))
+                .max_time(std::time::Duration::from_millis(500))
+                .batch_size(PAGE_ROWS as u32)
+                .session(&mut *tx)
+                .await?;
+            let mut count = 0;
+            while let Some(row) = cursor.stream(&mut *tx).try_next().await? {
+                count += 1;
+                after[i] = row.get_str("_id").map_err(|_| unavailable())?.to_owned();
+                if out.candidates.contains(&after[i]) {
+                    continue;
+                }
+                if out.candidates.len() == MAX_ROWS {
+                    out.truncated = true;
+                    return Ok(());
+                }
+                out.candidates.insert(after[i].clone());
+                if out.add(row, registry.as_ref()).is_err() {
+                    out.invalid += 1;
+                }
+                #[cfg(test)]
+                if out.candidates.len() == 1 {
+                    super::tests::after_first_row().await;
+                }
+            }
+            done[i] = count < PAGE_ROWS;
         }
     }
-    Ok(out)
+    Ok(())
 }
 pub(crate) async fn diagnostics(
     db: &mongodb::Database,
 ) -> AppResult<Vec<super::super::BillingStartupDiagnostic>> {
     let started = std::time::Instant::now();
     let stage = std::sync::Mutex::new("session");
-    let result = tokio::time::timeout(
-        TIMEOUT,
-        super::super::hold_conservation::backlog::retry_snapshot_read(|| async {
+    // Progress lives outside the cancellable future. A deadline or later-page
+    // error retains the already classified prefix, explicitly as lower bounds.
+    let mut inventory = Inventory::default();
+    let result = tokio::time::timeout(TIMEOUT, async {
+        for attempt in 0..8 {
             let mut tx = db.client().start_session().await?;
             tx.start_transaction()
                 .read_concern(ReadConcern::snapshot())
                 .await?;
-            let result = scan_once(db, &mut tx, &stage).await;
-            // This is a read-only transaction. Abort releases the pinned history;
-            // dropping a cancelled session also queues an abort in the driver.
+            let result = scan_once(db, &mut tx, &stage, &mut inventory).await;
             let failed_stage = *stage.lock().unwrap();
             *stage.lock().unwrap() = "snapshot_release";
             let cleanup = tx.abort_transaction().await;
             match result {
                 Err(error) => {
                     *stage.lock().unwrap() = failed_stage;
-                    Err(error)
+                    if inventory.candidates.is_empty()
+                        && attempt < 7
+                        && super::super::hold_conservation::backlog::expired_snapshot(&error)
+                    {
+                        inventory = Inventory::default();
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        continue;
+                    }
+                    return Err(error);
                 }
-                Ok(inventory) => {
-                    cleanup?;
-                    Ok(inventory)
-                }
+                Ok(()) => return cleanup.map_err(AppError::from),
             }
-        }),
-    )
-    .await;
-    let elapsed = started.elapsed().as_millis();
-    let detail = match result {
-        Ok(Ok(inventory)) if inventory.rows == 0 => return Ok(vec![]),
-        Ok(Ok(inventory)) => {
-            let reason = if let Some(failure) = &inventory.registry_failure {
-                failure.metadata()
-            } else if inventory.invalid != 0 {
-                "reason=row_decode_error stage=decode".into()
-            } else if inventory.truncated {
-                "reason=row_limit stage=inventory".into()
-            } else {
-                "reason=ok".into()
-            };
-            format!("{}\n{reason} elapsed_ms={elapsed}", inventory.detail())
         }
-        Ok(Err(error)) => ReadFailure::from_error(&error, *stage.lock().unwrap()).detail(elapsed),
-        Err(_) => ReadFailure {
+        unreachable!()
+    })
+    .await;
+    let failure = match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(ReadFailure::from_error(&error, *stage.lock().unwrap())),
+        Err(_) => Some(ReadFailure {
             reason: "deadline_exceeded",
             stage: *stage.lock().unwrap(),
             database_code: None,
-        }
-        .detail(elapsed),
+        }),
     };
+    inventory.truncated |= failure.is_some();
+    if failure.is_none()
+        && inventory.candidates.is_empty()
+        && inventory.holdless_lower_bound == Some(0)
+    {
+        return Ok(vec![]);
+    }
+    let reason = if let Some(failure) = failure.as_ref().or(inventory.registry_failure.as_ref()) {
+        failure.metadata()
+    } else if inventory.invalid != 0 {
+        "reason=row_decode_error stage=decode".into()
+    } else if inventory.truncated {
+        "reason=row_limit stage=inventory".into()
+    } else {
+        "reason=ok".into()
+    };
+    let detail = format!(
+        "{}\n{reason} elapsed_ms={}",
+        inventory.detail(),
+        started.elapsed().as_millis()
+    );
     Ok(vec![super::super::BillingStartupDiagnostic{
-        code:"billing_stuck_requests".into(),summary:"Forwarded request recovery eligibility".into(),detail,
-        remediation:"Read-only classification. Live includes the registry's 45-second window plus a two-minute margin. Legacy eligibility requires registration times for every live generation and an extra hour before the earliest registration. Missing, malformed, empty or unreadable registry evidence authorizes no cleanup. Amounts exclude returned holds and matching applied resource locks. Groups overlap in requests and resources; truncated totals are not population totals. No quantities or charges are changed by this diagnostic.".into(),detected_at:chrono::Utc::now(),
+        code:"billing_stuck_requests".into(),summary:"Held forwarded request recovery eligibility".into(),detail,
+        remediation:"Read-only classification of potential wallet, grant and allowance holds. At most 10,000 distinct candidate rows, in 128-row pages, within four seconds; incomplete groups mean at least the reported counts and amounts. The separate hold-less lower bound uses at most 100,001 index keys per source and may undercount overlapping funding or returned holds. Siblings are bounded at 129 per row; locks and receipts are deducted in the same snapshot. Live includes the registry's 45-second window plus a two-minute margin. Legacy eligibility requires an extra hour before every live generation's registration. Missing or unreadable registry evidence authorizes no cleanup. No quantities or charges change.".into(),detected_at:chrono::Utc::now(),
     }])
 }
 
@@ -327,6 +405,7 @@ impl ReadFailure {
         }
         value
     }
+    #[cfg(test)]
     fn detail(&self, elapsed: u128) -> String {
         format!(
             "complete=false; {} elapsed_ms={elapsed}; no cleanup eligibility established",

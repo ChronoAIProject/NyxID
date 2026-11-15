@@ -3,7 +3,7 @@
 use super::*;
 
 #[tokio::test]
-#[ignore = "two million historical rows and six thousand unfinished rows"]
+#[ignore = "500,000 hold-less forwarded rows and 6,000 held rows"]
 async fn stuck_request_inventory_production_scale() {
     let f = Fixture::new().await;
     let _metered = f.open(true).await;
@@ -17,17 +17,24 @@ async fn stuck_request_inventory_production_scale() {
         .delete_many(doc! {})
         .await
         .unwrap();
-    for batch in 0..200 {
+    for batch in 0..50 {
         let rows: Vec<_> = (batch * 10_000..(batch + 1) * 10_000)
             .map(|i| {
-                doc! {
-                    "_id":uuid::Uuid::new_v4().to_string(), "transaction_id":format!("history-{i}"),
-                    "billing_request_id":uuid::Uuid::new_v4().to_string(), "status":"finalized",
-                    "forwarded":true, "released":true, "quantity":1000_i64,
-                    "billing_owner_id":&f.owner, "reserved_credits":Credits::ZERO,
-                    "metric":"tokens", "created_at":bson::DateTime::from_millis(0),
-                    "padding":"x".repeat(400),
+                let mut row = raw.clone();
+                row.insert("_id", format!("a-empty-{i:09}"));
+                row.insert("transaction_id", format!("empty-{i}"));
+                row.insert("billing_request_id", format!("empty-{}", i / 128));
+                row.insert("flush_seq", (i % 128) as i64);
+                row.insert("reserved_credits", Credits::ZERO);
+                row.insert(
+                    "funding",
+                    doc! {"settled":false,"grant_reservations":[],"allowance_reservations":[]},
+                );
+                if i % 2 == 0 {
+                    row.insert("wallet_id", Bson::Null);
                 }
+                row.insert("padding", "x".repeat(1024));
+                row
             })
             .collect();
         f.db.collection::<Document>(METERS)
@@ -48,7 +55,7 @@ async fn stuck_request_inventory_production_scale() {
     let rows: Vec<_> = (0..6000)
         .map(|i| {
             let mut row = raw.clone();
-            row.insert("_id", uuid::Uuid::new_v4().to_string());
+            row.insert("_id", format!("z-held-{i:09}"));
             row.insert("transaction_id", format!("unfinished-{i}"));
             row.insert("billing_request_id", format!("unfinished-{i}"));
             row.insert("created_at", bson::DateTime::from_millis(0));
@@ -100,20 +107,51 @@ async fn stuck_request_inventory_production_scale() {
         bson::DateTime::now(),
     )
     .await;
-    let plan =
-        f.db.run_command(doc! {
-            "explain": {
-                "aggregate": METERS, "pipeline": inventory::pipeline(),
-                "hint": inventory::INDEX, "cursor": {},
-            },
-            "verbosity": "executionStats",
-        })
-        .await
-        .unwrap();
-    let json = serde_json::to_string(&plan).unwrap();
-    assert!(json.contains(inventory::INDEX));
-    assert!(!json.contains("COLLSCAN"), "{json}");
-    println!("SCALE_PLAN {json}");
+    for source in selection::Source::ALL {
+        for after in ["", "z-held-000001000"] {
+            let plan = f.db.run_command(doc! {"explain":{
+                "aggregate":METERS,"pipeline":inventory::pipeline(source,after,inventory::PAGE_ROWS),
+                "hint":source.index(),"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
+            let json = serde_json::to_string(&plan).unwrap();
+            assert!(json.contains(source.index()));
+            assert!(!json.contains("COLLSCAN"), "{json}");
+            assert!(!json.contains("\"stage\":\"SORT\""), "{json}");
+            let stats = plan.get_array("stages").unwrap()[0]
+                .as_document()
+                .unwrap()
+                .get_document("$cursor")
+                .unwrap()
+                .get_document("executionStats")
+                .unwrap();
+            assert!(
+                stats.get_i32("totalDocsExamined").unwrap() <= inventory::PAGE_ROWS as i32,
+                "{plan:?}"
+            );
+            println!("SCALE_PAGE_PLAN {json}");
+        }
+    }
+    for name in std::iter::once(inventory::INDEX).chain(selection::Source::ALL.map(|s| s.index())) {
+        let plan =
+            f.db.run_command(doc! {"explain":{
+            "aggregate":METERS,"pipeline":inventory::count_pipeline(),
+            "hint":name,"cursor":{}},"verbosity":"executionStats"})
+                .await
+                .unwrap();
+        let stages = plan.get_array("stages").unwrap();
+        let stats = stages[0]
+            .as_document()
+            .unwrap()
+            .get_document("$cursor")
+            .unwrap()
+            .get_document("executionStats")
+            .unwrap();
+        assert_eq!(stats.get_i32("totalDocsExamined").unwrap(), 0, "{plan:?}");
+        assert!(
+            stats.get_i32("totalKeysExamined").unwrap() <= 100_001,
+            "{plan:?}"
+        );
+        println!("SCALE_COUNT_PLAN {}", serde_json::to_string(&plan).unwrap());
+    }
     for attempt in 0..3 {
         let start = std::time::Instant::now();
         let churn = async {
@@ -135,6 +173,11 @@ async fn stuck_request_inventory_production_scale() {
         println!(
             "SCALE_RUST attempt={attempt} elapsed_ms={} detail={}",
             start.elapsed().as_millis(),
+            result[0].detail
+        );
+        assert!(
+            result[0].detail.contains("holdless_rows_at_least=94001"),
+            "{}",
             result[0].detail
         );
         assert!(
