@@ -404,8 +404,12 @@ while the separate hourly attempt remains charged.
 Web and mobile reject transport/read errors and byte counts that differ from a
 present `Content-Length` only when `Content-Encoding` is absent or `identity`.
 Fetch exposes decoded bytes; a nonidentity encoding makes that length unusable,
-so clients use their JSON/structural fallback. Web also parses the JSON before starting a download or
-showing success. Mobile never reads the temporary file back or parses the full
+so clients use their JSON/structural fallback. When an unencoded length matches,
+web checks the first and last non-whitespace bytes for `{` / `}` through at most
+4 KiB blob slices and saves the original blob directly, without a full body string
+or parsed object graph. This is a completeness/structure check, not full syntax
+validation. With no usable length, web fully parses the JSON and checks the format
+before downloading or showing success. Mobile never reads the temporary file back or parses the full
 body: when the unencoded length is present, the exact byte count proves completeness. When
 it is absent or an encoding is present, mobile requires a clean transport completion and checks that the
 first and last non-whitespace bytes are `{` and `}`. It tracks only those two bytes
