@@ -54,7 +54,7 @@
   "Disable MFA": "停用 MFA",
   "Disable Two-Factor Authentication": "停用双重验证",
   "Disabling two-factor authentication…": "正在停用双重验证…",
-  "Download a JSON copy of your account profile, services, activity, your assistant inputs, private assistant replies and channel metadata, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.": "下载账户资料、服务、活动、你编写的助手输入、私人对话中的助手回复及频道元数据、会话元数据、机器元数据及账单摘要的 JSON 副本。密码、令牌、密钥、机密、原始文件和临时协调记录不会包含在内；较大的分区可能会被截断。",
+  "Download a JSON copy of your account profile, services, activity, your assistant inputs, private assistant replies to web/mobile turns without platform routing, and channel metadata, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.": "下载账户资料、服务、活动、你编写的助手输入、私人对话中未路由至消息平台的网页或移动端轮次的助手回复及频道元数据、会话元数据、机器元数据及账单摘要的 JSON 副本。密码、令牌、密钥、机密、原始文件和临时协调记录不会包含在内；较大的分区可能会被截断。",
   "Download your data": "下载你的数据",
   "Email resend is not yet available on this server.": "此服务器暂不支持重新发送邮件。",
   "Enable for app sign-ins": "为应用登录启用",

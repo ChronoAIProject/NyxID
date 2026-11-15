@@ -1368,7 +1368,6 @@ fn private_conversation_filter(prefix: &str) -> Document {
         "collaboration",
         "platform_thread",
         "channel",
-        "reply_channel",
         "group_id",
     ] {
         filter.insert(format!("{prefix}{field}"), Bson::Null);

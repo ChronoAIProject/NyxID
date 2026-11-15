@@ -1149,6 +1149,7 @@ async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_privat
         ),
         ("private", "user", None, "MY_LEGACY_INPUT", true),
         ("private", "assistant", None, "MY_PRIVATE_REPLY", true),
+        ("private", "assistant", None, "CHANNEL_ORIGIN_REPLY", false),
     ];
     for (index, (conversation, role, author, text, _)) in cases.iter().enumerate() {
         let mut message: AssistantMessage =
@@ -1159,7 +1160,11 @@ async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_privat
         message.role = (*role).into();
         message.author = *author;
         message.text = (*text).into();
-        message.origin = Some(TurnOrigin::User);
+        message.origin = Some(if *text == "CHANNEL_ORIGIN_REPLY" {
+            TurnOrigin::Channel
+        } else {
+            TurnOrigin::User
+        });
         message.platform_origin = None;
         message.platform_reply = None;
         db.collection::<AssistantMessage>("assistant_messages")
@@ -1172,6 +1177,10 @@ async fn shared_guest_content_and_replies_are_excluded_but_own_inputs_and_privat
     for (_, _, _, text, included) in cases {
         assert_eq!(encoded.contains(text), included, "{text}");
     }
+    // Current delivery preferences cannot retroactively reclassify stored replies.
+    db.collection::<Document>("assistant_conversations").update_one(doc! {"_id":"private"},doc! {"$set":{"reply_channel":{"platform":"telegram","conversation_id":"destination"}}}).await.unwrap();
+    let changed = build(&db, &person).await.unwrap();
+    assert_eq!(export.sections["assistant"]["assistant_messages"].items, changed.sections["assistant"]["assistant_messages"].items);
     assert!(!encoded.contains("GUEST_TITLE_SENTINEL"));
     assert!(encoded.contains("Private title"));
     assert_eq!(

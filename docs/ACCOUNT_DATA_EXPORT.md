@@ -59,7 +59,7 @@ timestamps.
 The remaining subsections are explicit registry mappings. They expose only
 user-visible metadata or content appropriate to that collection: service
 connections and service metadata; session lifecycle metadata; assistant
-private conversation titles, the person's explicitly owner-authored user inputs, private assistant replies and attachment metadata; channel message metadata
+private conversation titles, the person's explicitly owner-authored user inputs, assistant replies to web/mobile-origin turns in private conversations without per-message platform routing, and attachment metadata; channel message metadata
 and routing metadata; action, notification, machine-job and other account
 activity metadata; audit event type/time metadata for events authored by the
 person; and billing wallet summary, received grants and usage rollups. Every
@@ -326,3 +326,5 @@ resolved parent scope. Source-query failures still mark the view unavailable.
 
 Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
 Assistant-message reads resolve up to 10,000 private conversation ids once per export, then use indexed message predicates with batches of 100. Explicit owner-authored inputs do not need a conversation join. If private scope is capped, `scope_truncated` is true.
+
+Reply classification uses each stored message’s origin, platform origin and platform reply fields (`assistant_nyxagent::persist_message` and settled-turn message writes), not the conversation’s mutable `reply_channel`. Replies to channel-origin turns, platform-routed replies and replies in shared/guest conversations are excluded. Changing a delivery preference cannot change which previously stored replies qualify.
