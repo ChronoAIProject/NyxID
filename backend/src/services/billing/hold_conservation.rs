@@ -1,4 +1,5 @@
 //! Snapshot hold verification and wallet excess repair.
+mod backlog;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
@@ -789,10 +790,16 @@ pub(super) async fn diagnostics(db: &Database) -> AppResult<Vec<super::BillingSt
             // has a distinct resource key. Samples retain one resource's
             // signed difference, never add unrelated allowance units.
             doc! {"$group":{"_id":{"$ifNull":["$wallet_id","$_id"]},
-            "difference":{"$first":"$difference"}}},
+            "difference":{"$first":"$difference"},
+            "resources":{"$sum":1},
+            "has_wallet":{"$first":{"$ne":[{"$ifNull":["$wallet_id",Bson::Null]},Bson::Null]}}}},
         ];
         let mut count = pipeline.clone();
-        count.push(doc! {"$count":"value"});
+        count.push(doc! {"$group":{"_id":Bson::Null,
+            "resources":{"$sum":"$resources"},
+            "wallets":{"$sum":{"$cond":["$has_wallet",1,0]}},
+            "without_wallet":{"$sum":{"$cond":["$has_wallet",0,"$resources"]}},
+        }});
         facets.insert(format!("count_{index}"), count);
         let mut samples = pipeline;
         samples.extend([doc! {"$sort":{"_id":1}}, doc! {"$limit":5}]);
@@ -815,17 +822,23 @@ pub(super) async fn diagnostics(db: &Database) -> AppResult<Vec<super::BillingSt
             if *group_exact != exact {
                 continue;
             }
-            let count = row
+            let counts = row
                 .get_array(format!("count_{index}"))
                 .ok()
                 .and_then(|v| v.first())
-                .and_then(Bson::as_document)
-                .and_then(|v| v.get("value"))
-                .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(i64::from)))
-                .unwrap_or(0);
-            if count == 0 {
+                .and_then(Bson::as_document);
+            let count = |key: &str| {
+                counts
+                    .and_then(|v| v.get(key))
+                    .and_then(|v| v.as_i64().or_else(|| v.as_i32().map(i64::from)))
+                    .unwrap_or(0)
+            };
+            let resources = count("resources");
+            if resources == 0 {
                 continue;
             }
+            let wallets = count("wallets");
+            let without_wallet = count("without_wallet");
             let samples: Vec<_> = row
                 .get_array(format!("samples_{index}"))
                 .into_iter()
@@ -837,7 +850,7 @@ pub(super) async fn diagnostics(db: &Database) -> AppResult<Vec<super::BillingSt
                         .map(|id| format!("{id}: {}", v.get_str("difference").unwrap_or("unknown")))
                 })
                 .collect();
-            details.push(format!("{kind}: {count} affected wallets/resources; sample differences (one resource per wallet): {}",samples.join(", ")));
+            details.push(format!("{kind}: {resources} affected resources; {wallets} wallets; {without_wallet} resources without a wallet; sample differences (one resource per wallet, or unbound resource): {}",samples.join(", ")));
             remediations.push(format!("{kind}: {remediation}"));
         }
         if !details.is_empty() {
@@ -860,6 +873,7 @@ pub(super) async fn diagnostics(db: &Database) -> AppResult<Vec<super::BillingSt
             });
         }
     }
+    output.extend(backlog::diagnostics(db).await?);
     Ok(output)
 }
 
@@ -876,6 +890,54 @@ mod tests {
             Bson::Array(values) => values.iter().find_map(|v| stat(v, key)),
             _ => None,
         }
+    }
+
+    #[tokio::test]
+    async fn hold_diagnostics_reports_resources_and_unfinished_rows() {
+        let db = crate::test_utils::connect_transaction_test_database("hold_diagnostics_red").await;
+        db.collection::<Document>(METERS)
+            .create_indexes(crate::db::billing_hold_indexes())
+            .await
+            .unwrap();
+        for (id, wallet) in [("g1", Some("w")), ("g2", Some("w")), ("g3", None)] {
+            db.collection::<Document>(OBSERVATIONS)
+                .insert_one(doc! {
+                    "_id":format!("{GRANTS}:{id}"),"wallet_id":wallet,"kind":"grant",
+                    "exact":true,"persistent":true,"difference":"+0.0000008",
+                })
+                .await
+                .unwrap();
+        }
+        db.collection::<Document>(GRANTS)
+            .insert_one(doc! {
+                "_id":"g1","recipient_user_id":"owner","active_settlement":Bson::Null,
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>(METERS).insert_one(doc! {
+            "_id":"unfinished","billing_owner_id":"owner","wallet_id":"w",
+            "status":"forwarded","forwarded":true,"released":false,"quantity":Bson::Null,
+            "metric":"tokens","created_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::days(8)),
+            "funding":{"settled":false,"grant_reservations":[{"grant_id":"g1","amount":"0.0000008".parse::<Credits>().unwrap()}]},
+        }).await.unwrap();
+        let result = super::super::startup_diagnostics(&db).await.unwrap();
+        db.drop().await.unwrap();
+        let conservation = result
+            .iter()
+            .find(|d| d.code == "billing_hold_conservation")
+            .unwrap();
+        assert!(
+            conservation
+                .detail
+                .contains("grant: 3 affected resources; 1 wallets; 1 resources without a wallet"),
+            "{}",
+            conservation.detail
+        );
+        let backlog = result
+            .iter()
+            .find(|d| d.code == "billing_hold_backlog")
+            .expect("unfinished rows must be visible");
+        assert!(backlog.detail.contains("grant status=forwarded age=over_7d unit=credits rows=1 held=0.0000008 resources=1 wallets=1 owners=1"),"{}",backlog.detail);
     }
 
     #[tokio::test]

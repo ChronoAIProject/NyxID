@@ -658,6 +658,53 @@ async fn hold_conservation_settlement_lock_handoffs_are_exact() {
             () = gate.entered() => {},
         }
         f.holds_clean().await;
+        let diagnostics = crate::services::billing::startup_diagnostics(&f.db)
+            .await
+            .unwrap();
+        let backlog = diagnostics
+            .iter()
+            .find(|d| d.code == "billing_hold_backlog");
+        let detail = backlog.map(|d| d.detail.as_str()).unwrap_or("");
+        assert!(!detail.contains("complete=false"), "{phase:?}: {detail}");
+        for (kind, collection, field, unit) in [
+            ("wallet", BILLING_WALLET, "reserved_credits", "credits"),
+            ("grant", "credit_grants", "reserved", "credits"),
+            (
+                "allowance",
+                "usage_allowance_periods",
+                "reserved_quantity",
+                "images",
+            ),
+        ] {
+            let resource =
+                f.db.collection::<bson::Document>(collection)
+                    .find_one(doc! {})
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let counter = if kind == "allowance" {
+                Credits::from_whole(resource.get_i64(field).unwrap())
+            } else {
+                Credits::from_bson(
+                    resource.get(field).unwrap().clone(),
+                    crate::models::credits::SCALE,
+                )
+                .unwrap()
+            };
+            let prefix = format!("{kind} total unit={unit} ");
+            if let Some(line) = detail.lines().find(|line| line.starts_with(&prefix)) {
+                assert!(
+                    line.contains(&format!(" held={counter} ")),
+                    "{phase:?}: {line}; stored={counter}"
+                );
+            } else {
+                assert_eq!(
+                    counter,
+                    Credits::ZERO,
+                    "{phase:?}: missing {kind}: {detail}"
+                );
+            }
+        }
         drop(settle);
         f.recover().await;
         f.holds_clean().await;
@@ -998,10 +1045,10 @@ async fn hold_conservation_benefit_counter_mismatches_are_diagnostic_only() {
     assert!(
         diagnostic
             .detail
-            .contains("grant: 1 affected wallets/resources;")
+            .contains("grant: 1 affected resources; 1 wallets;")
             && diagnostic
                 .detail
-                .contains("allowance: 1 affected wallets/resources;"),
+                .contains("allowance: 1 affected resources; 1 wallets;"),
         "deduplicate resource owners per kind"
     );
     assert_eq!(repair_audits(&f).await, 0);
