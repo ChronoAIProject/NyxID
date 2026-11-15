@@ -928,6 +928,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reparented_reviewed_children_are_noops() {
+        let db = crate::test_utils::connect_transaction_test_database("orphan_reparent").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        db.collection::<Document>("platform_delivery_tests")
+            .insert_one(doc! {"_id":"child", "installation_id":"missing-parent"})
+            .await
+            .unwrap();
+        let dry = scan(&db).await.unwrap();
+        assert_eq!(dry.candidate_count, 1);
+        db.collection::<Document>("platform_bot_installations")
+            .insert_one(doc! {"_id":"live-parent"})
+            .await
+            .unwrap();
+        let changed = doc! {"_id":"child", "installation_id":"live-parent"};
+        db.collection::<Document>("platform_delivery_tests")
+            .replace_one(doc! {"_id":"child"}, changed.clone())
+            .await
+            .unwrap();
+        let apply = start(&db, "operator", true, Some(&dry.digest))
+            .await
+            .unwrap();
+        finish(&db, &apply.job_id).await.unwrap();
+        assert_eq!(status(&db, &apply.job_id).await.unwrap().noop_count, 1);
+        assert_eq!(
+            db.collection::<Document>("platform_delivery_tests")
+                .find_one(doc! {"_id":"child"})
+                .await
+                .unwrap(),
+            Some(changed)
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn persistent_page_errors_fail_after_the_cap_and_finished_pages_are_purged() {
         let db = crate::test_utils::connect_transaction_test_database("orphan_retry_purge").await;
         crate::test_utils::init_test_audit_chain_hmac_key();

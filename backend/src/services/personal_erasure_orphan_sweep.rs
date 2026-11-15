@@ -167,9 +167,9 @@ async fn apply_group(
     let mut present = false;
     for chunk in group.row_ids.chunks(APPLY_BATCH) {
         let mut filter = doc! {"_id": {"$in": chunk.to_vec()}};
-        if group.joined_parent.is_none() {
-            filter.insert(group.field, group.owner_id.as_str());
-        }
+        // An old review authorizes this parent/owner relationship, not every
+        // future document that happens to reuse the same child identity.
+        filter.insert(group.field, group.owner_id.as_str());
         let mut tx = db.client().start_session().await?;
         tx.start_transaction()
             .read_concern(mongodb::options::ReadConcern::snapshot())
