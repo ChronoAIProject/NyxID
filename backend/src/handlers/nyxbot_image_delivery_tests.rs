@@ -4214,3 +4214,6 @@ async fn attachment_preparation_accepted_upload_without_message_receipt_is_never
     assert_eq!(server.received_requests().await.unwrap().len(), before);
     assert_eq!(claim(&f).await.items[0].state.as_str(), "unknown");
 }
+
+#[path = "nyxbot_scheduled_preparation_tests.rs"]
+mod scheduled_preparation_tests;

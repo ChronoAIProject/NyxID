@@ -94,6 +94,7 @@ pub(crate) async fn mark_provider_attempt() -> AppResult<()> {
     revalidate_post_effect().await?;
     super::channel_turn_preparation::effect().await?;
     super::channel_image_preparation::effect().await?;
+    super::channel_text_preparation::effect().await?;
     let _ = PROVIDER_ATTEMPT.try_with(|progress| {
         progress.store(true, std::sync::atomic::Ordering::Relaxed);
     });

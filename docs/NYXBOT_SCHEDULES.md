@@ -482,8 +482,22 @@ old/new replicas can still race during rollout. Remove the v1 read path and
 collection/index one release later, at least seven days after deployment;
 see `CHANNEL_BOT_RELAY.md` for the full compatibility contract.
 
-Final delivery is claimed once. If a replica dies around a remote send, recovery
-reports `result_delivery_interrupted` rather than duplicating an ambiguous send.
+Chat results keep the existing leased result claim and per-part text journal.
+Text preparation keeps a part pending under an exact MongoDB-time lease; the
+provider boundary transaction checks both the current result claim and the part
+attempt before changing it to sending. The existing trigger worker can recover
+an expired preparation, revalidate the destination, and send only the unsent
+suffix. It never replays the admitted turn or an accepted part. The parent lease,
+retry deadlines and expiry decisions use MongoDB time. A send attempt is bounded
+to five minutes and can make no further effect after its database deadline.
+
+A replica lost after a possible provider effect remains uncertain. Legacy claimed
+results without recovery evidence report `result_delivery_interrupted`; a
+receipt-less text part fails delivery without resending it. No operator action is
+needed for this additive change during an ordinary rolling update. An older
+multipart-capable replica may claim a pending preparation with its own attempt,
+which fences the newer worker; rollback preserves those states and receipts but
+loses recovery for preparation started by the old binary.
 Schedule-to-webhook delivery retains the existing signed delivery record and
 optional encrypted replay envelope. Plain notification/device deliveries use
 their existing transport paths.

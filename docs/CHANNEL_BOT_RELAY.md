@@ -2522,6 +2522,14 @@ content under the same automation run is rejected. These journals have no TTL
 and are purged on owner deletion. They do not replace ordinary relay receipts or
 the legacy/v2 image migration checks.
 
+Saved manager and scheduled chat text parts now stay pending under an additive
+MongoDB-time preparation lease until a transaction fences the current parent and
+part at the provider boundary. Existing workers recover only that proven-unsent
+state and recheck live authority between effects. Older multipart writers can
+claim pending parts only by replacing the attempt and setting sending, fencing
+new preparations; no operator action is required for an ordinary rolling update.
+See the full saved reply contract above for bounds and rollback.
+
 ### Channel reply length
 
 NyxBot and specialist turns destined for a chat receive turn-only length guidance

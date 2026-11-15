@@ -23,11 +23,21 @@ pub struct ChannelTextDelivery {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TextPart {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<TextPreparation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formatting_fallback: Option<String>,
     pub state: TextPartState,
     pub attempt_id: Option<String>,
     pub platform_message_id: Option<String>,
     pub outbound_message_id: Option<String>,
+}
+
+/// Only Pending is reclaimable. Sending always means a possible provider effect.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TextPreparation {
+    pub version: u32,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub lease_until: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
