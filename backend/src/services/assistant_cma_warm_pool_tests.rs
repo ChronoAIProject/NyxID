@@ -195,7 +195,8 @@ fn warm_pool_resize_requires_explicit_cma_permission_not_generic_authority() {
                 &permissions
                     .into_iter()
                     .map(str::to_owned)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                "cma:admin:settings",
             )
             .is_ok()
         );
@@ -213,7 +214,8 @@ fn warm_pool_resize_requires_explicit_cma_permission_not_generic_authority() {
                 &permissions
                     .into_iter()
                     .map(str::to_owned)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                "cma:admin:settings",
             )
             .is_err()
         );
