@@ -509,6 +509,24 @@ the start audit's time bound and are cancelled before finish; they cannot keep
 work non-idle or extend cleanup. The last successful checkpoint bounds how far
 a killed drain got, though an audit failure can also explain a missing checkpoint.
 
+After both listeners bind, `backend_process_started` records the generation,
+build, bind time, and the latest other generation and heartbeat observed under
+the same instance name (if any), through the chained audit path; its background
+lookup is bounded to one second and the entire attempt to three seconds, without
+holding up serving. `previous_lookup` distinguishes `found`, `none`, and
+`unavailable`; a retained heartbeat is evidence of a prior process, not proof it
+was still alive, and gracefully retired observations are removed. Two process
+starts without an intervening drain for the earlier generation indicate an
+unobserved exit (including a crash or kill); a missing audit or a crash before
+listener binding can leave no start record, so one start alone does not prove a
+routing fault. Drain start, progress and finish records include `recent_traffic`:
+at most twelve five-second buckets with UTC boundaries and aggregate `received`
+and `responded` counts across both listeners, including probes and errors.
+`responded` counts middleware response-header completion, not body completion or
+confirmed client delivery; the newest bucket is partial and concurrent snapshots
+are approximate. Counting uses fixed process-local atomics and no request data or
+database calls; only those drain snapshots persist the rolling history.
+
 Cleanup does not clear uncertain provider-send barriers, wallet locks or
 purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
 retain their mutation locks; Discord identify rate windows retain their expiry. These records

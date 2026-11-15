@@ -714,6 +714,10 @@ async fn shutdown_cluster_release_covers_owner_constants_and_excludes_billing_an
 async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_waiter() {
     const TASKS: usize = 16;
     const PAIRS: usize = 20_000;
+    println!(
+        "traffic fixed storage: {} bytes/process; no per-request allocation",
+        std::mem::size_of::<super::traffic::Traffic>()
+    );
     let db = connect_transaction_test_database("shutdown_tracking_benchmark").await;
     let response = Router::new()
         .route(
@@ -754,12 +758,14 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
                     let sample = (index % 100 == 0).then(std::time::Instant::now);
                     // One response handoff, including both registrations and Drops.
                     diagnostics::scope(Some(route.clone()), &axum::http::Method::GET, async {
+                        runtime.record_received();
                         let request = runtime.request();
                         diagnostics::resolved_catalog(&catalog);
                         let stream = runtime.response_stream(Some(
                             &axum::http::HeaderValue::from_static("text/event-stream"),
                         ));
                         drop(request);
+                        runtime.record_responded();
                         drop(stream);
                     })
                     .await;
@@ -789,7 +795,7 @@ async fn shutdown_tracking_overhead_concurrent_requests_with_and_without_idle_wa
         );
         let elapsed = start.elapsed();
         println!(
-            "tracking waiter={waiter}: {} requests, {:.1} ns/request (two register/drop pairs), elapsed={elapsed:?}",
+            "tracking waiter={waiter}: {} requests, {:.1} ns/request (two register/drop pairs + traffic counters), elapsed={elapsed:?}",
             TASKS * PAIRS,
             elapsed.as_nanos() as f64 / (TASKS * PAIRS) as f64
         );

@@ -63,6 +63,7 @@ impl Drain {
                     "in_flight": self.runtime.counts(),
                     "node_operations": state.node_ws_manager.in_flight_operations(),
                     "open_http": self.runtime.open_http(),
+                    "recent_traffic": self.runtime.recent_traffic(),
                 });
                 tracing::info!(target: "nyxid::shutdown", event = "backend_shutdown_drain_progress", metadata = %metadata, "Backend drain still running");
                 snapshot_audit(
@@ -137,6 +138,7 @@ impl Drain {
             "in_flight_at_start": drain.counts,
             "open_http_at_start": drain.open_http,
             "node_operations_at_start": state.node_ws_manager.in_flight_operations(),
+            "recent_traffic": runtime.recent_traffic(),
         });
         // Fit the completion join even when a second signal starts cleanup immediately.
         let audit_deadline = started + drain.snapshot_audit_timeout();
@@ -224,6 +226,7 @@ impl Drain {
             "in_flight_at_start": self.counts,
             "open_http_at_start": self.open_http,
             "open_http_at_finish": self.runtime.open_http(),
+            "recent_traffic": self.runtime.recent_traffic(),
             "in_flight_at_finish": self.runtime.counts(),
             "tracked_units_at_finish": self.runtime.tracked_units(),
             "subscriptions_ended": self.runtime.subscriptions_ended(),

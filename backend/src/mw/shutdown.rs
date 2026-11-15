@@ -14,17 +14,22 @@ use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use crate::services::shutdown::{RecoverableSubscription, Runtime, Work};
 
 pub async fn track(State(runtime): State<Runtime>, request: Request, next: Next) -> Response {
+    runtime.record_received();
     if matches!(request.uri().path(), "/health" | "/ready") {
-        return next.run(request).await;
+        let response = next.run(request).await;
+        runtime.record_responded();
+        return response;
     }
     let route = request.extensions().get::<MatchedPath>().cloned();
     let method = request.method().clone();
-    crate::services::shutdown::diagnostics::scope(
+    let response = crate::services::shutdown::diagnostics::scope(
         route,
         &method,
-        track_route(runtime, request, next),
+        track_route(runtime.clone(), request, next),
     )
-    .await
+    .await;
+    runtime.record_responded();
+    response
 }
 
 async fn track_route(runtime: Runtime, request: Request, next: Next) -> Response {

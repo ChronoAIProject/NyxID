@@ -392,6 +392,37 @@ async fn actual_server_process(scenario: ProcessDrain) {
         "server startup timeout: {}",
         std::fs::read_to_string(&output).unwrap()
     );
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let count = state
+                .db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type": "backend_process_started"})
+                .await
+                .unwrap();
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("real server must write its bounded process-start audit");
+    let process_start = drain_audit_row(&state, "backend_process_started").await;
+    assert!(process_start.contains_key("entry_hash"));
+    let start_data = process_start.get_document("event_data").unwrap();
+    assert_eq!(
+        start_data.get_str("instance_name").unwrap(),
+        "drain-process-test"
+    );
+    assert!(!start_data.get_str("generation").unwrap().is_empty());
+    assert!(!start_data.get_str("build_commit").unwrap().is_empty());
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(start_data.get_str("listeners_bound_at").unwrap())
+            .unwrap()
+            <= chrono::Utc::now()
+    );
+    assert_eq!(start_data.get_str("previous_lookup").unwrap(), "none");
     let mut config = state.config.clone();
     config.base_url = base.clone();
     config.jwt_issuer = base.clone();
