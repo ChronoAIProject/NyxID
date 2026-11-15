@@ -56,16 +56,21 @@ NyxID maintains explicit allowlists for which request headers to forward and whi
 
 Request bodies are normally forwarded as-is, except for configured credential injection or protocol transforms, up to the configured size limit (100 MiB for authenticated proxy routes by default). If approval is enabled for the service, the body is buffered briefly to build the action description shown to the approver; it is not persisted.
 
-For CMA, final dispatch also checks the resolved catalog operation. The administrative
-warm-pool resize operation is `PUT /api/v1/admin/warm-pools/{id}`, with exactly
-`expected_revision` (an integer from 1 through 9223372036854775806) and
-`target_replicas` (an integer from 0 through 1000). It requires a stable
-`Idempotency-Key` and current `cma:admin:settings` or `cma:*` permission; a generic
-`*` permission is insufficient. NyxID checks that grant again before sending the
-unchanged request. CMA independently verifies the signed identity, its enrolled
-authority, and the expected revision. A stale revision returns CMA's `409`
-without an automatic retry. This operation does not allocate or recover a personal
-sandbox account slot, and it does not admit other administrative mutations.
+For CMA, final dispatch also checks the resolved catalog operation. It admits
+these administrative mutations with their distinct permissions:
+
+| Operation | Strict request body | Required permission |
+| --- | --- | --- |
+| `PUT /api/v1/admin/warm-pools/{id}` | `expected_revision` (integer 1–9223372036854775806), `target_replicas` (integer 0–1000) | `cma:admin:settings` |
+| `POST /api/v1/admin/sandboxes/{id}/runtime-update` | `target_version` (nonblank string, at most 512 bytes, no control characters) | `cma:admin:control` |
+
+Both require a stable `Idempotency-Key`. The explicit `cma:*` permission also
+allows these operations; a generic `*` permission is insufficient. NyxID checks
+the live grant again before sending the unchanged request. CMA independently
+verifies the signed identity and its enrolled authority, and enforces its revision,
+target-version, retained-home and active-work rules. CMA's responses pass through
+without an automatic retry. These operations do not allocate or recover a personal
+sandbox account slot, and they do not admit other administrative mutations.
 
 ## Streaming responses
 

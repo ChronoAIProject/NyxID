@@ -37,6 +37,7 @@ use crate::{
 enum Operation {
     Read,
     ResizeWarmPool,
+    UpdateSandboxRuntime,
     CreateAgent {
         sandbox: Option<String>,
         workspace: Option<String>,
@@ -55,6 +56,17 @@ enum Operation {
         id: String,
     },
 }
+
+impl Operation {
+    fn admin_permission(&self) -> Option<&'static str> {
+        match self {
+            Self::ResizeWarmPool => Some("cma:admin:settings"),
+            Self::UpdateSandboxRuntime => Some("cma:admin:control"),
+            _ => None,
+        }
+    }
+}
+
 fn invalid() -> AppError {
     AppError::BadRequest("Invalid CMA execution request".into())
 }
@@ -85,24 +97,30 @@ struct WarmPoolResize {
     target_replicas: u32,
 }
 
-fn require_warm_pool_permission(permissions: &[String]) -> AppResult<()> {
-    // Match CMA's ConfigurePlatform mapping. NyxID's generic wildcard and
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxRuntimeUpdate {
+    target_version: String,
+}
+
+fn require_cma_admin_permission(permissions: &[String], required: &str) -> AppResult<()> {
+    // Match CMA's capability mapping. NyxID's generic wildcard and
     // role names do not confer downstream CMA administrative authority.
     if permissions
         .iter()
-        .any(|permission| matches!(permission.as_str(), "cma:admin:settings" | "cma:*"))
+        .any(|permission| permission == required || permission == "cma:*")
     {
         Ok(())
     } else {
-        Err(AppError::Forbidden(
-            "cma_warm_pool_admin_required: ConfigurePlatform permission required".into(),
-        ))
+        Err(AppError::Forbidden(format!(
+            "cma_admin_permission_required: {required}"
+        )))
     }
 }
 
-async fn require_warm_pool_admin(db: &Database, owner: &str) -> AppResult<()> {
+async fn require_cma_admin(db: &Database, owner: &str, permission: &str) -> AppResult<()> {
     let rbac = super::rbac_helpers::resolve_user_rbac(db, owner).await?;
-    require_warm_pool_permission(&rbac.permissions)
+    require_cma_admin_permission(&rbac.permissions, permission)
 }
 
 fn classify(method: &str, path: &str, body: &[u8]) -> AppResult<Operation> {
@@ -134,6 +152,19 @@ fn classify(method: &str, path: &str, body: &[u8]) -> AppResult<Operation> {
                 return Err(invalid());
             }
             Ok(Operation::ResizeWarmPool)
+        }
+        ("POST", ["api", "v1", "admin", "sandboxes", _, "runtime-update"]) => {
+            let update: SandboxRuntimeUpdate =
+                serde_json::from_slice(body).map_err(|_| invalid())?;
+            if update.target_version.trim().is_empty()
+                || update.target_version.len() > 512
+                || update.target_version.chars().any(char::is_control)
+            {
+                return Err(invalid());
+            }
+            // CMA still decides whether this version is current or an already
+            // pinned update and whether the retained Sandbox can be upgraded.
+            Ok(Operation::UpdateSandboxRuntime)
         }
         ("POST", ["api", "v1", "agents"]) => {
             let parsed: Value = serde_json::from_slice(body).map_err(|_| invalid())?;
@@ -760,7 +791,7 @@ pub async fn admit(
     }
     let key = keys_in_headers.first().map(|value| (*value).clone());
     if !matches!(operation, Operation::Read)
-        && (!path.ends_with("/files") || matches!(operation, Operation::ResizeWarmPool))
+        && (!path.ends_with("/files") || operation.admin_permission().is_some())
     {
         validate_idempotency_key(key.as_deref().ok_or_else(|| {
             AppError::BadRequest("CMA changes require a stable Idempotency-Key".into())
@@ -784,8 +815,8 @@ pub async fn admit(
     if matches!(operation, Operation::Read) {
         return Ok(permit);
     }
-    if matches!(operation, Operation::ResizeWarmPool) {
-        require_warm_pool_admin(&db, owner).await?;
+    if let Some(permission) = operation.admin_permission() {
+        require_cma_admin(&db, owner, permission).await?;
         if headers
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case(RECOVERY_SUBMISSION_HEADER))
@@ -794,7 +825,7 @@ pub async fn admit(
         }
         // Administration does not allocate a personal Sandbox/account slot.
         // Normal proxy identity propagation and CMA's signed-capability check
-        // still apply; this permit only admits the exact administrative PUT.
+        // still apply; this permit only admits the exact administrative request.
         return Ok(permit);
     }
     let creates_sandbox = matches!(
@@ -1097,10 +1128,10 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                 return Err(drift());
             }
         }
-        if matches!(self.operation, Operation::ResizeWarmPool) {
+        if let Some(permission) = self.operation.admin_permission() {
             // Do not retain an administrative permit after its RBAC grant is
             // revoked while the request is being prepared.
-            require_warm_pool_admin(&self.db, &self.owner).await?;
+            require_cma_admin(&self.db, &self.owner, permission).await?;
         }
         if let Some(creation) = &self.creation {
             change_creation(&self.db, creation, CreationChange::Dispatch).await?;

@@ -1,6 +1,135 @@
 const ROUTE: &str = "/api/v1/admin/warm-pools/pool_1";
 const BODY: &[u8] = br#"{"expected_revision":1,"target_replicas":3}"#;
 const KEY: &str = "warm-pool-resize-test";
+const RUNTIME_ROUTE: &str = "/api/v1/admin/sandboxes/sandbox_1/runtime-update";
+const RUNTIME_BODY: &[u8] = br#"{"target_version":"registry.example/runtime@sha256:1234"}"#;
+
+#[test]
+fn runtime_update_is_exact_and_requires_its_own_capability() {
+    let operation = classify("POST", RUNTIME_ROUTE, RUNTIME_BODY).unwrap();
+    assert_eq!(operation, Operation::UpdateSandboxRuntime);
+    assert_eq!(operation.admin_permission(), Some("cma:admin:control"));
+    assert_eq!(
+        Operation::ResizeWarmPool.admin_permission(),
+        Some("cma:admin:settings")
+    );
+    for (permission, allowed) in [
+        ("cma:admin:control", true),
+        ("cma:*", true),
+        ("cma:admin:settings", false),
+        ("cma:sandbox:use", false),
+        ("*", false),
+        ("admin", false),
+    ] {
+        assert_eq!(
+            require_cma_admin_permission(
+                &[permission.into()],
+                operation.admin_permission().unwrap()
+            )
+            .is_ok(),
+            allowed
+        );
+    }
+    assert!(
+        require_cma_admin_permission(&["cma:admin:control".into()], "cma:admin:settings").is_err()
+    );
+    for body in [
+        "{}",
+        "[]",
+        r#"{"target_version":null}"#,
+        r#"{"target_version":1}"#,
+        r#"{"target_version":""}"#,
+        r#"{"target_version":"   "}"#,
+        r#"{"target_version":"x\ny"}"#,
+        r#"{"target_version":"v2","force":true}"#,
+        r#"{"target_version":"v2","target_version":"v3"}"#,
+    ] {
+        assert!(
+            classify("POST", RUNTIME_ROUTE, body.as_bytes()).is_err(),
+            "{body}"
+        );
+    }
+    for (version, allowed) in [("x".repeat(512), true), ("x".repeat(513), false)] {
+        let body = serde_json::to_vec(&serde_json::json!({"target_version":version})).unwrap();
+        assert_eq!(classify("POST", RUNTIME_ROUTE, &body).is_ok(), allowed);
+    }
+    for route in [
+        "/api/v1/admin/sandboxes/sandbox_1/restart",
+        "/api/v1/admin/sandboxes/sandbox_1/runtime-update/",
+        "/api/v1/admin/sandboxes/%73andbox_1/runtime-update",
+        "/api/v1/admin/sandboxes/../runtime-update",
+        "/api/v1/admin/sandboxes/sandbox_1/runtime-update?force=1",
+        "/api/v1/sandboxes/sandbox_1/runtime-update",
+    ] {
+        assert!(classify("POST", route, RUNTIME_BODY).is_err(), "{route}");
+    }
+    for method in ["PUT", "PATCH", "DELETE"] {
+        assert!(classify(method, RUNTIME_ROUTE, RUNTIME_BODY).is_err());
+    }
+}
+
+#[tokio::test]
+async fn runtime_update_checks_control_without_resolving_a_personal_sandbox() {
+    let f = Fixture::new().await;
+    set_permission(&f, "cma:admin:settings").await;
+    assert!(matches!(
+        operator_permit(&f, "POST", RUNTIME_ROUTE, RUNTIME_BODY).await,
+        Err(AppError::Forbidden(_))
+    ));
+    set_permission(&f, "cma:admin:control").await;
+    let permit = operator_permit(&f, "POST", RUNTIME_ROUTE, RUNTIME_BODY)
+        .await
+        .unwrap();
+    assert!(permit.sandbox.is_none() && permit.creation.is_none());
+    let request = || {
+        reqwest::Client::new()
+            .post(format!("{}{RUNTIME_ROUTE}", f.server.uri()))
+            .header("Idempotency-Key", KEY)
+            .body(RUNTIME_BODY.to_vec())
+            .build()
+            .unwrap()
+    };
+    permit.before_send(&request()).await.unwrap();
+    for collection in [
+        COLLECTION_NAME,
+        crate::models::assistant_cma_sandbox::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            f.db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    // Neither the remote Sandbox nor its owner's personal connection is read.
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    for change in ["method", "sandbox", "target_version", "key"] {
+        let mut changed = request();
+        match change {
+            "method" => *changed.method_mut() = reqwest::Method::PUT,
+            "sandbox" => changed
+                .url_mut()
+                .set_path("/api/v1/admin/sandboxes/sandbox_2/runtime-update"),
+            "target_version" => {
+                *changed.body_mut() = Some(br#"{"target_version":"v3"}"#.to_vec().into())
+            }
+            "key" => {
+                changed
+                    .headers_mut()
+                    .insert("idempotency-key", "changed-key".parse().unwrap());
+            }
+            _ => unreachable!(),
+        }
+        assert!(permit.before_send(&changed).await.is_err(), "{change}");
+    }
+    set_permission(&f, "cma:admin:settings").await;
+    assert!(matches!(
+        permit.before_send(&request()).await,
+        Err(AppError::Forbidden(_))
+    ));
+    f.db.drop().await.unwrap();
+}
 
 #[test]
 fn warm_pool_resize_accepts_only_the_exact_put_and_strict_cas_body() {
@@ -62,7 +191,7 @@ fn warm_pool_resize_accepts_only_the_exact_put_and_strict_cas_body() {
 fn warm_pool_resize_requires_explicit_cma_permission_not_generic_authority() {
     for permissions in [vec!["cma:admin:settings"], vec!["cma:*", "unrelated"]] {
         assert!(
-            require_warm_pool_permission(
+            require_cma_admin_permission(
                 &permissions
                     .into_iter()
                     .map(str::to_owned)
@@ -80,7 +209,7 @@ fn warm_pool_resize_requires_explicit_cma_permission_not_generic_authority() {
         vec!["cma:agent:manage"],
     ] {
         assert!(
-            require_warm_pool_permission(
+            require_cma_admin_permission(
                 &permissions
                     .into_iter()
                     .map(str::to_owned)
@@ -118,6 +247,15 @@ async fn set_permission(f: &Fixture, permission: &str) {
 }
 
 async fn resize_permit(f: &Fixture) -> AppResult<CmaDispatchPermit> {
+    operator_permit(f, "PUT", ROUTE, BODY).await
+}
+
+async fn operator_permit(
+    f: &Fixture,
+    method: &str,
+    route: &str,
+    body: &[u8],
+) -> AppResult<CmaDispatchPermit> {
     admit(
         &f.db,
         &f.keys,
@@ -126,10 +264,10 @@ async fn resize_permit(f: &Fixture) -> AppResult<CmaDispatchPermit> {
         &f.owner,
         true,
         &f.target,
-        "PUT",
-        ROUTE,
+        method,
+        route,
         None,
-        BODY,
+        body,
         &[("Idempotency-Key".into(), KEY.into())],
         false,
     )
