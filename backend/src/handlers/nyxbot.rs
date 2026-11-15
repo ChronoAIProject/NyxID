@@ -74,6 +74,15 @@ struct ConnectInsertGate {
 tokio::task_local! {
     static CONNECT_INSERT_GATE: std::sync::Arc<ConnectInsertGate>;
 }
+#[cfg(test)]
+tokio::task_local! {
+    static RESTORE_CONNECT_FAIL_STAGE: u8;
+}
+
+#[cfg(test)]
+const RESTORE_FAIL_ROUTE: u8 = 1;
+#[cfg(test)]
+const RESTORE_FAIL_ACTIVATION: u8 = 2;
 
 fn canonical_platform(platform: &str) -> &str {
     crate::services::channel_platform::canonical_platform(platform)
@@ -113,7 +122,11 @@ pub(crate) fn bot_owner(row: &NyxbotChannel) -> &str {
 
 /// Whether `owner` may link and manage `bot`: their own bot, or a bot of an
 /// organization they administer (the rule for managing org bots).
-async fn manages_bot_owner(state: &AppState, owner: &str, bot_owner: &str) -> AppResult<bool> {
+pub(crate) async fn manages_bot_owner(
+    state: &AppState,
+    owner: &str,
+    bot_owner: &str,
+) -> AppResult<bool> {
     if owner == bot_owner {
         return Ok(true);
     }
@@ -210,6 +223,231 @@ async fn org_access_with(
         return Ok(OrgAccess::Lost);
     }
     crate::services::org_channel_service::transport_access(&state.db, row).await
+}
+
+/// Result of the bounded pre-#2288 restoration gate. `Unavailable` is a
+/// readiness/flag dependency and must not consume a retry attempt.
+#[derive(Debug)]
+pub(crate) enum OrgRestoreOutcome {
+    Restored(Box<NyxbotChannel>),
+    Disqualified(&'static str),
+    Unavailable(&'static str),
+}
+
+/// `org_access_lost` is the established public error code emitted by the
+/// org-channel admission contract (`require_org_access` and its callers).
+pub(crate) fn is_org_access_lost_error(error: &AppError) -> bool {
+    matches!(error, AppError::Forbidden(code) if code == "org_access_lost")
+}
+
+async fn cleanup_org_restore_provisional(
+    state: &AppState,
+    predecessor: &NyxbotChannel,
+    claim_id: &str,
+) -> AppResult<()> {
+    let Some(provisional) = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {
+            "_id": {"$ne": &predecessor.id},
+            "user_id": &predecessor.user_id,
+            "channel_bot_id": &predecessor.channel_bot_id,
+            "org_restored_at": {"$ne": null},
+            "status": {"$in": ["pending", "failed"]},
+            "org_restore_claim_id": claim_id,
+        })
+        .sort(doc! {"created_at": -1, "_id": -1})
+        .await?
+    else {
+        return Ok(());
+    };
+    let ids = releases::retire_connection(
+        state,
+        &provisional,
+        ReleaseReason::SetupFailed,
+        "failed",
+        Some("restoration_interrupted"),
+    )
+    .await?;
+    releases::try_inline(state, &ids).await;
+    // The release record retains any remote cleanup obligation.  Once the
+    // restoration-owned keys and route have been handed to that release path,
+    // remove the provisional channel document itself so a failed rebuild can
+    // never appear as a second connection or block the next retry.  The claim
+    // fence excludes a person's simultaneous manual connection.
+    state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .delete_one(doc! {
+            "_id": &provisional.id,
+            "org_restore_claim_id": claim_id,
+            "org_restored_at": {"$ne": null},
+            "status": {"$ne": "active"},
+        })
+        .await?;
+    Ok(())
+}
+
+/// Rebuild one retired organization binding through the exact human connect
+/// path. This is called only by the leased gateway maintenance worker; it does
+/// no tool/watch/onboarding work because the source conversation is absent.
+pub(crate) async fn restore_org_channel(
+    state: AppState,
+    row: NyxbotChannel,
+    claim_id: &str,
+) -> AppResult<OrgRestoreOutcome> {
+    let Some(binding) = row.org_specialist.as_ref() else {
+        return Ok(OrgRestoreOutcome::Disqualified("binding_missing"));
+    };
+    if row.status != "failed"
+        || row.last_error.as_deref() != Some("org_access_lost")
+        || binding.version != 1
+        || row.bot_owner_id.as_ref() != Some(&binding.org_id)
+        || row.agent_id.is_none()
+    {
+        return Ok(OrgRestoreOutcome::Disqualified("binding_changed"));
+    }
+    // A release or setup obligation owns cleanup of the old transport. Wait
+    // for that existing worker rather than creating a second remote identity.
+    if row.gateway_setup_release_id.is_some()
+        || row.pending_agent_api_key_id.is_some()
+        || row.pending_route_api_key_id.is_some()
+        || state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+            .find_one(doc! {"channel_bot_id": &row.channel_bot_id, "state": {"$ne": "settled"}})
+            .await?
+            .is_some()
+    {
+        return Ok(OrgRestoreOutcome::Unavailable("gateway_release_pending"));
+    }
+    let org_live = state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&binding.org_id,"user_type":"org","is_active":true})
+        .await?
+        .is_some();
+    let person_live = state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.user_id,"user_type":{"$ne":"org"},"is_active":true})
+        .await?
+        .is_some();
+    let admin_live = state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .find_one(
+            doc! {"org_user_id":&binding.org_id,"member_user_id":&row.user_id,
+            "role":"admin","revoked_at":null},
+        )
+        .await?
+        .is_some();
+    let bot_live = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.channel_bot_id,"user_id":&binding.org_id,
+        "is_active":true,"status":"active"})
+        .await?
+        .is_some();
+    let specialist = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":&row.agent_id,"user_id":&binding.org_id,
+        "kind":"specialist","destroyed_at":null})
+        .await?;
+    if !(org_live && person_live && admin_live && bot_live && specialist.is_some()) {
+        return Ok(OrgRestoreOutcome::Disqualified("live_authority_changed"));
+    }
+    if state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(
+            doc! {"channel_bot_id":&row.channel_bot_id,"_id":{"$ne":&row.id},
+            "status":{"$in":["pending","active"]}},
+        )
+        .await?
+        .is_some()
+        || state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"channel_bot_id":&row.channel_bot_id,"is_active":true})
+            .await?
+            .is_some()
+    {
+        return Ok(OrgRestoreOutcome::Disqualified("live_binding_or_route"));
+    }
+    match org_access(&state, &row).await? {
+        OrgAccess::Lost => {
+            return Ok(OrgRestoreOutcome::Disqualified("live_authority_changed"));
+        }
+        OrgAccess::Unavailable => {
+            return Ok(OrgRestoreOutcome::Unavailable("readiness_unavailable"));
+        }
+        OrgAccess::Holds => {}
+    }
+    let agent: crate::models::assistant_agent::AssistantAgent =
+        bson::from_document(specialist.ok_or_else(|| AppError::NotFound("specialist".into()))?)
+            .map_err(|_| AppError::Internal("Specialist unavailable".into()))?;
+    let rebuilt = Box::pin(connect_inner(
+        &state,
+        &row.user_id,
+        None,
+        &row.channel_bot_id,
+        &agent,
+        false,
+        true,
+        Some(claim_id),
+    ))
+    .await;
+    let (mut restored, _) = match rebuilt {
+        Ok(result) => result,
+        Err(error) => {
+            cleanup_org_restore_provisional(&state, &row, claim_id).await?;
+            if is_org_access_lost_error(&error) {
+                return Ok(OrgRestoreOutcome::Disqualified("live_authority_changed"));
+            }
+            return Err(error);
+        }
+    };
+    // Organization bindings deliberately do not use the ordinary continuity
+    // carry-over (which would revive sender links).  Keep only the predecessor
+    // id as a tombstone so an old member can be told to verify again.
+    state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &restored.id, "org_restore_claim_id": claim_id},
+            doc! {"$set": {
+                "continuity_from_channel_id": &row.id,
+                "continuity_restored_at": bson::DateTime::now(),
+            }},
+        )
+        .await?;
+    restored.continuity_from_channel_id = Some(row.id.clone());
+    restored.continuity_restored_at = Some(Utc::now());
+    Ok(OrgRestoreOutcome::Restored(Box::new(restored)))
+}
+
+pub(crate) fn org_restore_error_reason(error: &AppError) -> &'static str {
+    // These ValidationError strings are the established gateway transport
+    // codes emitted by connect_gateway; the fallback is the only new local
+    // classification. `org_access_lost` is the existing typed admission
+    // contract handled by is_org_access_lost_error above.
+    match error {
+        AppError::SecurityReadinessUnavailable => "readiness_unavailable",
+        AppError::ValidationError(code) if code.len() <= 64 => match code.as_str() {
+            "gateway_unavailable" => "gateway_unavailable",
+            "gateway_configuration_required" => "gateway_configuration_required",
+            "gateway_not_authenticated" => "gateway_not_authenticated",
+            "gateway_permission_required" => "gateway_permission_required",
+            "gateway_provider_not_registered" => "gateway_provider_not_registered",
+            "gateway_invalid_response" => "gateway_invalid_response",
+            "creator_unavailable" => "creator_unavailable",
+            _ => "rebuild_failed",
+        },
+        AppError::Conflict(_) => "concurrent_change",
+        _ => "rebuild_failed",
+    }
 }
 
 async fn require_org_access(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
@@ -612,11 +850,21 @@ pub async fn connect(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
-    connect_inner(state, owner, source_conversation_id, bot_id, agent, true)
-        .await
-        .map_err(present_gateway_error)
+    connect_inner(
+        state,
+        owner,
+        source_conversation_id,
+        bot_id,
+        agent,
+        true,
+        false,
+        None,
+    )
+    .await
+    .map_err(present_gateway_error)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_inner(
     state: &AppState,
     owner: &str,
@@ -624,6 +872,8 @@ async fn connect_inner(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
     allow_existing: bool,
+    restoration: bool,
+    restoration_claim_id: Option<&str>,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
     crate::services::org_channel_service::require_target(&state.db, owner, agent).await?;
     if agent.destroyed_at.is_some() {
@@ -845,6 +1095,13 @@ async fn connect_inner(
         delivery_seen_at: None,
         delivery_checked_at: None,
         delivery_notified_at: None,
+        org_restore_next_attempt_at: None,
+        org_restore_attempts: 0,
+        org_restore_rule_version: 0,
+        org_restore_last_reason: None,
+        org_restore_claim_id: restoration_claim_id.map(str::to_owned),
+        org_restore_lease_until: None,
+        org_restored_at: restoration.then_some(now),
         created_at: now,
         updated_at: now,
     };
@@ -914,6 +1171,17 @@ async fn connect_inner(
         }
         return Err(error);
     }
+    // Exercise the real restoration cleanup after the provisional row and route
+    // key exist. The hook only fails; cleanup_org_restore_provisional owns the
+    // rollback of the product state.
+    #[cfg(test)]
+    if restoration
+        && RESTORE_CONNECT_FAIL_STAGE
+            .try_with(|stage| *stage == RESTORE_FAIL_ROUTE)
+            .unwrap_or(false)
+    {
+        return Err(AppError::ValidationError("route_creation_failed".into()));
+    }
     let row = if org_binding.is_some() {
         load_channel(state, owner, &id).await?
     } else {
@@ -967,6 +1235,14 @@ async fn connect_inner(
     match outcome {
         Ok(route_id) => {
             let code = new_link_code();
+            #[cfg(test)]
+            if restoration
+                && RESTORE_CONNECT_FAIL_STAGE
+                    .try_with(|stage| *stage == RESTORE_FAIL_ACTIVATION)
+                    .unwrap_or(false)
+            {
+                return Err(AppError::ValidationError("activation_failed".into()));
+            }
             let activation = crate::services::nyxbot_channel_continuity_service::activate(
                 &state.db,
                 owner,
@@ -997,30 +1273,32 @@ async fn connect_inner(
                 }
             }
             let row = load_channel(state, owner, &id).await?;
-            audit(
-                state,
-                owner,
-                "nyxbot_channel_connected",
-                gateway_diagnostic_audit(
-                    json!({
-                        "channel_agent_id": &id, "channel_bot_id": &bot.id,
-                        "platform": &platform, "transport": &row.transport,
-                    }),
-                    &row,
-                ),
-            )
-            .await;
-            if let Some(creator) = bot_creator(state, owner, &bot.id).await
-                && row.owner_sender_ids.contains(&creator)
-            {
+            if !restoration {
                 audit(
                     state,
                     owner,
-                    "nyxbot_channel_owner_linked",
-                    json!({"channel_agent_id": &id, "platform": &platform,
-                        "method": "bot_creator"}),
+                    "nyxbot_channel_connected",
+                    gateway_diagnostic_audit(
+                        json!({
+                            "channel_agent_id": &id, "channel_bot_id": &bot.id,
+                            "platform": &platform, "transport": &row.transport,
+                        }),
+                        &row,
+                    ),
                 )
                 .await;
+                if let Some(creator) = bot_creator(state, owner, &bot.id).await
+                    && row.owner_sender_ids.contains(&creator)
+                {
+                    audit(
+                        state,
+                        owner,
+                        "nyxbot_channel_owner_linked",
+                        json!({"channel_agent_id": &id, "platform": &platform,
+                            "method": "bot_creator"}),
+                    )
+                    .await;
+                }
             }
             if let Some(code) = chats::sync_gateway_groups(state, &row, true).await? {
                 tracing::warn!(code, "NyxBot gateway group admission not restored");
@@ -2150,6 +2428,8 @@ async fn connect_tool_inner(
         bot_id,
         agent,
         allow_existing,
+        false,
+        None,
     )
     .await?;
     // Linking an existing bot answers a setup link this chat handed out for
@@ -2999,8 +3279,44 @@ pub(super) async fn prepare_guest_model(
     Ok(())
 }
 
+fn org_restore_status_text(code: &str) -> &'static str {
+    match code {
+        "org_access_restoration_waiting_readiness" => {
+            "This organization channel is waiting for required safety checks to become available. NyxID will retry automatically; no administrator rights were lost."
+        }
+        "org_access_restoration_retrying_gateway" => {
+            "The channel connection is retrying restoration. The retry schedule can take hours; no administrator rights were lost."
+        }
+        "org_access_restored" => {
+            "This organization channel was restored. Members must verify their chat account again. Guest access is preserved as before."
+        }
+        _ => {
+            "This organization channel is being restored automatically; it normally returns in under a minute. Members must verify their chat account again."
+        }
+    }
+}
+
 async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) -> AppResult<Value> {
-    let rows = list(state, owner).await?;
+    let mut rows = list(state, owner).await?;
+    // Agent details shows one current organization binding per bot. Keep
+    // personal listings exactly as list_current returned them; only a manual
+    // organization reconnect needs presentation-level predecessor hiding.
+    // Completed restoration predecessors also stay hidden after a disconnect.
+    let live_org_bots: std::collections::HashSet<_> = rows
+        .iter()
+        .filter(|row| {
+            row.org_specialist.is_some() && matches!(row.status.as_str(), "pending" | "active")
+        })
+        .map(|row| row.channel_bot_id.clone())
+        .collect();
+    let mut org_seen = std::collections::HashSet::new();
+    rows.retain(|row| {
+        row.org_specialist.is_none()
+            || (row.org_restore_last_reason.as_deref() != Some("restored")
+                && (!live_org_bots.contains(&row.channel_bot_id)
+                    || matches!(row.status.as_str(), "pending" | "active"))
+                && org_seen.insert(row.channel_bot_id.clone()))
+    });
     let discord_ids: Vec<_> = rows
         .iter()
         .filter(|r| r.platform == "discord")
@@ -3105,21 +3421,77 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
         } else {
             "unavailable"
         });
+        let restoration_status = if row.status == "failed"
+            && row.last_error.as_deref() == Some("org_access_lost")
+            && releases::has_old_org_restore_proof(&state.db, &row.id).await?
+        {
+            let code = match row.org_restore_last_reason.as_deref() {
+                Some("readiness_unavailable") => "org_access_restoration_waiting_readiness",
+                Some(_)
+                    if row
+                        .org_restore_next_attempt_at
+                        .is_some_and(|next| next > Utc::now()) =>
+                {
+                    "org_access_restoration_retrying_gateway"
+                }
+                Some(reason) if reason != "readiness_unavailable" && reason != "restored" => {
+                    "org_access_restoration_retrying_gateway"
+                }
+                Some("restored") => "org_access_restored",
+                None if row.org_restore_attempts == 0
+                    && row
+                        .org_restore_next_attempt_at
+                        .is_none_or(|next| next <= Utc::now()) =>
+                {
+                    "org_access_restoration_pending"
+                }
+                _ => "org_access_restoration_retrying_gateway",
+            };
+            Some(code)
+        } else {
+            None
+        };
         // While the owner has not verified, say what NyxID saw from the bot
         // (for an org bot, only while they still administer the org).
         match org_access(state, row).await {
             Ok(OrgAccess::Holds) => {
+                if let Some(code) = restoration_status {
+                    value["last_error"] = json!(code);
+                    value["org_restore_guest_enabled"] = json!(
+                        row.org_specialist
+                            .as_ref()
+                            .is_some_and(|binding| binding.guests.enabled)
+                    );
+                    value["delivery_status"] = json!("failing");
+                    value["delivery_error"] = json!(code);
+                    value["delivery_failed_at"] = Value::Null;
+                    value["delivery_reason"] = json!(org_restore_status_text(code));
+                    value["follow_readiness"] = json!("unavailable");
+                }
                 if let Some(hint) = status::verification_hint(state, row).await? {
                     value["inbound_hint"] = json!(hint);
                 }
             }
             Ok(OrgAccess::Lost) => {}
             Ok(OrgAccess::Unavailable) | Err(_) => {
-                value["delivery_status"] = json!("failing");
-                value["delivery_error"] = json!("org_access_unavailable");
-                value["delivery_failed_at"] = Value::Null;
-                value["delivery_reason"] =
-                    json!("This assistant is temporarily unavailable. Please try again later.");
+                if let Some(code) = restoration_status {
+                    value["last_error"] = json!(code);
+                    value["org_restore_guest_enabled"] = json!(
+                        row.org_specialist
+                            .as_ref()
+                            .is_some_and(|binding| binding.guests.enabled)
+                    );
+                    value["delivery_status"] = json!("failing");
+                    value["delivery_error"] = json!(code);
+                    value["delivery_failed_at"] = Value::Null;
+                    value["delivery_reason"] = json!(org_restore_status_text(code));
+                } else {
+                    value["delivery_status"] = json!("failing");
+                    value["delivery_error"] = json!("org_access_unavailable");
+                    value["delivery_failed_at"] = Value::Null;
+                    value["delivery_reason"] =
+                        json!("This assistant is temporarily unavailable. Please try again later.");
+                }
                 value["follow_readiness"] = json!("unavailable");
             }
         }

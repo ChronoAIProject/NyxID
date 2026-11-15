@@ -108,7 +108,7 @@ async fn due(state: &AppState, id: &str) {
         .unwrap();
 }
 
-async fn native_discord_identity(
+pub(super) async fn native_discord_identity(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> (
@@ -152,7 +152,7 @@ async fn native_discord_identity(
     )
 }
 
-async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
+pub(super) async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
     use crate::services::{
         discord_gateway::transport::relay_allowed,
         nyxbot_gateway_release_service::settle_native_drains,

@@ -202,6 +202,17 @@ const backendPayloads: [
     "Plugins",
     { tab: "connectors" },
   ],
+  [
+    "restored channel bot",
+    {
+      type: "channel_bot_restored",
+      bot_id: "bot",
+      guest_enabled: "true",
+      url: "https://nyx.example/channel-bots/bot",
+    },
+    "Plugins",
+    { tab: "connectors" },
+  ],
 ];
 for (const [label, payload, name, params] of backendPayloads) {
   test(`backend push map: ${label} reaches its native destination`, () => {

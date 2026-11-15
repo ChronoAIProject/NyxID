@@ -5,6 +5,56 @@ use crate::services::org_channel_service as org;
 const MEMBER_REFUSAL: &str =
     "Verify your organization membership in NyxID to chat with this assistant.";
 
+pub(crate) async fn member_refusal(
+    state: &AppState,
+    row: &NyxbotChannel,
+    sender_id: &str,
+    eligible: bool,
+) -> &'static str {
+    if row.org_restored_at.is_none() || !eligible {
+        return MEMBER_REFUSAL;
+    }
+    let previously_linked = {
+        let mut prior = vec![doc! {
+            "channel_id": &row.id,
+            "sender_hash": org::sender_identity(row, sender_id),
+        }];
+        if let Some(predecessor_id) = row.continuity_from_channel_id.as_deref()
+            && let Some(predecessor) = state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .find_one(doc! {"_id": predecessor_id})
+                .await
+                .ok()
+                .flatten()
+        {
+            prior.push(doc! {
+                "channel_id": predecessor.id.clone(),
+                "sender_hash": org::sender_identity(&predecessor, sender_id),
+            });
+        }
+        state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::org_channel::LINKS)
+            .find_one(doc! {
+                "org_id": row.org_specialist.as_ref().map(|b| b.org_id.as_str()),
+                "$or": prior,
+                // A restored prompt is useful only until fresh verification;
+                // an active link is proof that this sender already verified.
+                "active": false,
+            })
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    };
+    if previously_linked {
+        "This organization connection was restored. Members must verify their chat account again in NyxID before chatting with this assistant."
+    } else {
+        MEMBER_REFUSAL
+    }
+}
+
 pub(super) async fn inbound(
     state: &AppState,
     row: &NyxbotChannel,
@@ -47,7 +97,11 @@ pub(super) async fn inbound(
         Ok(value) => value,
         Err(AppError::Forbidden(_)) => {
             return Ok(if private || addressed == Some(true) {
-                Inbound::Reply(MEMBER_REFUSAL.into())
+                Inbound::Reply(
+                    member_refusal(state, row, sender.id, sender.owner_eligible)
+                        .await
+                        .into(),
+                )
             } else {
                 Inbound::Silent("refused_members")
             });
@@ -70,7 +124,13 @@ pub(super) async fn inbound(
     }
     match chats::admission(&projected, &current, sender.id, addressed) {
         chats::Admission::Owner | chats::Admission::Guest => {}
-        chats::Admission::Refuse => return Ok(Inbound::Reply(MEMBER_REFUSAL.into())),
+        chats::Admission::Refuse => {
+            return Ok(Inbound::Reply(
+                member_refusal(state, row, sender.id, sender.owner_eligible)
+                    .await
+                    .into(),
+            ));
+        }
         _ => {
             return Ok(Inbound::Silent(
                 if addressed == Some(false) && current.reply_mode.as_deref() != Some("all") {

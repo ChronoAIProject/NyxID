@@ -29,6 +29,16 @@ const UNCERTAIN_HOURS: i64 = 24;
 const BINDING_REPAIR_WINDOW_MINUTES: i64 = 15;
 const BINDING_REPAIR_REFUSED_HOURS: i64 = 6;
 const BINDING_REPAIR_BATCH: i64 = 8;
+/// #2288 merged 2026-11-06 14:34 UTC and went live after that build. The
+/// audit log has no `nyxbot_channel_org_access_lost` event after
+/// 2026-11-06 08:58:06 UTC. A conservative cutover excludes a wrongful
+/// retirement between merge and rollout; production has none.
+pub(crate) const ORG_RESTORE_CUTOVER: i64 = 1_793_975_640_000;
+/// Increment when the qualification rule changes; a parked row from an older
+/// rule is reconsidered once by the newer binary.
+pub(crate) const ORG_RESTORE_RULE_VERSION: i32 = 2;
+const ORG_RESTORE_LEASE_SECONDS: i64 = 120;
+const ORG_RESTORE_RETRY_CAP_DAYS: i64 = 3650;
 
 fn conflict() -> AppError {
     AppError::Conflict("Gateway lifecycle changed; reload and retry".into())
@@ -94,6 +104,40 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
                 .options(
                     IndexOptions::builder()
                         .name("gateway_binding_repair".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(CHANNELS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"channel_bot_id": 1, "created_at": -1, "_id": -1})
+                .options(
+                    IndexOptions::builder()
+                        .name("nyxbot_health_latest".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(CHANNELS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "status": 1,
+                    "last_error": 1,
+                    "org_restore_next_attempt_at": 1,
+                    "_id": 1,
+                })
+                .options(
+                    IndexOptions::builder()
+                        .name("org_access_restore_candidates".to_owned())
+                        .partial_filter_expression(doc! {
+                            "status": "failed",
+                            "last_error": "org_access_lost",
+                            "org_specialist.version": 1,
+                        })
                         .build(),
                 )
                 .build(),
@@ -1914,6 +1958,11 @@ pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
 }
 
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
+    // One bounded org-access restoration candidate shares this leased pass;
+    // remote gateway release/drain work remains authoritative.
+    if restore_org_access_step(state.clone()).await.is_err() {
+        tracing::debug!("org channel restoration deferred");
+    }
     if repair_stale_bindings_sweep(state).await.is_err() {
         tracing::warn!(
             code = "gateway_binding_repair_scan_failed",
@@ -2187,6 +2236,479 @@ pub(crate) async fn repair_direct_attempts(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) fn org_restore_event_qualifies(at: chrono::DateTime<Utc>) -> bool {
+    at.timestamp_millis() < ORG_RESTORE_CUTOVER
+}
+
+/// Latest matching audit proof. The existing `{event_type, created_at}` index
+/// narrows this tens-of-millions-row collection by event type and supplies the
+/// descending order; `channel_agent_id` is the residual metadata predicate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrgRestoreProof {
+    Missing,
+    BeforeCutover,
+    AtOrAfterCutover,
+}
+
+pub(crate) async fn org_restore_proof(
+    db: &Database,
+    channel_agent_id: &str,
+) -> AppResult<OrgRestoreProof> {
+    let Some(event) = db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(doc! {
+            "event_type": "nyxbot_channel_org_access_lost",
+            "event_data.channel_agent_id": channel_agent_id,
+        })
+        .sort(doc! {"created_at": -1})
+        .projection(doc! {"created_at": 1})
+        .hint(mongodb::options::Hint::Name(
+            "event_type_1_created_at_-1".to_owned(),
+        ))
+        .await?
+    else {
+        return Ok(OrgRestoreProof::Missing);
+    };
+    Ok(event
+        .get_datetime("created_at")
+        .ok()
+        .map(|at| {
+            if org_restore_event_qualifies(at.to_chrono()) {
+                OrgRestoreProof::BeforeCutover
+            } else {
+                OrgRestoreProof::AtOrAfterCutover
+            }
+        })
+        .unwrap_or(OrgRestoreProof::AtOrAfterCutover))
+}
+
+pub(crate) async fn has_old_org_restore_proof(
+    db: &Database,
+    channel_agent_id: &str,
+) -> AppResult<bool> {
+    Ok(org_restore_proof(db, channel_agent_id).await? == OrgRestoreProof::BeforeCutover)
+}
+
+fn org_restore_retry_delay(attempt: i32) -> Duration {
+    match attempt {
+        0 | 1 => Duration::minutes(1),
+        2 => Duration::minutes(5),
+        3 => Duration::minutes(15),
+        4 => Duration::hours(1),
+        _ => Duration::hours(6),
+    }
+}
+
+pub(crate) async fn claim_org_restore_candidate(
+    db: &Database,
+) -> AppResult<Option<(NyxbotChannel, String)>> {
+    // Completion must never undo a later manual disconnect when a newer rule
+    // revisits previously disqualified predecessors.
+    let now = bson::DateTime::now();
+    let Some(candidate) = db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {
+            "status": "failed",
+            "last_error": "org_access_lost",
+            "org_restore_last_reason": {"$ne": "restored"},
+            "org_specialist.version": 1,
+            "$or": [
+                {"org_restore_rule_version": {"$lt": ORG_RESTORE_RULE_VERSION}},
+                {"org_restore_next_attempt_at": null},
+                {"org_restore_next_attempt_at": {"$lte": &now}},
+            ],
+        })
+        .hint(mongodb::options::Hint::Name(
+            "org_access_restore_candidates".to_owned(),
+        ))
+        // The partial candidate index supplies a bounded first eligible row;
+        // a live-binding fence decides any duplicate predecessor race.
+        .await?
+    else {
+        return Ok(None);
+    };
+    let claim_id = Uuid::new_v4().to_string();
+    let lease_until =
+        bson::DateTime::from_chrono(Utc::now() + Duration::seconds(ORG_RESTORE_LEASE_SECONDS));
+    let claimed = db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one_and_update(
+            doc! {
+                "_id": &candidate.id,
+                "status": "failed",
+                "last_error": "org_access_lost",
+                "org_restore_last_reason": {"$ne": "restored"},
+                "$and": [
+                    {"$or": [
+                        {"org_restore_claim_id": null},
+                        {"org_restore_lease_until": {"$lte": &now}},
+                        {"org_restore_lease_until": null},
+                    ]},
+                    {"$or": [
+                        {"org_restore_rule_version": {"$lt": ORG_RESTORE_RULE_VERSION}},
+                        {"org_restore_next_attempt_at": null},
+                        {"org_restore_next_attempt_at": {"$lte": &now}},
+                    ]},
+                ],
+            },
+            doc! {"$set": {
+                "org_restore_claim_id": &claim_id,
+                "org_restore_lease_until": lease_until,
+            }},
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+    Ok(claimed.map(|row| (row, claim_id)))
+}
+
+async fn finish_org_restore_disqualified(
+    state: &AppState,
+    row: &NyxbotChannel,
+    claim_id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    let row = row.clone();
+    let claim_id = claim_id.to_owned();
+    let reason = reason.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = db.clone();
+            let row = row.clone();
+            let claim_id = claim_id.clone();
+            let reason = reason.clone();
+            let work: AppResult<()> = Box::pin(async move {
+                let current = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &row.id, "org_restore_claim_id": &claim_id})
+                    .session(&mut *session)
+                    .await?;
+                let Some(current) = current else { return Ok(()) };
+                db.collection::<Document>(CHANNELS)
+                    .update_one(
+                        doc! {"_id": &row.id, "org_restore_claim_id": &claim_id},
+                        doc! {"$set": {
+                            "org_restore_next_attempt_at": bson::DateTime::from_chrono(Utc::now() + Duration::days(ORG_RESTORE_RETRY_CAP_DAYS)),
+                            "org_restore_rule_version": ORG_RESTORE_RULE_VERSION,
+                            "org_restore_last_reason": &reason,
+                            "org_restore_claim_id": bson::Bson::Null,
+                            "org_restore_lease_until": bson::Bson::Null,
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if current.org_restore_last_reason.as_deref() != Some(reason.as_str()) {
+                    audit(
+                        &db,
+                        session,
+                        &current.user_id,
+                        "nyxbot_channel_org_access_restoration",
+                        json!({
+                            "outcome": "disqualified",
+                            "reason": &reason,
+                            "channel_agent_id": &current.id,
+                            "predecessor_channel_id": &current.id,
+                            "channel_bot_id": &current.channel_bot_id,
+                            "org_id": current.bot_owner_id,
+                            "specialist_id": current.agent_id,
+                            "platform": &current.platform,
+                            "guest_enabled": current.org_specialist.as_ref().is_some_and(|b| b.guests.enabled),
+                        }),
+                    )
+                    .await?;
+                }
+                Ok(())
+            })
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+pub(crate) async fn defer_org_restore_unavailable(
+    db: &Database,
+    row: &NyxbotChannel,
+    claim_id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    db.collection::<Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "org_restore_claim_id": claim_id},
+            doc! {"$set": {
+                "org_restore_next_attempt_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(1)),
+                "org_restore_rule_version": ORG_RESTORE_RULE_VERSION,
+                "org_restore_last_reason": reason,
+                "org_restore_claim_id": bson::Bson::Null,
+                "org_restore_lease_until": bson::Bson::Null,
+            }},
+        )
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn finish_org_restore_failure(
+    state: &AppState,
+    row: &NyxbotChannel,
+    claim_id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    let row = row.clone();
+    let reason = reason.to_owned();
+    let claim_id = claim_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = db.clone();
+            let row = row.clone();
+            let reason = reason.clone();
+            let claim_id = claim_id.clone();
+            let work: AppResult<()> = Box::pin(async move {
+                let current = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &row.id, "org_restore_claim_id": &claim_id})
+                    .session(&mut *session)
+                    .await?;
+                let Some(current) = current else { return Ok(()) };
+                let attempt = current.org_restore_attempts + 1;
+                let next = bson::DateTime::from_chrono(Utc::now() + org_restore_retry_delay(attempt));
+                db.collection::<Document>(CHANNELS)
+                    .update_one(
+                        doc! {"_id": &row.id, "org_restore_claim_id": &claim_id},
+                        doc! {"$set": {
+                            "org_restore_next_attempt_at": next,
+                            "org_restore_rule_version": ORG_RESTORE_RULE_VERSION,
+                            "org_restore_last_reason": &reason,
+                            "org_restore_claim_id": bson::Bson::Null,
+                            "org_restore_lease_until": bson::Bson::Null,
+                        }, "$inc": {"org_restore_attempts": 1_i64}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if current.org_restore_last_reason.as_deref() != Some(reason.as_str()) {
+                    audit(
+                        &db,
+                        session,
+                        &current.user_id,
+                        "nyxbot_channel_org_access_restoration",
+                        json!({
+                            "outcome": "failed",
+                            "reason": &reason,
+                            "channel_agent_id": &current.id,
+                            "predecessor_channel_id": &current.id,
+                            "channel_bot_id": &current.channel_bot_id,
+                            "org_id": current.bot_owner_id,
+                            "specialist_id": current.agent_id,
+                            "platform": &current.platform,
+                            "guest_enabled": current.org_specialist.as_ref().is_some_and(|b| b.guests.enabled),
+                        }),
+                    )
+                    .await?;
+                }
+                Ok(())
+            })
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+async fn finish_org_restore_success(
+    state: &AppState,
+    predecessor: &NyxbotChannel,
+    claim_id: &str,
+    restored: &NyxbotChannel,
+) -> AppResult<bool> {
+    let db = state.db.clone();
+    let predecessor = predecessor.clone();
+    let restored = restored.clone();
+    let claim_id = claim_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = db.clone();
+            let predecessor = predecessor.clone();
+            let restored = restored.clone();
+            let claim_id = claim_id.clone();
+            let work: AppResult<bool> = Box::pin(async move {
+                // The predecessor lease may have expired while the gateway was
+                // rebuilding. The activated row's exact claim identifies the
+                // winner, even if a later claimant deferred on that pending row.
+                // Clearing this claim in the audit transaction makes completion
+                // and its transition notice occur once.
+                if db.collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &restored.id, "status": "active",
+                        "org_restore_claim_id": &claim_id})
+                    .session(&mut *session)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(false);
+                }
+                let current = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &predecessor.id})
+                    .session(&mut *session)
+                    .await?;
+                let Some(current) = current else { return Ok(false) };
+                let next = bson::DateTime::from_chrono(
+                    Utc::now() + Duration::days(ORG_RESTORE_RETRY_CAP_DAYS),
+                );
+                db.collection::<Document>(CHANNELS)
+                    .update_one(
+                        doc! {"_id": &current.id},
+                        doc! {"$set": {
+                            "org_restore_next_attempt_at": next,
+                            "org_restore_rule_version": ORG_RESTORE_RULE_VERSION,
+                            "org_restore_last_reason": "restored",
+                            "org_restore_claim_id": bson::Bson::Null,
+                            "org_restore_lease_until": bson::Bson::Null,
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<Document>(CHANNELS)
+                    .update_one(
+                        doc! {"_id": &restored.id, "org_restore_claim_id": &claim_id},
+                        doc! {"$set": {
+                            "org_restore_rule_version": ORG_RESTORE_RULE_VERSION,
+                            "org_restore_claim_id": bson::Bson::Null,
+                            "org_restore_lease_until": bson::Bson::Null,
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                audit(
+                    &db,
+                    session,
+                    &current.user_id,
+                    "nyxbot_channel_org_access_restoration",
+                    json!({
+                        "outcome": "restored",
+                        "channel_agent_id": &restored.id,
+                        "predecessor_channel_id": &current.id,
+                        "channel_bot_id": &restored.channel_bot_id,
+                        "org_id": restored.bot_owner_id,
+                        "specialist_id": restored.agent_id,
+                        "platform": &restored.platform,
+                        "guest_enabled": restored.org_specialist.as_ref().is_some_and(|b| b.guests.enabled),
+                    }),
+                )
+                .await?;
+                Ok(true)
+            })
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+/// One candidate at most per leased maintenance pass. All ordinary request
+/// paths remain untouched.
+pub(crate) async fn restore_org_access_step(state: AppState) -> AppResult<()> {
+    let Some((candidate, claim_id)) = claim_org_restore_candidate(&state.db).await? else {
+        return Ok(());
+    };
+    let proof = org_restore_proof(&state.db, &candidate.id).await?;
+    if proof != OrgRestoreProof::BeforeCutover {
+        let reason = match proof {
+            OrgRestoreProof::Missing => "audit_proof_missing",
+            OrgRestoreProof::AtOrAfterCutover => "audit_proof_after_cutover",
+            OrgRestoreProof::BeforeCutover => unreachable!(),
+        };
+        return finish_org_restore_disqualified(&state, &candidate, &claim_id, reason).await;
+    }
+    match crate::handlers::nyxbot::restore_org_channel(state.clone(), candidate.clone(), &claim_id)
+        .await
+    {
+        Ok(crate::handlers::nyxbot::OrgRestoreOutcome::Disqualified(reason)) => {
+            finish_org_restore_disqualified(&state, &candidate, &claim_id, reason).await
+        }
+        Ok(crate::handlers::nyxbot::OrgRestoreOutcome::Unavailable(reason)) => {
+            defer_org_restore_unavailable(&state.db, &candidate, &claim_id, reason).await
+        }
+        Ok(crate::handlers::nyxbot::OrgRestoreOutcome::Restored(restored)) => {
+            if !finish_org_restore_success(&state, &candidate, &claim_id, &restored).await? {
+                return Ok(());
+            }
+            if let Some(bot) = state
+                .db
+                .collection::<crate::models::channel_bot::ChannelBot>(
+                    crate::models::channel_bot::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id": &restored.channel_bot_id})
+                .await?
+            {
+                crate::services::channel_bot_health::notify_restored(
+                    &state.db,
+                    &bot,
+                    &candidate.user_id,
+                    restored
+                        .org_specialist
+                        .as_ref()
+                        .is_some_and(|b| b.guests.enabled),
+                );
+            }
+            Ok(())
+        }
+        Err(AppError::SecurityReadinessUnavailable) => {
+            defer_org_restore_unavailable(&state.db, &candidate, &claim_id, "readiness_unavailable")
+                .await
+        }
+        Err(error) => {
+            if crate::handlers::nyxbot::is_org_access_lost_error(&error) {
+                return finish_org_restore_disqualified(
+                    &state,
+                    &candidate,
+                    &claim_id,
+                    "live_authority_changed",
+                )
+                .await;
+            }
+            if matches!(&error, AppError::Conflict(_))
+                && (state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {
+                        "channel_bot_id": &candidate.channel_bot_id,
+                        "_id": {"$ne": &candidate.id},
+                        "status": {"$in": ["pending", "active"]},
+                    })
+                    .await?
+                    .is_some()
+                    || state
+                        .db
+                        .collection::<Document>(
+                            crate::models::channel_conversation::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {
+                            "channel_bot_id": &candidate.channel_bot_id,
+                            "is_active": true,
+                        })
+                        .await?
+                        .is_some())
+            {
+                return finish_org_restore_disqualified(
+                    &state,
+                    &candidate,
+                    &claim_id,
+                    "live_binding_or_route",
+                )
+                .await;
+            }
+            let reason = crate::handlers::nyxbot::org_restore_error_reason(&error);
+            finish_org_restore_failure(&state, &candidate, &claim_id, reason).await
+        }
+    }
+}
+
 pub(crate) async fn list(
     db: &Database,
     after: Option<&str>,
@@ -2296,4 +2818,28 @@ pub(crate) async fn continue_setup(state: &AppState, release: &Release) -> AppRe
         return Err(conflict());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod org_restore_tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn org_restore_cutover_is_strict() {
+        let cutover = Utc.timestamp_millis_opt(ORG_RESTORE_CUTOVER).unwrap();
+        assert!(org_restore_event_qualifies(cutover - Duration::seconds(1)));
+        assert!(!org_restore_event_qualifies(cutover));
+        assert!(!org_restore_event_qualifies(cutover + Duration::seconds(1)));
+    }
+
+    #[test]
+    fn org_restore_retry_schedule_is_bounded() {
+        assert_eq!(org_restore_retry_delay(1), Duration::minutes(1));
+        assert_eq!(org_restore_retry_delay(2), Duration::minutes(5));
+        assert_eq!(org_restore_retry_delay(3), Duration::minutes(15));
+        assert_eq!(org_restore_retry_delay(4), Duration::hours(1));
+        assert_eq!(org_restore_retry_delay(5), Duration::hours(6));
+        assert_eq!(org_restore_retry_delay(99), Duration::hours(6));
+    }
 }
