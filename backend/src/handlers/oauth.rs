@@ -3546,18 +3546,17 @@ pub async fn get_binding(
 ///
 /// Client-initiated binding revocation aligned with the contract
 /// proposed on issue #549. Authenticated via client_credentials in
-/// Authorization: Basic or query params. Always returns 204 — missing,
-/// already-revoked, and ownership-mismatched bindings are
-/// indistinguishable from a successful revoke (no enumeration leak).
-/// `/oauth/revoke` (RFC 7009) remains supported as the standards-track
-/// alternative; this endpoint is the REST-style alias the issue spec
-/// calls for.
+/// Authorization: Basic or query params. Missing, already-revoked, and
+/// ownership-mismatched bindings return 204, like a successful revoke
+/// (no enumeration leak).
+/// `/oauth/revoke` (RFC 7009) remains the standards-track alternative.
+/// Mutation storage failures propagate. This endpoint is the REST-style alias.
 pub async fn delete_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
     Query(query): Query<GetBindingQuery>,
-) -> StatusCode {
+) -> AppResult<StatusCode> {
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
     let (client_id, client_secret) = match client_credentials_from_basic_or_params(
         basic,
@@ -3565,58 +3564,38 @@ pub async fn delete_binding(
         query.client_secret,
     ) {
         Some(credentials) => credentials,
-        None => return StatusCode::NO_CONTENT,
+        None => return Ok(StatusCode::NO_CONTENT),
     };
 
     if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
         .await
         .is_err()
     {
-        return StatusCode::NO_CONTENT;
+        return Ok(StatusCode::NO_CONTENT);
     }
 
-    let revoked = oauth_broker_service::revoke_binding_by_client(
+    oauth_broker_service::revoke_binding_by_client_as(
         &state.db,
-        state.encryption_keys.clone(),
-        &state.http_client,
         &client_id,
         &raw_binding_id,
         "client_revoked",
+        crate::handlers::admin_helpers::extract_ip(&headers).as_deref(),
+        crate::handlers::admin_helpers::extract_user_agent(&headers).as_deref(),
     )
-    .await
-    .unwrap_or(false);
+    .await?;
 
-    if revoked {
-        let binding_hash = crate::models::oauth_broker_binding::hash_binding_id(&raw_binding_id);
-        audit_service::log_async(
-            state.db.clone(),
-            None,
-            "oauth_broker_binding_revoked".to_string(),
-            Some(serde_json::json!({
-                "revoke_source": "client",
-                "client_id": client_id,
-                "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
-                "reason": "client_revoked",
-            })),
-            crate::handlers::admin_helpers::extract_ip(&headers),
-            crate::handlers::admin_helpers::extract_user_agent(&headers),
-            None,
-            None,
-        );
-    }
-
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /oauth/revoke
 ///
 /// RFC 7009 Token Revocation. Authenticates the calling client before
-/// revoking the token. Always returns 200 per the spec.
+/// revoking the token. Unknown/revoked tokens return 200; broker-binding mutation failures propagate.
 pub async fn revoke(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(body): Form<RevokeRequest>,
-) -> StatusCode {
+) -> AppResult<StatusCode> {
     // Authenticate the calling client (RFC 7009 requirement).
     // Per the spec, always return 200 even if authentication fails.
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
@@ -3626,14 +3605,14 @@ pub async fn revoke(
         body.client_secret.clone(),
     ) {
         Some((id, secret)) if !id.is_empty() => (id, secret),
-        _ => return StatusCode::OK,
+        _ => return Ok(StatusCode::OK),
     };
 
     if oauth_service::authenticate_client(&state.db, &caller_client_id, client_secret.as_deref())
         .await
         .is_err()
     {
-        return StatusCode::OK;
+        return Ok(StatusCode::OK);
     }
 
     // Broker-binding revocation: detect via the explicit token_type_hint or
@@ -3650,39 +3629,19 @@ pub async fn revoke(
             .starts_with(crate::models::oauth_broker_binding::BINDING_ID_PREFIX);
 
     if is_broker_binding {
-        let revoked = oauth_broker_service::revoke_binding_by_client(
+        oauth_broker_service::revoke_binding_by_client_as(
             &state.db,
-            state.encryption_keys.clone(),
-            &state.http_client,
             &caller_client_id,
             &body.token,
             "client_revoked",
+            crate::handlers::admin_helpers::extract_ip(&headers).as_deref(),
+            crate::handlers::admin_helpers::extract_user_agent(&headers).as_deref(),
         )
-        .await
-        .unwrap_or(false);
-
-        if revoked {
-            let binding_hash = crate::models::oauth_broker_binding::hash_binding_id(&body.token);
-            audit_service::log_async(
-                state.db.clone(),
-                None,
-                "oauth_broker_binding_revoked".to_string(),
-                Some(serde_json::json!({
-                    "revoke_source": "client",
-                    "client_id": caller_client_id,
-                    "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
-                    "reason": "client_revoked",
-                })),
-                crate::handlers::admin_helpers::extract_ip(&headers),
-                crate::handlers::admin_helpers::extract_user_agent(&headers),
-                None,
-                None,
-            );
-        }
+        .await?;
 
         // RFC 7009: always return 200 regardless of whether the token was
         // valid, owned by this client, or already revoked.
-        return StatusCode::OK;
+        return Ok(StatusCode::OK);
     }
 
     // Try to decode to get JTI for revocation
@@ -3690,7 +3649,7 @@ pub async fn revoke(
     {
         Ok(c) => c,
         // Per RFC 7009, return 200 even if the token is invalid
-        Err(_) => return StatusCode::OK,
+        Err(_) => return Ok(StatusCode::OK),
     };
 
     if claims.token_type == "refresh" {
@@ -3705,7 +3664,7 @@ pub async fn revoke(
                 doc! { "$set": { "revoked": true } },
             )
             .await;
-        return StatusCode::OK;
+        return Ok(StatusCode::OK);
     }
 
     // For service account tokens, revoke via the SA tokens collection
@@ -3718,7 +3677,7 @@ pub async fn revoke(
                 doc! { "$set": { "revoked": true } },
             )
             .await;
-        return StatusCode::OK;
+        return Ok(StatusCode::OK);
     }
 
     if claims.delegated == Some(true)
@@ -3730,14 +3689,14 @@ pub async fn revoke(
             &caller_client_id,
         )
         .await;
-        return StatusCode::OK;
+        return Ok(StatusCode::OK);
     }
 
     // Access tokens are JWTs -- they cannot be directly revoked without a blacklist.
     // Per RFC 7009, the server SHOULD revoke the token if possible. Since access tokens
     // are short-lived and stateless, we simply return 200.
 
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }
 
 // --- Dynamic Client Registration (RFC 7591) ---
@@ -6585,7 +6544,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status.unwrap(), StatusCode::NO_CONTENT);
         assert!(load_binding(&db, &raw_binding_id).await.revoked);
 
         let wrong_client_status = delete_binding(
@@ -6598,7 +6557,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(wrong_client_status, StatusCode::NO_CONTENT);
+        assert_eq!(wrong_client_status.unwrap(), StatusCode::NO_CONTENT);
         assert!(!load_binding(&db, &other_raw_binding_id).await.revoked);
     }
 

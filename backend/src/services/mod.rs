@@ -248,6 +248,7 @@ pub mod resource_adapter;
 pub mod resource_request_proof;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod security_effect_service;
 pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;

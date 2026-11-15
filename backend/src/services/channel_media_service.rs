@@ -62,6 +62,17 @@ pub async fn media_client(
     trusted_base: Option<&str>,
 ) -> AppResult<reqwest::Client> {
     tokio::time::timeout(TIMEOUT, async {
+        #[cfg(test)]
+        if let Ok((builder, host, addresses)) = TEST_PINNED_TRANSPORT.try_with(|fixture| {
+            assert_eq!(target, fixture.target);
+            (
+                (fixture.builder)(),
+                fixture.host.clone(),
+                fixture.addresses.clone(),
+            )
+        }) {
+            return pinned_client(builder, &host, &addresses);
+        }
         if target.len() > MAX_MEDIA_URL_BYTES {
             return Err(fetch_failed());
         }
@@ -105,16 +116,37 @@ pub async fn media_client(
         {
             return Err(fetch_failed());
         }
-        reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(TIMEOUT)
-            .resolve_to_addrs(host, &addresses)
-            .build()
-            .map_err(|_| fetch_failed())
+        pinned_client(reqwest::Client::builder(), host, &addresses)
     })
     .await
     .map_err(|_| fetch_failed())?
+}
+
+fn pinned_client(
+    builder: reqwest::ClientBuilder,
+    host: &str,
+    addresses: &[std::net::SocketAddr],
+) -> AppResult<reqwest::Client> {
+    builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TIMEOUT)
+        .resolve_to_addrs(host, addresses)
+        .build()
+        .map_err(|_| fetch_failed())
+}
+
+#[cfg(test)]
+pub(crate) struct TestPinnedTransport {
+    pub target: String,
+    pub host: String,
+    pub addresses: Vec<std::net::SocketAddr>,
+    pub builder: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_PINNED_TRANSPORT: TestPinnedTransport;
 }
 
 pub async fn bounded_response(

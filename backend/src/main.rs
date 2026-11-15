@@ -1864,6 +1864,7 @@ async fn server_run(cli: Cli) {
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
     services::service_history::relay::start(state.db.clone());
+    services::security_effect_service::start(state.db.clone(), state.encryption_keys.clone());
 
     let (public_oauth, private_api) = routes::build_router_with_state(state.clone());
 

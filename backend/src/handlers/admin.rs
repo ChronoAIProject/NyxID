@@ -1685,6 +1685,7 @@ pub struct ChainVerificationResponse {
     pub chains: Vec<ChainVerifyStatusItem>,
     pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
+    pub security_effects: crate::services::security_effect_service::SecurityEffectDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -1787,6 +1788,7 @@ pub async fn get_chain_verification(
         chains: items,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+        security_effects: crate::services::security_effect_service::diagnostics(&state.db).await?,
     }))
 }
 
@@ -1817,6 +1819,7 @@ pub async fn run_chain_verification(
         chains,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+        security_effects: crate::services::security_effect_service::diagnostics(&state.db).await?,
     }))
 }
 
