@@ -107,19 +107,6 @@ fn joined_child_spec(collection: &str, parent: &str) -> Option<(&'static str, &'
         .map(|spec| (spec.child_parent_field, spec.parent))
 }
 
-async fn was_applied(db: &mongodb::Database, digest: &str) -> AppResult<bool> {
-    Ok(db
-        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {
-            "event_type": "user.account.erasure_orphan_sweep",
-            "event_data.digest": digest,
-        })
-        .projection(doc! {"_id": 1})
-        .max_time(AGGREGATE_TIMEOUT)
-        .await?
-        .is_some())
-}
-
 pub mod jobs;
 
 #[cfg(test)]
@@ -447,7 +434,7 @@ mod tests {
                 .await
                 .unwrap()
                 .candidate_count,
-            0
+            report.candidate_count
         );
     }
 
@@ -528,7 +515,7 @@ mod tests {
                 .is_none()
         );
         let second = apply(&db, &person, &report.digest).await.unwrap();
-        assert_eq!(second.candidate_count, 0);
+        assert_eq!(second.candidate_count, report.candidate_count);
         assert!(db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type": "user.account.erasure_orphan_sweep", "event_data.digest": &report.digest}).await.unwrap().is_some());
         db.drop().await.unwrap();
     }

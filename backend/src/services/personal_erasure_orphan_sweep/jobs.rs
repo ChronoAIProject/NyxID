@@ -152,14 +152,9 @@ pub async fn start(
     } else {
         None
     };
-    let already_applied = apply && was_applied(db, expected.unwrap_or_default()).await?;
     let mut report = reviewed.as_ref().and_then(|job| job.report.clone());
     if let Some(report) = &mut report {
         report.dry_run = false;
-        if already_applied {
-            report.candidate_count = 0;
-            report.collections.clear();
-        }
     }
     let job = Job {
         id: Uuid::new_v4().to_string(),
@@ -169,20 +164,8 @@ pub async fn start(
         source_job_id: reviewed.as_ref().map(|job| job.id.clone()),
         consecutive_failures: 0,
         noop_count: 0,
-        status: if already_applied {
-            "complete"
-        } else {
-            "pending"
-        }
-        .into(),
-        phase: if already_applied {
-            "complete"
-        } else if apply {
-            "apply"
-        } else {
-            "scan"
-        }
-        .into(),
+        status: "pending".into(),
+        phase: if apply { "apply" } else { "scan" }.into(),
         scan_spec: 0,
         specs_digest: reviewed
             .as_ref()
@@ -892,6 +875,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_digest_retries_rows_after_remote_cleanup_clears() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("orphan_blocked_reapply").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<Document>("assistant_wire_logs")
+            .insert_one(doc! {"_id":"held", "user_id":&owner})
+            .await
+            .unwrap();
+        // Remote cleanup is lifecycle state, so it does not alter the reviewed
+        // local-inventory digest when the blocker clears.
+        db.collection::<Document>("platform_bot_cleanup")
+            .insert_one(doc! {"_id":"remote", "owner_user_id":&owner, "completed":false})
+            .await
+            .unwrap();
+        let dry = scan(&db).await.unwrap();
+        let first = start(&db, "operator", true, Some(&dry.digest))
+            .await
+            .unwrap();
+        finish(&db, &first.job_id).await.unwrap();
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id":"held"})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(db.collection::<Document>("audit_log").find_one(doc! {"event_type":"user.account.erasure_orphan_sweep", "event_data.digest":&dry.digest}).await.unwrap().is_some());
+        db.collection::<Document>("platform_bot_cleanup")
+            .update_one(doc! {"_id":"remote"}, doc! {"$set":{"completed":true}})
+            .await
+            .unwrap();
+        let next = scan(&db).await.unwrap();
+        assert_eq!(next.digest, dry.digest);
+        let second = start(&db, "operator", true, Some(&next.digest))
+            .await
+            .unwrap();
+        assert_eq!(second.status, "pending");
+        assert_eq!(
+            finish(&db, &second.job_id).await.unwrap().candidate_count,
+            1
+        );
+        assert!(
+            db.collection::<Document>("assistant_wire_logs")
+                .find_one(doc! {"_id":"held"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn persistent_page_errors_fail_after_the_cap_and_finished_pages_are_purged() {
         let db = crate::test_utils::connect_transaction_test_database("orphan_retry_purge").await;
         crate::test_utils::init_test_audit_chain_hmac_key();
@@ -1051,7 +1087,7 @@ mod tests {
                 .await
                 .unwrap()
                 .candidate_count,
-            0
+            600
         );
         db.drop().await.unwrap();
     }
