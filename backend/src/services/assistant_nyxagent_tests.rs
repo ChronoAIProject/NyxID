@@ -127,6 +127,32 @@ fn mixed_sse_line_endings_in_one_chunk_preserve_frame_order() {
 }
 
 #[test]
+fn terminal_answer_excludes_progress_messages_with_native_and_legacy_items() {
+    for phased in [false, true] {
+        let mut done = terminal("response.completed", 9, "The verified result.");
+        let mut progress = done["response"]["output"][0].clone();
+        progress["content"][0]["text"] = json!("Checking records.");
+        if phased {
+            progress["phase"] = json!("commentary");
+            done["response"]["output"][0]["phase"] = json!("final_answer");
+        }
+        done["response"]["output"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, progress);
+        let mut stream = ResponseStream::default();
+        stream
+            .push(&frame(
+                json!({"type":"response.output_text.delta", "sequence_number":1,
+            "delta":"Checking records.The verified result."}),
+            ))
+            .unwrap();
+        stream.push(&frame(done)).unwrap();
+        assert_eq!(stream.terminal.unwrap().text, "The verified result.");
+    }
+}
+
+#[test]
 fn stream_rejects_invalid_sequences_json_identifiers_and_bounds() {
     let mut stream = ResponseStream::default();
     let delta =

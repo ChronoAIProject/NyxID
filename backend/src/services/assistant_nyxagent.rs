@@ -7673,20 +7673,8 @@ impl ResponseStream {
             self.text.push_str(delta);
         } else {
             let response = &event["response"];
-            let text = response["output"]
-                .as_array()
-                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?
-                .iter()
-                .filter(|item| item["type"] == "message" && item["role"] == "assistant")
-                .flat_map(|item| item["content"].as_array().into_iter().flatten())
-                .filter(|part| part["type"] == "output_text")
-                .map(|part| {
-                    part["text"]
-                        .as_str()
-                        .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .join("\n\n");
+            let text = super::assistant_response_text::final_text(&response["output"])
+                .map_err(|_| TurnError::internal("invalid_stream", "stream"))?;
             let session = response["conversation"]["id"]
                 .as_str()
                 .filter(|id| prefixed_hex(id, "conv_"));

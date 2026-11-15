@@ -331,6 +331,7 @@ pub mod assistant_onboarding_service;
 pub mod assistant_platform_model;
 pub mod assistant_platform_reply_decision;
 pub mod assistant_profile_routing;
+mod assistant_response_text;
 pub mod assistant_service_execution;
 pub mod assistant_settings_service;
 pub(crate) mod assistant_ssh_session;
