@@ -893,3 +893,122 @@ fn every_primary_export_has_an_explicit_access_selector() {
         );
     }
 }
+
+#[tokio::test]
+async fn large_message_source_does_not_starve_later_session_metadata() {
+    use crate::models::{assistant_message::AssistantMessage, session::Session, user::UserType};
+    let db = crate::test_utils::connect_transaction_test_database("export_fair_sources").await;
+    let person = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user::User>("users")
+        .insert_one(crate::test_utils::test_user(&person, UserType::Person))
+        .await
+        .unwrap();
+    let mut message: AssistantMessage =
+        bson::from_document(model_fixture("assistant_messages")).unwrap();
+    message.user_id = person.clone();
+    message.role = "user".into();
+    message.text = "x".repeat(512 * 1024);
+    db.collection::<AssistantMessage>("assistant_messages")
+        .insert_one(message)
+        .await
+        .unwrap();
+    let mut session: Session = bson::from_document(model_fixture("sessions")).unwrap();
+    session.user_id = person.clone();
+    db.collection::<Session>("sessions")
+        .insert_one(session)
+        .await
+        .unwrap();
+    let export = build(&db, &person).await.unwrap();
+    let message_spec = explicit_export_spec("assistant_messages").unwrap();
+    let session_spec = explicit_export_spec("sessions").unwrap();
+    assert!(!export.sections[message_spec.section][message_spec.subsection].truncated);
+    assert_eq!(
+        export.sections[message_spec.section][message_spec.subsection]
+            .items
+            .len(),
+        1
+    );
+    assert!(!export.truncated_sections.contains(&format!(
+        "{}.{}",
+        message_spec.section, message_spec.subsection
+    )));
+    assert_eq!(
+        export.sections[session_spec.section][session_spec.subsection]
+            .items
+            .len(),
+        1
+    );
+    assert!(serde_json::to_vec(&export).unwrap().len() <= MAX_BYTES);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn row_cap_marks_the_source_and_is_listed_without_final_byte_trimming() {
+    use crate::models::assistant_message_feedback::AssistantMessageFeedback;
+    let db = crate::test_utils::connect_transaction_test_database("export_row_cap").await;
+    let person = uuid::Uuid::new_v4().to_string();
+    let mut feedback: AssistantMessageFeedback =
+        bson::from_document(model_fixture("assistant_message_feedback")).unwrap();
+    feedback.user_id = person.clone();
+    for start in (0..SUBSECTION_ROW_CAP + 1).step_by(256) {
+        db.collection::<AssistantMessageFeedback>("assistant_message_feedback")
+            .insert_many(
+                (start..(start + 256).min(SUBSECTION_ROW_CAP + 1))
+                    .map(|index| {
+                        let mut row = feedback.clone();
+                        row.id = format!("feedback-{index}");
+                        row
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+    }
+    let mut budget = ExportBudget {
+        remaining: MAX_BYTES,
+        ..Default::default()
+    };
+    let value = rows(
+        &db,
+        "assistant_message_feedback",
+        doc! {"user_id": &person},
+        fields_for("assistant_message_feedback").unwrap(),
+        doc! {"created_at": -1},
+        &mut budget,
+    )
+    .await
+    .unwrap();
+    assert_eq!(value.total_count, SUBSECTION_ROW_CAP as u64 + 1);
+    assert_eq!(value.items.len(), SUBSECTION_ROW_CAP as usize);
+    assert!(value.truncated);
+    let mut export = AccountExport {
+        format: FORMAT,
+        version: VERSION,
+        generated_at: Utc::now().to_rfc3339(),
+        account_id: person,
+        limits: ExportLimits {
+            max_bytes: MAX_BYTES,
+            subsection_row_cap: SUBSECTION_ROW_CAP,
+            query_timeout_ms: QUERY_TIMEOUT.as_millis() as u64,
+            file_payloads: "metadata_only",
+        },
+        truncated_sections: Vec::new(),
+        excluded: Vec::new(),
+        sections: BTreeMap::from([(
+            "assistant".into(),
+            BTreeMap::from([("assistant_message_feedback".into(), value)]),
+        )]),
+    };
+    enforce_cap_with_limit(&mut export, MAX_BYTES);
+    assert_eq!(
+        export.truncated_sections,
+        ["assistant.assistant_message_feedback"]
+    );
+    assert_eq!(
+        export.sections["assistant"]["assistant_message_feedback"]
+            .items
+            .len(),
+        SUBSECTION_ROW_CAP as usize
+    );
+    db.drop().await.unwrap();
+}

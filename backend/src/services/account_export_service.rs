@@ -28,6 +28,7 @@ pub struct ExportSubsection {
     pub items: Vec<serde_json::Value>,
     pub total_count: u64,
     pub truncated: bool,
+    pub unavailable: bool,
 }
 #[derive(Debug, Serialize, Clone)]
 pub struct ExportLimits {
@@ -1409,8 +1410,10 @@ fn restrict_row(collection: &str, filter: &Document, row: &mut Document) {
     }
 }
 
+#[derive(Default)]
 struct ExportBudget {
     remaining: usize,
+    byte_truncated: bool,
 }
 
 impl ExportBudget {
@@ -1419,6 +1422,7 @@ impl ExportBudget {
         // metadata. The final cap pass remains a correctness backstop.
         Self {
             remaining: max_bytes.saturating_sub(64 * 1024),
+            ..Default::default()
         }
     }
 
@@ -1428,11 +1432,103 @@ impl ExportBudget {
             .unwrap_or(usize::MAX);
         let needed = bytes.saturating_add(1);
         if needed > self.remaining {
+            self.byte_truncated = true;
             return false;
         }
         self.remaining -= needed;
         true
     }
+}
+
+/// Four total reads per source at most: one equal-share pass and up to three
+/// redistributions. Only byte-limited sources compete for unused capacity.
+const ALLOCATION_ROUNDS: usize = 4;
+
+#[derive(Default)]
+struct ExportPage {
+    value: ExportSubsection,
+    used: usize,
+    byte_truncated: bool,
+}
+
+impl ExportPage {
+    fn from_read(value: ExportSubsection, limit: usize, budget: ExportBudget) -> Self {
+        if value.unavailable {
+            // A failed cursor may have consumed part of the budget before its
+            // rows were discarded. None of those bytes belong to the result.
+            return Self {
+                value,
+                ..Default::default()
+            };
+        }
+        Self {
+            byte_truncated: budget.byte_truncated
+                && value.items.len() < SUBSECTION_ROW_CAP as usize,
+            used: limit - budget.remaining,
+            value,
+        }
+    }
+}
+
+async fn allocate_pages<F, Fut>(
+    max_bytes: usize,
+    count: usize,
+    mut read: F,
+) -> AppResult<Vec<ExportSubsection>>
+where
+    F: FnMut(usize, usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<ExportPage>>,
+{
+    let total = ExportBudget::new(max_bytes).remaining;
+    let mut pages = Vec::with_capacity(count);
+    let mut limits = vec![total / count; count];
+    for (index, limit) in limits.iter().enumerate() {
+        pages.push(read(index, *limit).await?);
+    }
+    for _ in 1..ALLOCATION_ROUNDS {
+        let active = pages.iter().filter(|page| page.byte_truncated).count();
+        if active == 0 {
+            break;
+        }
+        let fixed: usize = pages
+            .iter()
+            .filter(|page| !page.byte_truncated)
+            .map(|page| page.used)
+            .sum();
+        // Include the active sources' old shares in this pool exactly once.
+        // Adding all unused bytes to their old limits would double-count the
+        // partially unused space at a row boundary and could exceed the cap.
+        let limit = total.saturating_sub(fixed) / active;
+        let mut progressed = false;
+        for index in 0..count {
+            if !pages[index].byte_truncated || limit <= limits[index] {
+                continue;
+            }
+            // Release the old page before reading its replacement. Retained
+            // payload plus the new cursor page stays within the total budget.
+            pages[index] = ExportPage::default();
+            limits[index] = limit;
+            pages[index] = read(index, limit).await?;
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+    Ok(pages.into_iter().map(|page| page.value).collect())
+}
+
+fn truncated_names(export: &AccountExport) -> BTreeSet<String> {
+    export
+        .sections
+        .iter()
+        .flat_map(|(section, subsections)| {
+            subsections
+                .iter()
+                .filter(|(_, value)| value.truncated)
+                .map(move |(subsection, _)| format!("{section}.{subsection}"))
+        })
+        .collect()
 }
 
 async fn rows(
@@ -1492,6 +1588,7 @@ async fn rows(
         items,
         total_count,
         truncated,
+        unavailable: false,
     })
 }
 fn empty_sections() -> BTreeMap<String, BTreeMap<String, ExportSubsection>> {
@@ -1504,13 +1601,39 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
     // admitted or removed. This keeps cap enforcement linear in the number of
     // rows instead of repeatedly serializing the complete export (which was
     // quadratic for a large message subsection).
-    let mut skeleton = export.clone();
-    for subsections in skeleton.sections.values_mut() {
-        for subsection in subsections.values_mut() {
-            subsection.items.clear();
-        }
-    }
-    skeleton.truncated_sections.clear();
+    let mut truncated = truncated_names(export);
+    let skeleton = AccountExport {
+        format: export.format,
+        version: export.version,
+        generated_at: export.generated_at.clone(),
+        account_id: export.account_id.clone(),
+        limits: export.limits.clone(),
+        excluded: export.excluded.clone(),
+        truncated_sections: truncated.iter().cloned().collect(),
+        sections: export
+            .sections
+            .iter()
+            .map(|(section, values)| {
+                (
+                    section.clone(),
+                    values
+                        .iter()
+                        .map(|(name, value)| {
+                            (
+                                name.clone(),
+                                ExportSubsection {
+                                    items: Vec::new(),
+                                    total_count: value.total_count,
+                                    truncated: value.truncated,
+                                    unavailable: value.unavailable,
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    };
     let mut current = serde_json::to_vec(&skeleton)
         .map(|value| value.len())
         .unwrap_or(usize::MAX);
@@ -1529,7 +1652,6 @@ fn enforce_cap_with_limit(export: &mut AccountExport, max_bytes: usize) {
             current = current.saturating_add(subsection.items.len().saturating_sub(1));
         }
     }
-    let mut truncated = BTreeSet::new();
     while current > max_bytes {
         let Some((section, subsection, value)) = export
             .sections
@@ -1576,31 +1698,28 @@ async fn build_with_limit(
     max_bytes: usize,
 ) -> AppResult<AccountExport> {
     let mut sections = empty_sections();
-    let mut budget = ExportBudget::new(max_bytes);
     let account = db.collection::<Document>(crate::models::user::COLLECTION_NAME).find_one(doc! {"_id": account_id}).projection(doc! {"_id": 1, "email": 1, "display_name": 1, "avatar_url": 1, "email_verified": 1, "mfa_enabled": 1, "social_provider": 1, "created_at": 1, "updated_at": 1, "last_login_at": 1, "profile_config": 1}).max_time(QUERY_TIMEOUT).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
-    let profile = safe_item(&account, PROFILE_FIELDS);
-    let profile_admitted = budget.admit(&profile);
-    sections.entry("account".into()).or_default().insert(
-        "profile".into(),
-        ExportSubsection {
-            items: profile_admitted.then_some(profile).into_iter().collect(),
-            total_count: 1,
-            truncated: !profile_admitted,
-        },
-    );
-    let audit = rows(
-        db,
-        crate::models::audit_log::COLLECTION_NAME,
-        doc! {"user_id": account_id},
-        fields_for("audit_log").map_err(|error| AppError::Internal(error.to_string()))?,
-        doc! {"created_at": -1},
-        &mut budget,
-    )
-    .await?;
-    sections
-        .entry("account_activity".into())
-        .or_default()
-        .insert("audit_log".into(), audit);
+    let mut sources = vec![
+        (
+            "users",
+            ExplicitExportSpec {
+                section: "account",
+                subsection: "profile",
+                fields: PROFILE_FIELDS,
+            },
+            Some(doc! {"_id": account_id}),
+        ),
+        (
+            "audit_log",
+            ExplicitExportSpec {
+                section: "account_activity",
+                subsection: "audit_log",
+                fields: fields_for("audit_log")
+                    .map_err(|error| AppError::Internal(error.to_string()))?,
+            },
+            Some(doc! {"user_id": account_id}),
+        ),
+    ];
     for entry in personal_data_registry::entries() {
         let personal_data_registry::Export::Section(section) = entry.export else {
             continue;
@@ -1611,42 +1730,54 @@ async fn build_with_limit(
         let spec = explicit_export_spec(entry.collection)
             .map_err(|error| AppError::Internal(error.to_string()))?;
         debug_assert_eq!(section, spec.section);
-        let Some(filter) = owner_filter(entry, account_id) else {
-            sections
-                .entry(spec.section.into())
-                .or_default()
-                .insert(spec.subsection.into(), ExportSubsection::default());
-            continue;
-        };
-        let value = rows(
-            db,
-            entry.collection,
-            filter,
-            spec.fields,
-            doc! {"created_at": -1},
-            &mut budget,
-        )
-        .await?;
-        sections
-            .entry(spec.section.into())
-            .or_default()
-            .insert(spec.subsection.into(), value);
+        sources.push((entry.collection, spec, owner_filter(entry, account_id)));
     }
     for view in personal_data_registry::ADDITIONAL_EXPORT_VIEWS {
-        let spec = additional_export_spec(view);
-        let value = rows(
-            db,
+        sources.push((
             view.collection,
-            additional_export_filter(view, account_id),
-            spec.fields,
-            doc! {"created_at": -1},
-            &mut budget,
-        )
-        .await?;
+            additional_export_spec(view),
+            Some(additional_export_filter(view, account_id)),
+        ));
+    }
+    let pages = allocate_pages(max_bytes, sources.len(), |index, limit| {
+        let (collection, spec, filter) = &sources[index];
+        let account = &account;
+        async move {
+            let mut budget = ExportBudget {
+                remaining: limit,
+                ..Default::default()
+            };
+            let value = if *collection == "users" {
+                let profile = safe_item(account, PROFILE_FIELDS);
+                let admitted = budget.admit(&profile);
+                ExportSubsection {
+                    items: admitted.then_some(profile).into_iter().collect(),
+                    total_count: 1,
+                    truncated: !admitted,
+                    unavailable: false,
+                }
+            } else if let Some(filter) = filter {
+                rows(
+                    db,
+                    collection,
+                    filter.clone(),
+                    spec.fields,
+                    doc! {"created_at": -1, "_id": -1},
+                    &mut budget,
+                )
+                .await?
+            } else {
+                ExportSubsection::default()
+            };
+            Ok(ExportPage::from_read(value, limit, budget))
+        }
+    })
+    .await?;
+    for ((_, spec, _), page) in sources.into_iter().zip(pages) {
         sections
             .entry(spec.section.into())
             .or_default()
-            .insert(spec.subsection.into(), value);
+            .insert(spec.subsection.into(), page);
     }
     let mut export = AccountExport {
         format: FORMAT,
@@ -1728,21 +1859,162 @@ mod tests {
 
     #[test]
     fn export_budget_stops_admitting_rows_at_the_byte_cap() {
-        let mut budget = ExportBudget { remaining: 16 };
+        let mut budget = ExportBudget {
+            remaining: 16,
+            ..Default::default()
+        };
         assert!(budget.admit(&serde_json::json!("123456")));
         assert!(!budget.admit(&serde_json::json!("this row is too large")));
     }
 
-    #[test]
-    fn export_budget_is_shared_across_subsections() {
-        let mut budget = ExportBudget::new(100_000);
-        let row = serde_json::json!({"body": "x".repeat(12_000)});
-        assert!(budget.admit(&row));
-        assert!(budget.admit(&row));
-        assert!(!budget.admit(&row));
-        // A later subsection sees the same exhausted budget and must mark
-        // itself truncated without accumulating another row batch.
-        assert!(!budget.admit(&row));
+    // Exercise the production allocator with deterministic source pages so its
+    // read count, unavailable handling and row/byte distinction are observable.
+    fn allocation_page(
+        limit: usize,
+        rows: usize,
+        row_bytes: usize,
+        unavailable: bool,
+    ) -> ExportPage {
+        let mut budget = ExportBudget {
+            remaining: limit,
+            ..Default::default()
+        };
+        let mut value = ExportSubsection {
+            total_count: rows as u64,
+            unavailable,
+            ..Default::default()
+        };
+        if !unavailable {
+            for _ in 0..rows.min(SUBSECTION_ROW_CAP as usize) {
+                let item = serde_json::json!({"text": "x".repeat(row_bytes)});
+                if !budget.admit(&item) {
+                    break;
+                }
+                value.items.push(item);
+            }
+            value.truncated = value.items.len() < rows;
+        }
+        ExportPage::from_read(value, limit, budget)
+    }
+
+    #[tokio::test]
+    async fn water_filling_reclaims_small_sources_and_splits_large_sources_equally() {
+        for large in [1, 2] {
+            let count = 20;
+            let cap = 1024 * 1024;
+            let mut reads = vec![0; count];
+            let pages = allocate_pages(cap, count, |index, limit| {
+                reads[index] += 1;
+                std::future::ready(Ok(if index < large {
+                    allocation_page(limit, 2000, 1000, false)
+                } else {
+                    allocation_page(limit, 1, 20, false)
+                }))
+            })
+            .await
+            .unwrap();
+            let floor = ExportBudget::new(cap).remaining / count;
+            let sizes: Vec<_> = pages
+                .iter()
+                .map(|page| {
+                    page.items
+                        .iter()
+                        .map(|item| serde_json::to_vec(item).unwrap().len() + 1)
+                        .sum::<usize>()
+                })
+                .collect();
+            assert!(sizes[0] > floor * 8, "unused shares were not redistributed");
+            assert!(sizes.iter().sum::<usize>() <= ExportBudget::new(cap).remaining);
+            if large == 2 {
+                assert_eq!(sizes[0], sizes[1]);
+            }
+            assert!(pages[..large].iter().all(|page| page.truncated));
+            assert!(
+                pages[large..]
+                    .iter()
+                    .all(|page| !page.truncated && page.items.len() == 1)
+            );
+            assert!(reads.iter().all(|count| *count <= ALLOCATION_ROUNDS));
+            assert!(reads[large..].iter().all(|count| *count == 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn water_filling_does_not_reread_row_capped_or_unavailable_sources() {
+        let mut reads = [0; 4];
+        let pages = allocate_pages(MAX_BYTES, 4, |index, limit| {
+            reads[index] += 1;
+            std::future::ready(Ok(match index {
+                0 => allocation_page(limit, SUBSECTION_ROW_CAP as usize + 1, 0, false),
+                1 => allocation_page(limit, 0, 0, true),
+                2 => allocation_page(limit, 1, 10, false),
+                _ => allocation_page(limit, 100, 512 * 1024, false),
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads[..3], [1, 1, 1]);
+        assert!(reads[3] > 1 && reads[3] <= ALLOCATION_ROUNDS);
+        assert_eq!(pages[0].items.len(), SUBSECTION_ROW_CAP as usize);
+        assert!(pages[0].truncated);
+        assert!(pages[1].unavailable && !pages[1].truncated && pages[1].items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn water_filling_releases_failed_reread_bytes_and_never_retries_unavailable() {
+        let mut reads = [0; 3];
+        let pages = allocate_pages(1024 * 1024, 3, |index, limit| {
+            reads[index] += 1;
+            let mut page = if index == 0 {
+                allocation_page(limit, 1, 10, false)
+            } else {
+                allocation_page(limit, 100, 50_000, false)
+            };
+            if index == 1 && reads[index] == 2 {
+                let mut spent = ExportBudget {
+                    remaining: limit,
+                    ..Default::default()
+                };
+                assert!(spent.admit(&serde_json::json!("partially read")));
+                page = ExportPage::from_read(
+                    ExportSubsection {
+                        unavailable: true,
+                        ..Default::default()
+                    },
+                    limit,
+                    spent,
+                );
+                assert_eq!(page.used, 0);
+                assert!(!page.byte_truncated);
+            }
+            std::future::ready(Ok(page))
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads, [1, 2, 3]);
+        assert!(pages[1].unavailable && pages[1].items.is_empty());
+        assert!(pages[2].items.len() > 15);
+    }
+
+    #[tokio::test]
+    async fn water_filling_stops_after_four_rounds_when_sources_finish_in_stages() {
+        let mut reads = [0; 5];
+        let pages = allocate_pages(1024 * 1024, 5, |index, limit| {
+            reads[index] += 1;
+            // Each round releases a different source's unused capacity.
+            let bytes = [0, 210_000, 250_000, 350_000, 900_000][index];
+            std::future::ready(Ok(allocation_page(limit, 1, bytes, false)))
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads, [1, 2, 3, 4, 4]);
+        assert!(pages[4].truncated);
+        let used: usize = pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .map(|item| serde_json::to_vec(item).unwrap().len() + 1)
+            .sum();
+        assert!(used <= ExportBudget::new(1024 * 1024).remaining);
     }
 
     #[test]
@@ -2046,6 +2318,7 @@ mod tests {
                     items: vec![serde_json::json!({"body": "x".repeat(64)}); 3],
                     total_count: 3,
                     truncated: false,
+                    unavailable: false,
                 },
             )]),
         );
@@ -2243,7 +2516,10 @@ mod tests {
         })).await.unwrap();
         let view = &personal_data_registry::ADDITIONAL_EXPORT_VIEWS[0];
         let spec = additional_export_spec(view);
-        let mut budget = ExportBudget { remaining: 2000 };
+        let mut budget = ExportBudget {
+            remaining: 2000,
+            ..Default::default()
+        };
         assert!(budget.admit(&serde_json::json!({"earlier_subsection": "x".repeat(1000)})));
         let value = rows(
             &db,

@@ -2201,4 +2201,68 @@ mod export_http_tests {
                 .is_some_and(|value| value > 0)
         );
     }
+    #[tokio::test]
+    async fn export_http_audit_lists_byte_share_truncation_exactly() {
+        use crate::models::assistant_message::{AssistantMessage, MessageAuthor};
+        let fixture = Fixture::new("export_truncation_audit").await;
+        let inputs: std::collections::BTreeMap<String, Vec<Document>> = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("test_data/account-export-models.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut message: AssistantMessage =
+            bson::from_document(inputs["assistant_messages"][0].clone()).unwrap();
+        message.user_id = fixture.owner.clone();
+        message.role = "user".into();
+        message.author = Some(MessageAuthor::Owner);
+        message.text = "x".repeat(512 * 1024);
+        fixture
+            .state
+            .db
+            .collection::<AssistantMessage>("assistant_messages")
+            .insert_many((0..80).map(|index| {
+                let mut row = message.clone();
+                row.id = format!("message-{index}");
+                row.created_at = chrono::Utc::now() - chrono::Duration::seconds(index);
+                row.text = format!("{index}:{}", row.text);
+                row
+            }))
+            .await
+            .unwrap();
+        let (status, _, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        let export: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            export["truncated_sections"],
+            serde_json::json!(["assistant.assistant_messages"])
+        );
+        let messages = &export["sections"]["assistant"]["assistant_messages"];
+        assert_eq!(messages["total_count"], 80);
+        assert!(messages["items"].as_array().unwrap().len() > 40);
+        assert!(
+            messages["items"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("0:")
+        );
+        assert!(body.len() <= crate::services::account_export_service::MAX_BYTES);
+        let audit = fixture
+            .state
+            .db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type": "user.data_exported"})
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = audit.get_document("event_data").unwrap();
+        assert_eq!(
+            serde_json::to_value(metadata.get_array("truncated_sections").unwrap()).unwrap(),
+            export["truncated_sections"]
+        );
+        assert!(audit.get("entry_hash").is_some());
+        fixture.state.db.drop().await.unwrap();
+    }
 }

@@ -24,8 +24,22 @@ Rows are newest first. A subsection reads at most 10,000 rows and reports the
 unbounded matching `total_count`; if more rows exist, `truncated` is true and
 its fully qualified name (`section.subsection`) appears in
 `truncated_sections`. The complete serialized document is capped at 32 MiB;
-when that cap is reached the oldest rows are removed incrementally from the
-largest subsections until the document fits. Queries have a three-second
+64 KiB is reserved for the envelope and metadata. The remaining bytes initially
+provide an equal share to every declared subsection (including the profile,
+audit view and additional authored-message view). Unused space is then divided
+equally among subsections still limited by bytes. Only those sources are read
+again, replacing their earlier pages in newest-first order; sources that are
+complete, unavailable or already at the 10,000-row limit are not read again.
+There are at most four passes per source (one initial pass and up to three
+redistributions), or eight aggregation queries per source, plus cursor batches.
+This bounded max-min allocation preserves each source's initial share while
+letting large sources use space that smaller ones do not need. Old pages are
+released before their replacements are read, so the combined retained payload
+stays within the byte budget. If the final envelope still exceeds the cap, the oldest rows
+are removed incrementally from the largest subsections until the document fits.
+Every subsection with `truncated: true`, whether limited by rows, its byte share
+or final envelope enforcement, appears in `truncated_sections` and the export
+audit metadata. Queries have a three-second
 MongoDB `maxTimeMS` bound. Each replica permits two concurrent exports. The rate
 limit is three exports per person per fixed hourly window; `Retry-After` gives
 the seconds until the window resets. A busy or rate-limited request returns
