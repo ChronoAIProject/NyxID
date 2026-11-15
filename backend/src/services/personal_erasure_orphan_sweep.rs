@@ -120,14 +120,14 @@ async fn redact_invite_row(
     id: &Bson,
     owner: &str,
     tx: &mut mongodb::ClientSession,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let Some(mut row) = db
         .collection::<Document>("invite_codes")
         .find_one(doc! {"_id": id, "usages": {"$elemMatch": {"user_id": owner, "email": {"$exists": true}}}})
         .session(&mut *tx)
         .await?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let usages = row.get_array("usages").cloned().unwrap_or_default();
     let mut changed = false;
@@ -156,76 +156,176 @@ async fn redact_invite_row(
             .session(tx)
             .await?;
     }
-    Ok(())
+    Ok(changed)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyOutcome {
+    Handled,
+    Noop,
+    Skipped,
+}
+
+#[cfg(test)]
 async fn apply_group(
     db: &mongodb::Database,
     group: &OrphanGroup,
     lease: &Document,
-) -> AppResult<bool> {
-    let mut present = false;
-    for chunk in group.row_ids.chunks(APPLY_BATCH) {
-        let mut filter = doc! {"_id": {"$in": chunk.to_vec()}};
-        // An old review authorizes this parent/owner relationship, not every
-        // future document that happens to reuse the same child identity.
-        filter.insert(group.field, group.owner_id.as_str());
-        let mut tx = db.client().start_session().await?;
-        tx.start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(mongodb::options::WriteConcern::majority())
-            .await?;
-        let result: AppResult<()> = async {
-            if db.collection::<Document>(jobs::JOBS).update_one(lease.clone(), doc! {"$inc": {"mutation_revision": 1_i64}})
-                .session(&mut tx).await?.matched_count != 1 {
-                return Err(AppError::Conflict("Orphan sweep lease expired".into()));
-            }
-            if db.collection::<Document>(group.collection).find_one(filter.clone()).projection(doc! {"_id":1}).session(&mut tx).await?.is_none(){return Ok(());}
-            present = true;
-            if let Some(parent) = group.joined_parent {
-                // A parent created after the review restores authoritative
-                // ownership. Check it in the same snapshot as the deletion.
-                if db.collection::<Document>(parent).find_one(doc! {"_id": &group.owner_id})
-                    .session(&mut tx).await?.is_none() {
-                    db.collection::<Document>(group.collection).delete_many(filter).session(&mut tx).await?;
-                }
-                return Ok(());
-            }
-            for (collection, key) in [("users", "_id"), ("service_accounts", "_id"), ("personal_erasure_jobs", "user_id")] {
-                if db.collection::<Document>(collection).find_one(doc! {key: &group.owner_id})
-                    .session(&mut tx).await?.is_some() { return Ok(()); }
-            }
-            super::erasure_admission::close_in_session(db, &group.owner_id, &mut tx).await?;
-            db.collection::<Document>(super::erasure_admission::COLLECTION).update_one(
-                doc! {"_id": &group.owner_id, "erasure_accepted": true}, doc! {"$inc": {"cleanup_revision": 1_i64}},
-            ).session(&mut tx).await?;
-            if let Some(spec) = personal_data_registry::attribution(group.collection, group.field) {
-                db.collection::<Document>(group.collection).update_many(
-                    doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
-                    super::personal_attribution_service::update(spec),
-                ).session(&mut tx).await?;
-            } else if group.collection == "invite_codes" {
-                if group.field == "created_by" {
-                    db.collection::<Document>("invite_codes").update_many(filter, doc! {"$unset": {"note": ""}}).session(&mut tx).await?;
-                } else {
-                    for id in chunk { redact_invite_row(db, id, &group.owner_id, &mut tx).await?; }
-                }
-            } else if matches!(group.disposition, Erasure::LocalInventory | Erasure::Redacted) {
-                if !super::personal_erasure_service::local::remote_cleanup_clear(db, &group.owner_id, &mut tx).await? { return Ok(()); }
-                let mut predicates: Vec<Document> = super::personal_erasure_service::local::inventory(&group.owner_id)
-                    .into_iter().filter(|(collection, _)| *collection == group.collection).map(|(_, filter)| filter).collect();
-                if group.collection == "service_change_events" && group.field == "owner_id" {
-                    predicates.push(doc! {"owner_id": &group.owner_id});
-                }
-                if !predicates.is_empty() {
-                    db.collection::<Document>(group.collection).delete_many(doc! {"$and": [filter, {"$or": predicates}]}).session(&mut tx).await?;
-                }
-            }
-            Ok(())
-        }.await;
-        super::org_membership_authority::finish(tx, result).await?;
+) -> AppResult<ApplyOutcome> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result = apply_group_in_session(db, group, lease, &mut tx).await;
+    super::org_membership_authority::finish(tx, result).await
+}
+
+async fn apply_group_in_session(
+    db: &mongodb::Database,
+    group: &OrphanGroup,
+    lease: &Document,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<ApplyOutcome> {
+    // A page supplies at most APPLY_BATCH ids, and normal apply uses one
+    // reviewed owner/row at a time within the page's single transaction.
+    if group.row_ids.len() > APPLY_BATCH {
+        return Err(AppError::Internal(
+            "Orphan mutation page exceeds its bound".into(),
+        ));
     }
-    Ok(present)
+    let mut filter = doc! {"_id": {"$in": &group.row_ids}};
+    // Bind both identity and the reviewed parent/owner relationship.
+    if group.collection == "channel_send_claims" && group.field == "_id" {
+        filter = doc! {"$and":[filter, {"_id":{"$regex":format!("^{}:", regex::escape(&group.owner_id))}}]};
+    } else {
+        filter = doc! {"$and":[filter, {group.field: &group.owner_id}]};
+    }
+    if db
+        .collection::<Document>(jobs::JOBS)
+        .update_one(lease.clone(), doc! {"$inc": {"mutation_revision": 1_i64}})
+        .session(&mut *tx)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(AppError::Conflict("Orphan sweep lease expired".into()));
+    }
+    if db
+        .collection::<Document>(group.collection)
+        .find_one(filter.clone())
+        .projection(doc! {"_id":1})
+        .session(&mut *tx)
+        .await?
+        .is_none()
+    {
+        return Ok(ApplyOutcome::Noop);
+    }
+    if let Some(parent) = group.joined_parent {
+        if db
+            .collection::<Document>(parent)
+            .find_one(doc! {"_id": &group.owner_id})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(ApplyOutcome::Skipped);
+        }
+        db.collection::<Document>(group.collection)
+            .delete_many(filter)
+            .session(&mut *tx)
+            .await?;
+        return Ok(ApplyOutcome::Handled);
+    }
+    for (collection, key) in [
+        ("users", "_id"),
+        ("service_accounts", "_id"),
+        ("personal_erasure_jobs", "user_id"),
+    ] {
+        if db
+            .collection::<Document>(collection)
+            .find_one(doc! {key: &group.owner_id})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(ApplyOutcome::Skipped);
+        }
+    }
+    super::erasure_admission::close_in_session(db, &group.owner_id, &mut *tx).await?;
+    db.collection::<Document>(super::erasure_admission::COLLECTION)
+        .update_one(
+            doc! {"_id": &group.owner_id, "erasure_accepted": true},
+            doc! {"$inc": {"cleanup_revision": 1_i64}},
+        )
+        .session(&mut *tx)
+        .await?;
+    let changed = if let Some(spec) =
+        personal_data_registry::attribution(group.collection, group.field)
+    {
+        db.collection::<Document>(group.collection).update_many(
+            doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
+            super::personal_attribution_service::update(spec),
+        ).session(&mut *tx).await?.modified_count > 0
+    } else if group.collection == "invite_codes" {
+        if group.field == "created_by" {
+            db.collection::<Document>("invite_codes")
+                .update_many(filter, doc! {"$unset": {"note": ""}})
+                .session(&mut *tx)
+                .await?
+                .modified_count
+                > 0
+        } else {
+            let mut changed = false;
+            for id in &group.row_ids {
+                changed |= redact_invite_row(db, id, &group.owner_id, &mut *tx).await?;
+            }
+            changed
+        }
+    } else if matches!(
+        group.disposition,
+        Erasure::LocalInventory | Erasure::Redacted
+    ) {
+        if !super::personal_erasure_service::local::remote_cleanup_clear(
+            db,
+            &group.owner_id,
+            &mut *tx,
+        )
+        .await?
+        {
+            return Ok(ApplyOutcome::Skipped);
+        }
+        let mut predicates: Vec<Document> =
+            super::personal_erasure_service::local::inventory(&group.owner_id)
+                .into_iter()
+                .filter(|(collection, _)| *collection == group.collection)
+                .map(|(_, filter)| filter)
+                .collect();
+        if group.collection == "service_change_events" && group.field == "owner_id" {
+            predicates.push(doc! {"owner_id": &group.owner_id});
+        }
+        if predicates.is_empty() {
+            return Ok(ApplyOutcome::Skipped);
+        }
+        if db
+            .collection::<Document>(group.collection)
+            .delete_many(doc! {"$and": [filter, {"$or": predicates}]})
+            .session(&mut *tx)
+            .await?
+            .deleted_count
+            == 0
+        {
+            return Ok(ApplyOutcome::Skipped);
+        }
+        true
+    } else {
+        return Ok(ApplyOutcome::Skipped);
+    };
+    Ok(if changed {
+        ApplyOutcome::Handled
+    } else {
+        ApplyOutcome::Noop
+    })
 }
 
 #[cfg(test)]

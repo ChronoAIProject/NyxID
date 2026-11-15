@@ -618,13 +618,23 @@ Orphan apply selects the completed dry-run by its returned SHA-256 digest and
 consumes that job's persisted candidate pages. It does not rescan the database;
 new orphans need a new dry-run. Every mutation still checks current account and
 parent liveness transactionally. `candidate_count` is the reviewed count;
-`noop_count` in job status counts vanished candidates and candidates skipped by
-batched liveness checks. Vanished rows are harmless. Eight consecutive failed
-page attempts terminate the job as `failed` with `page_retry_limit_exceeded`.
+`noop_count` counts vanished, re-parented or already-redacted candidates;
+`skipped_count` separately counts blocked candidates, including owners that are
+live again, remote cleanup still pending, or lifecycle predicates refusing a
+delete. Row mutations, both counts and page advancement commit in one majority
+transaction, so page retries cannot double-count outcomes. A completion audit
+means the reviewed page set was processed; skipped rows need a later apply after
+their blocker clears, even when a new dry-run has the same digest.
+Eight consecutive failed page attempts, including expired leases and abandoned
+claims, terminate the job as `failed` with `page_retry_limit_exceeded`.
 Finished jobs and identifier-only pages are eligible for cleanup after seven
 days. Each worker pass purges at most 128 pages from each of at most 16 finished
 jobs; pending apply jobs pin their source dry-run pages. After retention expires,
-run a fresh dry-run before applying. No additional large-collection index is
+apply admission returns `1004 conflict` with
+`Reviewed dry-run expired or unavailable; run a new dry-run`. It also refuses a
+source whose page purge has started, checking retention and purge state again
+inside the admission transaction. Run a fresh dry-run before applying.
+No additional large-collection index is
 needed: page reads and deletion use the existing `_id` prefix.
 
 Terminal `durable_operation_grants` and `durable_operation_executions` are compacted
