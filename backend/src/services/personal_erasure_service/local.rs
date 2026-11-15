@@ -712,7 +712,7 @@ async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
 
 /// Local revocation creates durable external-effect outboxes. Their completion,
 /// rather than domain ordering alone, permits deleting recovery credentials.
-async fn settle_telegram_requests(db: &Database, owner: &str) -> AppResult<()> {
+pub(super) async fn settle_telegram_requests(db: &Database, owner: &str) -> AppResult<()> {
     let mut tx = db.client().start_session().await?;
     tx.start_transaction()
         .read_concern(ReadConcern::snapshot())
@@ -1145,6 +1145,16 @@ pub(crate) const NODE_DRAIN_COLLECTIONS: &[&str] = &[
     crate::models::node_service_binding::COLLECTION_NAME,
     crate::models::node_credential_desired::COLLECTION_NAME,
 ];
+
+pub(super) async fn remote_cleanup_pending(db: &Database, owner: &str) -> AppResult<bool> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .await?;
+    let clear = remote_cleanup_clear(db, owner, &mut tx).await?;
+    tx.abort_transaction().await?;
+    Ok(!clear)
+}
 
 /// One bounded page. The next pass starts from the first unresolved collection,
 /// avoiding offset skips when an earlier held writer resumes during cleanup.

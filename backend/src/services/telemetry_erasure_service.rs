@@ -1026,6 +1026,7 @@ mod tests {
                 last_retry_key_hash: None,
                 last_retry_request_digest: None,
                 consecutive_failures: 0,
+                remote_wait_started_at: None,
                 domain: "vendor".into(),
                 status: crate::models::personal_erasure::DomainStatus::Complete,
                 cursor: Some(personal_evidence),

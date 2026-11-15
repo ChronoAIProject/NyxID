@@ -34,6 +34,9 @@ pub struct DomainCheckpoint {
     /// Consecutive failed adapter passes; normal durable progress resets it.
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Server time at the start of a continuous remote-cleanup wait.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub remote_wait_started_at: Option<DateTime<Utc>>,
     pub domain: String,
     pub status: DomainStatus,
     /// Finite service-owned reason code, never a provider response/error body.

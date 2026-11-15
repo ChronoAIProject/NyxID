@@ -5,6 +5,7 @@ use mongodb::options::ReturnDocument;
 
 const LEASE_SECONDS: i64 = 120;
 const RECONCILIATION_PAGE_CAP: usize = 64;
+const RECONCILIATION_REMOTE_RETRY_SECONDS: i64 = 5 * 60;
 const RECONCILIATION_QUIET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 #[derive(Default)]
@@ -33,7 +34,6 @@ async fn reconcile_completed_if_due(
     }
     Ok(())
 }
-
 
 async fn claim(db: &Database) -> AppResult<Option<PersonalErasureJob>> {
     let durable = super::super::transaction_service::durable_database(db);
@@ -90,6 +90,19 @@ async fn reconcile_completed_once(state: &crate::AppState) -> AppResult<bool> {
         .lease_token
         .as_deref()
         .ok_or_else(|| AppError::Conflict("Erasure reconciliation lease unavailable".into()))?;
+    if super::local::remote_cleanup_pending(db, &job.user_id).await? {
+        return defer_remote_reconciliation(db, &job, lease).await;
+    }
+    // Observing a clear gate ends the persisted blocked episode, even if the
+    // bounded inventory needs more than one lease to finish.
+    db.collection::<Document>(JOBS)
+        .update_one(
+            doc! {"_id": &job.id, "status": "complete", "lease_token": lease,
+            "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]}},
+            doc! {"$unset": {"reconciliation_remote_blocked": ""}},
+        )
+        .write_concern(WriteConcern::majority())
+        .await?;
     let mut clean = false;
     for _ in 0..RECONCILIATION_PAGE_CAP {
         // Do not continue a repair after another worker has taken the lease.
@@ -113,6 +126,9 @@ async fn reconcile_completed_once(state: &crate::AppState) -> AppResult<bool> {
             clean = true;
             break;
         }
+        if super::local::remote_cleanup_pending(db, &job.user_id).await? {
+            return defer_remote_reconciliation(db, &job, lease).await;
+        }
     }
     if !clean {
         // Release the lease; the next tick can continue the bounded pass.
@@ -127,7 +143,43 @@ async fn reconcile_completed_once(state: &crate::AppState) -> AppResult<bool> {
     }
     // The lease token is part of the stamp fence. A stale holder can never
     // advance a job after another replica has claimed the repair.
-    stamp_reconciled(db, &job.id, lease).await
+    stamp_reconciled(db, &job.id, lease).await?;
+    // A lost lease is still a found candidate, not an empty repair scan.
+    Ok(true)
+}
+
+async fn defer_remote_reconciliation(
+    db: &Database,
+    job: &PersonalErasureJob,
+    lease: &str,
+) -> AppResult<bool> {
+    // The gate is checked first. Still allow one bounded cancellation of
+    // unstarted/confirmed Telegram requests, which can itself clear that gate.
+    // This performs no inventory pass and cannot churn through the page cap.
+    super::local::settle_telegram_requests(db, &job.user_id).await?;
+    let before = db
+        .collection::<Document>(JOBS)
+        .find_one_and_update(
+            doc! {"_id": &job.id, "status": "complete", "lease_token": lease,
+                "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]}},
+            vec![doc! {"$set": {
+                "reconciliation_remote_blocked": true,
+                "retry_at": {"$dateAdd": {"startDate": "$$NOW", "unit": "second", "amount": RECONCILIATION_REMOTE_RETRY_SECONDS}},
+                "lease_token": bson::Bson::Null,
+                "lease_expires_at": bson::Bson::Null,
+                "updated_at": "$$NOW",
+            }}],
+        )
+        .projection(doc! {"reconciliation_remote_blocked": 1})
+        .return_document(ReturnDocument::Before)
+        .write_concern(WriteConcern::majority())
+        .await?;
+    if let Some(before) = &before
+        && before.get_bool("reconciliation_remote_blocked") != Ok(true)
+    {
+        tracing::warn!(job_id = %job.id, "Completed erasure inventory repair waits for remote cleanup");
+    }
+    Ok(true)
 }
 
 async fn stamp_reconciled(db: &Database, job_id: &str, lease: &str) -> AppResult<bool> {
@@ -135,7 +187,7 @@ async fn stamp_reconciled(db: &Database, job_id: &str, lease: &str) -> AppResult
         .collection::<Document>(JOBS)
         .update_one(
             doc! {"_id": job_id, "status": "complete", "lease_token": lease, "$expr": {"$gt": ["$lease_expires_at", "$$NOW"]}},
-            vec![doc! {"$set": {"local_inventory_revision": super::local::LOCAL_INVENTORY_REVISION, "lease_token": bson::Bson::Null, "lease_expires_at": bson::Bson::Null, "updated_at": "$$NOW"}}],
+            vec![doc! {"$set": {"local_inventory_revision": super::local::LOCAL_INVENTORY_REVISION, "lease_token": bson::Bson::Null, "lease_expires_at": bson::Bson::Null, "updated_at": "$$NOW"}}, doc! {"$unset": "reconciliation_remote_blocked"}],
         )
         .write_concern(WriteConcern::majority())
         .await?;
@@ -176,6 +228,20 @@ async fn checkpoint(
     let domain = domains
         .get_mut(index)
         .ok_or_else(|| AppError::Internal("Erasure domain is unavailable".into()))?;
+    // Claim.updated_at and the persisted wait date both originate on MongoDB.
+    let remote_wait = matches!(outcome, Outcome::Pending("remote_cleanup_pending"));
+    let outcome = if remote_wait
+        && domain.remote_wait_started_at.is_some_and(|started| {
+            job.updated_at.signed_duration_since(started) >= chrono::Duration::hours(24)
+        }) {
+        Outcome::OperatorAction("remote_cleanup_wait_exceeded")
+    } else {
+        outcome
+    };
+    if !remote_wait && !matches!(outcome, Outcome::RetryableFailure(_)) {
+        domain.remote_wait_started_at = None;
+    }
+    let start_remote_wait = remote_wait && domain.remote_wait_started_at.is_none();
     let outcome = match outcome {
         Outcome::RetryableFailure(reason) => {
             domain.consecutive_failures = domain.consecutive_failures.saturating_add(1);
@@ -264,6 +330,8 @@ async fn checkpoint(
             Ok(bson::Bson::Document(
                 if position == index && entry.status == DomainStatus::Complete {
                     doc! {"$mergeObjects":[{"$literal":literal},{"completed_at":"$$NOW"}]}
+                } else if position == index && start_remote_wait {
+                    doc! {"$mergeObjects":[{"$literal":literal},{"remote_wait_started_at":"$$NOW"}]}
                 } else {
                     doc! {"$literal":literal}
                 },
@@ -402,11 +470,13 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
                     }
                 },
             ),
-            "channel_bots" => Ok(if Box::pin(super::channel::pass(state, &job)).await? {
-                Outcome::Complete
-            } else {
-                Outcome::Pending("channel_webhook_cleanup_pending")
-            }),
+            "channel_bots" => {
+                Ok(if Box::pin(super::channel::pass(state, &job)).await? {
+                    Outcome::Complete
+                } else {
+                    Outcome::Pending("channel_webhook_cleanup_pending")
+                })
+            }
             "machine" => Ok(match Box::pin(super::machine::pass(state, &job)).await? {
                 super::machine::Pass::Complete => Outcome::Complete,
                 super::machine::Pass::Retained => {
@@ -420,16 +490,24 @@ async fn process_one_inner(state: &crate::AppState) -> AppResult<bool> {
                     Outcome::OperatorAction("machine_lifecycle_reconciliation_required")
                 }
             }),
-            "local_inventory" => Ok(if Box::pin(super::local::pass(state, &job)).await? {
-                Outcome::Complete
-            } else {
-                Outcome::Pending("local_inventory_cleanup_pending")
-            }),
-            "source" => Ok(if Box::pin(super::local::source(db, &job)).await? {
-                Outcome::Complete
-            } else {
-                Outcome::Pending("source_cleanup_pending")
-            }),
+            "local_inventory" => {
+                Ok(if Box::pin(super::local::pass(state, &job)).await? {
+                    Outcome::Complete
+                } else if super::local::remote_cleanup_pending(&state.db, &job.user_id).await? {
+                    Outcome::Pending("remote_cleanup_pending")
+                } else {
+                    Outcome::Pending("local_inventory_cleanup_pending")
+                })
+            }
+            "source" => {
+                Ok(if Box::pin(super::local::source(db, &job)).await? {
+                    Outcome::Complete
+                } else if super::local::remote_cleanup_pending(db, &job.user_id).await? {
+                    Outcome::Pending("remote_cleanup_pending")
+                } else {
+                    Outcome::Pending("source_cleanup_pending")
+                })
+            }
             _ => Ok(Outcome::OperatorAction("unknown_inventory_domain")),
         }
     }
@@ -597,11 +675,245 @@ mod tests {
         assert!(CompletedReconciliationSchedule::default().due(start));
     }
 
+    async fn cleanup_revision(db: &Database, user: &str) -> i64 {
+        db.collection::<Document>(crate::services::erasure_admission::COLLECTION)
+            .find_one(doc! {"_id": user})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_i64("cleanup_revision")
+            .unwrap_or(0)
+    }
+
     async fn retry_now(db: &Database, id: &str) {
         db.collection::<Document>(JOBS)
             .update_one(doc! {"_id": id}, vec![doc! {"$set": {"retry_at": "$$NOW"}}])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_reconciliation_backs_off_remote_blocker_and_logs_once_per_episode() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+        struct BlockedLogs(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BlockedLogs {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == module_path!().trim_end_matches("::tests")
+                    && event.metadata().fields().field("job_id").is_some()
+                {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let logs = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(BlockedLogs(logs.clone())));
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        db.collection::<Document>(JOBS).update_one(doc! {"_id": &accepted.id},
+            vec![doc! {"$set": {"status": "complete", "local_inventory_revision": 0_i32, "retry_at": "$$NOW"}}])
+            .await.unwrap();
+        db.collection::<Document>("platform_bot_cleanup")
+            .insert_one(doc! {"_id": "remote-blocker", "owner_user_id": &user, "completed": false})
+            .await
+            .unwrap();
+        let before = cleanup_revision(&db, &user).await;
+        assert!(
+            reconcile_completed_once(&state)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(cleanup_revision(&db, &user).await - before, 1);
+        let blocked = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id": &accepted.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.get_i32("local_inventory_revision"), Ok(0));
+        assert_eq!(blocked.get_bool("reconciliation_remote_blocked"), Ok(true));
+        assert_eq!(blocked.get("lease_token"), Some(&bson::Bson::Null));
+        assert_eq!(blocked.get("lease_expires_at"), Some(&bson::Bson::Null));
+        assert_eq!(
+            blocked.get_datetime("retry_at").unwrap().timestamp_millis()
+                - blocked
+                    .get_datetime("updated_at")
+                    .unwrap()
+                    .timestamp_millis(),
+            RECONCILIATION_REMOTE_RETRY_SECONDS * 1000
+        );
+        assert_eq!(logs.load(Ordering::SeqCst), 1);
+        assert!(
+            !reconcile_completed_once(&state)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(cleanup_revision(&db, &user).await - before, 1);
+        retry_now(&db, &accepted.id).await;
+        assert!(
+            reconcile_completed_once(&state)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(cleanup_revision(&db, &user).await - before, 2);
+        assert_eq!(logs.load(Ordering::SeqCst), 1);
+        db.collection::<Document>("platform_bot_cleanup")
+            .update_one(
+                doc! {"_id": "remote-blocker"},
+                doc! {"$set": {"completed": true}},
+            )
+            .await
+            .unwrap();
+        assert!(!reconcile_completed_once(&state).await.unwrap());
+        retry_now(&db, &accepted.id).await;
+        assert!(
+            reconcile_completed_once(&state)
+                .with_subscriber(subscriber.clone())
+                .await
+                .unwrap()
+        );
+        let repaired = super::super::status(&db, &user).await.unwrap().unwrap();
+        assert_eq!(
+            repaired.local_inventory_revision,
+            super::local::LOCAL_INVENTORY_REVISION
+        );
+        assert!(
+            !db.collection::<Document>(JOBS)
+                .find_one(doc! {"_id": &accepted.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .contains_key("reconciliation_remote_blocked")
+        );
+        // A later blocked episode emits a new event, including across workers.
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id},
+                doc! {"$set": {"local_inventory_revision": 0_i32}},
+            )
+            .await
+            .unwrap();
+        db.collection::<Document>("platform_bot_cleanup")
+            .update_one(
+                doc! {"_id": "remote-blocker"},
+                doc! {"$set": {"completed": false}},
+            )
+            .await
+            .unwrap();
+        retry_now(&db, &accepted.id).await;
+        assert!(
+            reconcile_completed_once(&state)
+                .with_subscriber(subscriber)
+                .await
+                .unwrap()
+        );
+        assert_eq!(logs.load(Ordering::SeqCst), 2);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_reconciliation_cancels_unstarted_telegram_before_retry() {
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        db.collection::<Document>(JOBS).update_one(doc! {"_id": &accepted.id},
+            vec![doc! {"$set": {"status": "complete", "local_inventory_revision": 0_i32, "retry_at": "$$NOW"}}]).await.unwrap();
+        db.collection::<Document>("telegram_bot_requests").insert_one(
+            doc! {"_id": "unstarted-request", "owner_user_id": &user, "active": true, "status": "waiting_telegram", "revision": 0_i64})
+            .await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        assert!(reconcile_completed_once(&state).await.unwrap());
+        let cancelled = db
+            .collection::<Document>("telegram_bot_requests")
+            .find_one(doc! {"_id": "unstarted-request"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.get_bool("active"), Ok(false));
+        assert_eq!(cancelled.get_str("status"), Ok("cancelled"));
+        assert!(!reconcile_completed_once(&state).await.unwrap());
+        retry_now(&db, &accepted.id).await;
+        assert!(reconcile_completed_once(&state).await.unwrap());
+        assert_eq!(
+            super::super::status(&db, &user)
+                .await
+                .unwrap()
+                .unwrap()
+                .local_inventory_revision,
+            super::local::LOCAL_INVENTORY_REVISION
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_remote_cleanup_runs_one_pass_and_honors_checkpoint_retry() {
+        let (db, user) = super::super::tests::fixture().await;
+        let mut accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        for domain in &mut accepted.domains {
+            if domain.domain == "local_inventory" {
+                break;
+            }
+            domain.status = DomainStatus::Complete;
+        }
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id},
+                doc! {"$set": {"domains": bson::to_bson(&accepted.domains).unwrap()}},
+            )
+            .await
+            .unwrap();
+        db.collection::<Document>("platform_bot_cleanup")
+            .insert_one(doc! {"_id": "remote-blocker", "owner_user_id": &user, "completed": false})
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let before = cleanup_revision(&db, &user).await;
+        assert!(process_one(&state).await.unwrap());
+        assert_eq!(cleanup_revision(&db, &user).await - before, 1);
+        let blocked = super::super::status(&db, &user).await.unwrap().unwrap();
+        let local = blocked
+            .domains
+            .iter()
+            .find(|d| d.domain == "local_inventory")
+            .unwrap();
+        assert_eq!(local.status, DomainStatus::Pending);
+        assert_eq!(local.reason.as_deref(), Some("remote_cleanup_pending"));
+        assert!(local.remote_wait_started_at.is_some());
+        assert_eq!(
+            blocked.retry_at.unwrap() - blocked.updated_at,
+            chrono::Duration::seconds(1)
+        );
+        assert!(blocked.lease_token.is_none() && blocked.lease_expires_at.is_none());
+        assert_eq!(blocked.local_inventory_revision, 0);
+        assert!(!process_one(&state).await.unwrap());
+        assert_eq!(cleanup_revision(&db, &user).await - before, 1);
+        db.collection::<Document>("platform_bot_cleanup")
+            .update_one(
+                doc! {"_id": "remote-blocker"},
+                doc! {"$set": {"completed": true}},
+            )
+            .await
+            .unwrap();
+        retry_now(&db, &accepted.id).await;
+        assert!(process_one(&state).await.unwrap());
+        let repaired = super::super::status(&db, &user).await.unwrap().unwrap();
+        assert_eq!(
+            repaired.local_inventory_revision,
+            super::local::LOCAL_INVENTORY_REVISION
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -693,6 +1005,69 @@ mod tests {
             .get_datetime("localTime")
             .unwrap()
             .to_chrono()
+    }
+
+    #[tokio::test]
+    async fn continuous_remote_wait_escalates_after_twenty_four_hours() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("erasure_remote_wait_age").await;
+        let user = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                &user,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        super::super::accept(&db, &user, &user, None).await.unwrap();
+        let job = claim(&db).await.unwrap().unwrap();
+        let index = job
+            .domains
+            .iter()
+            .position(|d| d.domain == "local_inventory")
+            .unwrap();
+        checkpoint(&db, &job, index, Outcome::Pending("remote_cleanup_pending"))
+            .await
+            .unwrap();
+        let raw = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id":&job.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut current: PersonalErasureJob = bson::from_document(raw).unwrap();
+        assert!(current.domains[index].remote_wait_started_at.is_some());
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id":&job.id},
+                doc! {"$set":{"retry_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        current = claim(&db).await.unwrap().unwrap();
+        current.domains[index].remote_wait_started_at =
+            Some(current.updated_at - chrono::Duration::hours(24));
+        checkpoint(
+            &db,
+            &current,
+            index,
+            Outcome::Pending("remote_cleanup_pending"),
+        )
+        .await
+        .unwrap();
+        let stored = db
+            .collection::<PersonalErasureJob>(JOBS)
+            .find_one(doc! {"_id":&job.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ErasureStatus::OperatorAction);
+        assert_eq!(
+            stored.domains[index].reason.as_deref(),
+            Some("remote_cleanup_wait_exceeded")
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

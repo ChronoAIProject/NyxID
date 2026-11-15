@@ -348,7 +348,7 @@ async fn accept_claimed(
         let now=chrono::Utc::now();
         let job=PersonalErasureJob {id:uuid::Uuid::new_v4().to_string(),user_id:user.to_owned(),requested_by:actor.to_owned(),owner_deletion_policy:owner_policy.map(str::to_owned),status:ErasureStatus::Accepted,inventory_version:INVENTORY_VERSION,
             local_inventory_revision: 0,
-            domains:DOMAINS.iter().map(|domain|DomainCheckpoint { retry_generation:0,last_retry_key_hash:None,last_retry_request_digest:None,consecutive_failures: 0,domain:(*domain).to_owned(),status:DomainStatus::Pending,reason:None,cursor:None,completed_at:None}).collect(),lease_token:None,lease_expires_at:None,retry_at:None,accepted_at:now,updated_at:now,completed_at:None};
+            domains:DOMAINS.iter().map(|domain|DomainCheckpoint { retry_generation:0,last_retry_key_hash:None,last_retry_request_digest:None,consecutive_failures: 0,remote_wait_started_at:None,domain:(*domain).to_owned(),status:DomainStatus::Pending,reason:None,cursor:None,completed_at:None}).collect(),lease_token:None,lease_expires_at:None,retry_at:None,accepted_at:now,updated_at:now,completed_at:None};
         db.collection::<PersonalErasureJob>(JOBS).insert_one(&job).session(&mut tx).await?;
         let key=super::audit_service::audit_chain_hmac_key().ok_or_else(||AppError::Internal("Audit chain key is not initialized".into()))?;
         super::audit_service::log_actor_event_in_session(db,&mut tx,key,&super::audit_service::AuditActor{user_id:actor.to_owned(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},"user.account.deletion_accepted",serde_json::json!({"target_user_id":user,"owner_machine_data_authorized":owner_policy.is_some(),"inventory_version":INVENTORY_VERSION})).await?;

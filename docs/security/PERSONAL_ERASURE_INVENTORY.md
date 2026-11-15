@@ -225,6 +225,40 @@ per-effect reconciliation disclosure.
 
 ## Durable phases and completion
 
+### Upgrade compatibility and repair cadence
+
+An in-flight job whose `local_inventory` checkpoint was completed by an older
+binary re-runs that domain when `local_inventory_revision` is below 4, before
+continuing to source cleanup. This binary stamps the current revision when its
+local-inventory checkpoint completes; its newly completed jobs need no repair
+scan.
+
+Each worker scans for old completed jobs immediately on process start. Finding
+a candidate keeps the one-second scan cadence; finding none pauses only this
+repair scan for ten minutes. An old binary completing a job during that quiet
+window can therefore wait about ten minutes, plus worker scheduling and any
+backlog, before repair starts. Ordinary pending jobs continue on their normal
+cadence throughout the quiet window. No additional index is created.
+
+Completed-job repair checks remote cleanup before running inventory pages.
+A blocked job releases its lease with a MongoDB-server-time `retry_at` five
+minutes later, without stamping the inventory revision. One bounded Telegram
+cancellation pass still retires unstarted requests or requests with confirmed
+bot cleanup. A persisted `reconciliation_remote_blocked` flag emits one warning
+containing only the job id per blocked episode, including across replicas and
+restarts; observing a clear gate removes the flag. Repeated blocked retries
+retain the flag and do not repeat that warning.
+
+Local-inventory and source deletion wait for platform bot cleanup, Telegram
+creation recovery, and personal Stop effects needing active, person-owned
+ordinary nodes. A continuous wait on an in-flight job reaches `operator_action`
+after 24 hours with reason `remote_cleanup_wait_exceeded`; the account row
+remains until an operator resolves the dependency and retries. Status dashboards
+can also show `remote_cleanup_pending` or `remote_cleanup_verification_required`.
+An old replica in a mixed fleet rewrites the domain array without
+`remote_wait_started_at`; that can restart and delay the 24-hour escalation
+clock. It does not bypass the cleanup gate.
+
 The accepted intent has a deterministic per-person identity, explicit policy
 basis and majority-durable account fence. The accepted transition fences user,
 session, MFA, approval, Machine and ordinary OAuth authority. Login and writer
@@ -603,3 +637,19 @@ db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"ass
 The rollout set is therefore the 16 erasure indexes above plus this one export
 index. Upgrade tests allow precisely these additions and preserve the previous
 index set, including on an older-replica startup.
+Continuous remote cleanup waits are recorded on the pending local-inventory or source domain's
+`remote_wait_started_at` using MongoDB server time. After 24 hours, the job enters
+`operator_action` with `remote_cleanup_wait_exceeded`; an operator must resolve
+the external effect and retry. Pagination progress is not a remote wait and does
+not consume this bound. Source/recovery credentials remain fenced until cleanup
+is confirmed; escalation never treats a failed remote deletion as success.
+
+Two existing protocols can remain nonterminal indefinitely: Telegram provisioning
+is explicitly excluded from `telegram_new_service::TelegramNewService::expire`
+(the ordinary 15-minute request expiry does not cancel provisioning), and
+`telegram_new_worker::complete_pending_creations` retries with bounded backoff but
+no terminal attempt cap. `platform_bot_config_service::claim_cleanup` and
+`handlers::platform_bots::sweep_cleanup` likewise retain unsuccessful cleanup,
+retrying without a TTL or terminal attempt cap. Their per-call deadlines/claim
+leases bound individual work, not total recovery time. The erasure wait escalation
+therefore surfaces both cases without discarding the remaining recovery evidence.
