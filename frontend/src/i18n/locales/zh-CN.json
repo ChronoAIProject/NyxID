@@ -12154,5 +12154,8 @@
   "This organization channel is being restored automatically; it normally returns in under a minute. Members must verify their chat account again.": "此组织频道正在自动恢复；通常会在一分钟内恢复。成员必须再次验证其聊天账号。",
   "This organization channel is waiting for required safety checks to become available. NyxID will retry automatically; no administrator rights were lost.": "此组织频道正在等待必要的安全检查可用。NyxID 会自动重试；管理员权限没有丢失。",
   "The channel connection is retrying restoration. The retry schedule can take hours; no administrator rights were lost.": "频道连接正在重试恢复，重试计划可能需要数小时；管理员权限没有丢失。",
-  "This organization channel was restored. Members must verify their chat account again. Guest access is preserved as before.": "此组织频道已恢复。成员必须再次验证其聊天账号。访客访问权限按原样保留。"
+  "This organization channel was restored. Members must verify their chat account again. Guest access is preserved as before.": "此组织频道已恢复。成员必须再次验证其聊天账号。访客访问权限按原样保留。",
+  "Security effect relay": "安全操作中继",
+  "Oldest outstanding effect: {{value1}}": "最早的待处理操作：{{value1}}",
+  "No outstanding effects": "没有待处理操作"
 }
