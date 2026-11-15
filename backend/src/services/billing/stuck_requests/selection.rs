@@ -92,3 +92,18 @@ pub(crate) fn indexes() -> Vec<mongodb::IndexModel> {
         .chain(Source::ALL.map(Source::model))
         .collect()
 }
+
+// The terminal transaction rechecks amounts as well as indexed selection. It
+// never ends an entirely hold-less request. The terminal fence is request-wide.
+pub(super) fn has_reservation(row: &Document) -> AppResult<bool> {
+    let hold: UsageHold = bson::from_document(row.clone()).map_err(|_| unavailable())?;
+    Ok(hold.reserved_credits > Credits::ZERO
+        || hold.funding.as_ref().is_some_and(|f| {
+            !f.settled
+                && (f
+                    .grant_reservations
+                    .iter()
+                    .any(|g| g.amount > Credits::ZERO)
+                    || f.allowance_reservations.iter().any(|a| a.quantity > 0))
+        }))
+}

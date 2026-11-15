@@ -202,7 +202,7 @@ async fn stuck_request_inventory_is_indexed_bounded_and_read_only() {
     println!("STUCK_REQUEST_INVENTORY_COMMANDS {commands:?}");
     assert!(commands.iter().all(|c| matches!(
         c.as_str(),
-        "aggregate" | "getMore" | "killCursors" | "abortTransaction"
+        "aggregate" | "getMore" | "killCursors" | "abortTransaction" | "find"
     )));
     assert!(
         result[0].detail.contains("distinct_requests=1"),

@@ -113,6 +113,9 @@ crate::exact_credit_model! {
     ]
     #[derive(Clone, Debug, Default, Serialize, ToSchema, PartialEq, Eq)]
     pub struct UsageFunding {
+        /// Original admission estimate; never a final usage quantity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub reserved_quantity: Option<i64>,
         /// Legacy rows without a reservation must never consume benefits.
         #[serde(default)]
         pub wallet_only: bool,
