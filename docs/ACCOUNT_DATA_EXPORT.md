@@ -16,7 +16,8 @@ a source collection:
 {
   "items": [],
   "total_count": 42,
-  "truncated": false
+  "truncated": false,
+  "unavailable": false
 }
 ```
 
@@ -139,7 +140,7 @@ Every declared registry export view has one subsection; a source collection may 
 | `account_activity` | `assistant_wire_logs` | `user_id`, `conversation_id`, `created_at`, `expires_at` |
 | `account_activity` | `audit_log` | `event_type`, `created_at` |
 | `account_activity` | `feature_flag_overrides` | `created_at`, `updated_at` |
-| `account_activity` | `invite_codes` | `used_count`, `max_uses`, `usages.user_id`, `usages.used_at`, `created_at`, `updated_at` |
+| `account_activity` | `invite_codes` | `usages.user_id`, `usages.used_at`, `created_at`, `updated_at` |
 | `account_activity` | `invocation_diagnostics` | `actor_user_id`, `state`, `created_at`, `completed_at`, `expires_at` |
 | `account_activity` | `mcp_session_notifications` | `created_at`, `expires_at` |
 | `account_activity` | `openclaw_channel_mappings` | `nyxid_user_id`, `channel`, `channel_user_id`, `created_at`, `updated_at` |

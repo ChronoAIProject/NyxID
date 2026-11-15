@@ -905,8 +905,6 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         ],
         "feature_flag_overrides" => &["created_at", "updated_at"],
         "invite_codes" => &[
-            "used_count",
-            "max_uses",
             "usages.user_id",
             "usages.used_at",
             "created_at",
