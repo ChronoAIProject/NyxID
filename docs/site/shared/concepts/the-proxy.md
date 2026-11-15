@@ -56,6 +56,17 @@ NyxID maintains explicit allowlists for which request headers to forward and whi
 
 Request bodies are normally forwarded as-is, except for configured credential injection or protocol transforms, up to the configured size limit (100 MiB for authenticated proxy routes by default). If approval is enabled for the service, the body is buffered briefly to build the action description shown to the approver; it is not persisted.
 
+For CMA, final dispatch also checks the resolved catalog operation. The administrative
+warm-pool resize operation is `PUT /api/v1/admin/warm-pools/{id}`, with exactly
+`expected_revision` (an integer from 1 through 9223372036854775806) and
+`target_replicas` (an integer from 0 through 1000). It requires a stable
+`Idempotency-Key` and current `cma:admin:settings` or `cma:*` permission; a generic
+`*` permission is insufficient. NyxID checks that grant again before sending the
+unchanged request. CMA independently verifies the signed identity, its enrolled
+authority, and the expected revision. A stale revision returns CMA's `409`
+without an automatic retry. This operation does not allocate or recover a personal
+sandbox account slot, and it does not admit other administrative mutations.
+
 ## Streaming responses
 
 SSE (`text/event-stream`) responses, media types (`video/*`, `audio/*`), and large responses are streamed chunk-by-chunk rather than buffered in memory. Small responses (JSON API responses) are buffered. Proxy error diagnostics log status and body size; upstream error body content is excluded. The streaming/buffering decision is made by inspecting the response `Content-Type` and `Content-Length`.

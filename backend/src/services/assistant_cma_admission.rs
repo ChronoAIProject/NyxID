@@ -36,6 +36,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Operation {
     Read,
+    ResizeWarmPool,
     CreateAgent {
         sandbox: Option<String>,
         workspace: Option<String>,
@@ -76,6 +77,34 @@ fn id(value: Option<&Value>) -> AppResult<Option<String>> {
         _ => Err(invalid()),
     }
 }
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WarmPoolResize {
+    expected_revision: u64,
+    target_replicas: u32,
+}
+
+fn require_warm_pool_permission(permissions: &[String]) -> AppResult<()> {
+    // Match CMA's ConfigurePlatform mapping. NyxID's generic wildcard and
+    // role names do not confer downstream CMA administrative authority.
+    if permissions
+        .iter()
+        .any(|permission| matches!(permission.as_str(), "cma:admin:settings" | "cma:*"))
+    {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "cma_warm_pool_admin_required: ConfigurePlatform permission required".into(),
+        ))
+    }
+}
+
+async fn require_warm_pool_admin(db: &Database, owner: &str) -> AppResult<()> {
+    let rbac = super::rbac_helpers::resolve_user_rbac(db, owner).await?;
+    require_warm_pool_permission(&rbac.permissions)
+}
+
 fn classify(method: &str, path: &str, body: &[u8]) -> AppResult<Operation> {
     if !path.starts_with('/') || path.starts_with("//") || path.contains(['?', '#', '%', '\\']) {
         return Err(invalid());
@@ -94,6 +123,18 @@ fn classify(method: &str, path: &str, body: &[u8]) -> AppResult<Operation> {
         validate_remote_id(segment)?;
     }
     match (method, segments.as_slice()) {
+        ("PUT", ["api", "v1", "admin", "warm-pools", _]) => {
+            // A typed strict DTO rejects duplicate/unknown fields and numeric
+            // coercions, matching the existing CMA route and durable CAS bounds.
+            let resize: WarmPoolResize = serde_json::from_slice(body).map_err(|_| invalid())?;
+            if resize.expected_revision == 0
+                || resize.expected_revision >= i64::MAX as u64
+                || resize.target_replicas > 1000
+            {
+                return Err(invalid());
+            }
+            Ok(Operation::ResizeWarmPool)
+        }
         ("POST", ["api", "v1", "agents"]) => {
             let parsed: Value = serde_json::from_slice(body).map_err(|_| invalid())?;
             let sandbox = id(parsed.get("sandbox_id"))?;
@@ -741,6 +782,19 @@ pub async fn admit(
     if matches!(operation, Operation::Read) {
         return Ok(permit);
     }
+    if matches!(operation, Operation::ResizeWarmPool) {
+        require_warm_pool_admin(&db, owner).await?;
+        if headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(RECOVERY_SUBMISSION_HEADER))
+        {
+            return Err(invalid());
+        }
+        // Administration does not allocate a personal Sandbox/account slot.
+        // Normal proxy identity propagation and CMA's signed-capability check
+        // still apply; this permit only admits the exact administrative PUT.
+        return Ok(permit);
+    }
     let creates_sandbox = matches!(
         &operation,
         Operation::CreateSandbox
@@ -1040,6 +1094,11 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
             if values.len() != 1 || values[0].to_str().ok() != Some(key.as_str()) {
                 return Err(drift());
             }
+        }
+        if matches!(self.operation, Operation::ResizeWarmPool) {
+            // Do not retain an administrative permit after its RBAC grant is
+            // revoked while the request is being prepared.
+            require_warm_pool_admin(&self.db, &self.owner).await?;
         }
         if let Some(creation) = &self.creation {
             change_creation(&self.db, creation, CreationChange::Dispatch).await?;
@@ -1597,6 +1656,11 @@ mod tests {
         mod trust_confirmation {
             use super::*;
             include!("assistant_cma_trust_tests.rs");
+        }
+
+        mod warm_pool_resize {
+            use super::*;
+            include!("assistant_cma_warm_pool_tests.rs");
         }
     }
 
