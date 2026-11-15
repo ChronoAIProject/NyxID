@@ -9763,6 +9763,12 @@ exact decimal payloads, validation, audit and activation semantics.
 `POST /api/v1/users/me/export` returns the bounded `nyxid.account-export` JSON
 attachment described in [ACCOUNT_DATA_EXPORT.md](ACCOUNT_DATA_EXPORT.md). It is
 first-party human only and rate limited to three requests per account per hour.
+The response has an exact serialized-byte `Content-Length` and streams in slices
+of at most 64 KiB. A 120-second total delivery deadline discards the remaining
+buffer and aborts the body with an error; it refunds the delivery slot, while
+leaving the attempt charged. The frontend nginx export route disables gzip and
+buffering. Clients must reject body errors, a byte count differing from a present
+length, or incomplete/invalid export JSON even when the length is absent.
 
 Orphan application appends a chained `user.account.erasure_orphan_sweep_started`
 event containing the reviewed digest before any mutation, and a chained

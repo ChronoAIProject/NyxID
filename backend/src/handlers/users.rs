@@ -123,83 +123,119 @@ impl Drop for ExportReservationGuard {
 
 const EXPORT_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The timer owns access to the reservation independently of body polling, so
-/// a reader that stops polling cannot retain a replica permit indefinitely.
-struct ExportDeliveryGuard {
-    reservation: std::sync::Arc<std::sync::Mutex<Option<ExportReservationGuard>>>,
-    cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    deadline: tokio::time::Instant,
+const EXPORT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Both the unpolled remainder and its admission guard are timer-owned. The
+/// stream retains only this shared state, so expiry can free it without a poll.
+struct ExportDeliveryState {
+    bytes: axum::body::Bytes,
+    reservation: Option<ExportReservationGuard>,
+    expired: bool,
 }
 
-impl ExportDeliveryGuard {
+impl ExportDeliveryState {
     fn finish(&mut self, delivered: bool) {
-        if let Some(mut guard) = self
-            .reservation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
+        self.bytes = axum::body::Bytes::new();
+        if let Some(mut guard) = self.reservation.take() {
             if delivered {
                 guard.reservation.take();
             }
             drop(guard);
         }
+    }
+}
+
+struct ExportDeliveryGuard {
+    state: std::sync::Arc<std::sync::Mutex<ExportDeliveryState>>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    deadline: tokio::time::Instant,
+}
+
+impl Drop for ExportDeliveryGuard {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish(false);
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
         }
     }
 }
 
-impl Drop for ExportDeliveryGuard {
-    fn drop(&mut self) {
-        self.finish(false);
-    }
-}
-
 fn export_body_with_deadline(
-    body: Body,
+    bytes: axum::body::Bytes,
     guard: ExportReservationGuard,
     duration: std::time::Duration,
 ) -> Body {
     let deadline = tokio::time::Instant::now() + duration;
     let shutdown = guard.shutdown.clone();
-    let reservation = std::sync::Arc::new(std::sync::Mutex::new(Some(guard)));
-    let timed_reservation = reservation.clone();
+    let state = std::sync::Arc::new(std::sync::Mutex::new(ExportDeliveryState {
+        bytes,
+        reservation: Some(guard),
+        expired: false,
+    }));
+    let timed_state = state.clone();
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
     shutdown.spawn_cleanup(async move {
         tokio::select! {
             _ = cancelled => {}
             _ = tokio::time::sleep_until(deadline) => {
-                // Drop refunds the delivery slot; the independent attempt
-                // reservation remains consumed.
-                drop(timed_reservation.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+                let mut state = timed_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.reservation.is_some() {
+                    state.expired = true;
+                    // Drop the remaining buffer and refund only the delivery slot.
+                    state.finish(false);
+                }
             }
         }
     });
     let delivery = ExportDeliveryGuard {
-        reservation,
+        state,
         cancel: Some(cancel),
         deadline,
     };
     Body::from_stream(futures::stream::unfold(
-        (body.into_data_stream(), delivery),
-        |(mut source, mut delivery)| async move {
-            use futures::StreamExt;
-            if tokio::time::Instant::now() >= delivery.deadline {
-                return None;
-            }
-            match tokio::time::timeout_at(delivery.deadline, source.next()).await {
-                Ok(Some(Ok(chunk))) => Some((Ok::<_, axum::Error>(chunk), (source, delivery))),
-                Ok(None) => {
-                    delivery.finish(true);
-                    None
+        Some(delivery),
+        |delivery| async move {
+            let mut delivery = delivery?;
+            let (chunk, complete) = {
+                let mut state = delivery
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.reservation.is_none() && !state.expired {
+                    return None;
                 }
-                Ok(Some(Err(error))) => {
-                    delivery.finish(false);
-                    Some((Err(error), (source, delivery)))
+                if state.expired || tokio::time::Instant::now() >= delivery.deadline {
+                    state.finish(false);
+                    // A truncated export must abort transport, never report clean EOF.
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Account export delivery deadline exceeded",
+                        )),
+                        None,
+                    ));
                 }
-                Err(_) => None,
+                if state.bytes.is_empty() {
+                    state.finish(true);
+                    return None;
+                }
+                let size = state.bytes.len().min(EXPORT_CHUNK_BYTES);
+                let chunk = state.bytes.split_to(size);
+                let complete = state.bytes.is_empty();
+                if complete {
+                    // Hyper can stop polling at Content-Length without asking
+                    // for EOF. Charge when the final slice is handed off.
+                    state.finish(true);
+                }
+                (chunk, complete)
+            };
+            if complete && let Some(cancel) = delivery.cancel.take() {
+                let _ = cancel.send(());
             }
+            Some((Ok(chunk), Some(delivery)))
         },
     ))
 }
@@ -261,7 +297,7 @@ async fn export_reserved(
     state: &AppState,
     auth_user: &AuthUser,
     account_id: &str,
-) -> AppResult<(Response, bool)> {
+) -> AppResult<(Response<axum::body::Bytes>, bool)> {
     let export = crate::services::account_export_service::build(&state.db, account_id).await?;
     let subsection_count: usize = export.sections.values().map(|section| section.len()).sum();
     let mostly_unavailable = export.unavailable_sections.len() * 2 > subsection_count;
@@ -298,13 +334,14 @@ async fn export_reserved(
     Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_LENGTH, bytes.len())
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{filename}\""),
         )
         .header(header::CACHE_CONTROL, "no-store")
         .header("X-Content-Type-Options", "nosniff")
-        .body(Body::from(bytes))
+        .body(axum::body::Bytes::from(bytes))
         .map(|response| (response, mostly_unavailable))
         .map_err(|_| AppError::Internal("Account export response failed".into()))
 }
@@ -2243,6 +2280,77 @@ mod export_http_tests {
     }
 
     #[tokio::test]
+    async fn export_body_delivers_identical_bytes_in_bounded_slices() {
+        use futures::StreamExt;
+        let fixture = Fixture::new("export_sliced_reader").await;
+        let expected: Vec<u8> = (0..EXPORT_CHUNK_BYTES * 20 + 13)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let guard = ExportReservationGuard {
+            limiter: fixture.state.account_export_limiter.clone(),
+            reservation: fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0,
+            shutdown: fixture.state.shutdown.clone(),
+            _permit: fixture
+                .state
+                .account_export_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let mut stream =
+            export_body_with_deadline(expected.clone().into(), guard, EXPORT_BODY_DEADLINE)
+                .into_data_stream();
+        let mut received = Vec::new();
+        let mut slices = 0;
+        // HTTP/1 stops polling when Content-Length bytes have been emitted;
+        // emulate that drop without an extra EOF poll.
+        while slices < expected.len().div_ceil(EXPORT_CHUNK_BYTES) {
+            let chunk = stream.next().await.unwrap().unwrap();
+            assert!(chunk.len() <= EXPORT_CHUNK_BYTES);
+            received.extend_from_slice(&chunk);
+            slices += 1;
+        }
+        drop(stream);
+        assert_eq!(slices, 21);
+        assert_eq!(received, expected);
+        assert_eq!(
+            fixture.state.account_export_semaphore.available_permits(),
+            2
+        );
+        fixture.state.shutdown.idle().await;
+        for _ in 0..2 {
+            assert!(
+                fixture
+                    .state
+                    .account_export_limiter
+                    .reserve(&fixture.owner)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_some()
+            );
+        }
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_none(),
+            "a fully handed-off response must stay charged even without an EOF poll"
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stalled_export_readers_expire_release_permits_and_refund_only_delivery_slots() {
         assert_eq!(EXPORT_BODY_DEADLINE, std::time::Duration::from_secs(120));
         let fixture = Fixture::new("export_stalled_reader").await;
@@ -2276,11 +2384,19 @@ mod export_http_tests {
                 _permit: permit,
             });
         }
-        let bodies: Vec<_> = guards
+        struct OwnedBuffer(std::sync::Arc<Vec<u8>>);
+        impl AsRef<[u8]> for OwnedBuffer {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+        let owner = std::sync::Arc::new(vec![42_u8; EXPORT_CHUNK_BYTES * 5]);
+        let weak = std::sync::Arc::downgrade(&owner);
+        let mut bodies: Vec<_> = guards
             .into_iter()
             .map(|guard| {
                 export_body_with_deadline(
-                    Body::from("unread"),
+                    axum::body::Bytes::from_owner(OwnedBuffer(owner.clone())),
                     guard,
                     std::time::Duration::from_millis(30),
                 )
@@ -2290,15 +2406,35 @@ mod export_http_tests {
             fixture.state.account_export_semaphore.available_permits(),
             0
         );
-        // Keep both bodies alive without polling them, exactly as stalled readers do.
+        drop(owner);
+        // One reader stops before polling; the other stops after one slice.
+        use http_body_util::BodyExt;
+        let first = bodies[0]
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        assert_eq!(first.len(), EXPORT_CHUNK_BYTES);
+        drop(first);
+        assert!(weak.upgrade().is_some());
+        // Keep both bodies alive, exactly as stalled readers do.
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         fixture.state.shutdown.idle().await;
         assert_eq!(
             fixture.state.account_export_semaphore.available_permits(),
             2
         );
+        assert!(
+            weak.upgrade().is_none(),
+            "timer drops the owning buffer before another body poll"
+        );
         for body in bodies {
-            assert!(to_bytes(body, 1024).await.unwrap().is_empty());
+            assert!(
+                to_bytes(body, EXPORT_CHUNK_BYTES * 5).await.is_err(),
+                "expiry aborts instead of clean EOF"
+            );
         }
         assert_eq!(
             fixture.request(&[bearer(&fixture.human_token)]).await.0,
@@ -2395,6 +2531,17 @@ mod export_http_tests {
                 .unwrap()
                 .starts_with("attachment; filename=\"nyxid-account-export-")
         );
+        assert_eq!(
+            headers
+                .get("content-length")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            body.len()
+        );
+        assert!(!headers.contains_key("content-encoding"));
         assert_eq!(headers.get("cache-control").unwrap(), "no-store");
         assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
         assert_eq!(

@@ -2,10 +2,10 @@
 export async function shareAccountExport(deps: {
   available(): Promise<boolean>;
   request(): Promise<{
-    response: { body: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<unknown>; releaseLock(): void } } | null };
+    response: { headers: { get(name: string): string | null }; body: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<unknown>; releaseLock(): void } } | null };
     assertOwner(): Promise<void>;
   }>;
-  create(): { uri: string; write(bytes: Uint8Array): void; close(): void; remove(): void };
+  create(): { uri: string; write(bytes: Uint8Array): void; close(): void; text(): Promise<string>; remove(): void };
   share(uri: string): Promise<void>;
 }) {
   if (!(await deps.available())) throw new Error("sharing_unavailable");
@@ -27,7 +27,17 @@ export async function shareAccountExport(deps: {
       if (bytes > 32 * 1024 * 1024) throw new Error("export_too_large");
       file.write(chunk.value);
     }
+    const length = response.headers.get("Content-Length");
+    if (length !== null && (!/^\d+$/.test(length) || bytes !== Number(length))) {
+      throw new Error("export_incomplete");
+    }
     file.close(); closed = true;
+    // Also validate a complete JSON document when a proxy omits the length.
+    // The response/file size is capped above before any write.
+    const data: unknown = JSON.parse(await file.text());
+    if (!data || typeof data !== "object" || !("format" in data) || data.format !== "nyxid.account-export") {
+      throw new Error("export_invalid");
+    }
     await assertOwner();
     await deps.share(file.uri);
   } finally {

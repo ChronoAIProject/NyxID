@@ -364,18 +364,32 @@ They intentionally omit unknown fields during round-trip validation.
 | `org_channel_link_challenges` | `org_channel_service::links::issue`: one-time link challenge document. |
 
 Delivery slots are refunded if the request is cancelled during building or the
-response body is dropped before EOF, on server failures, or when more than half
+response body is dropped before its final slice is handed off, on server failures,
+or when more than half
 of all declared subsections are unavailable. A separate durable fixed-hourly
 limit allows at most 12 admitted attempts per person, including refunded attempts;
 three delivered exports remain the normal hourly limit. Busy requests consume
-neither budget. The two concurrency permits remain held through response EOF or
-drop, bounding builders and buffered deliveries together. Refund cleanup is
-tracked by graceful shutdown and affects only the original reservation window.
+neither budget. The two concurrency permits remain held until the final slice is
+handed to the transport, the body is dropped, or its deadline expires, bounding
+builders and buffered deliveries together. A complete hand-off remains charged
+even when HTTP/1 stops polling at Content-Length without a separate EOF poll.
+Refund cleanup is tracked by graceful shutdown and affects only the original reservation window.
 
 Joined views reuse existing child indexes for MCP notifications and setup notices. Explicit indexes on delivery-test installation ids and setup-step setup ids support the other two joined reads; their rollout commands and awaited startup cost are in `security/PERSONAL_ERASURE_INVENTORY.md`.
 
 The response body has a total 120-second delivery deadline starting when it is
-created. A stalled reader loses the response at that deadline and releases its
-replica concurrency permit even if it never polls again. Deadline expiry is a
-non-delivery: the delivery slot is refunded, while the separate hourly attempt
-remains charged. Receiving clients must discard an incomplete JSON response.
+created. The backend emits at most 64 KiB per slice and sets `Content-Length` to
+the exact serialized byte size. The API stack does not compress responses; the
+frontend nginx export location disables gzip and response buffering to preserve
+that length and propagate an upstream abort. At the deadline, the backend drops
+its remaining bytes independently of reader polling, releases the replica
+concurrency permit, and errors the body so transport aborts rather than ending
+with a clean EOF. A slice already handed to the transport can remain until that
+transport drops it. Expiry is a non-delivery: the delivery slot is refunded,
+while the separate hourly attempt remains charged.
+
+Web and mobile reject transport/read errors, byte counts that differ from a
+present `Content-Length`, and incomplete or invalid export JSON even when a proxy
+omits the length. Web starts no download and shows no success message; mobile
+removes the temporary file and never opens the share sheet for a partial export.
+Mobile reads the size-capped temporary file for JSON validation before sharing.

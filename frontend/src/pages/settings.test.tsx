@@ -486,6 +486,28 @@ describe.each(["/settings", "/assistant"] as const)(
       }
     });
 
+    it.each(["fetch abort", "body abort", "short body", "invalid JSON without length"])("does not download an incomplete export: %s", async (failure) => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (url !== "/api/v1/users/me/export" || options?.method !== "POST") return original(url, options);
+        if (failure === "fetch abort") throw new TypeError("connection aborted");
+        if (failure === "body abort") return new Response(new ReadableStream({
+          start(controller) { controller.error(new TypeError("connection aborted")); },
+        }));
+        return new Response(failure === "short body" ? '{"format":"nyxid.account-export"}' : '{"format":', {
+          headers: failure === "short body" ? { "Content-Length": "1024" } : {},
+        });
+      });
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+      try {
+        await open(route, "privacy");
+        await userEvent.click(screen.getByRole("button", { name: "Download" }));
+        await waitFor(() => expect(toastError).toHaveBeenCalledWith("We couldn't create your data export. Please try again."));
+        expect(click).not.toHaveBeenCalled();
+        expect(toastSuccess).not.toHaveBeenCalled();
+      } finally { click.mockRestore(); }
+    });
+
     it.each([[1, "1 second"], [42, "42 seconds"], [60, "1 minute"], [130, "3 minutes"]])("shows Retry-After %i with the right time unit", async (seconds, duration) => {
       const original = transport.getMockImplementation()!;
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/export" && options?.method === "POST"

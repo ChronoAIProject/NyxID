@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
-import { api, apiBlobClient, apiClient, ApiError } from "@/lib/api-client";
+import { api, apiFetch, apiClient, ApiError } from "@/lib/api-client";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
 import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
@@ -1101,9 +1101,18 @@ function PrivacyTab() {
     if (exporting) return;
     setExporting(true);
     try {
-      const { blob, filename } = await apiBlobClient("/users/me/export", {
-        method: "POST",
-      });
+      const response = await apiFetch("/users/me/export", { method: "POST" });
+      const blob = await response.blob();
+      const length = response.headers.get("Content-Length");
+      if (length !== null && (!/^\d+$/.test(length) || blob.size !== Number(length))) {
+        throw new Error("Incomplete account export");
+      }
+      // A proxy may omit Content-Length; require complete JSON in either case.
+      const data: unknown = JSON.parse(await blob.text());
+      if (!data || typeof data !== "object" || !("format" in data) || data.format !== "nyxid.account-export") {
+        throw new Error("Invalid account export");
+      }
+      const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/i)?.[1];
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
