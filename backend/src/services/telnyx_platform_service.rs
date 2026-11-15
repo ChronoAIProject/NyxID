@@ -704,6 +704,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.billing = Some(fixture_billing());
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,

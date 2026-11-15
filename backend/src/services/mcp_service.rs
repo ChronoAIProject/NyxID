@@ -15414,6 +15414,7 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                catalog_is_public: false,
                 catalog_slug: None,
                 execution_request: None,
                 execution_permission: None,

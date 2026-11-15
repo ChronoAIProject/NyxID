@@ -25,6 +25,213 @@ async fn audit_data(db: &mongodb::Database, event: &str) -> Vec<Document> {
 }
 
 #[tokio::test]
+async fn shutdown_service_labels_content_type_families_and_unresolved_request() {
+    use axum::{extract::Path, http::header::CONTENT_TYPE, response::IntoResponse};
+    let runtime = Runtime::default();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let entered = Arc::new(Mutex::new(Some(entered)));
+    let app = Router::new()
+        .route(
+            "/unresolved/{id}",
+            get(move || {
+                let entered = entered.clone();
+                async move {
+                    entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                    std::future::pending::<()>().await
+                }
+            }),
+        )
+        .route(
+            "/stream/{kind}",
+            get(|Path(kind): Path<String>| async move {
+                let mut response = Body::from_stream(futures::stream::pending::<
+                    Result<axum::body::Bytes, Infallible>,
+                >())
+                .into_response();
+                let content_type = match kind.as_str() {
+                    "sse" => Some("Text/Event-Stream; private=secret"),
+                    "json" => Some("application/json; charset=utf-8"),
+                    "suffix" => Some("application/problem+json"),
+                    "other" => Some("application/private-user-type"),
+                    _ => None,
+                };
+                if let Some(value) = content_type {
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_TYPE, value.parse().unwrap());
+                }
+                response
+            }),
+        )
+        .layer(middleware::from_fn_with_state(
+            runtime.clone(),
+            crate::mw::shutdown::track,
+        ));
+    let request = tokio::spawn(
+        app.clone().oneshot(
+            Request::builder()
+                .uri("/unresolved/private-id")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    waiting.await.unwrap();
+    let mut responses = Vec::new();
+    for kind in ["sse", "json", "suffix", "other", "missing"] {
+        responses.push(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/stream/{kind}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let summary = serde_json::to_value(runtime.open_http()).unwrap();
+    let entries = summary["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        4,
+        "response families must be separate groups"
+    );
+    for (family, count) in [("event-stream", 1), ("json", 2), ("other", 2)] {
+        let entry = entries
+            .iter()
+            .find(|e| e["content_type"] == family)
+            .unwrap();
+        assert_eq!(entry["count"], count);
+    }
+    let unresolved = entries.iter().find(|e| e["kind"] == "request").unwrap();
+    assert!(unresolved.get("service").is_none());
+    assert!(unresolved.get("content_type").is_none());
+    assert!(!summary.to_string().contains("private"));
+    request.abort();
+    let _ = request.await;
+    drop(responses);
+    assert!(runtime.open_http().entries.is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_service_labels_update_open_request_once_after_pool_selection() {
+    use axum::{extract::State, response::IntoResponse};
+    let runtime = Runtime::default();
+    let app = Router::new()
+        .route(
+            "/api/v1/proxy/s/{slug}/{*path}",
+            get(|State(runtime): State<Runtime>| async move {
+                assert!(runtime.open_http().entries[0].service.is_none());
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(7)).await;
+                let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+                catalog.slug = "failed-candidate".into();
+                let (_, failed) = diagnostics::candidate(async {
+                    diagnostics::resolved_catalog(&catalog);
+                    assert!(runtime.open_http().entries[0].service.is_none());
+                })
+                .await;
+                drop(failed);
+                catalog.slug = "selected-catalog".into();
+                let (_, selected) = diagnostics::candidate(async {
+                    diagnostics::resolved_catalog(&catalog);
+                })
+                .await;
+                selected.publish();
+                catalog.slug = "must-not-overwrite".into();
+                diagnostics::resolved_catalog(&catalog);
+                let request = runtime.open_http();
+                assert_eq!(
+                    request.entries[0].service.as_deref(),
+                    Some("selected-catalog")
+                );
+                assert_eq!(request.entries[0].kind, "request");
+                assert_eq!(request.entries[0].oldest_age_secs, 7);
+                assert!(request.entries[0].content_type.is_none());
+                tokio::time::resume();
+                (
+                    [("content-type", "application/json")],
+                    Body::from_stream(futures::stream::pending::<
+                        Result<axum::body::Bytes, Infallible>,
+                    >()),
+                )
+                    .into_response()
+            }),
+        )
+        .with_state(runtime.clone())
+        .layer(middleware::from_fn_with_state(
+            runtime.clone(),
+            crate::mw::shutdown::track,
+        ));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/proxy/s/private-alias/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let summary = runtime.open_http();
+    assert_eq!(
+        summary.entries[0].service.as_deref(),
+        Some("selected-catalog")
+    );
+    assert_eq!(summary.entries[0].kind, "stream");
+    assert_eq!(summary.entries[0].content_type, Some("json"));
+    drop(response);
+    assert!(runtime.open_http().entries.is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_service_labels_uuid_and_unrelated_routes_cannot_expose_service_names() {
+    use axum::response::IntoResponse;
+    let runtime = Runtime::default();
+    for (route, uri, slug, expected) in [
+        (
+            "/api/v1/proxy/{service_id}/{*path}",
+            "/api/v1/proxy/private-id/events",
+            "550e8400-e29b-41d4-a716-446655440000",
+            Some("custom"),
+        ),
+        (
+            "/ordinary/{id}",
+            "/ordinary/private-id",
+            "catalog-name",
+            None,
+        ),
+    ] {
+        let app = Router::new()
+            .route(
+                route,
+                get(move || async move {
+                    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+                    catalog.slug = slug.into();
+                    diagnostics::resolved_catalog(&catalog);
+                    Body::from_stream(futures::stream::pending::<
+                        Result<axum::body::Bytes, Infallible>,
+                    >())
+                    .into_response()
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                runtime.clone(),
+                crate::mw::shutdown::track,
+            ));
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let summary = runtime.open_http();
+        assert_eq!(summary.entries[0].service.as_deref(), expected);
+        assert!(!serde_json::to_string(&summary).unwrap().contains(slug));
+        drop(response);
+        assert!(runtime.open_http().entries.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn shutdown_diagnostics_start_finish_are_bounded_sorted_and_metadata_only() {
     let db = connect_transaction_test_database("shutdown_diagnostics_routes").await;
     let state = test_app_state(db.clone());

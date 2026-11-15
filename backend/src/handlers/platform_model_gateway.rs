@@ -389,6 +389,7 @@ pub(super) async fn execute_with_runtime(
         &request,
     )
     .await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&plan.offering);
     if request.has_images()
         && access.body.len() as i64 > plan.tariff.tariff().bounds.max_request_bytes
     {

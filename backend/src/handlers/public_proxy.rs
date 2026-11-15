@@ -74,6 +74,8 @@ async fn execute_public_proxy(
     )
     .await?;
 
+    crate::services::shutdown::diagnostics::resolved_catalog(&matched.service);
+
     if matched.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
         let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
             &normalized_path,
@@ -164,6 +166,9 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        catalog_is_public: crate::services::catalog_service::is_public_unowned_discovery_entry(
+            &service,
+        ),
         catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,

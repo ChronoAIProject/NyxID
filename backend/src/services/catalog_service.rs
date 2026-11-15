@@ -426,6 +426,19 @@ pub async fn list_catalog(
     .await
 }
 
+/// A public discovery entry whose slug may be included in diagnostic metadata.
+/// Mirrors `list_catalog_all`; `shutdown_public_catalog_listing_parity` checks
+/// the real discovery response. Explicit owners are excluded even though public
+/// owned rows can be listed. Creator attribution does not affect discovery.
+pub(crate) fn is_public_unowned_discovery_entry(service: &DownstreamService) -> bool {
+    service.visibility == "public"
+        && service.owner_user_id.is_none()
+        && service.is_active
+        && matches!(service.service_category.as_str(), "connection" | "internal")
+        && !(service.service_category == "internal" && service.slug.starts_with("platform-"))
+        && !super::platform_key_service::model_only(service)
+}
+
 /// List ALL active catalog entries for discovery (includes system services without auth).
 /// Enforces visibility: private services only visible to their creator.
 pub async fn list_catalog_all(
