@@ -1201,6 +1201,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 /// Additive account-export index, owned here with the message writer. The
 /// base startup fixture deliberately omits this later feature addition.
 pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    ensure_checkpoint_export_index(db).await?;
     let collection = db.collection::<bson::Document>(MESSAGES);
     let keys = doc! {"user_id":1,"created_at":-1,"_id":-1};
     match collection.list_indexes().await {
@@ -1222,6 +1223,46 @@ pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Res
                 .options(
                     IndexOptions::builder()
                         .name("assistant_messages_account_export".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn ensure_checkpoint_export_index(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>(CHECKPOINTS);
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_assistant_checkpoints_user_id".to_owned())
                         .build(),
                 )
                 .build(),

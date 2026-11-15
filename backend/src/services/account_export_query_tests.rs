@@ -15,7 +15,7 @@ fn uses_index(value: &serde_json::Value) -> bool {
 async fn explain(db: &mongodb::Database, collection: &str, filter: Document) {
     let result = db
         .run_command(
-            doc! {"explain": {"find": collection, "filter": filter, "sort": if ["mcp_sessions","platform_bot_installations","platform_setups"].contains(&collection) {parent_scope_sort(collection)} else if ["assistant_attachments","assistant_group_requests","org_channel_messages"].contains(&collection) {doc! {"created_at":-1,"_id":-1}} else {doc! {}}, "limit":PARENT_ID_CAP as i64 + 1}, "verbosity": "executionStats"},
+            doc! {"explain": {"find": collection, "filter": filter, "sort": if ["mcp_sessions","platform_bot_installations","platform_setups"].contains(&collection) {parent_scope_sort(collection)} else if ["assistant_attachments","assistant_checkpoints","assistant_group_requests","org_channel_messages"].contains(&collection) {doc! {"created_at":-1,"_id":-1}} else {doc! {}}, "limit":PARENT_ID_CAP as i64 + 1}, "verbosity": "executionStats"},
         )
         .await
         .unwrap();
@@ -200,6 +200,9 @@ async fn unbounded_export_selectors_use_selective_prefix_indexes() {
     super::super::org_channel_service::ensure_account_export_indexes(&db)
         .await
         .unwrap();
+    super::super::assistant_nyxagent::ensure_account_export_indexes(&db)
+        .await
+        .unwrap();
     for &(collection, field) in personal_data_registry::EXPORT_SELECTOR_INDEX_GAPS {
         let entry = personal_data_registry::find(collection).unwrap();
         let filter = owner_filter(entry, "person").unwrap();
@@ -235,6 +238,9 @@ async fn unbounded_export_selectors_use_selective_prefix_indexes() {
             .await
             .unwrap();
         super::super::org_channel_service::ensure_account_export_indexes(&db)
+            .await
+            .unwrap();
+        super::super::assistant_nyxagent::ensure_account_export_indexes(&db)
             .await
             .unwrap();
         let after = rows

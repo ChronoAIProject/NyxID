@@ -3152,6 +3152,7 @@ pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
 #[cfg(test)]
 pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
     ("assistant_attachments", "user_id"),
+    ("assistant_checkpoints", "user_id"),
     ("assistant_group_requests", "actor_user_id"),
     ("org_channel_messages", "author_user_id"),
 ];
@@ -3261,11 +3262,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
     ),
     (
         "assistant_async_quotas",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
-    ),
-    (
-        "assistant_checkpoints",
         "user_id",
         OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
@@ -4464,11 +4460,20 @@ mod tests {
             .collect()
     }
 
+    fn export_owner_index_predicates() -> impl Iterator<Item = (&'static str, &'static str)> {
+        let owners = registry_owner_predicates();
+        EXPORT_SELECTOR_INDEX_GAPS
+            .iter()
+            .copied()
+            .filter(move |predicate| owners.contains(predicate))
+    }
+
     fn owner_index_manifest_predicates() -> BTreeSet<(&'static str, &'static str)> {
         OWNER_INDEX_GAPS
             .iter()
             .chain(EXPORT_JOIN_INDEX_GAPS)
             .copied()
+            .chain(export_owner_index_predicates())
             .chain(
                 OWNER_INDEX_BOUNDED
                     .iter()
@@ -4586,11 +4591,14 @@ mod tests {
             .iter()
             .chain(EXPORT_JOIN_INDEX_GAPS)
             .copied()
+            .chain(export_owner_index_predicates())
             .collect();
         let bounded = owner_index_bounded_predicates();
         assert_eq!(
             kept.len(),
-            OWNER_INDEX_GAPS.len() + EXPORT_JOIN_INDEX_GAPS.len(),
+            OWNER_INDEX_GAPS.len()
+                + EXPORT_JOIN_INDEX_GAPS.len()
+                + export_owner_index_predicates().count(),
             "duplicate kept index"
         );
         assert_eq!(
@@ -4620,7 +4628,12 @@ mod tests {
 
     async fn assert_owner_prefix_coverage(db: &mongodb::Database) {
         let mut missing: Vec<(&str, &str)> = Vec::new();
-        for &(collection, field) in OWNER_INDEX_GAPS.iter().chain(EXPORT_JOIN_INDEX_GAPS) {
+        for (collection, field) in OWNER_INDEX_GAPS
+            .iter()
+            .chain(EXPORT_JOIN_INDEX_GAPS)
+            .copied()
+            .chain(export_owner_index_predicates())
+        {
             let covered = index_models(db, collection)
                 .await
                 .iter()
@@ -4697,7 +4710,11 @@ mod tests {
             let classified = OWNER_INDEX_GAPS.contains(&(collection, field))
                 || EXPORT_JOIN_INDEX_GAPS.contains(&(collection, field))
                 || owner_index_bounded_predicates().contains(&(collection, field));
-            if !covered && !classified {
+            // A broad export can require a full prefix where a partial owner
+            // prefix exists already. Export coverage checks that separately.
+            let export_index =
+                export_owner_index_predicates().any(|predicate| predicate == (collection, field));
+            if !covered && !classified && !export_index {
                 classification_errors.push(format!(
                     "unclassified origin/main owner gap for {collection}.{field}"
                 ));

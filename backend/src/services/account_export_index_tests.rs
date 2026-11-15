@@ -264,17 +264,6 @@ mod export_index_coverage {
             ["QUOTAS_COLLECTION_NAME).update_one(doc!{\"_id\":&chat.user_id}"]
         ),
         resource!(
-            "assistant_checkpoints",
-            "user_id",
-            "assistant_nyxagent replaces a conversation's checkpoint rather than appending checkpoints for each turn.",
-            "assistant_nyxagent.rs",
-            [
-                "let checkpoint = AssistantCheckpoint {",
-                "conversation_id: row.id.clone(),",
-                ".replace_one(filter, &checkpoint)"
-            ]
-        ),
-        resource!(
             "assistant_group_agent_access",
             "owner_id",
             "collaboration_group_service has one current access relationship per group/agent, enforced by a unique index.",

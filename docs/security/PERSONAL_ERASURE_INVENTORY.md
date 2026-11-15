@@ -138,7 +138,7 @@ registry):
 | `agent_key_login_requests`, `auth_device_codes`, `auth_device_codes_v2`, `authorization_codes`, `device_codes`, `login_approvals`, `mfa_challenges`, `oauth_consent_requests` | Login/consent protocols write expiring rows, rather than a retained event stream (`auth_agent_key_login_service::REQUEST_TTL_SECS` and `auth_agent_key_login_service::request`, `token_service::insert_mfa_pending_session_with_method`, and the corresponding expiry indexes in `db.rs`). |
 | `assistant_agent_sharing`, `assistant_agent_shares`, `assistant_agent_private_notes`, `assistant_agent_consents` | Sharing policy, recipient grant, private note and connection consent state belongs to agent/recipient/connection lifecycles (`models/assistant_sharing.rs`, `services/shared_agent_service.rs`); this is resource state rather than the message stream. |
 | `assistant_agent_learning_members`, `assistant_agent_learning_runs`, `assistant_agent_learning_skill_roots`, `assistant_learning_migrations` | Opt-in membership and explicit learning/publication work (`assistant_agent_learning::set_member_opt_in`, `create_run` and `reserve_run`); bounded feature lifecycle rather than every assistant message. |
-| `assistant_async_quotas`, `assistant_checkpoints` | One quota counter per owner (`async_service_operation::reserve_with_artifacts`) and one replaced checkpoint per conversation (`assistant_nyxagent::write_checkpoint_in_session`); resource state rather than an append-only history. |
+| `assistant_async_quotas` | One quota counter per owner (`async_service_operation::reserve_with_artifacts`); replaced resource state rather than an append-only history. |
 | `assistant_group_agent_access`, `assistant_group_agent_proposals`, `assistant_group_invites`, `assistant_group_read_states` | Group access/invite lifecycle and one read-state per participant (`services/collaboration_group_service/membership.rs`, `collaboration_group_service::notifications::ensure_state`); invites/proposals also expire (`collaboration_group_service::ensure_indexes`). |
 | `assistant_skill_draft_attempts`, `assistant_voice_windows`, `assistant_voice_announcements` | Explicit draft attempts expire after a day (`db::ensure_indexes`, `assistant_skill_draft_attempts` expiry index); voice windows are bounded by a voice session (`voice::runtime::checkpoint_windows` and `voice::runtime::settle_windows`), and announcements are expiring coordination (`assistant_voice_announcement::Announcement::expires_at`). |
 | `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`channel_email::EmailSubscription`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
@@ -675,12 +675,12 @@ db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_expor
 db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
 ```
 
-The complete additive rollout set is 22 indexes: 16 erasure indexes and six
+The complete additive rollout set is 23 indexes: 16 erasure indexes and seven
 export indexes. Existing definitions remain untouched; the upgrade tests compare
 all definitions before/after and replay the old startup fixture afterward.
 
 
-Three per-event collections also need export selector indexes. Actor selection is
+Four growing history collections also need export selector indexes. Actor selection is
 independent of resource ownership: an organization or group can retain many events
 authored by other people. Attachment selection must cover every origin, including
 tool images without a channel source. These are the only additional selector
@@ -690,6 +690,7 @@ existing index sets.
 | Collection | Key/name | Writer/volume justification | Startup build behavior |
 | --- | --- | --- | --- |
 | `assistant_attachments` | `user_id`; `account_export_assistant_attachments_user_id` | `assistant_nyxagent::attach_routed_image` appends a UUID row for each tool image; `assistant_upload_service` also stores upload roots and chunks. `models::assistant_upload_retention::Policy::default` leaves `tool_image_days=None`, retaining tool images with the conversation, so this history has no fixed TTL or total cap. The existing owner-prefix index `assistant_channel_source_unique` is partial on `source.event_key` being a string and cannot serve an export across all origins. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_upload_retention::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
+| `assistant_checkpoints` | `user_id`; `account_export_assistant_checkpoints_user_id` | `assistant_nyxagent::write_checkpoint_in_session` replaces a conversation's checkpoint, but conversation histories grow platform-wide with no fixed retention or total cap. Exporting by person needs a selective owner prefix. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `assistant_nyxagent::ensure_account_export_indexes` → `ensure_checkpoint_export_index` → `create_index` before binding listeners. Startup waits for a large build; prebuild below. |
 | `assistant_group_requests` | `actor_user_id`; `account_export_assistant_group_requests_actor_user_id` | `collaboration_group_service::requests::enqueue_with_uploads_ready` appends a UUID request per authored group message. The pending queue cap covers active requests only; settled requests have no TTL. The existing `user_id` owner index and `collaboration.version/actor_user_id` index cannot serve the actor-only export predicate. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `collaboration_group_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
 | `org_channel_messages` | `author_user_id`; `account_export_org_channel_messages_author_user_id` | `org_channel_service::transcript::publish` persists each member-authored transcript row; no transcript TTL. Existing `_id`, `org_id` and `user_id` prefixes cannot select an author's history across organizations. | `main` awaits `personal_erasure_service::ensure_startup_indexes` → `org_channel_service::ensure_account_export_indexes` → `create_index` before binding listeners. On a large collection startup waits for the build; prebuild below. |
 
@@ -702,6 +703,7 @@ original definitions. Prebuild on a large deployment before restarting replicas:
 
 ```javascript
 db.assistant_attachments.createIndex({user_id:1}, {name:"account_export_assistant_attachments_user_id"});
+db.assistant_checkpoints.createIndex({user_id:1}, {name:"account_export_assistant_checkpoints_user_id"});
 db.assistant_group_requests.createIndex({actor_user_id:1}, {name:"account_export_assistant_group_requests_actor_user_id"});
 db.org_channel_messages.createIndex({author_user_id:1}, {name:"account_export_org_channel_messages_author_user_id"});
 ```
@@ -739,7 +741,6 @@ exports still retain their query timeouts and report unavailable subsections.
 | `assistant_agent_shares.owner_id` | **SmallOrResourceBounded**: shared_agent_service replaces each agent's audience; MAX_SHARES=500 and unique agent/subject pairs bound each current audience. |
 | `assistant_agent_sharing.owner_id` | **SmallOrResourceBounded**: shared_agent_service stores one current sharing policy with _id equal to the agent id. |
 | `assistant_async_quotas.user_id` | **SmallOrResourceBounded**: async_service_operation quota admission upserts _id=user_id; one counter per person. |
-| `assistant_checkpoints.user_id` | **SmallOrResourceBounded**: assistant_nyxagent replaces a conversation's checkpoint rather than appending checkpoints for each turn. |
 | `assistant_cma_agents.user_id` | **SmallOrResourceBounded**: assistant_cma_agent_service::register_live upserts one owner/service/remote-agent profile, not each task. Its existing owner prefix is partial on cma_agent_id being a string; the owner-only export does not guarantee that predicate. |
 | `assistant_cma_sandboxes.user_id` | **SmallOrResourceBounded**: assistant_cma_sandbox_service::indexes permits one occupied account slot per owner; creation stores numbered resource generations, not per-task events. Historical generations persist for receipt reconciliation. Existing owner prefixes are partial on occupied slots, idempotency keys or remote ids, none guaranteed by the export. |
 | `assistant_group_agent_access.owner_id` | **SmallOrResourceBounded**: collaboration_group_service has one current access relationship per group/agent, enforced by a unique index. |
