@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { cleanStaleAccountExports, shareAccountExport } from "./accountExport";
 
-function fixture({ available = true, switchAccount = false, failShare = false, abort = false, length = null as string | null, invalid = false } = {}) {
+function fixture({ available = true, switchAccount = false, failShare = false, abort = false, length = null as string | null, invalid = false, body = undefined as string | undefined, pieces = undefined as Uint8Array[] | undefined } = {}) {
   const calls: string[] = [];
   let reads = 0;
-  const text = invalid ? '{"format":' : '{"format":"nyxid.account-export","note":"你好"}';
+  const text = body ?? (invalid ? '{"format":' : '{"format":"nyxid.account-export","note":"你好"}');
   const encoded = new TextEncoder().encode(text);
-  const chunks = [encoded.slice(0, 5), encoded.slice(5)];
+  const chunks = pieces ?? [encoded.slice(0, 5), encoded.slice(5)];
   return { calls, deps: {
     available: async () => { calls.push("available"); return available; },
     request: async () => { calls.push("request"); return {
@@ -19,7 +19,7 @@ function fixture({ available = true, switchAccount = false, failShare = false, a
     }; },
     create: () => { calls.push("create"); return {
       uri: "cache/export.json", write: (bytes: Uint8Array) => { calls.push(`write:${bytes.length}`); },
-      text: async () => text,
+      text: async () => { calls.push("text"); throw new Error("Export file must never be read back"); },
       close: () => { calls.push("close"); }, remove: () => { calls.push("remove"); },
     }; },
     share: async () => { calls.push("share"); if (failShare) throw new Error("dismissed"); },
@@ -83,8 +83,28 @@ for (const [name, options] of [
   });
 }
 
-test("a complete export matches its byte Content-Length, including non-ASCII text", async () => {
+test("a present Content-Length is checked in bytes without reading the file back", async () => {
   const { calls, deps } = fixture({ length: String(new TextEncoder().encode('{"format":"nyxid.account-export","note":"你好"}').length) });
   await shareAccountExport(deps);
   assert.ok(calls.includes("share"));
+  assert.ok(!calls.includes("text"));
+});
+
+test("without Content-Length a complete stream tracks braces across whitespace-only chunks", async () => {
+  const pieces = [" \r\n", "\t", "{", '"note":"你好"', "}", "", "\r\n \t"].map((part) => new TextEncoder().encode(part));
+  const { calls, deps } = fixture({ pieces });
+  await shareAccountExport(deps);
+  assert.ok(calls.includes("share"));
+  assert.ok(!calls.includes("text"));
+  assert.equal(calls.at(-1), "remove");
+});
+
+test("without Content-Length truncated, empty and non-object streams are never shared", async () => {
+  for (const body of [' \n {"note":"truncated" \t', "", "\r\n \t", "[]", '"text"', '"missing opening brace"}']) {
+    const { calls, deps } = fixture({ body });
+    await assert.rejects(shareAccountExport(deps), /export_incomplete/);
+    assert.ok(!calls.includes("share"));
+    assert.ok(!calls.includes("text"));
+    assert.equal(calls.at(-1), "remove");
+  }
 });

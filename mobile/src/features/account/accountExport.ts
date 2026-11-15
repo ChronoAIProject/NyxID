@@ -1,3 +1,7 @@
+function isJsonWhitespace(byte: number) {
+  return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
+}
+
 /** One bounded file stream, bound to the admitted account for its lifetime. */
 export async function shareAccountExport(deps: {
   available(): Promise<boolean>;
@@ -5,7 +9,7 @@ export async function shareAccountExport(deps: {
     response: { headers: { get(name: string): string | null }; body: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<unknown>; releaseLock(): void } } | null };
     assertOwner(): Promise<void>;
   }>;
-  create(): { uri: string; write(bytes: Uint8Array): void; close(): void; text(): Promise<string>; remove(): void };
+  create(): { uri: string; write(bytes: Uint8Array): void; close(): void; remove(): void };
   share(uri: string): Promise<void>;
 }) {
   if (!(await deps.available())) throw new Error("sharing_unavailable");
@@ -18,6 +22,9 @@ export async function shareAccountExport(deps: {
   try {
     file = deps.create();
     let bytes = 0;
+    const length = response.headers.get("Content-Length");
+    let firstByte: number | undefined;
+    let lastByte: number | undefined;
     for (;;) {
       const chunk = await reader.read();
       await assertOwner();
@@ -25,19 +32,32 @@ export async function shareAccountExport(deps: {
       if (!chunk.value) continue;
       bytes += chunk.value.byteLength;
       if (bytes > 32 * 1024 * 1024) throw new Error("export_too_large");
+      if (length === null) {
+        // Keep only the outer non-whitespace bytes, never a body string or
+        // retained chunks. A present length needs only the exact byte count.
+        for (let i = 0; firstByte === undefined && i < chunk.value.length; i++) {
+          const byte = chunk.value[i];
+          if (byte !== undefined && !isJsonWhitespace(byte)) firstByte = byte;
+        }
+        for (let i = chunk.value.length - 1; i >= 0; i--) {
+          const byte = chunk.value[i];
+          if (byte !== undefined && !isJsonWhitespace(byte)) {
+            lastByte = byte;
+            break;
+          }
+        }
+      }
       file.write(chunk.value);
     }
-    const length = response.headers.get("Content-Length");
     if (length !== null && (!/^\d+$/.test(length) || bytes !== Number(length))) {
       throw new Error("export_incomplete");
     }
-    file.close(); closed = true;
-    // Also validate a complete JSON document when a proxy omits the length.
-    // The response/file size is capped above before any write.
-    const data: unknown = JSON.parse(await file.text());
-    if (!data || typeof data !== "object" || !("format" in data) || data.format !== "nyxid.account-export") {
-      throw new Error("export_invalid");
+    // Reaching done without a read error plus these outer braces is the
+    // bounded structural check when a proxy omits Content-Length.
+    if (length === null && (firstByte !== 0x7b || lastByte !== 0x7d)) {
+      throw new Error("export_incomplete");
     }
+    file.close(); closed = true;
     await assertOwner();
     await deps.share(file.uri);
   } finally {

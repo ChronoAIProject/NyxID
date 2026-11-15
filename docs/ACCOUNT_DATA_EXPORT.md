@@ -388,8 +388,12 @@ with a clean EOF. A slice already handed to the transport can remain until that
 transport drops it. Expiry is a non-delivery: the delivery slot is refunded,
 while the separate hourly attempt remains charged.
 
-Web and mobile reject transport/read errors, byte counts that differ from a
-present `Content-Length`, and incomplete or invalid export JSON even when a proxy
-omits the length. Web starts no download and shows no success message; mobile
-removes the temporary file and never opens the share sheet for a partial export.
-Mobile reads the size-capped temporary file for JSON validation before sharing.
+Web and mobile reject transport/read errors and byte counts that differ from a
+present `Content-Length`. Web also parses the JSON before starting a download or
+showing success. Mobile never reads the temporary file back or parses the full
+body: when the length is present, the exact byte count proves completeness. When
+it is absent, mobile requires a clean transport completion and checks that the
+first and last non-whitespace bytes are `{` and `}`. It tracks only those two bytes
+while writing, using constant validation memory; this is a structural check, not
+a full JSON syntax check. On failure, mobile removes the temporary file and never
+opens the share sheet.

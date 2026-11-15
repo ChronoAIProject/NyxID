@@ -91,7 +91,6 @@ export function PrivacySettingsScreen(
             uri: file.uri,
             write: (bytes) => handle.writeBytes(bytes),
             close: () => handle.close(),
-            text: () => file.text(),
             remove: () => { if (file.exists) file.delete(); },
           };
         },
