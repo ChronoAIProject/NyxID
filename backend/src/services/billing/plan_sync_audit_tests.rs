@@ -566,7 +566,11 @@ async fn integrity_diagnostics_command_count() {
         f.commands.load(Ordering::SeqCst),
         f.command_names.lock().unwrap()
     );
-    assert!(diagnostics.is_empty());
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.code.starts_with("billing_plan_repair:"))
+    );
     assert_read_only(&f);
     f.db.drop().await.unwrap();
 }

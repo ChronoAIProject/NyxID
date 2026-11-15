@@ -175,12 +175,30 @@ reservation allocations less recorded settlement/release operations; an applied
 resource lock accounts for the gap before its history record. Grant rule holds
 are checked too. These counters are separate from journaled asset checkpoints.
 
+Integrity also exposes a read-only `billing_hold_backlog` inventory of unfinished
+wallet, grant and allowance rows, grouped by meter status and creation age
+(under one hour, 1–24 hours, 1–7 days, over seven days). It shows row counts,
+outstanding holds and distinct resources, wallets and owners; allowance units
+stay separated by metric. Each kind uses its own snapshot of meter rows and
+joined resource locks, excluding recorded returns and matching applied locks.
+Each kind scans at most 10,000 rows using the existing partial indexes, with a
+three-second server and four-second overall client bound. Expired or unavailable
+snapshots retry from scratch up to eight times within that same client bound;
+partial attempts are discarded. Truncation, malformed rows or exhausted reads
+make that kind explicitly incomplete; unavailable reads show no totals and are
+retried on the next page read.
+These are amounts still held, not proof of abandonment or permission to charge
+or release them. Conservation diagnostics separately count affected resources
+and wallets, including resources without a wallet. Neither diagnostic changes
+benefit counters or adds work to billed requests.
+
 `billing_hold_conservation` reports unchanged mismatches seen in consecutive
 scheduled passes and at least five minutes of stability measured with MongoDB
 time. It separates wallet excess, wallet deficit, grant and allowance counts,
 with at most five IDs and signed total differences per kind. Resources without
-a wallet use their resource key. A wallet with several affected resources counts
-once per kind; its sample shows one resource's difference, not a sum of units.
+a wallet use their resource key. Every affected resource is counted; wallets
+are deduplicated per kind, and the sample shows one resource's difference per
+wallet, not a sum of units.
 Rapid passes retain the first unchanged timestamp. A revisit within the same
 pass preserves confirmation; hold repair waits while an asset mismatch holds
 the cursor. A balance change does not hide an unchanged hold mismatch but does
