@@ -1118,6 +1118,7 @@ function PrivacyTab() {
     } catch (error) {
       if (error instanceof ApiError) {
         if (error.status === 429) {
+          const seconds = error.retryAfter;
           const minutes = error.retryAfter
             ? Math.max(1, Math.ceil(error.retryAfter / 60))
             : undefined;
@@ -1125,10 +1126,14 @@ function PrivacyTab() {
             translateUi(
               minutes === undefined
                 ? "Your data export is temporarily rate limited."
-                : minutes === 1
+                : seconds && seconds < 60
+                  ? seconds === 1
+                    ? "Your data export is temporarily rate limited. Try again in 1 second."
+                    : "Your data export is temporarily rate limited. Try again in {{seconds}} seconds."
+                  : minutes === 1
                   ? "Your data export is temporarily rate limited. Try again in 1 minute."
                   : "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
-              minutes === undefined ? undefined : { minutes },
+              minutes === undefined ? undefined : { minutes, seconds },
             ),
           );
         } else if (error.status === 404 || error.status === 405) {

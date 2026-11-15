@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Switch } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChartColumn, Download, Smartphone } from "lucide-react-native";
-import { File, Paths } from "expo-file-system";
+import { Directory, File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { PrimaryButton } from "../../components/PrimaryButton";
@@ -19,9 +19,10 @@ import {
   saveAnalyticsPermission,
   type AnalyticsPermission,
 } from "../../lib/analyticsRelay";
-import { requestJson, requestRawText } from "../../lib/api/http";
+import { requestJson, requestBoundAuthenticatedResponse } from "../../lib/api/http";
 import { ApiError } from "../../lib/api/ApiError";
 import { getAuthAccountId } from "../../lib/auth/authAccount";
+import { cleanStaleAccountExports, shareAccountExport } from "./accountExport";
 
 /** Settings › Privacy: optional usage analytics for the account and this device. */
 export function PrivacySettingsScreen(
@@ -34,6 +35,9 @@ export function PrivacySettingsScreen(
     const timer = setTimeout(() => setToast(null), 2400);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    try { cleanStaleAccountExports(new Directory(Paths.cache).list()); } catch { /* Retry on next mount. */ }
+  }, []);
   const deviceConsent = useMobileConsent();
   const analyticsPermission = useQuery({
     queryKey: ["analytics-consent", deviceConsent.accountId],
@@ -73,34 +77,30 @@ export function PrivacySettingsScreen(
     mutationFn: async () => {
       const accountId = getAuthAccountId();
       if (!accountId) throw new Error("auth_session_missing");
-      const response = await requestRawText("/users/me/export", {
-        method: "POST",
-        expectedAccountId: accountId,
+      await shareAccountExport({
+        available: Sharing.isAvailableAsync,
+        request: () => requestBoundAuthenticatedResponse("/users/me/export", {
+          method: "POST", expectedAccountId: accountId,
+        }),
+        create: () => {
+          const file = new File(Paths.cache, `nyxid-account-export-${Date.now()}.json`);
+          file.create();
+          let handle: ReturnType<File["open"]>;
+          try { handle = file.open(); } catch (error) { file.delete(); throw error; }
+          return {
+            uri: file.uri,
+            write: (bytes) => handle.writeBytes(bytes),
+            close: () => handle.close(),
+            remove: () => { if (file.exists) file.delete(); },
+          };
+        },
+        share: (uri) => Sharing.shareAsync(uri, {
+          mimeType: "application/json", UTI: "public.json", dialogTitle: t("Export my data"),
+        }),
       });
-      const file = new File(
-        Paths.cache,
-        `nyxid-account-export-${Date.now()}.json`,
-      );
-      file.create();
-      try {
-        file.write(response.text);
-        if (!(await Sharing.isAvailableAsync()))
-          throw new Error("sharing_unavailable");
-        await Sharing.shareAsync(file.uri, {
-          mimeType: "application/json",
-          UTI: "public.json",
-          dialogTitle: t("Export my data"),
-        });
-      } finally {
-        try {
-          if (file.exists) file.delete();
-        } catch {
-          // Cache cleanup is best effort after the share sheet closes.
-        }
-      }
     },
     onSuccess: () =>
-      setToast({ message: t("Your data export is ready."), kind: "success", lines: 2 }),
+      setToast({ message: t("Export share sheet closed."), kind: "info", lines: 2 }),
     onError: (error: unknown) => {
       if (error instanceof ApiError && error.statusCode === 429) {
         const seconds = error.retryAfterMs ? Math.ceil(error.retryAfterMs / 1000) : 0;
@@ -111,7 +111,11 @@ export function PrivacySettingsScreen(
           message:
             minutes === undefined
               ? t("Your data export is temporarily rate limited.")
-              : minutes === 1
+              : seconds && seconds < 60
+                ? seconds === 1
+                  ? t("Your data export is temporarily rate limited. Try again in 1 second.")
+                  : t("Your data export is temporarily rate limited. Try again in {{seconds}} seconds.", { seconds })
+                : minutes === 1
                 ? t(
                     "Your data export is temporarily rate limited. Try again in 1 minute.",
                   )

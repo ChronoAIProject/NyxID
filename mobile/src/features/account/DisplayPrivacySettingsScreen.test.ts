@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiError } from "../../lib/api/ApiError";
+import { buildApiError } from "../../lib/api/responseError";
 import { elements, setupSettingsScreen, style } from "./settingsTestHarness";
 
 test("Display previews appearance only in its Light/Dark tiles, with radios and the Automatic switch", () => {
@@ -92,7 +93,7 @@ test("Privacy export result toasts request two lines without changing analytics 
     env.harness.render();
     assert.equal(toast().lines, 2);
     for (const error of [new Error("failed"), ...[404, 405, 429].map((statusCode) => new ApiError({
-      errorKey: "export_failed", errorCode: 1000, statusCode, message: "failed", retryAfter: 130,
+      errorKey: "export_failed", errorCode: 1000, statusCode, message: "failed", retryAfterMs: 130_000,
     }))]) {
       exportData!.onError(error);
       env.harness.render();
@@ -170,4 +171,58 @@ test("Privacy analytics keeps shared group insets and wrapping controls at narro
   assert.deepEqual(env.mutations, [false]);
   assert.deepEqual(env.deviceChoices, [true]);
   env.harness.unmount();
+});
+
+
+test("Privacy export uses HTTP-date Retry-After diagnostics in its retry toast", (t) => {
+  const now = Date.UTC(2030, 0, 1);
+  t.mock.method(Date, "now", () => now);
+  const error = buildApiError(
+    { error: "rate_limited", error_code: 1005, message: "busy" },
+    429,
+    new Headers({ "Retry-After": new Date(now + 90_000).toUTCString() }),
+  );
+  assert.equal(error.retryAfterMs, 90_000);
+  const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen");
+  try {
+    env.mutationOptions[1]!.onError(error);
+    env.harness.render();
+    const toast = env.all().find((node) => node.type === "ToastOverlay")!.props.toast;
+    assert.equal(toast.message, "Your data export is temporarily rate limited. Try again in 2 minutes.");
+  } finally {
+    env.harness.unmount();
+  }
+});
+
+test("Privacy export uses generic rate-limit wording for a zero Retry-After", () => {
+  const error = buildApiError(
+    { error: "rate_limited", error_code: 1005, message: "busy" },
+    429,
+    new Headers({ "Retry-After": "0" }),
+  );
+  assert.equal(error.retryAfterMs, 0);
+  const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen");
+  try {
+    env.mutationOptions[1]!.onError(error);
+    env.harness.render();
+    const toast = env.all().find((node) => node.type === "ToastOverlay")!.props.toast;
+    assert.equal(toast.message, "Your data export is temporarily rate limited.");
+  } finally {
+    env.harness.unmount();
+  }
+});
+
+test("Privacy export uses neutral share wording and second-based busy retries", () => {
+  for (const language of ["en", "zh-CN", "zh-TW"] as const) {
+    const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", { language });
+    const exportData = env.mutationOptions[1]!;
+    const toast = () => env.all().find((node) => node.type === "ToastOverlay")!.props.toast;
+    exportData.onSuccess(); env.harness.render();
+    assert.equal(toast().message, language === "en" ? "Export share sheet closed." : language === "zh-CN" ? "导出分享面板已关闭。" : "匯出分享面板已關閉。");
+    assert.equal(toast().kind, "info");
+    exportData.onError(new ApiError({errorKey:"busy", errorCode:1005, statusCode:429, message:"busy", retryAfterMs: 1_000}));
+    env.harness.render();
+    assert.match(toast().message, language === "en" ? /1 second/ : /1 秒/);
+    env.harness.unmount();
+  }
 });

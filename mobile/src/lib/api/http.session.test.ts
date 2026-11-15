@@ -77,7 +77,6 @@ function setup(
       analyticsDeviceHeaders: () => ({}),
       analyticsConsentState: { getSnapshot: () => ({ accountId: "actor" }) },
     },
-    "../auth/authAccount": { getAuthAccountId: () => "actor" },
   };
   const exports: Record<string, unknown> = {};
   runInNewContext(

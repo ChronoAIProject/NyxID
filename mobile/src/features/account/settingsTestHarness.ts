@@ -261,12 +261,14 @@ export function setupSettingsScreen(
     "../../lib/analyticsRelay": {},
     "../../lib/api/http": {
       requestJson: async () => ({ enabled: true }),
-      requestRawText: async () => ({ text: "{}", headers: { get: () => null } }),
+      requestBoundAuthenticatedResponse: async () => ({ response: { body: null }, assertOwner: async () => {} }),
     },
     "../../lib/api/ApiError": { ApiError },
     "expo-file-system": {
+      Directory: class Directory { list() { return []; } },
       File: class File {
         uri = "cache/export.json";
+        open() { return { writeBytes() {}, close() {} }; }
         exists = false;
         create() {}
         write() {}
@@ -274,6 +276,7 @@ export function setupSettingsScreen(
       },
       Paths: { cache: "cache" },
     },
+    "./accountExport": { cleanStaleAccountExports: () => {}, shareAccountExport: async () => {} },
     "expo-sharing": {
       isAvailableAsync: async () => true,
       shareAsync: async () => {},

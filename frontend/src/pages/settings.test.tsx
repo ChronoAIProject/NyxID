@@ -486,14 +486,14 @@ describe.each(["/settings", "/assistant"] as const)(
       }
     });
 
-    it("shows Retry-After for a rate-limited export", async () => {
+    it.each([[1, "1 second"], [42, "42 seconds"], [60, "1 minute"], [130, "3 minutes"]])("shows Retry-After %i with the right time unit", async (seconds, duration) => {
       const original = transport.getMockImplementation()!;
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/export" && options?.method === "POST"
-        ? new Response(JSON.stringify({ error: "rate_limited", error_code: 1005, message: "Rate limited" }), { status: 429, headers: { "Content-Type": "application/json", "Retry-After": "42" } })
+        ? new Response(JSON.stringify({ error: "rate_limited", error_code: 1005, message: "Rate limited" }), { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(seconds) } })
         : original(url, options));
       await open(route, "privacy");
       await userEvent.click(screen.getByRole("button", { name: "Download" }));
-      await waitFor(() => expect(toastError).toHaveBeenCalledWith("Your data export is temporarily rate limited. Try again in 1 minute."));
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith(`Your data export is temporarily rate limited. Try again in ${duration}.`));
     });
 
     it.each([404, 405])("explains that export is unavailable on an older backend (%i)", async (status) => {

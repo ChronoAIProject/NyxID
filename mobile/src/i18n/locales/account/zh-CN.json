@@ -32,6 +32,7 @@
   "Enter the code from the NyxID account you just added. If you did not add it, cancel and start again.": "输入刚添加的 NyxID 账户的代码。如果尚未添加，请取消并重新开始。",
   "Export Recovery Codes": "导出恢复码",
   "Export my data": "导出我的数据",
+  "Export share sheet closed.": "导出分享面板已关闭。",
   "Exporting…": "正在导出…",
   "Follows your device's appearance": "跟随设备外观",
   "Hands-free": "免提",
@@ -103,7 +104,9 @@
   "Your data export is ready.": "你的数据导出已准备好。",
   "Your data export is temporarily rate limited.": "你的数据导出暂时受到频率限制。",
   "Your data export is temporarily rate limited. Try again in 1 minute.": "你的数据导出暂时受到频率限制。请在 1 分钟后重试。",
+  "Your data export is temporarily rate limited. Try again in 1 second.": "你的数据导出暂时受到频率限制。请在 1 秒后重试。",
   "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.": "你的数据导出暂时受到频率限制。请在 {{minutes}} 分钟后重试。",
+  "Your data export is temporarily rate limited. Try again in {{seconds}} seconds.": "你的数据导出暂时受到频率限制。请在 {{seconds}} 秒后重试。",
   "Your name": "您的姓名",
   "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您保存的声音（{{voice}}）已不可用。请选择声音以继续。"
 }
