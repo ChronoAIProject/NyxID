@@ -45,11 +45,11 @@ pub(super) fn identity(request: &str) -> Option<(&str, Kind)> {
     Some((session, kind))
 }
 pub(super) fn is_voice(row: &Document) -> bool {
-    row.get_str("metric").ok() == Some("voice_seconds")
-        || row
-            .get_str("billing_request_id")
-            .ok()
-            .is_some_and(|id| id.starts_with("voice:"))
+    // A configured ordinary price lane can include a voice_seconds component.
+    // Only the request identity assigns it to the voice evidence protocol.
+    row.get_str("billing_request_id")
+        .ok()
+        .is_some_and(|id| id.starts_with("voice:"))
 }
 pub(super) fn kind(row: &Document) -> &'static str {
     if !is_voice(row) {

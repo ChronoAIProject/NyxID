@@ -205,7 +205,6 @@ async fn stuck_request_exit_live_owner_and_protocol_exclusions_are_untouched() {
         doc! {"model_tariff":{}},
         doc! {"metric":"machine_running_seconds"},
         doc! {"metric":"sandbox_cpu_millis_seconds"},
-        doc! {"metric":"voice_seconds"},
         doc! {"billing_request_id":"voice:session:1"},
         doc! {"quantity":3_i64,"status":"dead_letter"},
         doc! {"pending_platform_usage":{}},
