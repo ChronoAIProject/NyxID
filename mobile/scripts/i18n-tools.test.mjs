@@ -773,4 +773,28 @@ describe("mobile adopt and sync tools", () => {
     assert.deepEqual(auditCatalogs(r.locales), []);
     for (const language of LANGUAGES) assert.equal(mergedCatalog(r, language)["Change me"], `b1 ${language}`);
   });
+
+  test("prints no notice for merges main already contains below the fork (plain rebase)", () => {
+    const r = repository();
+    // Main itself merges a side branch with --no-ff, the legacy branch forks after that merge, then main splits.
+    r.git("checkout", "-q", "-b", "side-main", r.base);
+    write(path.join(r.root, "src/features/auth/Side.tsx"), "export const side = 1;\n");
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "side");
+    r.git("checkout", "-q", "-b", "main-with-merge", r.base);
+    r.git("merge", "-q", "--no-ff", "-m", "main merges side", "side-main");
+    const mainMerge = r.git("rev-parse", "HEAD");
+    r.git("checkout", "-q", "-b", "late-legacy", mainMerge);
+    editMonoliths(r, "b1", (next, language) => { next["Change me"] = `b1 ${language}`; });
+    r.git("checkout", "-q", "-b", "main-with-merge-split", mainMerge);
+    assert.equal(r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", "empty", "--onto", "HEAD").status, 0);
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "split");
+    r.git("checkout", "-q", "late-legacy");
+    assert.notEqual(spawnSync("git", ["rebase", "main-with-merge-split"], { cwd: r.repo, encoding: "utf8" }).status, 0);
+    assert.equal(r.git("rev-parse", "REBASE_HEAD^"), mainMerge);
+    const result = r.run("adopt-i18n.mjs");
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!result.stderr.includes("i18n: notice"), result.stderr);
+    assert.deepEqual(auditCatalogs(r.locales), []);
+    for (const language of LANGUAGES) assert.equal(mergedCatalog(r, language)["Change me"], `b1 ${language}`);
+  });
 });
