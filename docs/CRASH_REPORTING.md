@@ -58,11 +58,14 @@ unchanged 15-minute manifest refresh. Local admin flag writes recompute the hint
 through rollout-cache invalidation before returning, with a 200 ms read bound;
 other replicas converge on their next successful refresh within the cadence.
 Failed reads retain the last value. This hint only permits the banner's cached
-preference GET; it grants no offer or consent authority. With product telemetry
-active or this hint set, a banner candidate reads preferences at most once per
-session, and explicit saves update that cache. A Cohort non-member on a crash-only
-deployment sees no banner because their preference response does not offer
-diagnostics.
+preference GET; it grants no offer or consent authority. Only this hint enables
+the banner's preference read, at most once per session, and explicit saves update
+that cache. Without the hint, product telemetry retains its first-time disclosure
+without reading preferences. Mobile reuses the hint from its existing domain
+bootstrap or sign-in public-config response, without an extra discovery request.
+A missing hint suppresses the mobile review notice. A Cohort non-member on a
+crash-only deployment sees no banner because their preference response does not
+offer diagnostics.
 
 Web offers the updated consent
 banner and a Privacy review dialog. Mobile offers an account-bound one-time
@@ -286,6 +289,8 @@ failed. A replica with no matching destination releases the lease as pending wit
 a short backoff, allowing a configured replica to export it before the deadline.
 An export interval of zero disables all export work, including existing pending
 rows (which TTL-expire), and stores new rows as disabled even with a DSN.
+With no export destinations configured, the worker exits without database
+commands; rows already pending after the last DSN is removed wait for TTL expiry.
 The admin health explicitly shows Export disabled. Stale workers cannot settle successor claims. Missing platform DSN stores
 reports with export disabled, with no backlog awaiting later configuration.
 
@@ -345,7 +350,10 @@ fails if a map or sourceMappingURL remains public. nginx also rejects `.map`.
 The runtime image copies only dist. The builder installs the artifact uploader
 only when the optional secret file is present and nonempty. Optional Docker secret
 `crash_artifacts_sentry` is a JSON object of the three web build-only variables
-listed in ENV.md. No token uses a VITE prefix or enters a runtime layer.
+listed in ENV.md; single-line and multi-line JSON are supported. The publish
+workflow passes it through `secret-envs` only for frontend/amd64 when nonempty;
+the secret input is empty on every other leg and when unset. A configured upload
+failure fails that image build. No token uses a VITE prefix or enters a runtime layer.
 
 Mobile scripts generate `NYXID_CRASH_ARTIFACT_ID` before prebuild. iOS archive
 sets SOURCEMAP_FILE for the Hermes composed map and copies main.jsbundle, map,
@@ -354,6 +362,10 @@ bundle and composed map; this provides JS symbolication only. Each manifest is
 under `mobile/release/crash-artifacts/<platform>/<version>-<build>-<artifact>/`.
 These directories are gitignored and must be retained privately by release ops.
 Reports use installed native version/build, not package metadata or an OTA label.
+Without symbol-upload secrets, missing bundles, composed maps, dSYMs or UUIDs
+produce a warning and the store build continues, including iOS IPA export.
+Once upload is configured, missing artifacts and upload failures fail the build;
+partial secret configuration also fails.
 
 `tools/crash-artifacts` pins its own CLI and lockfile. Upload does nothing unless
 the auth token, organization and matching project are configured together; a
@@ -377,6 +389,10 @@ and export discards pending records. Disable first for binary rollback; older
 binaries ignore additive fields and new collections. Diagnostic reports and
 counters TTL-expire; the release registry persists with shared attribution. No migration
 of existing analytics consent is performed.
+After binary rollback, an old replica's personal-erasure inventory does not
+include `client_error_reports`: a person erased by that replica retains those
+rows until TTL expiry (at most 30 days). Operators needing immediate removal
+must erase again after upgrading, or delete those rows by owner.
 
 ## Third-party components
 

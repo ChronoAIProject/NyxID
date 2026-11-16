@@ -57,8 +57,9 @@ before returning (a maximum 200 ms read), while other replicas converge at their
 next successful periodic evaluation. Read failures retain the last value. The
 independent manifest worker keeps its 15-minute cadence.
 
-The web consent banner can query preferences when product telemetry is active or
-the diagnostics discovery field is true, retaining the session cache. Only the
+The web consent banner queries preferences only when the diagnostics discovery
+field is true, retaining the session cache. With the hint absent, product telemetry
+keeps its first-time disclosure without any preference GET. Only the
 authenticated preference response determines the person's real diagnostics offer
 and consent. A Cohort non-member makes at most one cached GET per session and sees
 no diagnostics banner. The public hint never grants capture authority.
