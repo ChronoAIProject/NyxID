@@ -304,9 +304,9 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// A different relay UUID lost the native-media insert race. Store one bounded
-/// alias only on the exact scoped source row; same-ID provider replays continue
-/// through the old replay/resume contract.
+/// Register a duplicate against the native-media winner, including a new HTTP
+/// key for the same relay source. Only a different source needs a duplicate
+/// marker; matching event IDs continue through the existing replay/resume path.
 pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<bool> {
     let Some(media) = &event.media else {
         return Ok(false);
@@ -318,18 +318,37 @@ pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<b
     let Some(winner) = winner else {
         return Ok(false);
     };
-    if winner.relay_message_id == event.relay_message_id {
+    if winner.relay_message_id == event.relay_message_id && winner.id == event.id {
         return Ok(false);
     }
     let Some(source) = &event.relay_message_id else {
         return Ok(false);
     };
-    db.collection::<ChannelMessage>(MESSAGES)
-        .update_one(
-            doc! {"_id":source,"direction":"inbound"},
-            doc! {"$set":{"duplicate_of_media_key":&media.key}},
-        )
-        .await?;
+    if let Some(key) = event
+        .dispatch_identity
+        .as_ref()
+        .and_then(|d| d.keys.first())
+    {
+        match super::nyxbot_dispatch_identity::alias_result(db, &winner.id, &winner.channel_id, key)
+            .await?
+        {
+            super::nyxbot_dispatch_identity::AliasOutcome::Added => {}
+            super::nyxbot_dispatch_identity::AliasOutcome::Limit => {
+                return Err(AppError::Conflict("dispatch_alias_limit".into()));
+            }
+            super::nyxbot_dispatch_identity::AliasOutcome::Missing => {
+                return Err(AppError::Conflict("dispatch_identity_conflict".into()));
+            }
+        }
+    }
+    if winner.relay_message_id != event.relay_message_id {
+        db.collection::<ChannelMessage>(MESSAGES)
+            .update_one(
+                doc! {"_id":source,"direction":"inbound"},
+                doc! {"$set":{"duplicate_of_media_key":&media.key}},
+            )
+            .await?;
+    }
     Ok(true)
 }
 

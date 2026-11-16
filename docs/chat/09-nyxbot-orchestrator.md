@@ -2331,3 +2331,5 @@ admin's personal specialist while that admin retains live org-admin authority.
 The org owns the bot/route/route key and pays channel usage; this is distinct from
 an enrolled organization-specialist execution lane. See
 [authenticated X outcomes](../CHANNEL_ACTIVITY.md#authenticated-inbound-outcomes-and-x-chat-limits).
+
+Gateway reply-target receipt waits reuse this preparation state: exact 409 `routed_reply_in_progress` and exact 503 `routed_reply_unavailable` allow only the identical same-key operation, with admission recorded only for 409. The [receipt and dispatch lookup contract](../CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup) specifies bounds, automatic compatibility readiness and output suppression after local ownership.

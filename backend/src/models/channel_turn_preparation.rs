@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Preparation {
     pub version: i32,
+    #[serde(default)]
+    pub gateway_receipt: Option<super::gateway_reply::ReceiptWait>,
+    #[serde(default)]
+    pub gateway_request_hash: Option<String>,
+    #[serde(default)]
+    pub gateway_request_version: Option<i32>,
     pub message_id: String,
     #[serde(default)]
     pub fingerprint: Option<String>,

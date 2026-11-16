@@ -1,5 +1,8 @@
 //! A preparation lease proves only that the next text part has not been sent.
 //! Images retain their independent barriers. A sending part is never reclaimed.
+#[path = "channel_turn_gateway_receipt.rs"]
+pub mod gateway;
+
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -117,6 +120,7 @@ pub async fn before_effect(db: &Database, event: &str, claim: &str, part: u32) -
         "delivery.preparation.lease_until":{"$cond":[{"$eq":["$delivery.state","preparing_text"]},
             {"$add":["$$NOW",SEND_SECS*1000]},"$delivery.preparation.lease_until"]},
         "delivery.state":"sending","delivery.checked_at":"$$NOW",
+        "delivery.gateway_attempted":{"$cond":[{"$eq":["$delivery.transport","gateway"]},true,"$$REMOVE"]},
     }}]).await?;
     if result.matched_count == 1 {
         Ok(())

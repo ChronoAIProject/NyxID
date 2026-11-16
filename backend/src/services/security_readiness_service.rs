@@ -151,6 +151,7 @@ pub const CAPABILITIES: &[&str] = &[
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
     super::nyxbot_response_recovery::RELAY_READINESS,
+    super::nyxbot_dispatch_identity::READINESS,
     super::channel_media_authority::READINESS,
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
@@ -801,6 +802,13 @@ async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
     Ok(result.upserted_id.is_some())
 }
 
+tokio::task_local! { static OBSERVATIONAL: (); }
+
+/// Read-only endpoints retain all readiness gates without publishing diagnostics.
+pub(crate) async fn without_diagnostics<F: std::future::Future>(work: F) -> F::Output {
+    OBSERVATIONAL.scope((), work).await
+}
+
 /// Serving decisions still read every live generation, including undeclared
 /// and duplicate names. Only a recorded activation can tolerate roster churn.
 pub async fn serving_report(db: &Database, capability: &str) -> AppResult<Readiness> {
@@ -813,7 +821,7 @@ async fn serving_report_for(
     capability: &str,
 ) -> AppResult<Readiness> {
     let (report, declared) = report_with_declarations(db, local, capability).await?;
-    if declared && report.serving_with_roster_warnings {
+    if declared && report.serving_with_roster_warnings && OBSERVATIONAL.try_with(|_| ()).is_err() {
         diagnostics::warn(db, capability, &report);
     }
     Ok(report)
