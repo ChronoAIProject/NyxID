@@ -545,7 +545,8 @@ pnpm typecheck
 git commit
 ```
 
-Rebase, at each catalog conflict:
+Rebase, at each catalog conflict (only a branch without merge commits, or only
+the commits after its last merge):
 
 ```sh
 git fetch origin
@@ -571,9 +572,17 @@ An addition, change or removal made in the split areas takes precedence over a
 monolith edit of that key; monoliths and areas changed differently are reported
 as a contradiction, and a key that arrives only through the area edits keeps
 the branch's area unless `--onto` already places it or a plural sibling. A
-layout with no such reference (areas the branch made itself, or an `--onto`
-with unrelated history) is refused, as is anything that would revert `main` or
-lose a value. For a branch that keeps the monoliths the
+monolith change equal to the areas' value at that reference is `main`'s own
+change, not a branch edit. `--base` must be an ancestor of `--branch` (or
+`empty`), and a commit already contained in `--onto` (re-landed after a revert)
+is measured from `--base` alone. Every history the web table above refuses is
+refused here too, the same way (writing nothing and printing no command): a
+rebase that drops or replays merges, `git cherry-pick -m`, an octopus merge,
+split areas the branch made itself (with or without merging `main`'s into
+them), diverged references, a legacy merge commit against its parent, a branch
+without monoliths or an `--onto` that is not plain split, and a result that
+would break `zh-CN`/`zh-TW` key parity; so is anything that would revert `main`
+or lose a value. For a branch that keeps the monoliths the
 refusal finds its legacy fork and prints the one command that adopts everything
 it changed, whatever its tip commit is:
 `pnpm adopt:i18n --branch <branch> --base <legacy-fork> --onto <onto>`
