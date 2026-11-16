@@ -122,9 +122,12 @@ then the source phrase.
 Run `npm run sync:i18n` after changing catalogs. It canonicalizes every app,
 common, error, and wizard JSON file, consolidates cross-portion duplicate keys,
 removes areas left without keys (`check:i18n` flags an empty area file), and
-regenerates `app/en-overrides.json`. Identical values in every language are
-safe to consolidate and are reported by `check:i18n`; differing values are a
-failure that must be resolved before syncing. Production builds run only the
+regenerates `app/en-overrides.json`. A key that appears in two areas with
+identical values in every language is only a warning in `check:i18n`, and
+`sync:i18n` moves it to `shared`. This is deliberate: two branches can add the
+same phrase to different areas, git merges both cleanly, and failing would turn
+`main` red with no conflict to resolve. Differing values are a failure that must
+be resolved before syncing. Production builds run only the
 override regeneration step, so builds never rewrite source catalogs.
 
 The app portions are listed below. The ordered path patterns in
