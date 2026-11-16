@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { connectLinksApi } from "../../lib/api/connectLinksApi";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -207,7 +207,7 @@ export function useHostedConnect(
     const safe = providerUrl(url);
     if (!safe || !current()) return;
     try {
-      await WebBrowser.openBrowserAsync(safe);
+      await openInAppBrowser(safe);
     } catch {
       if (current()) setError("Could not open the provider. Try again.");
     }

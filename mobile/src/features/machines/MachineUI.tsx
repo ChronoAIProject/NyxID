@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { z } from "zod";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -21,7 +21,7 @@ export function machineError(cause: unknown) {
     : "Could not complete this machine action.";
 }
 export async function openMachineWeb(path: string) {
-  await WebBrowser.openBrowserAsync(
+  await openInAppBrowser(
     `${getFrontendUrl().replace(/\/$/, "")}${path}`,
   );
 }
