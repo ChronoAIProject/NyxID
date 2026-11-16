@@ -30,7 +30,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
-    associatedUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    associatedUrls: r.associatedUrls,
     androidHttpsAppLinks: r.androidHttpsAppLinks,
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,

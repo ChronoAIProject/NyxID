@@ -153,6 +153,11 @@ function resolveProfile(appEnv, env, options = {}) {
     env[`${appEnv.toUpperCase()}_ANDROID_HTTPS_APP_LINKS`] || "false";
   if (!["true", "false"].includes(linkOptIn))
     fatal("ANDROID_HTTPS_APP_LINKS must be true or false");
+  // This rollout selector is intentionally profile-local; do not use pick().
+  const nativeLinkHostsVariable = `${appEnv.toUpperCase()}_NATIVE_LINK_HOSTS`;
+  const nativeLinkHosts = env[nativeLinkHostsVariable] || "api";
+  if (!["api", "api+frontend"].includes(nativeLinkHosts))
+    fatal(`${nativeLinkHostsVariable} must be api or api+frontend`);
   const dev = readProfile(env, "DEV");
   const prod = readProfile(env, "PROD");
   if (env.PROD_USE_NEW_DOMAINS !== undefined) {
@@ -185,10 +190,15 @@ function resolveProfile(appEnv, env, options = {}) {
   const androidPackage = pick("androidPackage");
   const explicitFrontendUrl = pick("frontendUrl");
   const legalBaseUrl = pick("legalBaseUrl");
+  const apiBaseUrl = pick("apiBaseUrl");
+  const frontendUrl = explicitFrontendUrl || legalBaseUrl;
+  const associatedUrls = [apiBaseUrl, newDomains?.apiBaseUrl ?? ""];
+  if (nativeLinkHosts === "api+frontend")
+    associatedUrls.push(frontendUrl, newDomains?.frontendUrl ?? "");
 
   const resolved = {
-    apiBaseUrl: pick("apiBaseUrl"),
-    frontendUrl: explicitFrontendUrl || legalBaseUrl,
+    apiBaseUrl,
+    frontendUrl,
     newApiBaseUrl: newDomains?.apiBaseUrl ?? "",
     newFrontendUrl: newDomains?.frontendUrl ?? "",
     newLegalBaseUrl: newDomains?.legalBaseUrl ?? "",
@@ -204,6 +214,8 @@ function resolveProfile(appEnv, env, options = {}) {
     appleAscAppId: pick("appleAscAppId"),
     iosBuildNumber: pick("iosBuildNumber") || "1",
     androidVersionCode: pick("androidVersionCode") || "1",
+    nativeLinkHosts,
+    associatedUrls,
     androidHttpsAppLinks: linkOptIn === "true",
     universalLinkHost: pick("universalLinkHost"),
     universalLinkPathPrefix: pick("universalLinkPathPrefix"),

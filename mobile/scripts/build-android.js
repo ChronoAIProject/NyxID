@@ -33,12 +33,22 @@ const {
   runFile,
 } = require("./android-build-command");
 
-const { loadEnv, resolveProfile, MOBILE_ROOT } = require("./lib/load-env");
+const {
+  loadEnv,
+  resolveProfile,
+  appIdentity,
+  MOBILE_ROOT,
+} = require("./lib/load-env");
+const { buildNativeLinks } = require("./lib/native-links");
 
 const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
 const env = loadEnv();
 const r = resolveProfile(APP_ENV, env, {
   validateAndroidGoogleServices: true,
+});
+const { associatedDomains } = buildNativeLinks({
+  ...r,
+  scheme: appIdentity(env).scheme,
 });
 
 const KEYSTORE_PATH =
@@ -84,6 +94,10 @@ console.log(`[build-android] Frontend URL:    ${r.frontendUrl}`);
 console.log(`[build-android] Legal URL:       ${r.legalBaseUrl}`);
 console.log(
   `[build-android] New domains:     ${r.newApiBaseUrl ? `${r.newApiBaseUrl} (selected at launch by mobile:new-domains)` : "not configured"}`,
+);
+console.log(`[build-android] Native link hosts: ${r.nativeLinkHosts}`);
+console.log(
+  `[build-android] Association hosts: ${associatedDomains.map((domain) => domain.slice("applinks:".length)).join(", ")}`,
 );
 console.log(`[build-android] Android package: ${r.androidPackage}`);
 console.log(
