@@ -1039,6 +1039,31 @@ pub static ENTRIES: &[Entry] = &[
         why: "billing_topup_sessions is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
+        collection: "billing_usage_comparisons",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: concat!(
+            "billing_usage_comparisons stores per-owner billing-provider usage-capture coverage ",
+            "metadata (wallet, customer and subscription identifiers, acknowledgement sequence ",
+            "and coverage flags); retained as FinancialBilling reconciliation evidence.",
+        ),
+    },
+    Entry {
+        collection: "billing_usage_deliveries",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: concat!(
+            "billing_usage_deliveries stores per-transaction usage delivery receipts sent to the ",
+            "billing provider (owner, wallet, customer and subscription identifiers, metric code, ",
+            "quantity and acknowledgement state); retained as FinancialBilling settlement ",
+            "evidence until its expires_at TTL; the same usage is exported through usage_meter.",
+        ),
+    },
+    Entry {
         collection: "billing_wallet",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
