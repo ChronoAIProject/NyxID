@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
-  LANGUAGES, allCatalogFiles, analyzePortions, canonicalText, catalogImportIssue,
+  FIXTURE_SOURCE, LANGUAGES, allCatalogFiles, analyzePortions, canonicalText, catalogImportIssue,
   englishOverrides as makeOverrides, isTestSource, loadPortions, readJson,
 } from "./lib/i18n-catalogs.mjs";
 import { portionForPath } from "./lib/i18n-portions.mjs";
@@ -129,7 +129,7 @@ for (const file of sourceFiles("src").filter((file) => /\.tsx?$/.test(file) && !
   visit(ast);
 }
 const files = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) &&
-    !/\.test\.|fixtures?|mock|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
+    !FIXTURE_SOURCE.test(file) && !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
 let checkedKeys = 0;
 const errorHelperFiles = new Set([
   "src/lib/api-error.ts",

@@ -49,6 +49,7 @@
   "At least one scope is required.": "At least one scope is required.",
   "Authorize via device code": "Authorize via device code",
   "Body field name": "Body field name",
+  "Bot token": "Bot token",
   "Cancel Pairing": "Cancel Pairing",
   "Cancel and return to terminal": "Cancel and return to terminal",
   "Cancelling...": "Cancelling...",

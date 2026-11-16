@@ -183,6 +183,7 @@
   "Discard saved request and review again": "放棄已儲存的請求並重新審核",
   "Do not paste tokens, credentials or job environment values into these configuration examples or chat.": "請勿將權杖、憑證或作業環境值貼到這些設定範例或聊天中。",
   "Docker": "Docker",
+  "Duration": "時長",
   "Each page contains at most 100 live pending or approved confirmations.": "每頁最多顯示 100 個目前待處理或已核准的確認。",
   "Each personal account has one free slot, with no entitlement expiry or monthly runtime limit. A paused Machine still occupies the slot and retains its workspace indefinitely until owner-confirmed deletion. Cleanup and accounting finalization must complete before the slot becomes available again.": "每個個人帳號有一個免費名額，沒有權益到期或每月執行時間限制。已暫停的機器仍會佔用該名額，並無限期保留其工作區，直到擁有者確認刪除。必須先完成清理和計費結算，該名額才會再次可用。",
   "Each result is confirmed independently. Elapsed time is not a completion percentage. Delete completion confirms Sandbox and related namespace objects, terminal creation responsibilities and accounting; physical disk release or erasure is not verified.": "每項結果都會個別確認。經過時間並非完成百分比。刪除完成會確認沙箱及相關命名空間物件、終止的建立責任以及帳務；不會確認實體磁碟的釋放或擦除。",

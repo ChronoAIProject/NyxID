@@ -49,6 +49,7 @@
   "At least one scope is required.": "至少需要一個權限範圍。",
   "Authorize via device code": "透過裝置碼授權",
   "Body field name": "請求體欄位名稱",
+  "Bot token": "機器人權杖",
   "Cancel Pairing": "取消配對",
   "Cancel and return to terminal": "取消並返回終端機",
   "Cancelling...": "正在取消…",

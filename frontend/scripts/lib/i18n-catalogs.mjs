@@ -15,6 +15,20 @@ export const englishOverrides = (english) => Object.fromEntries(
 );
 export const stripPluralSuffix = (key) => key.replace(/_(?:zero|one|two|few|many|other)$/, "");
 export const isTestSource = (file) => /(?:\.(?:test|spec)\.[cm]?[jt]sx?$|\/(?:__tests__|test|tests)\/)/.test(file);
+/** Fixture and mock sources; shared with check-i18n's copy audit. */
+export const FIXTURE_SOURCE = /fixtures?|mock/;
+/**
+ * The one predicate for sources whose string literals decide catalog placement.
+ * Excludes tests, test harnesses, dev previews, fixtures/mocks, features with their
+ * own catalogs, and the catalogs themselves.
+ */
+export const isPlacementSource = (file) => /\.tsx?$/.test(file) &&
+  !isTestSource(file) &&
+  file !== "src/test-setup.ts" &&
+  !/^src\/(?:test-utils|dev)\//.test(file) &&
+  !FIXTURE_SOURCE.test(file) &&
+  !/^src\/features\/(?:landing|nyxbot-onboarding)\//.test(file) &&
+  !file.includes("/locales/");
 
 export function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -118,13 +132,6 @@ export function consolidateDuplicates(portions) {
   return result;
 }
 
-export function filesystemSources(root) {
-  return walkFiles(path.join(root, "src"))
-    .map((file) => [path.relative(root, file).split(path.sep).join("/"), file])
-    .filter(([file]) => /\.tsx?$/.test(file) && !isTestSource(file) && !file.includes("/locales/"))
-    .map(([file, absolute]) => [file, fs.readFileSync(absolute, "utf8")]);
-}
-
 export function scanUsage(sources, keys) {
   const groups = new Map();
   for (const key of keys) {
@@ -132,7 +139,7 @@ export function scanUsage(sources, keys) {
     if (!groups.has(base)) groups.set(base, new Set());
   }
   for (const [file, source] of sources) {
-    if (!/\.tsx?$/.test(file) || isTestSource(file) || file.includes("/locales/")) continue;
+    if (!isPlacementSource(file)) continue;
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
     function visit(node) {
       if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {

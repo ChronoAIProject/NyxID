@@ -49,6 +49,7 @@
   "At least one scope is required.": "至少需要一个权限范围。",
   "Authorize via device code": "通过设备码授权",
   "Body field name": "请求体字段名称",
+  "Bot token": "机器人令牌",
   "Cancel Pairing": "取消配对",
   "Cancel and return to terminal": "取消并返回终端",
   "Cancelling...": "正在取消…",

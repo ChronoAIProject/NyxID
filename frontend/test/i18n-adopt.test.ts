@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzePortions, applyDelta, canonicalText, catalogImportIssue,
-  consolidateDuplicates, emptyLanguages, placeCatalogs, scanUsage, stripPluralSuffix,
+  consolidateDuplicates, emptyLanguages, isPlacementSource, placeCatalogs, scanUsage, stripPluralSuffix,
 } from "../scripts/lib/i18n-catalogs.mjs";
 
 describe("legacy i18n delta adoption", () => {
@@ -50,6 +50,26 @@ describe("legacy i18n delta adoption", () => {
     expect(usage.get("Referenced")).toBe("shared");
     expect(usage.get("Platform copy")).toBe("platform");
     expect(usage.get("Unseen")).toBe("unattributed");
+  });
+
+  it("scans only app sources that use the app catalog for placement", () => {
+    const excluded = [
+      "src/pages/billing.test.tsx", "src/components/__tests__/widget.tsx", "src/test-setup.ts",
+      "src/test-utils/options.tsx", "src/dev/scope-preview.tsx", "src/lib/fixtures/billing.ts",
+      "src/components/assistant/chat-fixture.ts", "src/hooks/mock-api.ts", "src/lib/mocks.ts",
+      "src/features/landing/hero.tsx", "src/features/nyxbot-onboarding/step.tsx",
+      "src/i18n/locales/app/zh-CN.ts", "src/pages/billing.json", "src/styles.css",
+    ];
+    for (const file of excluded) expect(isPlacementSource(file), file).toBe(false);
+    for (const file of ["src/pages/billing.tsx", "src/lib/api-error.ts", "src/features/docs/page.tsx", "src/test-setup-helper.ts"]) {
+      expect(isPlacementSource(file), file).toBe(true);
+    }
+    const usage = scanUsage([
+      ["src/pages/billing.tsx", 'const label = "Billing only";'],
+      ...excluded.map((file): [string, string] => [file, 'const labels = ["Billing only", "Fixture only"];']),
+    ], ["Billing only", "Fixture only"]);
+    expect(usage.get("Billing only")).toBe("billing");
+    expect(usage.get("Fixture only")).toBe("unattributed");
   });
 
   it("consolidates identical duplicate plural families by language", () => {

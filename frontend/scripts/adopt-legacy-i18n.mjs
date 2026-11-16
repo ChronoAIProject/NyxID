@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   LANGUAGES, FAMILIES, analyzePortions, applyDelta, consolidateDuplicates,
-  emptyLanguages, englishOverrides, placeCatalogs, writeJson, writePortions,
+  emptyLanguages, englishOverrides, isPlacementSource, placeCatalogs, writeJson, writePortions,
 } from "./lib/i18n-catalogs.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,7 +50,7 @@ function snapshot(ref) {
   if (analysis.issues.length) throw new Error(`${ref}: ${analysis.issues.join("\n")}`);
   const app = Object.keys(portions).length ? analysis.merged : Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${language}.json`)]));
   const families = Object.fromEntries(FAMILIES.map((family) => [family, Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${family}-${language}.json`)]))]));
-  const sources = files.filter((file) => /\.tsx?$/.test(file) && !file.includes("/locales/")).map((file) => [file.slice(prefix.length + 1), git("show", `${ref}:${file}`)]);
+  const sources = files.map((file) => file.slice(prefix.length + 1)).filter(isPlacementSource).map((file) => [file, git("show", `${ref}:${prefix}/${file}`)]);
   return { app, portions, families, sources };
 }
 
