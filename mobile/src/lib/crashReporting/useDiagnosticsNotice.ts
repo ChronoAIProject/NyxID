@@ -1,18 +1,26 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useMobileConsent } from "../consent";
 import { requestJson } from "../api/http";
 import type { AnalyticsPermission } from "../analyticsRelay";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { getCrashDiagnosticsOffered, subscribePublicConfigHints } from "../publicConfigHints";
 export function useDiagnosticsNotice(
   authenticated: boolean,
   onReview: () => void,
 ) {
   const { accountId, isHydrated, enabled, policy } = useMobileConsent();
   const { t } = useAppLanguage();
+  const [offered, setOffered] = useState(getCrashDiagnosticsOffered);
   useEffect(() => {
-    if (!authenticated || !accountId || !isHydrated || !enabled) return;
+    const update = () => setOffered(getCrashDiagnosticsOffered());
+    const unsubscribe = subscribePublicConfigHints(update);
+    update();
+    return unsubscribe;
+  }, []);
+  useEffect(() => {
+    if (!offered || !authenticated || !accountId || !isHydrated || !enabled) return;
     let active = true;
     const key = `nyxid.diagnostics.notice.${encodeURIComponent(accountId)}`;
     void (async () => {
@@ -51,5 +59,5 @@ export function useDiagnosticsNotice(
     return () => {
       active = false;
     };
-  }, [authenticated, accountId, isHydrated, enabled, policy, t, onReview]);
+  }, [offered, authenticated, accountId, isHydrated, enabled, policy, t, onReview]);
 }
