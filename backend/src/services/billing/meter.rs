@@ -764,45 +764,57 @@ pub(crate) async fn settle_voice_checkpoint(
 }
 
 pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> AppResult<u64> {
-    let components: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    use super::recovery_batch::{self, Failures};
+    let mut failures = Failures::default();
+    let components: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
         .find(doc! { "pending_platform_usage": { "$type": "object" } })
-        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .limit(recovery_batch::limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
-    for coordinator in components {
+    for raw in components {
         if !super::reconcile::continue_reconcile() {
             break;
         }
-        let rows = materialize_component_intent(db, &coordinator).await?;
-        settle_persisted(db, rows).await?;
+        failures
+            .unit(async {
+                let coordinator = recovery_batch::decode(&raw)?;
+                let rows = materialize_component_intent(db, &coordinator).await?;
+                settle_persisted(db, rows).await
+            })
+            .await;
     }
-    let coordinators: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    let coordinators: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
         .find(doc! {
             "layer": "platform",
             "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
         })
-        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .limit(recovery_batch::limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
 
     let mut recovered = 0;
-    for coordinator in coordinators {
+    for raw in coordinators {
         if !super::reconcile::continue_reconcile() {
             break;
         }
-        if materialize_pending_resale_intent(db, &coordinator)
-            .await?
+        if failures
+            .unit(async {
+                let coordinator = recovery_batch::decode(&raw)?;
+                materialize_pending_resale_intent(db, &coordinator).await
+            })
+            .await
+            .flatten()
             .is_some()
         {
             recovered += 1;
         }
     }
 
-    Ok(recovered)
+    failures.finish(recovered)
 }
 
 pub(super) async fn settle_persisted(
@@ -813,7 +825,10 @@ pub(super) async fn settle_persisted(
     for row in finalized_rows {
         if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
             reservation::record_settlement_failure(db, &row, Utc::now()).await?;
-            if first_error.is_none() {
+            if first_error
+                .as_ref()
+                .is_none_or(super::recovery_batch::is_wait)
+            {
                 first_error = Some(error);
             }
         }

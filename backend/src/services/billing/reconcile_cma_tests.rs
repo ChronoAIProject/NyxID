@@ -1006,3 +1006,6 @@ async fn shutdown_reconcile_expiry_finishes_current_operation_and_preserves_mark
 
 #[path = "reconcile_isolation_tests.rs"]
 mod isolation_tests;
+
+#[path = "reconcile_step_isolation_tests.rs"]
+mod step_isolation_tests;

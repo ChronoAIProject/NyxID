@@ -1,11 +1,12 @@
 use super::*;
 use crate::models::usage_meter::{UsageMeterRow, UsageStatus};
+use crate::services::billing::recovery_batch::{self, Failures};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 
 pub(crate) async fn recover_stale(db: &mongodb::Database, now: DateTime<Utc>) -> AppResult<u64> {
-    let rows: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(METERS)
+    let rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(METERS)
         .find(doc! {
             "usage_checkpoint.final_report":true,
             "usage_checkpoint.recovered":false,
@@ -13,18 +14,33 @@ pub(crate) async fn recover_stale(db: &mongodb::Database, now: DateTime<Utc>) ->
             "usage_checkpoint.recover_after":{"$lte":bson::DateTime::from_chrono(now)},
         })
         .sort(doc! {"usage_checkpoint.recover_after":1,"_id":1})
-        .limit(100)
+        .limit(recovery_batch::limit(100))
         .await?
         .try_collect()
         .await?;
     let mut recovered = 0;
-    for row in rows {
+    let mut failures = Failures::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for raw in rows {
         if !super::super::reconcile::continue_reconcile() {
             break;
         }
-        recovered += recover_request(db, &row.billing_request_id, Some(now)).await?;
+        if let Some(request) = raw.get_str("billing_request_id").ok()
+            && !seen.insert(request.to_owned())
+        {
+            continue;
+        }
+        if let Some(n) = failures
+            .unit(async {
+                let row: UsageMeterRow = recovery_batch::decode(&raw)?;
+                recover_request(db, &row.billing_request_id, Some(now)).await
+            })
+            .await
+        {
+            recovered += n;
+        }
     }
-    Ok(recovered)
+    failures.finish(recovered)
 }
 
 /// `None` is an explicit live attempt finish. A recovery cutoff rechecks an

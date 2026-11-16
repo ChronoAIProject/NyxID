@@ -221,6 +221,19 @@ version is retained as `status_newer_version` without failing an otherwise healt
 pass. Malformed or older formats are replaced with fresh status on release and
 reported once in that pass's aggregate log; they do not fail subsequent passes.
 
+Money recovery decodes and processes each selected resource or request separately.
+A failed unit retains its financial claims, locks and evidence while other selected
+units continue. The pass diagnostic includes `failing_units` for the latest batch;
+a query/cursor error has no invented count. Selections retain their existing filters,
+sorts, indexes and caps. Claim loops exclude failed identities only within that pass;
+existing leases, retry times and expiry rotation remain authoritative. More poison
+rows than a selection cap can still defer healthy work across passes and are reported
+as failures. No retry fields or indexes are added. Live claims, pending journals,
+expiry quiet periods and retry backoff are waits, not failing units; provider read
+outages and malformed documents are failures. Old replicas ignore the additive status
+count and retain their existing batch behavior; rolling updates and rollback need no
+operator action. No amount, financial fence, receipt or evidence rule changes.
+
 Automatic and manual chain verification discard losing `Ok` scans, always log a local
 `Broken` at error level and retry its publication up to three times (on conflict,
 keeping the stored break at an earlier or equal sequence, or returning an error on
