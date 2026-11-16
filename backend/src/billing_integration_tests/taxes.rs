@@ -394,9 +394,13 @@ async fn stale_wallet_profile_fails_closed_and_forced_refresh_bypasses_backoff()
         ));
     }
     assert_eq!(lago.tax_fetches.load(Ordering::SeqCst), 1);
-    crate::services::billing::taxes::reconcile(&db, lago.as_ref(), 900)
-        .await
-        .unwrap();
+    assert!(matches!(
+        crate::services::billing::taxes::reconcile(&db, lago.as_ref(), 900).await,
+        Err(AppError::BillingRecoveryFailed {
+            failed_units: 1,
+            ..
+        })
+    ));
     assert_eq!(lago.tax_fetches.load(Ordering::SeqCst), 2);
     db.drop().await.unwrap();
 }

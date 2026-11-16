@@ -54,6 +54,7 @@ export function SettingsPage({
   return (
     <ScreenContainer>
       <PageScrollView
+        keyboardAware
         scrollRef={scrollRef}
         fadeColor={colors.bg}
         refreshControl={

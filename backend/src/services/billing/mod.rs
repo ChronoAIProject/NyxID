@@ -22,6 +22,8 @@ pub mod provisioning;
 pub(crate) mod rate_cache;
 pub(crate) mod realtime_usage;
 pub mod reconcile;
+mod reconcile_status;
+pub(crate) mod recovery_batch;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
@@ -199,6 +201,7 @@ pub async fn startup_diagnostics(
             detected_at:diagnostic.updated_at,
         });
     }
+    items.extend(reconcile_status::diagnostics(db).await);
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
     items.extend(hold_conservation::diagnostics(db).await?);
     items.extend(stuck_requests::diagnostics(db).await?);
@@ -1474,6 +1477,7 @@ mod tests {
         // Advance the fixture to the next pass after the uncertain plan lease expires.
         crate::services::billing::plan_writers_tests::expire_plan_lease(&db, "standard").await;
         lago.fail_price_sync.store(false, Ordering::SeqCst);
+        defer_plan_repair(&db).await;
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
                 .await
@@ -1582,6 +1586,7 @@ mod tests {
             .replace_one(doc! {"_id": &catalog.id}, &catalog)
             .await
             .unwrap();
+        defer_plan_repair(&db).await;
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
                 .await
@@ -1609,6 +1614,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        defer_plan_repair(&db).await;
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
                 .await
@@ -2212,6 +2218,7 @@ mod tests {
                 .upsert(true)
                 .await
                 .unwrap();
+            defer_plan_repair(db).await;
             assert_eq!(
                 pricing::retry_pending_service_prices(db, lago, "standard")
                     .await
@@ -2281,8 +2288,17 @@ mod tests {
             .expect("insert platform rate");
     }
 
+    // These lifecycle fixtures exercise the service writer. Keep the independent
+    // plan audit in its ordinary per-code backoff; the service retry remains due.
+    async fn defer_plan_repair(db: &mongodb::Database) {
+        db.collection::<mongodb::bson::Document>(crate::models::billing_plan_sync::CHARGE_COLLECTION)
+            .update_many(doc! {"plan_code":"standard"}, doc! {"$set":{"repair_next_at":mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1))}})
+            .await.unwrap();
+    }
+
     #[derive(Default)]
     struct FakeLago {
+        charges: std::sync::Mutex<std::collections::BTreeMap<(String, String), String>>,
         prices: std::sync::Mutex<Vec<crate::services::billing::lago_client::ServicePriceSync>>,
         wallet_creates: AtomicUsize,
         fail_price_sync: std::sync::atomic::AtomicBool,
@@ -2310,15 +2326,28 @@ mod tests {
                     "test unavailable".into(),
                 ));
             }
+            self.charges.lock().unwrap().insert(
+                (_plan.into(), _input.metric_code.clone()),
+                _input.credits_per_unit.clone(),
+            );
             self.prices.lock().unwrap().push(_input.clone());
             self.price_syncs.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn remove_standard_charge(&self, _plan: &str, _metric: &str) -> AppResult<()> {
+            self.charges
+                .lock()
+                .unwrap()
+                .remove(&(_plan.into(), _metric.into()));
             self.price_removals.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
+        async fn plan_charges(&self, plan: &str) -> AppResult<Vec<serde_json::Value>> {
+            Ok(self.charges.lock().unwrap().iter().filter(|((p, _), _)| p == plan).map(|((_, code), amount)| serde_json::json!({
+            "billable_metric_code": code, "charge_model":"standard", "properties":{"amount":amount}
+        })).collect())
+        }
         async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
             Ok(owner.external_customer_id.clone())
         }

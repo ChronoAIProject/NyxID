@@ -3,6 +3,8 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
+use super::audit_service::required::{self, TextField};
+
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
@@ -873,11 +875,11 @@ async fn revoke_consent_in_session(
             "user_revoked",
         )
         .await?;
-    intents.push(super::audit_service::required::intent(
+    intents.push(required::intent(
         Some(actor),
         "oauth_consent_revoked",
         Some(serde_json::json!({
-            "client_id": client_id,
+            "client_id": required::text(TextField::Identifier, client_id),
             "revoked_refresh_tokens": revoked_refresh_tokens,
             "revoked_broker_bindings": revoked_broker_bindings,
         })),

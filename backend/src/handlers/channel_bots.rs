@@ -400,6 +400,7 @@ pub async fn admin_list(
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
     let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
     let nyxbot_rows = latest_nyxbot_rows(&state.db, &ids).await?;
+    let billing = org_guest_billing_for_rows(&state.db, &bots, &nyxbot_rows).await?;
     let mut nyxbot_states = std::collections::HashMap::new();
     for row in nyxbot_rows.values() {
         if let Some(code) = nyxbot_health_state(&state, row).await {
@@ -416,6 +417,7 @@ pub async fn admin_list(
                     intake.get(&bot.id).cloned(),
                     nyxbot_rows.get(&bot.id),
                     nyxbot_states.get(&bot.id).map(String::as_str),
+                    billing.get(&bot.id).copied(),
                 )
             })
             .collect(),
@@ -526,6 +528,8 @@ pub(crate) async fn health_loaded(
         crate::services::channel_bot_health::discord::load(&state.db, std::slice::from_ref(bot))
             .await?;
     let nyxbot_rows = latest_nyxbot_rows(&state.db, std::slice::from_ref(&bot.id)).await?;
+    let billing =
+        org_guest_billing_for_rows(&state.db, std::slice::from_ref(bot), &nyxbot_rows).await?;
     let nyxbot_state = if let Some(row) = nyxbot_rows.get(&bot.id) {
         nyxbot_health_state(state, row).await
     } else {
@@ -538,6 +542,7 @@ pub(crate) async fn health_loaded(
         intake.remove(&bot.id),
         nyxbot_rows.get(&bot.id),
         nyxbot_state.as_deref(),
+        billing.get(&bot.id).copied(),
     ))
 }
 
@@ -619,6 +624,26 @@ async fn latest_nyxbot_rows(
     Ok(latest)
 }
 
+async fn org_guest_billing_for_rows(
+    db: &mongodb::Database,
+    bots: &[crate::models::channel_bot::ChannelBot],
+    rows: &std::collections::HashMap<String, NyxbotHealthRow>,
+) -> AppResult<std::collections::BTreeMap<String, &'static str>> {
+    let bindings: Vec<_> = bots
+        .iter()
+        .filter_map(|bot| {
+            let row = rows.get(&bot.id)?;
+            let binding = row.org_specialist.as_ref()?;
+            (matches!(row.status.as_str(), "active" | "pending")
+                && binding.version == 1
+                && binding.guests.enabled
+                && binding.org_id == bot.user_id)
+                .then(|| (bot.id.clone(), binding.org_id.clone()))
+        })
+        .collect();
+    crate::services::channel_bot_health::load_org_guest_billing_many(db, &bindings).await
+}
+
 fn health_with_intake(
     bot: &crate::models::channel_bot::ChannelBot,
     gateway: bool,
@@ -662,9 +687,11 @@ fn health_with_nyxbot(
     intake: Option<crate::services::channel_bot_health::discord::Intake>,
     nyxbot: Option<&NyxbotHealthRow>,
     nyxbot_state: Option<&str>,
+    org_guest_billing: Option<&str>,
 ) -> ChannelBotHealthResponse {
     let mut facts =
         crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    facts.org_guest_billing = org_guest_billing;
     if intake.is_some() {
         facts.discord_intake = intake;
     }
@@ -674,9 +701,6 @@ fn health_with_nyxbot(
             facts.failure_reason = nyxbot_state.or(Some(
                 crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
             ));
-            let recommendation = crate::services::channel_bot_health::recommend(&facts);
-            response.recommended_action = recommendation.action;
-            response.recommended_action_text = recommendation.text;
         }
         response.nyxbot_status = Some(row.status.clone());
         response.nyxbot_last_error = row.last_error.clone();
@@ -686,6 +710,9 @@ fn health_with_nyxbot(
             .map(|_| "in_flight".to_owned())
             .or_else(|| row.org_restore_last_reason.clone());
     }
+    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+    response.recommended_action = recommendation.action;
+    response.recommended_action_text = recommendation.text;
     response
 }
 
@@ -1037,18 +1064,21 @@ pub(crate) async fn resolve_create_owner(
     }
 }
 
-/// Resolve the owner id for a list operation. If `org_id` is set, the
-/// caller must be an admin of that org; otherwise lists personal bots.
+/// Resolve a list owner, preserving admin access and admitting first-party human Members.
 async fn resolve_list_owner(
     state: &AppState,
-    actor: &str,
+    auth: &AuthUser,
     org_id: Option<&str>,
 ) -> AppResult<String> {
+    let actor = auth.user_id.to_string();
     if let Some(org_id) = org_id {
-        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
-        if !access.can_write() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, org_id).await?;
+        if !access.can_write()
+            && !(crate::services::org_agent_service::can_use(&access)
+                && super::login_client_context::require_first_party_human(auth).is_ok())
+        {
             return Err(AppError::OrgRoleInsufficient(
-                "admin access to the target org is required to list its channel bots".to_string(),
+                "member access to the target org is required to list its channel bots".to_string(),
             ));
         }
         Ok(org_id.to_string())
@@ -1535,13 +1565,17 @@ pub async fn list_bots(
     }
     let mut bots = match query.scope {
         Some(ChannelBotListScope::All) => {
-            channel_bot_service::list_all_bots(&state.db, &actor).await?
+            if super::login_client_context::require_first_party_human(&auth_user).is_ok() {
+                channel_bot_service::list_accessible_bots(&state.db, &actor).await?
+            } else {
+                channel_bot_service::list_all_bots(&state.db, &actor).await?
+            }
         }
         Some(ChannelBotListScope::User) => {
             channel_bot_service::list_bots(&state.db, &actor).await?
         }
         None => {
-            let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
+            let owner_id = resolve_list_owner(&state, &auth_user, query.org_id.as_deref()).await?;
             channel_bot_service::list_bots(&state.db, &owner_id).await?
         }
     };
@@ -2235,20 +2269,21 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(response.total, 3);
+        assert_eq!(response.total, 4);
         assert_eq!(
             response
                 .bots
                 .iter()
                 .map(|bot| bot.user_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["admin-b", "admin-a", actor.as_str()]
+            vec!["member", "admin-b", "admin-a", actor.as_str()]
         );
 
         for (scope, org_id) in [
             (None, None),
             (Some(ChannelBotListScope::User), None),
             (None, Some("admin-a")),
+            (None, Some("member")),
         ] {
             let Json(response) = list_bots(
                 State(state.clone()),
@@ -2269,7 +2304,7 @@ mod tests {
                 test_auth_user(&actor),
                 Query(ChannelBotListQuery {
                     scope: None,
-                    org_id: Some("member".to_string())
+                    org_id: Some("viewer".to_string())
                 }),
             )
             .await,

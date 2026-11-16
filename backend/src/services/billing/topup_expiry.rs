@@ -2,6 +2,7 @@ use super::lago_client::{
     DispatchWindow, LagoApi, LagoWalletTransaction, ProviderDispatch,
     purchased_credit_expiry_transaction_name,
 };
+use super::recovery_batch::{self, Failures};
 use crate::errors::AppResult;
 use crate::models::billing_topup_session::{
     BillingTopUpSession, COLLECTION_NAME as BILLING_TOPUP_SESSIONS,
@@ -43,191 +44,204 @@ pub async fn expire_purchased_credits(
     now: DateTime<Utc>,
 ) -> AppResult<u64> {
     super::exact_migration::require_ready(db).await?;
-    let wallets: Vec<BillingWallet> = db
-        .collection::<BillingWallet>(BILLING_WALLETS)
+    let wallets: Vec<bson::Document> = db
+        .collection::<bson::Document>(BILLING_WALLETS)
         .find(doc! { "lago_wallet_id": { "$ne": null } })
-        .sort(doc! { "topup_expiry_checked_at": 1, "updated_at": 1 })
-        .limit(EXPIRY_WALLET_BATCH)
+        .sort(doc! {"topup_expiry_checked_at":1,"updated_at":1})
+        .limit(recovery_batch::limit(EXPIRY_WALLET_BATCH))
         .await?
         .try_collect()
         .await?;
     let mut expired_transactions = 0;
-    for wallet in wallets {
+    let mut failures = Failures::default();
+    for raw in wallets {
         if !super::reconcile::continue_reconcile() {
             break;
         }
-        // Rotate the bounded batch even when Lago is unavailable or this
-        // wallet has no purchases, preventing the oldest 100 wallets from
-        // starving every other billing owner.
-        db.collection::<BillingWallet>(BILLING_WALLETS)
-            .update_one(
-                doc! { "_id": &wallet.id },
-                doc! { "$set": { "topup_expiry_checked_at": bson::DateTime::from_chrono(now), } },
-            )
-            .await?;
-        if !super::reconcile::continue_reconcile() {
-            break;
-        }
-        if let Some(operation) = wallet.active_topup_expiry.clone() {
-            match acquire_expiry_operation(db, &wallet, operation, now).await? {
-                Some(operation) => {
-                    match complete_expiry_operation(db, lago, &wallet, operation, now).await {
-                        Ok(completed) => expired_transactions += completed,
-                        Err(error) => {
-                            tracing::warn!(
-                                owner_id = %wallet.owner_id,
-                                %error,
-                                "failed to recover purchased-credit expiry operation"
-                            );
+        let result: AppResult<()> = recovery_batch::work(async {
+            // Rotate the bounded batch even when Lago is unavailable or this
+            // wallet has no purchases, preventing the oldest 100 wallets from
+            // starving every other billing owner.
+            db.collection::<BillingWallet>(BILLING_WALLETS)
+                .update_one(
+                    doc! { "_id": raw.get("_id") },
+                    doc! { "$set": { "topup_expiry_checked_at": bson::DateTime::from_chrono(now), } },
+                )
+                .await?;
+            let wallet: BillingWallet = recovery_batch::decode(&raw)?;
+            if !super::reconcile::continue_reconcile() {
+                return Ok(());
+            }
+            if let Some(operation) = wallet.active_topup_expiry.clone() {
+                match acquire_expiry_operation(db, &wallet, operation, now).await? {
+                    Some(operation) => {
+                        match complete_expiry_operation(db, lago, &wallet, operation, now).await {
+                            Ok(completed) => expired_transactions += completed,
+                            Err(error) => {
+                                tracing::warn!(
+                                    owner_id = %wallet.owner_id,
+                                    %error,
+                                    "failed to recover purchased-credit expiry operation"
+                                );
+                                return Err(error);
+                            }
                         }
                     }
+                    None => {
+                        tracing::debug!(
+                            owner_id = %wallet.owner_id,
+                            "purchased-credit expiry operation is leased by another reconciler"
+                        );
+                    }
                 }
-                None => {
-                    tracing::debug!(
-                        owner_id = %wallet.owner_id,
-                        "purchased-credit expiry operation is leased by another reconciler"
-                    );
-                }
+                return Ok(());
             }
-            continue;
-        }
-        let Some(wallet_id) = wallet.lago_wallet_id.as_deref() else {
-            continue;
-        };
-        let transactions = match lago.wallet_transactions(wallet_id).await {
-            Ok(transactions) => transactions,
-            Err(error) => {
-                tracing::warn!(owner_id = %wallet.owner_id,
- %error,
- "failed to list Lago wallet transactions for expiry");
-                continue;
-            }
-        };
-        if !transactions.iter().any(is_settled_purchase) {
-            continue;
-        }
-        let protected = wallet
-            .pending_lago_debits
-            .checked_add(wallet.reserved_credits)?
-            .max(Credits::ZERO);
-        let wallet_balance = if has_traceable_purchase_balances(&transactions) {
-            Credits::ZERO
-        } else {
-            match super::webhook::provider_effective_balance(lago, &wallet).await {
-                Ok(balance) => balance,
+            let Some(wallet_id) = wallet.lago_wallet_id.as_deref() else {
+                return Ok(());
+            };
+            let transactions = match lago.wallet_transactions(wallet_id).await {
+                Ok(transactions) => transactions,
                 Err(error) => {
                     tracing::warn!(owner_id = %wallet.owner_id,
- %error,
- "failed to read exact Lago wallet balance for expiry");
-                    continue;
+     %error,
+     "failed to list Lago wallet transactions for expiry");
+                    return Err(error);
+                }
+            };
+            if !transactions.iter().any(is_settled_purchase) {
+                return Ok(());
+            }
+            let protected = wallet
+                .pending_lago_debits
+                .checked_add(wallet.reserved_credits)?
+                .max(Credits::ZERO);
+            let wallet_balance = if has_traceable_purchase_balances(&transactions) {
+                Credits::ZERO
+            } else {
+                match super::webhook::provider_effective_balance(lago, &wallet).await {
+                    Ok(balance) => balance,
+                    Err(error) => {
+                        tracing::warn!(owner_id = %wallet.owner_id,
+     %error,
+     "failed to read exact Lago wallet balance for expiry");
+                        return Err(error);
+                    }
+                }
+            };
+            let purchases = purchased_remaining(transactions, wallet_balance, protected)?;
+            // Populate the paid/expiry timestamps well before credits become due,
+            // so history surfaces remain truthful without waiting for the expiry
+            // mutation itself.
+            if !super::reconcile::continue_reconcile() {
+                return Ok(());
+            }
+            let sessions = backfill_session_expiry(db, &wallet.owner_id, &purchases, now).await?;
+            if !super::reconcile::continue_reconcile() {
+                return Ok(());
+            }
+            let expired = prepare_expired_purchases(db, &wallet.owner_id, purchases, now).await?;
+            let amount = expired
+                .iter()
+                .map(|purchase| purchase.remaining)
+                .try_fold(Credits::ZERO, Credits::checked_add)?;
+            if amount <= Credits::ZERO {
+                return Ok(());
+            }
+            let operation_id = Uuid::new_v4().to_string();
+            let processing_token = Uuid::new_v4().to_string();
+            let operation = PurchasedCreditExpiryOperation {
+                operation_id,
+                processing_token,
+                lease_until: now + Duration::seconds(EXPIRY_OPERATION_LEASE_SECS),
+                amount,
+                items: expired
+                    .iter()
+                    .map(|purchase| PurchasedCreditExpiryItem {
+                        lago_purchase_transaction_id: purchase.transaction_id.clone(),
+                        reference_id: sessions.get(&purchase.transaction_id).map_or_else(
+                            || purchase.transaction_id.clone(),
+                            |session| session.id.clone(),
+                        ),
+                        amount: purchase.remaining,
+                        settled_at: purchase.settled_at,
+                    })
+                    .collect(),
+                dispatch_attempts: 0,
+                processing_lease_until: None,
+                processing_lease_token: None,
+                dispatch_started_at: None,
+                unresolved_reported_at: None,
+                lago_void_transaction_id: None,
+                wallet_balance_applied: false,
+                history_applied: false,
+                created_at: now,
+                updated_at: now,
+            };
+            let operation_bson = bson::to_bson(&operation).map_err(|error| {
+                crate::errors::AppError::Internal(format!(
+                    "failed to encode purchased-credit expiry operation: {error}"
+                ))
+            })?;
+            let pending_credits = amount;
+            let claim = db
+                .collection::<BillingWallet>(BILLING_WALLETS)
+                .find_one_and_update(
+                    doc! {
+                        "_id": &wallet.id,
+                        "$or": [
+                            { "active_topup_expiry": { "$exists": false } },
+                            { "active_topup_expiry": null },
+                        ],
+                        "pending_topup_expiry_credits": { "$in": [0_i64, null] },
+                        // Recompute if a concurrent request changed protected funds.
+                        "$expr": { "$and": [
+                            { "$eq": [{ "$ifNull": ["$reserved_credits", 0_i64] }, wallet.reserved_credits] },
+                            { "$eq": [{ "$ifNull": ["$pending_lago_debits", 0_i64] }, wallet.pending_lago_debits] },
+                            // A completed expiry advances this generation before
+                            // clearing its operation; reject older purchase reads.
+                            { "$eq": [{ "$ifNull": ["$snapshot_generation", 0_i64] }, wallet.snapshot_generation] },
+                        ] },
+                    },
+                    vec![
+                        doc! { "$set": {
+                            "active_topup_expiry": { "$literal": operation_bson },
+                            "pending_topup_expiry_credits": pending_credits,
+                            "updated_at": "$$NOW",
+                        }},
+                        doc! { "$set": {
+                            "active_topup_expiry.lease_until": expiry_deadline(),
+                            "active_topup_expiry.processing_lease_until": expiry_deadline(),
+                            "active_topup_expiry.processing_lease_token": "$active_topup_expiry.processing_token",
+                        }},
+                    ],
+                )
+                .return_document(ReturnDocument::After)
+                .await?;
+            let Some(operation) = claim.and_then(|wallet| wallet.active_topup_expiry) else {
+                return Ok(());
+            };
+            match complete_expiry_operation(db, lago, &wallet, operation, now).await {
+                Ok(completed) => expired_transactions += completed,
+                Err(error) => {
+                    tracing::warn!(
+                        owner_id = %wallet.owner_id,
+                        %amount,
+                        %error,
+                        "failed to complete purchased-credit expiry operation"
+                    );
+                    return Err(error);
                 }
             }
-        };
-        let purchases = purchased_remaining(transactions, wallet_balance, protected)?;
-        // Populate the paid/expiry timestamps well before credits become due,
-        // so history surfaces remain truthful without waiting for the expiry
-        // mutation itself.
-        if !super::reconcile::continue_reconcile() {
-            break;
-        }
-        let sessions = backfill_session_expiry(db, &wallet.owner_id, &purchases, now).await?;
-        if !super::reconcile::continue_reconcile() {
-            break;
-        }
-        let expired = prepare_expired_purchases(db, &wallet.owner_id, purchases, now).await?;
-        let amount = expired
-            .iter()
-            .map(|purchase| purchase.remaining)
-            .try_fold(Credits::ZERO, Credits::checked_add)?;
-        if amount <= Credits::ZERO {
-            continue;
-        }
-        let operation_id = Uuid::new_v4().to_string();
-        let processing_token = Uuid::new_v4().to_string();
-        let operation = PurchasedCreditExpiryOperation {
-            operation_id,
-            processing_token,
-            lease_until: now + Duration::seconds(EXPIRY_OPERATION_LEASE_SECS),
-            amount,
-            items: expired
-                .iter()
-                .map(|purchase| PurchasedCreditExpiryItem {
-                    lago_purchase_transaction_id: purchase.transaction_id.clone(),
-                    reference_id: sessions.get(&purchase.transaction_id).map_or_else(
-                        || purchase.transaction_id.clone(),
-                        |session| session.id.clone(),
-                    ),
-                    amount: purchase.remaining,
-                    settled_at: purchase.settled_at,
-                })
-                .collect(),
-            dispatch_attempts: 0,
-            processing_lease_until: None,
-            processing_lease_token: None,
-            dispatch_started_at: None,
-            unresolved_reported_at: None,
-            lago_void_transaction_id: None,
-            wallet_balance_applied: false,
-            history_applied: false,
-            created_at: now,
-            updated_at: now,
-        };
-        let operation_bson = bson::to_bson(&operation).map_err(|error| {
-            crate::errors::AppError::Internal(format!(
-                "failed to encode purchased-credit expiry operation: {error}"
-            ))
-        })?;
-        let pending_credits = amount;
-        let claim = db
-            .collection::<BillingWallet>(BILLING_WALLETS)
-            .find_one_and_update(
-                doc! {
-                    "_id": &wallet.id,
-                    "$or": [
-                        { "active_topup_expiry": { "$exists": false } },
-                        { "active_topup_expiry": null },
-                    ],
-                    "pending_topup_expiry_credits": { "$in": [0_i64, null] },
-                    // Recompute if a concurrent request changed protected funds.
-                    "$expr": { "$and": [
-                        { "$eq": [{ "$ifNull": ["$reserved_credits", 0_i64] }, wallet.reserved_credits] },
-                        { "$eq": [{ "$ifNull": ["$pending_lago_debits", 0_i64] }, wallet.pending_lago_debits] },
-                        // A completed expiry advances this generation before
-                        // clearing its operation; reject older purchase reads.
-                        { "$eq": [{ "$ifNull": ["$snapshot_generation", 0_i64] }, wallet.snapshot_generation] },
-                    ] },
-                },
-                vec![
-                    doc! { "$set": {
-                        "active_topup_expiry": { "$literal": operation_bson },
-                        "pending_topup_expiry_credits": pending_credits,
-                        "updated_at": "$$NOW",
-                    }},
-                    doc! { "$set": {
-                        "active_topup_expiry.lease_until": expiry_deadline(),
-                        "active_topup_expiry.processing_lease_until": expiry_deadline(),
-                        "active_topup_expiry.processing_lease_token": "$active_topup_expiry.processing_token",
-                    }},
-                ],
-            )
-            .return_document(ReturnDocument::After)
-            .await?;
-        let Some(operation) = claim.and_then(|wallet| wallet.active_topup_expiry) else {
-            continue;
-        };
-        match complete_expiry_operation(db, lago, &wallet, operation, now).await {
-            Ok(completed) => expired_transactions += completed,
-            Err(error) => {
-                tracing::warn!(
-                    owner_id = %wallet.owner_id,
-                    %amount,
-                    %error,
-                    "failed to complete purchased-credit expiry operation"
-                );
-            }
+            Ok(())
+        })
+        .await;
+        // The existing checked-at update rotates every selected wallet; no
+        // second metadata write is needed after a malformed or failed wallet.
+        if let Err(error) = result {
+            failures.note(error);
         }
     }
-    Ok(expired_transactions)
+    failures.finish(expired_transactions)
 }
 
 async fn prepare_expired_purchases(
@@ -454,7 +468,7 @@ async fn complete_expiry_operation_inner(
                         ProviderDispatch::AlreadyExists(error)
                         | ProviderDispatch::Ambiguous(error) => {
                             report_unresolved(db, wallet, &operation).await?;
-                            return Err(error);
+                            return Err(recovery_batch::waiting(error));
                         }
                     }
                 }

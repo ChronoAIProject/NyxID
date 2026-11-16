@@ -506,6 +506,14 @@ async fn erase_page(
                 super::super::erasure_admission::close_in_session(db, target, &mut tx).await?;
             }
         }
+        if collection == crate::models::nyxbot_channel::COLLECTION_NAME {
+            super::super::org_channel_service::defaults::erase_in_session(
+                db,
+                doc! {"channel_id":{"$in":&ids}},
+                &mut tx,
+            )
+            .await?;
+        }
         db.collection::<Document>(collection)
             .delete_many(doc! {"$and":[filter, {"_id":{"$in":ids}}]})
             .session(&mut tx)

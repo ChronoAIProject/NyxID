@@ -276,7 +276,10 @@ pub async fn relink(
                 super::super::org_channel_service::fence_management(db,session,&current,&manager).await?;
                 super::super::org_channel_service::live_doc(db,session,"assistant_agents",doc!{"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},true).await?;
                 binding.revision=uuid::Uuid::new_v4().to_string();
-                binding.guests=Default::default();
+                let enabled = binding.guests.enabled;
+                binding.guests=super::super::org_channel_service::new_guest_policy(
+                    super::super::org_channel_service::guest_grants_ready(db).await?);
+                binding.guests.enabled=enabled;
                 db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":channel},doc!{"$set":{"org_specialist":bson::to_bson(&binding).map_err(|_|not_found())?},"$inc":{"notification_epoch":1_i64}}).session(&mut *session).await?;
                 super::super::org_channel_service::lifecycle::retire_in_session(db,session,channel,None).await?;
             }

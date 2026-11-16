@@ -1143,6 +1143,54 @@ async fn preflight_channel_target(
     Ok(())
 }
 
+async fn channel_connect_preview(
+    state: &AppState,
+    owner: &str,
+    name: &str,
+    args: &Value,
+) -> AppResult<Option<crate::services::org_channel_service::preview::Preview>> {
+    if !matches!(name, "connect_channel_bot" | "link_channel_bot") {
+        return Ok(None);
+    }
+    let agent = channel_target_agent(state, owner, args["agent"].as_str()).await?;
+    if agent.user_id == owner {
+        return Ok(None);
+    }
+    let bot_id = if name == "connect_channel_bot" {
+        let reference = args["bot"]
+            .as_str()
+            .or_else(|| args["bot_id"].as_str())
+            .ok_or_else(|| AppError::ValidationError("bot is required".into()))?;
+        super::nyxbot::resolve_bot_ref(state, owner, reference)
+            .await?
+            .id
+    } else {
+        crate::services::org_channel_service::management::load(
+            &state.db,
+            owner,
+            text_arg(args, "channel_agent_id"),
+            true,
+        )
+        .await?
+        .channel_bot_id
+    };
+    Ok(Some(
+        Box::pin(crate::services::org_channel_service::preview::load(
+            &state.db,
+            &state.encryption_keys,
+            owner,
+            &bot_id,
+            &agent.id,
+            if name == "link_channel_bot" {
+                Some(text_arg(args, "channel_agent_id"))
+            } else {
+                None
+            },
+        ))
+        .await?,
+    ))
+}
+
 /// The owner-facing description of a native team tool call for its action
 /// card: what it does and the identifiers it names, bounded and free of
 /// message text, instructions or other model-written prose.
@@ -1440,6 +1488,7 @@ async fn execute_authorized_tool_impl(
         // widening they make (operations, skills, machine capabilities and
         // updates, permission decisions) or are specialists' own permission
         // requests; never consume a second digest for them.
+        let channel_preview = Box::pin(channel_connect_preview(state, &chat.user_id, name, args)).await?;
         let mut auto_allowed = None;
         let mut delegation_approved = false;
         let sharing_preview = if name == "set_agent_sharing" {
@@ -1491,6 +1540,7 @@ async fn execute_authorized_tool_impl(
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
                 .unwrap_or_else(|| if group_delegation { format!("Enable guest access for agent {} in group {}. Current and future participants without use rights may use the owner’s guest service policy; the owner pays. Membership revision {}, guest revision {}.",text_arg(&args["change"],"agent_id"),text_arg(args,"group"),args["expected_revision"],args["change"]["guest_revision"]) } else {action_summary(name,args)});
+            if let Some(preview) = &channel_preview { summary.push('\n'); summary.push_str(&preview.summary()); }
             let audience_readiness = if name == "update_channel_access" && args["private_chats"] == "everyone" {
                 let facts = super::nyxbot::chats::audience_readiness(state, &chat.user_id, text_arg(args, "channel_agent_id")).await?;
                 summary.push('\n');
@@ -1517,6 +1567,7 @@ async fn execute_authorized_tool_impl(
                         acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary)
                             .await?
                 {
+                    if let Some(preview) = &channel_preview { refusal["channel_preview"] = json!(preview); }
                     if let Some(facts) = &audience_readiness {
                         refusal["audience_readiness"] = json!(facts);
                     }
@@ -1525,7 +1576,8 @@ async fn execute_authorized_tool_impl(
             }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        let outcome = dispatch(state, chat, name, args, delegation_approved).await?;
+        let mut outcome = dispatch(state, chat, name, args, delegation_approved).await?;
+        if let Some(preview) = &channel_preview { outcome.0["channel_preview"] = json!(preview); }
         if !outcome.1
             && let Some(auto) = auto_allowed
         {
@@ -1535,7 +1587,7 @@ async fn execute_authorized_tool_impl(
                 tool_name,
                 args,
                 &auto,
-                &action_summary(name, args),
+                &channel_preview.as_ref().map(|p| format!("{}\n{}", action_summary(name,args), p.summary())).unwrap_or_else(|| action_summary(name,args)),
             )
             .await;
         }
@@ -4128,12 +4180,19 @@ pub fn spawn_sweeps(state: AppState) {
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
     state.shutdown.clone().spawn_worker(async move {
+        let mut guest_defaults = crate::services::org_channel_service::defaults::Sweep::default();
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let Some(_work) = state.shutdown.tick(&mut interval).await else {
                 break;
             };
+            if state.shutdown.is_draining() {
+                break;
+            }
+            if let Err(error) = guest_defaults.run(&state.db).await {
+                tracing::warn!(%error, "Organization guest defaults deferred");
+            }
             if state.shutdown.is_draining() {
                 break;
             }

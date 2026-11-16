@@ -434,6 +434,8 @@ Every proxy call routed through an org carries the routing context in its audit 
 }
 ```
 
+Organization membership add/update/revoke and invitation issue/cancel/redeem commit a bounded audit intent with the source mutation; invite redemption commits its claim and membership in the same transaction. The existing relay chains each occurrence once, with identifiers and role only—never an invitation nonce or join URL.
+
 Personal-routed calls record `routed_via: "personal"` and omit the org fields. Audit writes are fire-and-forget (`audit_service::log_async`) so audit failures never block the proxy request — degraded audit storage degrades observability, not availability.
 
 ---

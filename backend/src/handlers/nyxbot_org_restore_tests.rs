@@ -446,6 +446,44 @@ async fn org_restore_real_mongo_restores_once_preserves_guests_and_revokes_prede
     );
     assert_ne!(live[0].id, predecessor.id);
     assert_eq!(
+        live[0]
+            .org_specialist
+            .as_ref()
+            .unwrap()
+            .guests
+            .continuity_channel_id
+            .as_deref(),
+        Some(predecessor.id.as_str())
+    );
+    let mut carried = live[0].org_specialist.clone().unwrap();
+    crate::services::org_channel_service::defaults::sweep(&state.db)
+        .await
+        .unwrap();
+    let after = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id": &live[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    let after_binding = after.org_specialist.as_ref().unwrap();
+    assert!(
+        after_binding.guests.enabled,
+        "untouched restored Off receives the default"
+    );
+    assert_ne!(after_binding.guests.revision, carried.guests.revision);
+    carried.guests.enabled = true;
+    carried
+        .guests
+        .revision
+        .clone_from(&after_binding.guests.revision);
+    assert_eq!(
+        bson::to_bson(after_binding).unwrap(),
+        bson::to_bson(&carried).unwrap()
+    );
+    assert_eq!(after.private_chats.as_deref(), Some("everyone"));
+
+    assert_eq!(
         state
             .db
             .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
@@ -2475,6 +2513,7 @@ async fn org_restore_transport_choice_covers_telegram_discord_and_lark_gateway_o
 fn org_restore_health_states_have_no_owner_action_and_truthful_wait_text() {
     use crate::services::channel_bot_health::{HealthFacts, codes};
     let facts = |failure_reason| HealthFacts {
+        org_guest_billing: None,
         platform: "telegram",
         status: "failed",
         webhook_registered: true,
@@ -2769,4 +2808,129 @@ async fn org_restore_real_mongo_racing_claims_are_single_and_expiry_is_reclaimab
             .is_some()
     );
     drop_state(state, server).await;
+}
+
+#[tokio::test]
+async fn org_restore_guest_defaults_preserves_on_without_wallet_and_reports_billing() {
+    Box::pin(async {
+        let (mut state, model_calls, server) = setup("org_restore_guest_defaults_no_wallet").await;
+        let (predecessor, org_id) = retired_real_org_row(&state, "telegram", "gateway").await;
+        state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id": &predecessor.id},
+                doc! {"$set": {
+                    "org_specialist.guests.enabled": true,
+                    "org_specialist.guests.revision": Uuid::new_v4().to_string(),
+                    "private_chats": "everyone",
+                }},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+                .count_documents(doc! {"owner_id": &org_id})
+                .await
+                .unwrap(),
+            0
+        );
+        let (_, gateway) = super::mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
+        releases::restore_org_access_step(state.clone())
+            .await
+            .unwrap();
+        let live = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"channel_bot_id": &predecessor.channel_bot_id, "status": "active"})
+            .await
+            .unwrap()
+            .expect("automatic restoration succeeds without billing");
+        let policy = &live.org_specialist.as_ref().unwrap().guests;
+        assert!(policy.enabled);
+        assert_eq!(
+            policy.continuity_channel_id.as_deref(),
+            Some(predecessor.id.as_str())
+        );
+        crate::services::org_channel_service::defaults::sweep(&state.db)
+            .await
+            .unwrap();
+        let after = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .find_one(doc! {"_id": &live.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_bson(&after.org_specialist).unwrap(),
+            bson::to_bson(&live.org_specialist).unwrap()
+        );
+        assert_eq!(after.private_chats.as_deref(), Some("everyone"));
+        let health = crate::handlers::channel_bots::health(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(OWNER),
+            Path(live.channel_bot_id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(health.nyxbot_status.as_deref(), Some("active"));
+        assert_eq!(health.recommended_action, "enable_billing");
+        let key = state
+            .encryption_keys
+            .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
+            .await
+            .unwrap();
+        let key = String::from_utf8(key.to_vec()).unwrap();
+        assert_eq!(
+            super::put_conversation(
+                State(state.clone()),
+                Path((
+                    live.binding_id.clone().unwrap(),
+                    super::PARTITION.to_owned()
+                )),
+                super::bearer(&key),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let reply = super::respond(
+            &state,
+            &key,
+            &super::event("Hello without billing", "7", "restored-no-wallet"),
+            "restored-no-wallet",
+        )
+        .await;
+        assert!(
+            super::body_text(reply)
+                .await
+                .contains(crate::services::org_channel_service::UNAVAILABLE)
+        );
+        assert!(model_calls.lock().await.is_empty());
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::org_channel::HOLDS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(crate::models::usage_meter::COLLECTION_NAME)
+                .count_documents(doc! {"billing_owner_id": &org_id})
+                .await
+                .unwrap(),
+            0
+        );
+        gateway.abort();
+        drop_state(state, server).await;
+    })
+    .await;
 }

@@ -203,6 +203,45 @@ unit may finish after expiry. Existing row claims, financial locks and dedupe
 remain necessary. This supervisor does not serialize request-time plan writers,
 wallet/rate/tax snapshots, or purchased-credit expiry against other entry points.
 
+After exact-accounting readiness, a failed maintenance step records its stable
+error code and the pass continues with independent later steps. The caller still
+receives one failed-pass result listing failed steps. Integrity's
+`billing_reconcile_steps` diagnostic shows each step's consecutive failed passes
+and database-time first/last failure; a successful attempt clears that step,
+while a drain/configuration skip preserves it. Status uses the existing
+`billing:reconcile` lease checkpoint and is published once with its fenced release;
+a clean pass adds no database commands. Old lease holders ignore and retain the
+checkpoint and keep their earlier stop-on-error behavior, so counts cover passes
+observed by upgraded holders. No rolling-update action is required. A hard abort
+or lost lease cannot publish a completed pass; leaf recovery markers remain the
+authority for unfinished work. Per-document failures already handled inside a
+step retain their existing retry and diagnostic behavior. Same-schema failure
+entries with unknown step names are preserved and displayed. A newer checkpoint
+version is retained as `status_newer_version` without failing an otherwise healthy
+pass. Malformed or older formats are replaced with fresh status on release and
+reported once in that pass's aggregate log; they do not fail subsequent passes.
+
+Money recovery decodes and processes each selected resource or request separately.
+A failed unit retains its financial claims, locks and evidence while other selected
+units continue. The pass diagnostic includes `failing_units` for the latest batch;
+a query/cursor error has no invented count. Selections retain their existing filters,
+sorts, indexes and caps. Claim loops exclude failed identities only within that pass;
+existing leases, retry times and expiry rotation remain authoritative. More poison
+rows than a selection cap can still defer healthy work across passes and are reported
+as failures. No retry fields or indexes are added. Live claims, pending journals,
+expiry quiet periods and retry backoff are waits, not failing units; provider read
+outages and malformed documents are failures. Old replicas ignore the additive status
+count and retain their existing batch behavior; rolling updates and rollback need no
+operator action. No amount, financial fence, receipt or evidence rule changes.
+
+Provider maintenance uses the same per-unit isolation for tax profiles, service and
+machine prices, usage emission/comparison, wallet balances and rate-cache publication.
+Provider outages fail their units after existing retry state is saved; plan contention,
+readback still pending, event rate limits and stale snapshot publication are waits.
+Rate publication retries a definitively rejected row's remaining chunk against the
+same captured epoch, never a freshly read epoch. The clean command paths and existing
+selection bounds are unchanged; no new durable marker or index is introduced.
+
 Automatic and manual chain verification discard losing `Ok` scans, always log a local
 `Broken` at error level and retry its publication up to three times (on conflict,
 keeping the stored break at an earlier or equal sequence, or returning an error on

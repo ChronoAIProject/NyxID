@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
-import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 import * as connectionPresentation from "./connectionPresentation";
 import * as serviceContracts from "./serviceContracts";
 import * as designTokens from "../../theme/designTokens";
@@ -105,6 +105,8 @@ function setup({
 } = {}) {
   let shared = sharedGrant;
   const calls: ApiCall[] = [];
+  let navigationDisabled = false;
+  let pendingAction: Promise<unknown> | undefined;
   const alerts: {
     title: string;
     message: string;
@@ -121,6 +123,7 @@ function setup({
     (method: string, result?: unknown) =>
     async (...args: unknown[]) => {
       calls.push({ method, args });
+      await pendingAction;
       return result;
     };
   const harness = hookHarness<Element>({
@@ -138,7 +141,11 @@ function setup({
         addEventListener: () => ({ remove: () => {} }),
       },
       Keyboard: { dismiss: () => {} },
-      Linking: { openURL: async () => {} },
+      Linking: {
+        openURL: async () => {
+          await pendingAction;
+        },
+      },
       Alert: {
         alert: (title: string, message: string, buttons: never) =>
           alerts.push({ title, message, buttons }),
@@ -165,7 +172,9 @@ function setup({
         isPending: false,
         isFetching: false,
         isError: false,
-        refetch: async () => {},
+        refetch: async () => {
+          await pendingAction;
+        },
         data:
           queryKey[2] === "connections"
             ? [row]
@@ -179,12 +188,14 @@ function setup({
     "expo-web-browser": {
       openBrowserAsync: async (url: string) => {
         browsers.push(url);
+        await pendingAction;
         return { type: "dismiss" };
       },
     },
     "expo-clipboard": {
       setStringAsync: async (value: string) => {
         copied.push(value);
+        await pendingAction;
       },
     },
     "lucide-react-native": Object.fromEntries(
@@ -232,7 +243,11 @@ function setup({
       },
     },
     "../../lib/env": { getFrontendUrl: () => "https://nyxid.example" },
-    "../../app/WorkspaceHeader": { useWorkspaceBack: () => {} },
+    "../../app/WorkspaceHeader": {
+      useWorkspaceBack: (input: { disabled: boolean }) => {
+        navigationDisabled = input.disabled;
+      },
+    },
     "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./serviceContracts": serviceContracts,
@@ -264,6 +279,10 @@ function setup({
   const button = (label: string) => find((item) => isAction(item, label));
   return {
     harness,
+    navigationDisabled: () => navigationDisabled,
+    defer: (promise: Promise<unknown>) => {
+      pendingAction = promise;
+    },
     calls,
     alerts,
     browsers,
@@ -594,5 +613,54 @@ test("read-only org viewers cannot trigger provider checks", async () => {
   env.button("Refresh status").props.onPress();
   await env.harness.settle();
   assert.deepEqual(env.calls, []);
+  env.harness.unmount();
+});
+
+
+test("service refresh, documentation, browser and clipboard actions do not register critical navigation guards", async () => {
+  for (const label of [
+    "Refresh status",
+    "Read provider documentation",
+    "Copy proxy address",
+    "Open advanced settings in Web",
+  ]) {
+    const env = setup({
+      catalogEntry: {
+        ...entry,
+        documentation_url: "https://provider.example/docs",
+      },
+    });
+    if (
+      label === "Copy proxy address" ||
+      label === "Open advanced settings in Web"
+    )
+      env.tab("Advanced");
+    const pending = deferred<void>();
+    env.defer(pending.promise);
+    env.button(label).props.onPress();
+    await env.harness.settle();
+    assert.equal(env.navigationDisabled(), false, label);
+    pending.resolve();
+    await env.harness.settle();
+    env.harness.unmount();
+  }
+});
+
+test("service credential writes retain their critical guard until completion", async () => {
+  const env = setup();
+  const pending = deferred<void>();
+  env.defer(pending.promise);
+  env
+    .find(
+      (node) =>
+        node.type === "Switch" &&
+        node.props.accessibilityLabel === "Connection enabled",
+    )
+    .props.onValueChange(false);
+  await env.harness.settle();
+  assert.equal(env.navigationDisabled(), true);
+  pending.resolve();
+  await env.harness.settle();
+  assert.equal(env.navigationDisabled(), false);
   env.harness.unmount();
 });

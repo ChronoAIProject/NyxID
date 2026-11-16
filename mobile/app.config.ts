@@ -72,6 +72,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
         NSMicrophoneUsageDescription:
           "Allow NyxID to use your microphone for dictation and voice conversations.",
+        NSPhotoLibraryAddUsageDescription:
+          "Allow NyxID to save images you choose from chats to your photo library.",
       },
     },
     android: {

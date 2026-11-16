@@ -259,6 +259,7 @@ test("native legal wrappers push the opposite document and pop on Back", () => {
     "./LegalDocumentScreen": { LegalDocumentScreen: "LegalDocumentScreen" },
   });
   const navigation = {
+    getState: () => ({ routes: [] }),
     push: (route: string) => pushes.push(route),
     goBack: () => {
       backs++;

@@ -17,8 +17,8 @@ export const orgGuestSettingsSchema = z.object({
   channel_status: z.string().optional(),
   readiness_reason: z.string().nullish(),
   effective_guest_services: z.array(guestServiceSchema).default([]),
-  spent_today_credits: z.string(),
-  reserved_today_credits: z.string(),
+  spent_today_credits: z.string().optional(),
+  reserved_today_credits: z.string().optional(),
 });
 export const orgGuestReviewSchema = z.object({
   ready: z.boolean(),

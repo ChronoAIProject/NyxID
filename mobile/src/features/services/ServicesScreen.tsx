@@ -81,6 +81,7 @@ export function ServicesScreen({
   );
   const [adding, setAdding] = useState<CatalogEntry>();
   const [busy, setBusy] = useState(false);
+  const [writing, setWriting] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [flowComplete, setFlowComplete] = useState(false);
@@ -179,7 +180,7 @@ export function ServicesScreen({
     // writing; a local detail screen must instead consume its own Back action.
     active: onClose ? busy : Boolean(selectedId) || Boolean(adding),
     defaultRole: onClose ? "back" : "menu",
-    disabled: busy,
+    disabled: writing,
     discardOnClose:
       formDirty || Boolean(replacement)
         ? {
@@ -193,10 +194,11 @@ export function ServicesScreen({
     },
   });
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<void>, criticalWrite = true) {
     if (actionLock.current) return;
     actionLock.current = true;
     setBusy(true);
+    setWriting(criticalWrite);
     setError(undefined);
     setNotice(undefined);
     try {
@@ -206,6 +208,7 @@ export function ServicesScreen({
     } finally {
       actionLock.current = false;
       setBusy(false);
+      setWriting(false);
     }
   }
 
@@ -352,7 +355,7 @@ export function ServicesScreen({
         url.searchParams.set("tab", target);
         await WebBrowser.openBrowserAsync(url.href);
         await reload();
-      });
+      }, false);
     // Removal is irreversible, so it is confirmed in a system alert. A shared
     // provider grant (11500) switches the next confirmation to token-only.
     const confirmRemoval = (target: ServiceConnection) =>
@@ -669,18 +672,35 @@ export function ServicesScreen({
                   value={connectionTime(connection.expires_at, "Not recorded")}
                 />
               ) : null}
-              {isSavedCredential(connection) && connection.credential_verification?.reason_code ? (
-                <SettingsRow label="Check result" value={connection.credential_verification.reason_code} />
+              {isSavedCredential(connection) &&
+              connection.credential_verification?.reason_code ? (
+                <SettingsRow
+                  label="Check result"
+                  value={connection.credential_verification.reason_code}
+                />
               ) : null}
               <SettingsRow
                 label="Refresh status"
                 tone="action"
                 disabled={busy || detail.isFetching}
-                onPress={() => void run(async () => {
-                  if (editable && isSavedCredential(connection) && connection.credential_verification?.can_check)
-                    await servicesApi.checkCredential(connection.id);
-                  await reload();
-                })}
+                onPress={() =>
+                  void run(
+                    async () => {
+                      if (
+                        editable &&
+                        isSavedCredential(connection) &&
+                        connection.credential_verification?.can_check
+                      )
+                        await servicesApi.checkCredential(connection.id);
+                      await reload();
+                    },
+                    Boolean(
+                      editable &&
+                        isSavedCredential(connection) &&
+                        connection.credential_verification?.can_check,
+                    ),
+                  )
+                }
               />
               {(entry?.documentation_url ?? connection.docs_url) ? (
                 <SettingsRow
@@ -694,7 +714,7 @@ export function ServicesScreen({
                           entry?.documentation_url ?? connection.docs_url!,
                         ),
                       );
-                    })
+                    }, false)
                   }
                 />
               ) : null}
@@ -727,7 +747,7 @@ export function ServicesScreen({
                     void run(async () => {
                       await Clipboard.setStringAsync(connection.proxy_url!);
                       setNotice("Proxy address copied.");
-                    })
+                    }, false)
                   }
                 />
               ) : null}

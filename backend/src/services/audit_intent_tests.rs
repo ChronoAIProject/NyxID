@@ -454,3 +454,31 @@ async fn multi_binding_consent_commits_one_audit_and_exact_cae_occurrences() {
     assert_eq!(effects.count_documents(doc! {}).await.unwrap(), 3);
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn long_user_agent_consent_revocation_keeps_visible_bounded_context() {
+    use axum::extract::{Path, State};
+    let db = crate::test_utils::connect_transaction_test_database("consent_long_ua").await;
+    let (state, owner, client, _) = revocation_fixture(&db).await;
+    let mut auth = crate::test_utils::test_auth_user(&owner);
+    auth.user_agent = Some("U".repeat(64 * 1024));
+    let _ = crate::handlers::consent::revoke_my_consent(State(state.clone()), auth, Path(client))
+        .await
+        .unwrap();
+    crate::services::security_effect_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    crate::services::security_effect_service::sweep(&db, &state.encryption_keys)
+        .await
+        .unwrap();
+    let row = db
+        .collection::<Document>("audit_log")
+        .find_one(doc! {"event_type":"oauth_consent_revoked"})
+        .await
+        .unwrap()
+        .unwrap();
+    let ua = row.get_str("user_agent").unwrap();
+    assert_eq!(ua.len(), 1024);
+    assert!(ua.ends_with("...[truncated]"));
+    db.drop().await.unwrap();
+}

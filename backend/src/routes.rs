@@ -3014,6 +3014,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
         .route(
+            "/nyxagent/channels/preview",
+            post(handlers::org_specialist_channels::preview),
+        )
+        .route(
             "/nyxagent/custom-event-bindings",
             get(handlers::nyxbot_event_bindings::list)
                 .post(handlers::nyxbot_event_bindings::create),

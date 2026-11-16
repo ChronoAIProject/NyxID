@@ -5,7 +5,10 @@ use mongodb::{ClientSession, Database};
 
 use crate::models::security_effect_intent::{SecurityEffect, SecurityEffectIntent};
 use crate::services::{
-    audit_service::{AuditActor, required},
+    audit_service::{
+        AuditActor,
+        required::{self, TextField},
+    },
     security_effect_service,
 };
 
@@ -106,7 +109,7 @@ async fn revoke_reused_in_session(
     intents.push(required::intent(
         Some(&actor),
         "oauth_broker_binding_reuse_detected",
-        Some(serde_json::json!({"client_id": binding.client_id,
+        Some(serde_json::json!({"client_id": required::text(TextField::Identifier, &binding.client_id),
             "binding_hash": binding_hash_prefix(binding_hash), "cascade_revoke_count": count})),
     )?);
     security_effect_service::enqueue_in_session(db, session, &intents).await
@@ -205,7 +208,7 @@ async fn revoke_one_in_session(
         .session(&mut *session)
         .await?;
     let metadata = Some(
-        serde_json::json!({"revoke_source": source, "client_id": binding.client_id,
+        serde_json::json!({"revoke_source": source, "client_id": required::text(TextField::Identifier, &binding.client_id),
         "binding_hash": binding_hash_prefix(&binding.id), "reason": reason}),
     );
     let audit = if let Some(actor) = actor {

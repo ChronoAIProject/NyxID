@@ -1,6 +1,6 @@
 # Sprint 2 — Dictation language picker (#2450)
 
-Test date: 2026-11-16 (Asia/Shanghai). Implementation commit: `1ffc58acfe9b622f3cb165006b8cf41051570d99` on `codex/sprint2-dictation-language`; base: `4372b638898a272ac8942d90ce099d2fd0ce3dec` (`upstream/main`). The PR's subsequent documentation commit does not change application behavior.
+Test date: 2026-11-16 (Asia/Shanghai). Implementation commit: `1ffc58acfe9b622f3cb165006b8cf41051570d99` on `codex/sprint2-dictation-language`; base: `4372b638898a272ac8942d90ce099d2fd0ce3dec` (`upstream/main`). The native E2E below was performed against that implementation. The PR was subsequently synchronized with team `upstream/main` at `0d37c7397`; the merge preserved both sides' locale additions and did not change the dictation picker implementation.
 
 ## Scope and minimum fix
 
@@ -55,3 +55,19 @@ Result: **PASS**. TypeScript `transpileModule(..., reportDiagnostics: true)` add
 The parent agent independently read the relevant implementation diff and reported no confirmed blocking issue. Self-review checked reuse, existing consumer regressions, unchanged recognizer locale values, script/region handling and cancellation/persistence.
 
 **PASS WITH NOTES:** the changed picker completed its actual authenticated native user path on iPad. The iPhone QA simulator loaded the real app and all normal login providers, but had no signed-in session; its picker path was not executed. Android and physical devices were not exercised for this PR. Shared components and Hermes-specific regression tests support consistency but do not replace those device checks. Audio recognition accuracy, live voice and push notifications are outside #2450 and are not claimed as validated by these picker tests.
+
+
+## Team main synchronization (2026-11-16)
+
+Merged team `upstream/main` commit `0d37c7397` into the existing PR branch. Only the two Chinese catalog tails conflicted; both dictation phrases and the team's organization settings phrases were retained. There were no conflicts or upstream changes in the dictation implementation or shared selection sheet. Independent review of the final diff against the new team baseline found no confirmed blocking issue and no new selection or persistence behavior.
+
+Re-ran the dependency-related tests on the merged tree, including the new main callers of the shared selection sheet and the locale completeness regression:
+
+```sh
+cd mobile
+node --import tsx --test src/components/workspace/WorkspaceSelectionField.test.ts src/features/groups/GroupEditorScreen.test.ts src/features/plugins/PluginSkills.test.ts src/features/agents/AgentsScreen.permissions.test.ts src/features/plugins/PluginConnectionHistory.test.ts src/features/assistant/voice/AssistantVoiceConversation.test.ts src/features/account/VoiceSettingsScreen.test.ts src/features/assistant/ComposerDictation.test.ts src/features/assistant/useComposerDictation.test.ts src/features/groups/CrewVoiceComposer.test.ts src/features/assistant/useAssistant.dictation.test.ts src/features/account/MobileSettingsMessages.test.ts src/features/assistant/voice/dictationLanguage.test.ts src/features/assistant/voice/useDictationLanguage.test.ts src/features/assistant/voice/dictationLocale.test.ts src/i18n/mobileRuntimeMessages.test.ts src/features/auth/rootEntryLayout.test.ts src/features/auth/loginRequests.test.ts src/features/auth/agentKeySelectionFields.test.ts src/features/agents/AgentCollaborationPanel.test.ts src/features/groups/CollaborationGroupControls.test.ts src/i18n/ws2LocaleCompleteness.test.ts
+```
+
+Result: **466 tests passed**, zero failures/skips. The exact nine-file Prettier command above passed again; TypeScript syntax and all three JSON dictionaries also passed, as did `git diff --check`. The local log is `/tmp/nyxid-sprint2-dictation-main-sync-tests.log`.
+
+The actual iPad E2E evidence remains the completed six-step run above; it has not been represented as a second simulator run after synchronization. The parent agent reserved the native device for the other categories' E2E. Full frontend suite/typecheck/build remains delegated to GitHub CI.

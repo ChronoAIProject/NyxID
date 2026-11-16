@@ -86,6 +86,7 @@ function setup(
   let onAdopt: ((id: string) => void) | undefined;
   let headerOptions: Record<string, any> = {};
   const headerModule = {};
+  let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
   const alerts: { text: string; onPress?: () => void }[][] = [];
@@ -360,7 +361,11 @@ function setup(
       ].map((name) => [name, name]),
     ),
     "../../app/WorkspaceHeader": {
-      useWorkspaceBack: (input: { options: Record<string, any> }) => {
+      useWorkspaceBack: (input: {
+        options: Record<string, unknown>;
+        disabled: boolean;
+      }) => {
+        navigationDisabled = input.disabled;
         headerOptions = input.options;
       },
       WorkspaceHeaderVisibility: "WorkspaceHeaderVisibility",
@@ -505,7 +510,9 @@ function setup(
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../notifications/NotificationBell": { NotificationBell: "NotificationBell" },
+    "../notifications/NotificationBell": {
+      NotificationBell: "NotificationBell",
+    },
     "../notifications/useNotifications": {
       useNotificationIndicator: () => ({
         enabled: false,
@@ -551,6 +558,8 @@ function setup(
     all().find((element) => element.type === "AssistantVoiceConversation");
   return {
     harness,
+    navigationDisabled: () => navigationDisabled,
+    headerActions: () => elements(expand(headerOptions.headerRight())),
     assistant,
     uploads,
     connection,
@@ -2643,4 +2652,33 @@ test("2345 history failure keeps the composer usable, offers refresh, and respec
   x.harness.render();
   assert.equal(x.input().props.editable, false);
   x.harness.unmount();
+});
+
+
+test("Home loading never registers a critical navigation guard; only its initial send or upload does", () => {
+  const env = setup();
+  env.assistant.loading = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), false);
+  assert.equal(
+    env
+      .headerActions()
+      .find((node) => node.props.accessibilityLabel === "New chat")?.props
+      .disabled,
+    true,
+  );
+  env.assistant.sending = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), true);
+  env.assistant.sending = false;
+  env.uploads.session.sending = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), true);
+  env.adopt(A);
+  assert.equal(
+    env.navigationDisabled(),
+    false,
+    "an established chat can leave during a send",
+  );
+  env.harness.unmount();
 });
