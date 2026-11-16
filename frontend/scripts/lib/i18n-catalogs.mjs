@@ -187,18 +187,25 @@ export function applyDelta(base, branch, onto, label = "catalog") {
   return { result, conflicts, changes };
 }
 
-export function placeCatalogs(merged, sources, existing = {}) {
+/**
+ * Place every merged key: existing (onto) owners first, by key then by plural sibling; then
+ * `preferred` owners (the branch's area for keys that arrive through its split-area edits), by key
+ * then by sibling; then literal usage.
+ */
+export function placeCatalogs(merged, sources, existing = {}, preferred = new Map()) {
   const result = structuredClone(existing);
   const keys = [...new Set(LANGUAGES.flatMap((language) => Object.keys(merged[language])))];
   const placement = scanUsage(sources, keys);
   const existingOwners = analyzePortions(existing).locations;
   const siblingOwners = new Map([...existingOwners].map(([key, owners]) => [stripPluralSuffix(key), owners]));
+  const preferredSiblings = new Map([...preferred].map(([key, owner]) => [stripPluralSuffix(key), owner]));
   for (const language of LANGUAGES) {
     for (const catalogs of Object.values(result)) catalogs[language] = {};
     for (const key of keys) {
       if (!Object.hasOwn(merged[language], key)) continue;
       const owner = existingOwners.get(key) ?? siblingOwners.get(stripPluralSuffix(key));
-      const portion = owner?.size === 1 ? [...owner][0] : placement.get(stripPluralSuffix(key));
+      const portion = owner?.size === 1 ? [...owner][0]
+        : preferred.get(key) ?? preferredSiblings.get(stripPluralSuffix(key)) ?? placement.get(stripPluralSuffix(key));
       result[portion] ??= emptyLanguages();
       result[portion][language][key] = merged[language][key];
     }

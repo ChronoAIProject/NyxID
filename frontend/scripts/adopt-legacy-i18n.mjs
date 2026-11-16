@@ -189,7 +189,12 @@ try {
   }
   if (conflicts.length) throw new Error(`No files written. Resolve these catalog divergences explicitly:\n${conflicts.join("\n")}`);
   const sources = refs.base === "empty" ? branch.sources : [...onto.sources, ...branch.sources];
-  const portions = consolidateDuplicates(placeCatalogs(merged, sources, refs.base === "empty" ? {} : onto.portions));
+  // Keys a mixed branch added or changed only in its split areas keep the branch's area when onto has no owner.
+  const branchOwners = analyzePortions(branch.portions).locations;
+  const preferred = new Map(app.areaDelta ? LANGUAGES.flatMap((language) => Object.keys({ ...app.areaDelta.base[language], ...app.areaDelta.branch[language] })
+    .filter((key) => app.areaDelta.base[language][key] !== app.areaDelta.branch[language][key] && branchOwners.get(key)?.size === 1)
+    .map((key) => [key, [...branchOwners.get(key)][0]])) : []);
+  const portions = consolidateDuplicates(placeCatalogs(merged, sources, refs.base === "empty" ? {} : onto.portions, preferred));
   const analysis = analyzePortions(portions);
   if (analysis.issues.length) throw new Error(`No files written. ${analysis.issues.join("\n")}`);
   writePortions(locales, portions);

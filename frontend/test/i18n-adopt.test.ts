@@ -54,6 +54,15 @@ describe("legacy i18n delta adoption", () => {
     expect(layoutReference("areas", { base: fork, mergeBase: merged, order: "diverged" })).toBeNull();
   });
 
+  it("places keys from a mixed branch's area edits in the branch's area unless onto owns the key or a sibling", () => {
+    const merged = Object.fromEntries(["en", "zh-CN", "zh-TW"].map((language) => [language, { New: "n", Owned: "o", Count_one: "one", Count_other: "other", Fresh_one: "f1", Fresh_other: "f2" }]));
+    const owned = emptyLanguages();
+    for (const language of ["en", "zh-CN", "zh-TW"]) { owned[language].Owned = "old"; owned[language].Count_other = "x"; }
+    const preferred = new Map([["New", "settings"], ["Owned", "settings"], ["Count_one", "settings"], ["Fresh_one", "settings"]]);
+    const result = placeCatalogs(merged, [], { billing: owned }, preferred);
+    expect(Object.keys(result.billing.en).sort()).toEqual(["Count_one", "Count_other", "Owned"]);
+    expect(Object.keys(result.settings.en).sort()).toEqual(["Fresh_one", "Fresh_other", "New"]);
+  });
 
   it("is idempotent when onto already contains the requested result", () => {
     expect(applyDelta({ Key: "base" }, { Key: "branch" }, { Key: "branch" }).conflicts).toEqual([]);

@@ -304,7 +304,9 @@ of the same key; if the monoliths changed that key to something else, the
 branch contradicts itself and the key is reported. The tool refuses, writing
 nothing, when a layout the branch has has no such reference (for example split
 areas the branch made itself, or an `--onto` that shares no history with it),
-when only some monoliths exist, or when a value would be lost.
+when only some monoliths exist, or when a value would be lost. A key that
+reaches the result only through the branch's split-area edits keeps the
+branch's area unless `--onto` already places it or a plural sibling.
 
 When it refuses a branch that keeps the monoliths, it finds the branch's
 legacy fork (the newest pre-split commit the branch is based on through its own
