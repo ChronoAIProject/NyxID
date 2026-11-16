@@ -325,17 +325,33 @@ export const mayImportLegacyCatalog = (source, legacy) =>
  * same layout as the branch: a commit's two layouts come from different points
  * in history, so comparing a stale monolith with newer areas would turn every
  * key main added or changed since the fork into a branch removal or revert.
- * Mismatched layouts, partial monoliths, and a mixed branch or onto whose
- * discarded layout holds values found in no chosen catalog are refused, with
- * nothing written.
+ *
+ * A branch's legacy edits are its monoliths compared with its legacy fork, the
+ * newest pre-split commit it is based on. Split areas a mixed branch carries
+ * were inherited from main: `options.inherited` (the areas at the merge-base of
+ * branch and onto) identifies them, so only values the branch itself put in
+ * its areas count as lost. `options.legacyFork()` returns the fork candidates
+ * (git-derived) for the refusal guidance. Mismatched layouts, partial
+ * monoliths, and values that would be lost are refused, with nothing written.
  */
-export function chooseCatalogViews(snapshots, refs, { languages, adopt }) {
+export function chooseCatalogViews(snapshots, refs, { languages, adopt, inherited = null, legacyFork = () => [] }) {
   const fail = (lines) => { throw new Error(`No files written. ${[lines].flat().join("\n")}`); };
-  // For a merge commit that kept the monoliths: its legacy parent, from the fork point, onto the target.
-  const legacyParentGuidance = [
-    "Adopt the legacy side instead. For a merge commit that kept the monoliths:",
-    `  ${adopt} --branch ${refs.branch}^1 --base "$(git merge-base ${refs.branch}^1 ${refs.onto})" --onto ${refs.onto}`,
-  ];
+  /** The one route that adopts everything a monolith branch changed: its monoliths against its legacy fork. */
+  const forkGuidance = () => {
+    const forks = legacyFork();
+    if (forks.length === 1) {
+      return [
+        `Adopt everything the branch changed in its monoliths by comparing them with its legacy fork ${forks[0]} (the newest pre-split commit it is based on):`,
+        `  ${adopt} --branch ${refs.branch} --base ${forks[0]} --onto ${refs.onto}`,
+      ];
+    }
+    return [
+      forks.length
+        ? `The branch is based on several unrelated pre-split commits (${forks.join(", ")}); pass the one its monoliths descend from as --base:`
+        : "Pass the branch's legacy fork (the newest pre-split commit it is based on) as --base:",
+      `  ${adopt} --branch ${refs.branch} --base <legacy-fork> --onto ${refs.onto}`,
+    ];
+  };
   for (const role of ["base", "branch", "onto"]) {
     const present = snapshots[role].monolithLanguages;
     if (present.length && present.length < languages.length) {
@@ -350,9 +366,10 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt }) {
   }
   if (branchView === "monolith" && baseHasCatalogs && !base.monolith) {
     fail([
-      `${refs.base} (--base) has only the split areas, but ${refs.branch} (--branch) is read from its legacy monoliths; comparing the two layouts would treat every key main added or changed since the fork as removed or reverted by the branch.`,
-      ...legacyParentGuidance,
-      "Otherwise pass the legacy-layout commit the branch forked from as --base.",
+      branch.areas
+        ? `${refs.branch} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths. ${refs.base} (--base) has only the split areas; comparing the two layouts would treat every key main added or changed since the fork as removed or reverted by the branch.`
+        : `${refs.branch} (--branch) has the legacy monoliths but ${refs.base} (--base) has only the split areas; comparing the two layouts would treat every key main added or changed since the fork as removed or reverted by the branch.`,
+      ...forkGuidance(),
     ]);
   }
   if (branchView === "areas" && baseHasCatalogs && !base.areas) {
@@ -369,13 +386,16 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt }) {
     if (!areas || !monolith) continue;
     const [dropped, droppedName] = role === "branch" ? [areas, "split areas"] : [monolith, "legacy monoliths"];
     const lost = languages.flatMap((language) => Object.entries(dropped[language])
+      // A mixed branch's split areas came from main; only values the branch put there itself can be lost.
+      .filter(([key, value]) => !(role === "branch" && inherited?.[language][key] === value))
       .filter(([key, value]) => !Object.values(chosen).some((catalog) => catalog[language][key] === value))
       .map(([key]) => `${language} ${JSON.stringify(key)}`));
     if (lost.length) {
       fail([
         `${refs[role]} (--${role}) holds both the legacy monoliths and the split areas, and ${lost.length} value(s) exist only in its ${droppedName} (${lost.slice(0, 3).join(", ")}${lost.length > 3 ? ", ..." : ""}); adopting would lose them.`,
-        ...(role === "branch" ? legacyParentGuidance : []),
-        "Otherwise move those values into one layout, commit, and rerun.",
+        role === "branch"
+          ? "Its split areas were inherited from main, so these values were added there on the branch. Copy them into the legacy monoliths, commit, and rerun."
+          : "Move those values into the split areas, commit, and rerun.",
       ]);
     }
   }

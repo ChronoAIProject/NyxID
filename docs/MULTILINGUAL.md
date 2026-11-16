@@ -283,22 +283,29 @@ npm run adopt:i18n -- --branch <old-layout-ref> --base <base-ref> --onto <portio
 ```
 
 If a commit holds both layouts (for example a merge whose modify/delete
-conflict was resolved by keeping the old monoliths), a `--branch` commit is
-read from its monoliths, where the legacy edits live, and an `--onto` commit
-from its areas. The base must then be read from the same layout as the
-branch: a commit's monoliths and areas come from different points in history,
-so comparing a stale monolith with a newer split base would make every key
-`main` added or changed since the fork look removed or reverted by the branch.
-The tool refuses, writing nothing, when the base and branch layouts differ,
-when only some monoliths exist, or when the layout it would discard holds
-values found nowhere else. For a merge commit `M` that kept the monoliths it
-prints the command to adopt its legacy side instead:
+conflict was resolved by keeping the old monoliths, possibly followed by more
+monolith edits), its split areas were inherited from `main` and its own edits
+live in the monoliths. A `--branch` commit is therefore read from its
+monoliths and an `--onto` commit from its areas, and the base must be read from
+the same layout as the branch: a commit's monoliths and areas come from
+different points in history, so comparing a stale monolith with a newer split
+base would make every key `main` added or changed since the fork look removed
+or reverted by the branch. The tool refuses, writing nothing, when the base and
+branch layouts differ, when only some monoliths exist, or when a value would
+be lost. Values in a mixed branch's areas that match the `main` it last merged
+are inherited, not branch edits, and never count as lost.
+
+When it refuses a branch that keeps the monoliths, it finds the branch's
+legacy fork (the newest pre-split commit the branch is based on through its own
+history) and prints the one command that adopts everything the branch changed
+in its monoliths, whatever its tip commit is:
 
 ```sh
-npm run adopt:i18n -- --branch M^1 --base "$(git merge-base M^1 <onto>)" --onto <onto>
+npm run adopt:i18n -- --branch <branch> --base <legacy-fork> --onto <onto>
 ```
 
-During a later merge of `main` into such a branch, `<onto>` is `MERGE_HEAD`.
+During a later merge of `main` into such a branch this is
+`--branch HEAD --base <legacy-fork> --onto MERGE_HEAD`.
 
 The initial migration is the same deterministic operation with an empty base:
 

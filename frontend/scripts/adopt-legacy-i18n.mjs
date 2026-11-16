@@ -44,6 +44,31 @@ function resolveRefs() {
   throw new Error(`no merge, rebase or cherry-pick detected; provide --branch, --base and --onto.\n${USAGE}`);
 }
 
+const tryGit = (...args) => { try { return git(...args); } catch { return null; } };
+
+/** The split areas at the merge-base of branch and onto (the latest main the branch merged), if any. */
+function mergeBaseAreas(branchRef, ontoRef) {
+  const mergeBase = tryGit("merge-base", branchRef, ontoRef);
+  return mergeBase ? snapshot(mergeBase, { sources: false }).areas : null;
+}
+
+/**
+ * The branch's legacy fork candidates: the newest pre-split commits it is based
+ * on through its own history. The split is the commit in onto's history that
+ * deleted the monoliths; boundary commits of `rev-list <branch> ^<split>` that
+ * still have every monolith are the legacy commits the branch grew from. Main's
+ * own pre-split commits are excluded because they are reachable from the split.
+ */
+function legacyForks(branchRef, ontoRef) {
+  const monoliths = LANGUAGES.map((language) => `${prefix}/src/i18n/locales/${language}.json`);
+  const split = tryGit("log", "-1", "--format=%H", "--diff-filter=D", ontoRef, "--", ...monoliths);
+  if (!split) return [];
+  const boundary = (tryGit("rev-list", "--boundary", branchRef, `^${split}`) ?? "").split("\n")
+    .filter((line) => line.startsWith("-")).map((line) => line.slice(1));
+  const legacy = boundary.filter((commit) => monoliths.every((file) => tryGit("cat-file", "-e", `${commit}:${file}`) !== null));
+  return legacy.length ? git("merge-base", "--independent", ...legacy).split("\n").filter(Boolean) : [];
+}
+
 /** Read many blobs from one ref with a single `git cat-file --batch` process. */
 function readBlobs(ref, files) {
   if (!files.length) return new Map();
@@ -122,7 +147,11 @@ try {
   const base = snapshot(refs.base, { sources: false });
   const branch = snapshot(refs.branch, { sources: true });
   const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
-  const app = chooseCatalogViews({ base, branch, onto }, refs, { languages: LANGUAGES, adopt: "npm run adopt:i18n --" });
+  // A mixed branch's split areas were inherited from main: the areas at the latest main it merged.
+  const inherited = branch.areas && branch.monolith ? mergeBaseAreas(refs.branch, refs.onto) : null;
+  const app = chooseCatalogViews({ base, branch, onto }, refs, {
+    languages: LANGUAGES, adopt: "npm run adopt:i18n --", inherited, legacyFork: () => legacyForks(refs.branch, refs.onto),
+  });
   const conflicts = [];
   const merged = emptyLanguages();
   const families = Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()]));
