@@ -316,6 +316,28 @@ describe("mobile adopt and sync tools", () => {
     assert.equal(r.run("adopt-i18n.mjs", "--imports-only").stdout, "i18n: run pnpm typecheck to type-check the result.\n");
   });
 
+  test("removes JSON import attributes when a legacy import is rewritten to a barrel", () => {
+    const r = repository();
+    assert.equal(r.run("adopt-i18n.mjs", "--branch", r.base, "--base", "empty", "--onto", r.base).status, 0);
+    write(path.join(r.root, "src/i18n/attributes.test.ts"), [
+      'import cn from "./locales/zh-CN.json" with { type: "json" };',
+      "import tw from './locales/zh-TW.json' assert { type: 'json' };",
+      'const lazy = await import("./locales/zh-CN.json", { with: { type: "json" } });',
+      'import data from "./data.json" with { type: "json" };',
+      "",
+    ].join("\n"));
+    const result = r.run("adopt-i18n.mjs", "--imports-only");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /i18n: rewrote src\/i18n\/attributes\.test\.ts:1 \.\/locales\/zh-CN\.json -> \.\/locales\/zh-CN \(removed its JSON import attributes\)\n/);
+    assert.equal(fs.readFileSync(path.join(r.root, "src/i18n/attributes.test.ts"), "utf8"), [
+      'import cn from "./locales/zh-CN";',
+      "import tw from './locales/zh-TW';",
+      'const lazy = await import("./locales/zh-CN");',
+      'import data from "./data.json" with { type: "json" };',
+      "",
+    ].join("\n"));
+  });
+
   test("rejects a divergent value without writing files", () => {
     const r = repository();
     r.git("checkout", "-q", "-b", "split");

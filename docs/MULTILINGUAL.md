@@ -524,7 +524,8 @@ It also rewrites imports of the monoliths in every `mobile/src` `.ts`/`.tsx`
 file in the working tree, tests included (static imports, `import()`,
 `require()` and `jest.mock`-style calls), keeping each relative prefix:
 `…/i18n/locales/zh-CN.json` becomes `…/i18n/locales/zh-CN` and `zh-TW.json`
-becomes `zh-TW` (the barrels). Each rewrite is printed as `file:line old ->
+becomes `zh-TW` (the barrels), dropping any `with`/`assert { type: "json" }`
+attributes, which are invalid on a module import. Each rewrite is printed as `file:line old ->
 new` with the `git add` command for the rewritten files; stage them with the
 catalogs and run `pnpm typecheck`. The barrels keep the phrase-keyed literal
 types, so these rewrites do not change type-checking. A branch that only adds
