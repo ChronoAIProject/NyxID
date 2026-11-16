@@ -12176,7 +12176,7 @@
   "No outstanding effects": "No outstanding effects",
   "Security effect relay": "Security effect relay",
   "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.",
-"Built-in skill changed": "Built-in skill changed",
+  "Built-in skill changed": "Built-in skill changed",
   "inherited": "inherited",
   "Built-in skills": "Built-in skills",
   "Selected by NyxID. Changes apply on the next turn.": "Selected by NyxID. Changes apply on the next turn.",

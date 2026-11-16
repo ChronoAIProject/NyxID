@@ -12176,7 +12176,7 @@
   "No outstanding effects": "沒有待處理操作",
   "Security effect relay": "安全操作中繼",
   "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord 訊息接收已暫停，正在檢查保留的閘道釋放記錄和安全等待期。NyxID 會持續檢查；重試啟用無法繞過此安全檢查。",
-"Built-in skill changed": "內建技能已變更",
+  "Built-in skill changed": "內建技能已變更",
   "inherited": "繼承",
   "Built-in skills": "內建技能",
   "Selected by NyxID. Changes apply on the next turn.": "由 NyxID 選擇。變更將在下一輪生效。",
