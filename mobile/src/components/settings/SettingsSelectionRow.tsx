@@ -1,5 +1,7 @@
 import { useEffect, useState, type ComponentProps } from "react";
 import { Keyboard } from "react-native";
+import type { LucideIcon } from "lucide-react-native";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import {
   WorkspaceSelectionSheet,
   type WorkspaceSelectionOption,
@@ -34,8 +36,10 @@ export function selectionSummary(
  */
 export function SettingsSelectionRow({
   detail,
+  icon,
   ...props
-}: SheetProps & { detail?: string }) {
+}: SheetProps & { detail?: string; icon?: LucideIcon }) {
+  const { t } = useAppLanguage();
   const [open, setOpen] = useState(false);
   const valueKey = signature(props.value);
   useEffect(() => {
@@ -48,13 +52,16 @@ export function SettingsSelectionRow({
   return (
     <>
       <SettingsRow
+        icon={icon}
         label={props.label}
         value={value}
         detail={detail}
         disabled={blocked}
         accessibilityState={{ expanded: open }}
         accessibilityHint={
-          props.readOnly ? `Shows ${props.label}` : `Changes ${props.label}`
+          props.readOnly
+            ? t("Shows {{label}}", { label: props.label })
+            : t("Changes {{label}}", { label: props.label })
         }
         onPress={() => {
           if (blocked) return;

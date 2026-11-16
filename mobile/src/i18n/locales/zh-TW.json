@@ -253,5 +253,15 @@
   "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您儲存的聲音（{{voice}}）已無法使用。請選擇聲音以繼續。",
   "{{name}}, {{count}} pending": "{{name}}，{{count}} 項待處理",
   "Unable to open link": "無法開啟連結",
-  "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。"
+  "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。",
+  "Dictation language": "聽寫語言",
+  "Device language uses {{language}}; it does not detect the language you speak. Choose the language you plan to speak. This setting only affects dictation in the message field, not live voice conversations.": "裝置語言會使用 {{language}}，不會自動偵測您說的語言。請選擇您準備使用的語言。此設定僅影響訊息輸入欄中的聽寫，不影響即時語音通話。",
+  "Shows {{label}}": "顯示{{label}}",
+  "Changes {{label}}": "變更{{label}}",
+  "Cancel {{label}}": "取消{{label}}",
+  "Search {{label}}": "搜尋{{label}}",
+  "Clear {{label}} search": "清除{{label}}搜尋",
+  "Search options": "搜尋選項",
+  "No matching options. Try another search.": "沒有符合的選項，請嘗試其他搜尋。",
+  "{{count}} selected": "已選擇 {{count}} 項"
 }

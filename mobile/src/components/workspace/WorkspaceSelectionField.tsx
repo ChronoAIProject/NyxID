@@ -1,4 +1,5 @@
 import { useNativeSheetDismiss } from "./useNativeSheetDismiss";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   FlatList,
@@ -135,6 +136,7 @@ export function WorkspaceSelectionSheet({
   onClose: () => void;
   keepOpenWhenDisabled?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const theme = useTheme();
   const colors = surfaceColors ?? theme.colors;
   const sheet = useNativeSheetDismiss(onClose);
@@ -225,7 +227,7 @@ export function WorkspaceSelectionSheet({
               </Label>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Cancel ${label}`}
+                accessibilityLabel={t("Cancel {{label}}", { label })}
                 style={styles.iconButton}
                 onPress={close}
               >
@@ -245,8 +247,8 @@ export function WorkspaceSelectionSheet({
                 >
                   <Search size={18} color={colors.textMuted} />
                   <TextInput
-                    accessibilityLabel={`Search ${label}`}
-                    placeholder="Search options"
+                    accessibilityLabel={t("Search {{label}}", { label })}
+                    placeholder={t("Search options")}
                     placeholderTextColor={colors.textMuted}
                     autoCapitalize="none"
                     autoCorrect={false}
@@ -259,7 +261,9 @@ export function WorkspaceSelectionSheet({
                   {!!query && (
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`Clear ${label} search`}
+                      accessibilityLabel={t("Clear {{label}} search", {
+                        label,
+                      })}
                       style={styles.iconButton}
                       onPress={() => setQuery("")}
                     >
@@ -322,7 +326,7 @@ export function WorkspaceSelectionSheet({
               ListEmptyComponent={
                 <Label muted>
                   {search
-                    ? "No matching options. Try another search."
+                    ? t("No matching options. Try another search.")
                     : selectedOnly
                       ? "No options selected. Choose from All."
                       : "No options are available."}
@@ -414,7 +418,7 @@ export function WorkspaceSelectionSheet({
               )}
               <View style={styles.footerRow}>
                 <Label muted style={styles.flex}>
-                  {draft.length} selected
+                  {t("{{count}} selected", { count: draft.length })}
                   {maxSelected !== undefined ? ` · Up to ${maxSelected}` : ""}
                 </Label>
                 {allowEmpty && !readOnly && (

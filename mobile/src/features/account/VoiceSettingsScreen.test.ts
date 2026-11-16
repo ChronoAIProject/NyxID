@@ -57,6 +57,7 @@ function setup(preferences: VoicePreferences = saved) {
   let reply: Promise<{ voice: VoicePreferences }> | undefined;
   const calls: VoicePreferences[] = [];
   const cacheWrites: Array<{ key: unknown[]; data: unknown }> = [];
+  const dictationChoices: string[] = [];
   const query = {
     options: {
       data: { options: [source] },
@@ -134,6 +135,9 @@ function setup(preferences: VoicePreferences = saved) {
       ),
     ),
     "../../components/workspace/WorkspaceUI": { Notice: "Notice" },
+    "../../components/settings/SettingsSelectionRow": {
+      SettingsSelectionRow: "SettingsSelectionRow",
+    },
     "../../hooks/useNetworkStatus": {
       useNetworkStatus: () => ({ isConnected: online }),
     },
@@ -143,9 +147,24 @@ function setup(preferences: VoicePreferences = saved) {
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../assistant/voice/useDictationLanguage": {
       useDictationLanguage: () => ({
-        value: "device",
-        options: [],
-        choose() {},
+        value: "automatic",
+        label: "English (United States)",
+        automaticLabel: "English (United States) · en-US",
+        options: [
+          {
+            value: "automatic",
+            label: "Device language",
+            detail: "English (United States) · en-US",
+          },
+          {
+            value: "ja-JP",
+            label: "Japanese (Japan)",
+            detail: "日本語 · ja-JP",
+          },
+        ],
+        choose(value: string) {
+          dictationChoices.push(value);
+        },
       }),
     },
   });
@@ -178,6 +197,7 @@ function setup(preferences: VoicePreferences = saved) {
     query,
     calls,
     cacheWrites,
+    dictationChoices,
     holdSave(promise: Promise<{ voice: VoicePreferences }>) {
       reply = promise;
     },
@@ -187,6 +207,29 @@ function setup(preferences: VoicePreferences = saved) {
     },
   };
 }
+
+test("dictation uses the shared searchable selector and keeps choices separate from live voice", () => {
+  const f = setup();
+  const row = f.row("Language");
+  assert.equal(row.type, "SettingsSelectionRow");
+  assert.equal(row.props.title, "Dictation language");
+  assert.equal(row.props.summary, "English (United States)");
+  assert.deepEqual(plain(row.props.value), ["automatic"]);
+  assert.match(
+    row.props.description,
+    /English.*en-US.*does not detect.*only affects dictation.*not live voice/,
+  );
+  assert.deepEqual(plain(row.props.options[1]), {
+    value: "ja-JP",
+    label: "Japanese (Japan)",
+    description: "日本語 · ja-JP",
+  });
+  row.props.onChange(["ja-JP"]);
+  row.props.onChange([]);
+  assert.deepEqual(f.dictationChoices, ["ja-JP"]);
+  assert.deepEqual(f.calls, []);
+  f.harness.unmount();
+});
 
 test("a missing saved voice requires explicit reselection and cache confirmation before other changes", async () => {
   const f = setup();

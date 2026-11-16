@@ -18,6 +18,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import type { VoicePreferences } from "../assistant/voice/voiceContracts";
 import { voiceTariff } from "../assistant/voice/voiceSelection";
 import { useDictationLanguage } from "../assistant/voice/useDictationLanguage";
+import { SettingsSelectionRow } from "../../components/settings/SettingsSelectionRow";
 import { voiceSettingsView } from "./voiceSettingsModel";
 
 const MODES = [
@@ -214,16 +215,24 @@ export function VoiceSettingsScreen({
           "The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending.",
         )}
       >
-        <SettingsMenuRow
+        <SettingsSelectionRow
           icon={Languages}
           label={t("Language")}
-          value={language.value}
-          options={language.options.map((option) =>
-            option.value === "automatic"
-              ? { ...option, label: t("Device language") }
-              : option,
+          title={t("Dictation language")}
+          summary={language.label}
+          value={[language.value]}
+          options={language.options.map(({ detail, ...option }) => ({
+            ...option,
+            description: detail,
+          }))}
+          description={t(
+            "Device language uses {{language}}; it does not detect the language you speak. Choose the language you plan to speak. This setting only affects dictation in the message field, not live voice conversations.",
+            { language: language.automaticLabel },
           )}
-          onChange={language.choose}
+          confirmLabel={t("Apply")}
+          onChange={(values) => {
+            if (values[0]) language.choose(values[0]);
+          }}
         />
       </SettingsGroup>
     </SettingsPage>

@@ -233,6 +233,9 @@ export function setupSettingsScreen(
     "../workspace/ScrollEdgeFades": { PageScrollView: "ScrollView" },
     "../ScreenContainer": screenContainer,
     "../../components/settings/SettingsList": settingsList,
+    "../../components/settings/SettingsSelectionRow": {
+      SettingsSelectionRow: "SettingsSelectionRow",
+    },
     "../../components/SegmentControl": { SegmentControl: renderSegmentControl },
     "../../components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
     "../../components/workspace/WorkspaceUI": { Notice: "Notice" },

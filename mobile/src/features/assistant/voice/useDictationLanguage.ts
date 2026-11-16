@@ -14,7 +14,7 @@ import {
  * it, else the device's. Changing it applies from the next recording.
  */
 export function useDictationLanguage(active: boolean) {
-  const { t } = useAppLanguage();
+  const { t, language } = useAppLanguage();
   const [saved, setSaved] = useState<string>();
   const [supported, setSupported] = useState<readonly string[]>([]);
   useEffect(() => {
@@ -41,20 +41,28 @@ export function useDictationLanguage(active: boolean) {
   const automatic = phone
     ? (dictationLocale(phone, supported) ?? phone)
     : undefined;
-  const current =
+  const selected =
     saved && (!supported.length || supported.includes(saved))
       ? saved
-      : automatic;
+      : undefined;
+  const current = selected ?? automatic;
   return {
-    value: saved ?? AUTOMATIC,
-    label: current ? languageLabel(current) : t("Your device's language"),
+    value: selected ?? AUTOMATIC,
+    label: current
+      ? languageLabel(current, language)
+      : t("Your device's language"),
+    automaticLabel: automatic
+      ? `${languageLabel(automatic, language)} · ${automatic}`
+      : t("Your device's language"),
     options: [
       {
         value: AUTOMATIC,
         label: t("Device language"),
-        detail: automatic ? languageLabel(automatic) : undefined,
+        detail: automatic
+          ? `${languageLabel(automatic, language)} · ${automatic}`
+          : undefined,
       },
-      ...languageOptions(supported),
+      ...languageOptions(supported, language),
     ],
     choose: (value: string) => {
       const next = value === AUTOMATIC ? undefined : value;
