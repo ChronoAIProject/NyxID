@@ -48,30 +48,12 @@ impl OrnnSkillRead {
         path: &'a str,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
         Box::pin(async move {
-            // The proxy already polls a substantial state machine. Keep the
-            // live database/authority checks on their own task, as the bound
-            // reader does for proxy dispatch, so their debug stack frames do
-            // not accumulate. Dropping the caller also cancels these reads.
-            let binding = self.clone();
-            let db = db.clone();
-            let person = person.to_owned();
-            let chat = chat.cloned();
-            let connection = connection.map(str::to_owned);
-            let method = method.to_owned();
-            let path = path.to_owned();
-            let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-                Box::pin(binding.revalidate_inner(
-                    &db,
-                    &person,
-                    chat.as_ref(),
-                    connection.as_deref(),
-                    &method,
-                    &path,
-                ))
+            // Keep the live database and authority checks in the caller's
+            // cancellation scope. This is a short, bounded read path; an
+            // independent task would outlive the shutdown inventory unless it
+            // were routed through the server shutdown runtime.
+            self.revalidate_inner(db, person, chat, connection, method, path)
                 .await
-            }));
-            task.await
-                .map_err(|_| AppError::Internal("Skill read authority unavailable".into()))?
         })
     }
 
