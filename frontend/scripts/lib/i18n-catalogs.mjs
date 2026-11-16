@@ -1,6 +1,6 @@
-import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import * as core from "../../../shared/i18n/catalog-core.mjs";
 import { portionForPath } from "./i18n-portions.mjs";
 
 const require = createRequire(import.meta.url);
@@ -8,17 +8,19 @@ let typescript;
 /** TypeScript, loaded on first use: adopting or syncing catalogs with no sources to parse never needs it. */
 const ts = new Proxy({}, { get: (_, name) => (typescript ??= require("typescript"))[name] });
 
+export {
+  applyMixedDelta, chooseCatalogViews, layoutReference, refuseCatalogIssues,
+  applyDelta, canonicalText, codeUnitCompare, readJson, sortObject, stripPluralSuffix,
+  walkFiles, writeJson,
+} from "../../../shared/i18n/catalog-core.mjs";
+
 export const LANGUAGES = ["en", "zh-CN", "zh-TW"];
 export const FAMILIES = ["common", "errors", "wizard"];
-export const codeUnitCompare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-export const sortObject = (object) => Object.fromEntries(
-  Object.keys(object).sort(codeUnitCompare).map((key) => [key, object[key]]),
-);
-export const canonicalText = (object) => `${JSON.stringify(sortObject(object), null, 2)}\n`;
+const tools = core.catalogTools(LANGUAGES, { label: "app" });
+export const { emptyLanguages, analyzePortions, consolidateDuplicates, collectPortions, mergeDeltas } = tools;
 export const englishOverrides = (english) => Object.fromEntries(
-  Object.entries(sortObject(english)).filter(([key, value]) => key !== value),
+  Object.entries(core.sortObject(english)).filter(([key, value]) => key !== value),
 );
-export const stripPluralSuffix = (key) => key.replace(/_(?:zero|one|two|few|many|other)$/, "");
 export const isTestSource = (file) => /(?:\.(?:test|spec)\.[cm]?[jt]sx?$|\/(?:__tests__|test|tests)\/)/.test(file);
 /** Fixture and mock sources; shared with check-i18n's copy audit. */
 export const FIXTURE_SOURCE = /fixtures?|mock/;
@@ -35,203 +37,33 @@ export const isPlacementSource = (file) => /\.tsx?$/.test(file) &&
   !/^src\/features\/(?:landing|nyxbot-onboarding)\//.test(file) &&
   !file.includes("/locales/");
 
-export function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-export function writeJson(file, object) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const text = canonicalText(object);
-  if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== text) fs.writeFileSync(file, text);
-}
-
-export function walkFiles(dir) {
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const file = path.join(dir, entry.name);
-    return entry.isDirectory() ? walkFiles(file) : entry.isFile() ? [file] : [];
-  }).sort(codeUnitCompare);
-}
-
 export function catalogFiles(locales) {
-  return walkFiles(locales).filter((file) => file.endsWith(".json") && !file.endsWith("/en-overrides.json"));
+  return core.walkFiles(locales).filter((file) => file.endsWith(".json") && !file.endsWith("/en-overrides.json"));
 }
 
 export function allCatalogFiles(locales) {
-  return walkFiles(locales).filter((file) => file.endsWith(".json"));
+  return core.walkFiles(locales).filter((file) => file.endsWith(".json"));
 }
 
-export function discoverPortions(locales) {
-  const dir = path.join(locales, "app");
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(codeUnitCompare);
+const appDir = (locales) => path.join(locales, "app");
+export const discoverPortions = (locales) => core.discoverPortions(appDir(locales));
+export const portionFile = (locales, portion, language) => core.portionFile(appDir(locales), portion, language);
+export const loadPortions = (locales) => tools.loadPortions(appDir(locales));
+export const writePortions = (locales, portions) => tools.writePortions(appDir(locales), portions);
+
+/** Every string and no-substitution template literal in a TypeScript source. */
+function stringLiterals(file, source) {
+  const literals = [];
+  const visit = (node) => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) literals.push(node.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true));
+  return literals;
 }
-
-export const portionFile = (locales, portion, language) => path.join(locales, "app", portion, `${language}.json`);
-export const emptyLanguages = () => Object.fromEntries(LANGUAGES.map((language) => [language, {}]));
-
-export function loadPortions(locales) {
-  return Object.fromEntries(discoverPortions(locales).map((portion) => [portion,
-    Object.fromEntries(LANGUAGES.map((language) => {
-      const file = portionFile(locales, portion, language);
-      return [language, fs.existsSync(file) ? readJson(file) : {}];
-    })),
-  ]));
-}
-
-export function analyzePortions(portions) {
-  const merged = emptyLanguages();
-  const locations = new Map();
-  const issues = [];
-  for (const portion of Object.keys(portions).sort(codeUnitCompare)) {
-    const catalogs = portions[portion];
-    const keySets = LANGUAGES.map((language) => canonicalText(Object.fromEntries(Object.keys(catalogs[language]).map((key) => [key, true]))));
-    if (new Set(keySets).size > 1) issues.push(`app/${portion}: key parity differs across en/zh-CN/zh-TW`);
-    for (const language of LANGUAGES) {
-      for (const [key, value] of Object.entries(catalogs[language])) {
-        if (!locations.has(key)) locations.set(key, new Set());
-        locations.get(key).add(portion);
-        merged[language][key] = value;
-      }
-    }
-  }
-  const duplicates = [];
-  for (const [key, owners] of locations) {
-    if (owners.size < 2) continue;
-    const names = [...owners];
-    const identical = LANGUAGES.every((language) => names.every((portion) =>
-      Object.hasOwn(portions[portion][language], key) &&
-      portions[portion][language][key] === portions[names[0]][language][key],
-    ));
-    duplicates.push({ key, portions: names, identical });
-    if (!identical) issues.push(`app duplicate key has differing values: ${key} (${names.join(", ")})`);
-  }
-  const pluralOwners = new Map();
-  for (const [key, owners] of locations) {
-    const base = stripPluralSuffix(key);
-    const ownerSet = [...owners].sort(codeUnitCompare).join(", ");
-    const previous = pluralOwners.get(base);
-    if (previous !== undefined && previous !== ownerSet) issues.push(`app plural siblings are not co-located: ${base} (${previous}; ${ownerSet})`);
-    pluralOwners.set(base, ownerSet);
-  }
-  return { merged, locations, duplicates, issues };
-}
-
-export function consolidateDuplicates(portions) {
-  const result = structuredClone(portions);
-  const { duplicates, issues } = analyzePortions(portions);
-  const differing = issues.filter((issue) => !issue.includes("plural siblings"));
-  if (differing.length) throw new Error(differing.join("\n"));
-  // Move the whole plural family when any sibling is duplicated.
-  const bases = new Set(duplicates.map(({ key }) => stripPluralSuffix(key)));
-  const { merged } = analyzePortions(portions);
-  if (bases.size) result.shared ??= emptyLanguages();
-  for (const language of LANGUAGES) {
-    for (const [key, value] of Object.entries(merged[language])) {
-      if (!bases.has(stripPluralSuffix(key))) continue;
-      for (const catalogs of Object.values(result)) delete catalogs[language][key];
-      result.shared[language][key] = value;
-    }
-  }
-  return result;
-}
-
-export function scanUsage(sources, keys) {
-  const groups = new Map();
-  for (const key of keys) {
-    const base = stripPluralSuffix(key);
-    if (!groups.has(base)) groups.set(base, new Set());
-  }
-  for (const [file, source] of sources) {
-    if (!isPlacementSource(file)) continue;
-    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
-    function visit(node) {
-      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-        groups.get(stripPluralSuffix(node.text))?.add(portionForPath(file));
-      }
-      ts.forEachChild(node, visit);
-    }
-    visit(ast);
-  }
-  return new Map([...groups].map(([key, owners]) => [key,
-    owners.size === 0 ? "unattributed" : owners.size > 1 ? "shared" : [...owners][0],
-  ]));
-}
-
-export function applyDelta(base, branch, onto, label = "catalog") {
-  const result = { ...onto };
-  const conflicts = [];
-  const changes = [];
-  for (const key of new Set([...Object.keys(base), ...Object.keys(branch)])) {
-    const before = Object.hasOwn(base, key);
-    const after = Object.hasOwn(branch, key);
-    const current = Object.hasOwn(onto, key);
-    if (before === after && base[key] === branch[key]) continue;
-    changes.push(key);
-    if (!before) {
-      if (!current || onto[key] === branch[key]) result[key] = branch[key];
-      else conflicts.push(`${label}: added key diverged: ${key}`);
-    } else if (!after) {
-      if (!current || onto[key] === base[key]) delete result[key];
-      else conflicts.push(`${label}: removed key diverged: ${key}`);
-    } else if (current && onto[key] === base[key]) {
-      result[key] = branch[key];
-    } else if (current && onto[key] === branch[key]) {
-      // A rerun after the same delta has already been adopted is a no-op.
-      result[key] = branch[key];
-    } else {
-      conflicts.push(`${label}: changed key diverged: ${key}`);
-    }
-  }
-  return { result, conflicts, changes };
-}
-
-/**
- * Place every merged key: existing (onto) owners first, by key then by plural sibling; then
- * `preferred` owners (the branch's area for keys that arrive through its split-area edits), by key
- * then by sibling; then literal usage.
- */
-export function placeCatalogs(merged, sources, existing = {}, preferred = new Map()) {
-  const result = structuredClone(existing);
-  const keys = [...new Set(LANGUAGES.flatMap((language) => Object.keys(merged[language])))];
-  const placement = scanUsage(sources, keys);
-  const existingOwners = analyzePortions(existing).locations;
-  const siblingOwners = new Map([...existingOwners].map(([key, owners]) => [stripPluralSuffix(key), owners]));
-  const preferredSiblings = new Map([...preferred].map(([key, owner]) => [stripPluralSuffix(key), owner]));
-  for (const language of LANGUAGES) {
-    for (const catalogs of Object.values(result)) catalogs[language] = {};
-    for (const key of keys) {
-      if (!Object.hasOwn(merged[language], key)) continue;
-      const owner = existingOwners.get(key) ?? siblingOwners.get(stripPluralSuffix(key));
-      const portion = owner?.size === 1 ? [...owner][0]
-        : preferred.get(key) ?? preferredSiblings.get(stripPluralSuffix(key)) ?? placement.get(stripPluralSuffix(key));
-      result[portion] ??= emptyLanguages();
-      result[portion][language][key] = merged[language][key];
-    }
-  }
-  return result;
-}
-
-/** Areas with at least one key in some language; an emptied area is pruned rather than kept as `{}` files. */
-export const nonEmptyPortions = (portions) => Object.fromEntries(Object.entries(portions)
-  .filter(([, catalogs]) => LANGUAGES.some((language) => Object.keys(catalogs[language] ?? {}).length)));
-
-export function writePortions(locales, allPortions) {
-  const portions = nonEmptyPortions(allPortions);
-  for (const [portion, catalogs] of Object.entries(portions)) {
-    for (const language of LANGUAGES) writeJson(portionFile(locales, portion, language), catalogs[language]);
-  }
-  for (const portion of discoverPortions(locales)) {
-    if (Object.hasOwn(portions, portion)) continue;
-    for (const language of LANGUAGES) {
-      const file = portionFile(locales, portion, language);
-      if (fs.existsSync(file)) fs.rmSync(file);
-    }
-    const dir = path.join(locales, "app", portion);
-    if (!fs.readdirSync(dir).length) fs.rmdirSync(dir);
-  }
-}
+const scan = { isSource: isPlacementSource, areaForPath: portionForPath, literals: stringLiterals };
+export const scanUsage = (sources, keys) => core.scanUsage(sources, keys, scan);
+export const placeCatalogs = (merged, sources, existing = {}, preferred = new Map()) => tools.placeCatalogs(merged, sources, existing, scan, preferred);
 
 export const SPECIFIER_ALIASES = [["@/", "src/"], ["/src/", "src/"]];
 
@@ -327,143 +159,6 @@ export function moduleSpecifiers(file, source) {
 /** Cheap text filter: could this source import a legacy catalog? */
 export const mayImportLegacyCatalog = (source, legacy) =>
   Object.keys(legacy).some((file) => source.includes(path.posix.basename(file)));
-
-/**
- * Apply a mixed branch's edits to `onto`. Its monoliths changed from `monolithBase` (the legacy
- * fork) and its inherited split areas changed from `areaBase` (the last main it merged). Where the
- * areas changed a key, that edit was made against the newer main and takes precedence: the
- * monolith delta skips the key, and a monolith change to a different result is a contradiction.
- * A monolith change equal to the areas reference is main's own change (the same change on both
- * sides) and is not a branch edit. Everything else goes through the ordinary three-way rules.
- */
-export function applyMixedDelta({ monolithBase, monolith, areaBase, areas, onto, labels }) {
-  const areaKeys = new Set([...Object.keys(areaBase), ...Object.keys(areas)].filter((key) => areaBase[key] !== areas[key]));
-  // A monolith change that matches the areas reference is one main already made (and the areas
-  // inherited at the merge): it is the same change on both sides, so it is not a branch edit.
-  const monolithChanged = (key) => monolithBase[key] !== monolith[key] && monolith[key] !== areaBase[key];
-  const contradictions = [...areaKeys]
-    .filter((key) => monolithChanged(key) && monolith[key] !== areas[key])
-    .map((key) => `${labels.areas}: monoliths and split areas changed differently: ${key}`);
-  const skipped = new Set([...new Set([...Object.keys(monolithBase), ...Object.keys(monolith)])].filter((key) => areaKeys.has(key) || !monolithChanged(key)));
-  const withoutAreaKeys = (catalog) => Object.fromEntries(Object.entries(catalog).filter(([key]) => !skipped.has(key)));
-  const first = applyDelta(withoutAreaKeys(monolithBase), withoutAreaKeys(monolith), onto, labels.monolith);
-  const second = applyDelta(areaBase, areas, first.result, labels.areas);
-  return { result: second.result, conflicts: [...first.conflicts, ...contradictions, ...second.conflicts] };
-}
-
-/**
- * The reference a branch layout is diffed against: that layout at the newer of `--base` and
- * merge-base(branch, onto) that has it (`order`: "base" when the base is the same or newer or there
- * is no merge-base, "mergeBase" when the merge-base is newer, "diverged" when neither contains the
- * other, in which case only the base counts). Each layout is reconciled with main at different
- * points, so the newest one that has it is where the branch's own edits to it begin: a rebased or
- * cherry-picked commit is diffed against its parent, while the legacy-fork route reads the
- * monoliths from the fork and the split areas and unsplit families from the merge-base. `layout` is
- * "monolith", "areas" or a family name. Returns null when no reference has the layout.
- */
-export function layoutReference(layout, { base, mergeBase, order }) {
-  const view = (snapshot) => !snapshot ? null : layout === "monolith" ? snapshot.monolith : layout === "areas" ? snapshot.areas
-    : snapshot.familyPresent?.[layout] ? snapshot.families[layout] : null;
-  const candidates = order === "mergeBase" ? [mergeBase, base] : order === "diverged" ? [base] : [base, mergeBase];
-  for (const snapshot of candidates) {
-    const catalog = view(snapshot);
-    if (catalog) return catalog;
-  }
-  return null;
-}
-
-/**
- * Pick the app catalog of each adoption snapshot without losing data. A snapshot may hold the
- * split areas (`areas`, merged), the legacy monoliths (`monolith`, with `monolithLanguages`
- * present), or both, e.g. when a merge that kept the monoliths was committed. The branch uses its
- * monoliths (where legacy edits live) and onto uses its areas; a branch read from its monoliths
- * needs a base with monoliths, since a commit's two layouts come from different points in history.
- * Each branch layout is diffed against its `layoutReference` (`options.mergeBase`, `options.order`).
- * A mixed branch (monoliths beside split areas) also returns `areaDelta` (reference -> branch
- * areas) for applyMixedDelta. A missing reference is refused, never treated as empty.
- * `options.legacyFork()` returns the fork candidates (git-derived) for the refusal guidance;
- * `options.commitLocal` says --base is a parent of --branch (a rebased or cherry-picked commit);
- * `options.baseLessAreaMerges()` lists branch merges that joined split areas without a common one.
- * Shapes it does not model are refused: a branch without monoliths or an onto that is not plain
- * split (unless --base is empty), and a mixed branch whose areas were joined by such a merge.
- */
-export function chooseCatalogViews(snapshots, refs, { languages, adopt, mergeBase = null, order = "base", legacyFork = () => [], commitLocal = false, baseLessAreaMerges = () => [] }) {
-  const fail = (lines) => { throw new Error(`No files written. ${[lines].flat().join("\n")}`); };
-  /** The one route that adopts everything a monolith branch changed: its monoliths against its legacy fork. */
-  const forkGuidance = () => {
-    const forks = legacyFork();
-    if (forks.length === 1) {
-      return [
-        `Adopt everything the branch changed by comparing its monoliths with its legacy fork ${forks[0]} (the newest pre-split commit it is based on):`,
-        `  ${adopt} --branch ${refs.branch} --base ${forks[0]} --onto ${refs.onto}`,
-      ];
-    }
-    return [
-      forks.length
-        ? `The branch is based on several unrelated pre-split commits (${forks.join(", ")}); pass the one its monoliths descend from as --base:`
-        : "Pass the branch's legacy fork (the newest pre-split commit it is based on) as --base:",
-      `  ${adopt} --branch ${refs.branch} --base <legacy-fork> --onto ${refs.onto}`,
-    ];
-  };
-  for (const role of ["base", "branch", "onto"]) {
-    const present = snapshots[role].monolithLanguages;
-    if (present.length && present.length < languages.length) {
-      fail(`${refs[role]} (--${role}) has only some legacy monoliths (${present.map((language) => `${language}.json`).join(", ")}); restore or delete the others, or pass a commit with one complete layout as --${role}.`);
-    }
-  }
-  const { base, branch, onto } = snapshots;
-  const mixed = Boolean(branch.monolith && branch.areas);
-  const branchView = branch.monolith ? "monolith" : branch.areas ? "areas" : null;
-  const baseHasCatalogs = Boolean(base.monolith || base.areas);
-  const reference = (layout) => layoutReference(layout, { base, mergeBase, order });
-  const inheritedNote = `${refs.branch} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths (and any later edits to those areas).`;
-  const emptyBase = refs.base === "empty";
-  // Shapes the adoption does not model are refused before any delta is computed.
-  if (!emptyBase && !branch.monolith) {
-    fail(`${refs.branch} (--branch) has no legacy monoliths, so it is not a branch from before the split and there is nothing to adopt; resolve split-catalog conflicts with git, then run the sync script. (--base empty is the only way to regenerate a split commit's placement.)`);
-  }
-  if (!emptyBase && (onto.monolith || !onto.areas)) {
-    fail(onto.monolith
-      ? `${refs.onto} (--onto) still has legacy monoliths${onto.areas ? " beside its split areas" : ""}; adopt only onto a commit that has just the split catalogs (adopt that branch first, or use --base empty for the initial split).`
-      : `${refs.onto} (--onto) has no split catalogs to adopt onto; pass the split main (or a commit on it) as --onto.`);
-  }
-  if (mixed && !baseHasCatalogs) {
-    fail([`${inheritedNote} It cannot be adopted from an empty base.`, ...forkGuidance()]);
-  }
-  if (mixed && !commitLocal) {
-    const merges = baseLessAreaMerges();
-    if (merges.length) {
-      fail([
-        `${refs.branch} (--branch) merged split areas into split areas it had made itself (merge ${merges.join(", ")}: both sides had areas but their merge-base had none), so its own area edits cannot be told apart from main's and a resolution that kept its copy would revert main.`,
-        "This history cannot be adopted automatically. Port the branch's catalog changes onto a fresh branch from main by hand (its monolith edits can still be adopted from a commit before it made its own areas, with --branch <that commit> --base <its legacy fork>).",
-      ]);
-    }
-  }
-  if (mixed && order === "diverged") {
-    fail(`${refs.base} (--base) and the merge-base of ${refs.branch} and ${refs.onto} do not contain one another, so the reference for the branch's split areas is ambiguous; pass a --base on the branch's own history (its legacy fork, or the parent of the commit being adopted).`);
-  }
-  if (mixed && !reference("areas")) {
-    fail([
-      `${refs.branch} (--branch) keeps the legacy monoliths beside split areas, but neither ${refs.base} (--base) nor the merge-base of ${refs.branch} and ${refs.onto} has split areas (the merge-base is missing or predates the split), so the branch's edits to those areas cannot be told apart from main's.`,
-      `Pass an --onto that contains the main the branch merged. If the branch created those areas itself instead of merging them from main, remove them from the branch (git rm -r the area directories), commit, and rerun.`,
-    ]);
-  }
-  if (branchView === "monolith" && baseHasCatalogs && !base.monolith) {
-    fail([
-      mixed
-        ? `${inheritedNote} ${refs.base} (--base) has only the split areas; comparing the two layouts would treat every key main added or changed since the fork as removed or reverted by the branch.`
-        : `${refs.branch} (--branch) has the legacy monoliths but ${refs.base} (--base) has only the split areas; comparing the two layouts would treat every key main added or changed since the fork as removed or reverted by the branch.`,
-      ...forkGuidance(),
-    ]);
-  }
-  const empty = () => Object.fromEntries(languages.map((language) => [language, {}]));
-  const chosen = {
-    base: (baseHasCatalogs && branchView ? reference(branchView) : null) ?? empty(),
-    branch: (branch.monolith ?? branch.areas) ?? empty(),
-    onto: (onto.areas ?? onto.monolith) ?? empty(),
-  };
-  return { ...chosen, areaDelta: mixed ? { base: reference("areas"), branch: branch.areas } : null };
-}
 
 /** Resolve relative, @/ and src/ imports independently of the current machine. */
 export function catalogImportIssue(file, specifier) {

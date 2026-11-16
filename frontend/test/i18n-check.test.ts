@@ -14,8 +14,9 @@ afterEach(() => {
 });
 
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-i18n-check-"));
-  temporaryRoots.push(root);
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-i18n-check-"));
+  temporaryRoots.push(repo);
+  const root = path.join(repo, "frontend");
   const write = (file: string, text: string) => {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), text);
@@ -24,6 +25,7 @@ function fixture() {
     write(`scripts/${file}`, fs.readFileSync(path.join(frontend, "scripts", file), "utf8"));
   }
   write("package.json", '{"type":"module"}\n');
+  write("../shared/i18n/catalog-core.mjs", fs.readFileSync(path.join(frontend, "../shared/i18n/catalog-core.mjs"), "utf8"));
   fs.symlinkSync(path.join(frontend, "node_modules"), path.join(root, "node_modules"));
   for (const file of ["protocol-examples", "glossary", "simplified-only", "domain-glossary"]) write(`src/i18n/${file}.json`, "[]\n");
   for (const language of LANGUAGES) {

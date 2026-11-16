@@ -25,6 +25,8 @@ function fixture() {
   const catalog = (file: string, value: object) => write(file, canonicalText(value));
   fs.mkdirSync(path.join(root, "scripts/lib"), { recursive: true });
   for (const file of ["adopt-legacy-i18n.mjs", "lib/i18n-catalogs.mjs", "lib/i18n-portions.mjs"]) fs.copyFileSync(path.join(frontend, "scripts", file), path.join(root, "scripts", file));
+  fs.mkdirSync(path.join(repo, "shared/i18n"), { recursive: true });
+  fs.copyFileSync(path.join(frontend, "../shared/i18n/catalog-core.mjs"), path.join(repo, "shared/i18n/catalog-core.mjs"));
   write(path.join(root, "package.json"), '{"type":"module"}\n');
   fs.symlinkSync(path.join(frontend, "node_modules"), path.join(root, "node_modules"));
   git("init", "-b", "legacy");
@@ -45,7 +47,7 @@ function fixture() {
     },
     include: ["src"],
   }, null, 2)}\n`);
-  git("add", "frontend/scripts", "frontend/package.json", "frontend/tsconfig.json", "frontend/src");
+  git("add", "shared", "frontend/scripts", "frontend/package.json", "frontend/tsconfig.json", "frontend/src");
   git("commit", "-m", "base old layout");
   const base = git("rev-parse", "HEAD");
   const adopt = (...args: string[]) => spawnSync(process.execPath, [path.join(root, "scripts/adopt-legacy-i18n.mjs"), ...args], { cwd: root, encoding: "utf8" });

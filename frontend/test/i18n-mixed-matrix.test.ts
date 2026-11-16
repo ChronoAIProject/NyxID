@@ -24,7 +24,10 @@ const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const pkg = {
   name: "frontend",
   source: frontend,
-  copy: ["adopt-legacy-i18n.mjs", "lib/i18n-catalogs.mjs", "lib/i18n-portions.mjs"].map((file) => [path.join(frontend, "scripts", file), `frontend/scripts/${file}`]),
+  copy: [
+    ...["adopt-legacy-i18n.mjs", "lib/i18n-catalogs.mjs", "lib/i18n-portions.mjs"].map((file) => [path.join(frontend, "scripts", file), `frontend/scripts/${file}`]),
+    [path.join(frontend, "../shared/i18n/catalog-core.mjs"), "shared/i18n/catalog-core.mjs"],
+  ],
   adoptScript: "scripts/adopt-legacy-i18n.mjs",
   adoptCommand: "npm run adopt:i18n --",
   languages: LANGUAGES,
@@ -137,18 +140,19 @@ for (const plan of plans) {
 
 describe("invariants without the model", () => {
   it("flag a cherry-pick that also applies edits from commits it did not pick (the N8 class, injected)", async () => {
-    // Inject N8: measure the picked commit from the older merge-base instead of its parent.
-    const adopt = fs.readFileSync(path.join(frontend, "scripts/adopt-legacy-i18n.mjs"), "utf8");
-    const anchor = 'const order = !mergeBaseRef ? "base" : referenceOrder(refs.base, mergeBaseRef);';
-    expect(adopt).toContain(anchor);
+    // Inject N8 into the shared core: measure the picked commit from the older merge-base instead of its parent.
+    const corePath = path.join(frontend, "../shared/i18n/catalog-core.mjs");
+    const core = fs.readFileSync(corePath, "utf8");
+    const anchor = 'order: mergeBaseRef ? referenceOrder(refs.base, mergeBaseRef) : "base"';
+    expect(core).toContain(anchor);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-i18n-n8-"));
     try {
-      const mutated = path.join(dir, "adopt-legacy-i18n.mjs");
-      fs.writeFileSync(mutated, adopt.replace(anchor, 'const order = !mergeBaseRef ? "base" : "mergeBase";'));
+      const mutated = path.join(dir, "catalog-core.mjs");
+      fs.writeFileSync(mutated, core.replace(anchor, 'order: mergeBaseRef ? "mergeBase" : "base"'));
       const history = randomHistory(2);
       expect(history.route).toBe("cherryPick");
       const { clean } = randomCases(history, CATALOGS, LANGUAGES, { clean: 30, conflicts: 0 });
-      const run = await rehearse(history, clean, { ...pkg, copy: [[mutated, "frontend/scripts/adopt-legacy-i18n.mjs"], ...pkg.copy.slice(1)] });
+      const run = await rehearse(history, clean, { ...pkg, copy: pkg.copy.map(([from, to]) => [to === "shared/i18n/catalog-core.mjs" ? mutated : from, to] as [string, string]) });
       expect(run.final?.status, run.final?.stderr).toBe(0);
       const violations: string[] = [];
       for (const testCase of clean) violations.push(...await invariantViolations(history, testCase, run, LANGUAGES));
