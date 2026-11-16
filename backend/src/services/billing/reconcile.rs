@@ -1,11 +1,12 @@
+#[cfg(test)]
 use crate::models::credits::Credits;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{Bson, Document, doc};
+use mongodb::bson::{Document, doc};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::config::AppConfig;
@@ -688,6 +689,11 @@ impl BillingReconciler {
     }
 
     async fn push_unacked(&self, lago: &dyn LagoApi, stats: &mut ReconcileStats) -> AppResult<()> {
+        // Receipt repair is bounded bookkeeping. A stale or malformed receipt
+        // must never prevent the meter rows below from reaching the provider.
+        if let Err(error) = super::usage_delivery::reconcile_prepared(&self.db).await {
+            tracing::warn!(error = %error, "usage delivery receipt repair deferred");
+        }
         let cutoff = Utc::now() - Duration::seconds(PUSH_GRACE_SECS);
         let rows: Vec<Document> = self
             .db
@@ -710,7 +716,8 @@ impl BillingReconciler {
         // Lago but never attached to a subscription's charges, so usage
         // silently aggregates to zero. Resolve each owner's subscription
         // from the local wallet, memoized for the batch.
-        let mut subscriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut subscriptions: BTreeMap<String, Option<super::usage_delivery::UsageTarget>> =
+            BTreeMap::new();
         let mut failures = super::recovery_batch::Failures::default();
         for raw in rows {
             if !continue_reconcile() {
@@ -749,7 +756,8 @@ impl BillingReconciler {
                             return Err(error);
                         }
                     };
-                    let subscription_id = match verified_subscription {
+                    let runtime_binding = verified_subscription.is_some();
+                    let target = match verified_subscription {
                         Some(verified) => Some(verified),
                         None => match subscriptions.get(&row.billing_owner_id) {
                             Some(cached) => cached.clone(),
@@ -759,14 +767,24 @@ impl BillingReconciler {
                                     .collection::<BillingWallet>(BILLING_WALLET)
                                     .find_one(doc! { "owner_id": &row.billing_owner_id })
                                     .await?
-                                    .and_then(|wallet| wallet.lago_subscription_id);
+                                    .and_then(|wallet| {
+                                        wallet.lago_subscription_id.map(|subscription_id| {
+                                            super::usage_delivery::UsageTarget {
+                                                customer_id: wallet.lago_customer_id,
+                                                subscription_id,
+                                            }
+                                        })
+                                    });
                                 subscriptions
                                     .insert(row.billing_owner_id.clone(), resolved.clone());
                                 resolved
                             }
                         },
                     };
-                    let Some(event) = LagoEvent::from_usage_row(&row, subscription_id) else {
+                    let Some(event) = LagoEvent::from_usage_row(
+                        &row,
+                        target.as_ref().map(|target| target.subscription_id.clone()),
+                    ) else {
                         mark_dead_letter(
                             &self.db,
                             &row.id,
@@ -777,7 +795,41 @@ impl BillingReconciler {
                         return Ok(());
                     };
 
+                    let receipt = super::usage_delivery::prepare(
+                        &self.db,
+                        &row,
+                        target
+                            .as_ref()
+                            .map_or(row.billing_owner_id.as_str(), |target| {
+                                target.customer_id.as_str()
+                            }),
+                        event,
+                    )
+                    .await?;
+                    if runtime_binding
+                        && target.as_ref().is_some_and(|target| {
+                            receipt.customer_id != target.customer_id
+                                || receipt.subscription_id.as_deref()
+                                    != Some(target.subscription_id.as_str())
+                        })
+                    {
+                        bump_attempt(
+                            &self.db,
+                            &row.id,
+                            "Recorded runtime delivery target no longer matches verified binding",
+                        )
+                        .await?;
+                        stats.retried += 1;
+                        return Err(AppError::BillingProviderUnavailable(
+                            "Recorded runtime delivery target could not be verified".into(),
+                        ));
+                    }
+                    let event = super::usage_delivery::event(&receipt);
                     let result = lago.record_event(&event).await;
+                    let duplicate = result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| error.kind == LagoErrorKind::Duplicate);
                     // A typed rate-limit response is waiting, not an outage. Transport
                     // failures and server errors retain the same retry write but fail
                     // this maintenance unit after that write is durable.
@@ -799,7 +851,7 @@ impl BillingReconciler {
                     });
                     match decide_lago_push(result) {
                         LagoPushDecision::Ack => {
-                            mark_lago_acked(&self.db, &row.id).await?;
+                            mark_delivered(&self.db, &row.id, Some((receipt, duplicate))).await?;
                             stats.pushed += 1;
                         }
                         LagoPushDecision::Retry => {
@@ -810,6 +862,7 @@ impl BillingReconciler {
                             }
                         }
                         LagoPushDecision::DeadLetter(reason) => {
+                            super::usage_delivery::reject(&self.db, &receipt).await?;
                             mark_dead_letter(&self.db, &row.id, &reason).await?;
                             stats.dead_lettered += 1;
                         }
@@ -824,49 +877,11 @@ impl BillingReconciler {
 
     async fn compare_finalized_usage(
         &self,
-        lago: &dyn LagoApi,
-        stats: &mut ReconcileStats,
+        _lago: &dyn LagoApi,
+        _stats: &mut ReconcileStats,
     ) -> AppResult<()> {
-        let mut failures = super::recovery_batch::Failures::default();
-        let local = finalized_sums_by_owner_metric(&self.db, &mut failures).await?;
-        for ((owner_id, metric_code), local_quantity) in local {
-            if !continue_reconcile() {
-                break;
-            }
-            failures
-                .unit(async {
-                    let usage = lago.current_usage(&owner_id, "").await?;
-                    let remote_quantity = extract_metric_quantity_micros(&usage.raw, &metric_code);
-                    if let Some(remote) = remote_quantity
-                        && remote != local_quantity
-                    {
-                        stats.drift_alerts += 1;
-                        let latest = self
-                            .db
-                            .collection::<UsageMeterRow>(USAGE_METER)
-                            .find_one(doc! { "billing_owner_id": &owner_id,
-                                "lago_metric_code": &metric_code,
-                                "funding.lago_carry_id": { "$type": "string" },
-                            })
-                            .sort(doc! { "created_at": -1 })
-                            .await?;
-                        let latest_carry_id = latest
-                            .and_then(|row| row.funding)
-                            .and_then(|funding| funding.lago_carry_id);
-                        tracing::warn!(
-                            owner_id = %owner_id,
-                            metric_code = %metric_code,
-                            latest_carry_id = ?latest_carry_id,
-                            local_quantity_micros = local_quantity,
-                            remote_quantity_micros = remote,
-                            "Billing Lago usage drift detected"
-                        );
-                    }
-                    Ok(())
-                })
-                .await;
-        }
-        failures.finish(())
+        // Capture only: no population has verified full-period coverage yet.
+        Ok(())
     }
 }
 
@@ -918,13 +933,24 @@ pub fn decide_lago_push(
 }
 
 pub(super) async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
+    mark_delivered(db, row_id, None).await
+}
+
+async fn mark_delivered(
+    db: &mongodb::Database,
+    row_id: &str,
+    receipt: Option<(
+        crate::models::billing_usage_delivery::BillingUsageDelivery,
+        bool,
+    )>,
+) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
     let database = db.clone();
     let row_id = row_id.to_owned();
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let result = ack_in_session(&database, session, &row_id).await;
+            let result = ack_in_session(&database, session, &row_id, receipt.as_ref()).await;
             crate::services::api_key_mutation_service::transaction_result(result)
         })
         .await
@@ -935,6 +961,10 @@ async fn ack_in_session(
     db: &mongodb::Database,
     session: &mut mongodb::ClientSession,
     row_id: &str,
+    receipt: Option<&(
+        crate::models::billing_usage_delivery::BillingUsageDelivery,
+        bool,
+    )>,
 ) -> AppResult<()> {
     let now = Utc::now();
     let expires_at = now + Duration::days(ACKED_RETENTION_DAYS);
@@ -950,16 +980,38 @@ async fn ack_in_session(
         )
         .session(&mut *session)
         .await?;
-    if let Some(wallet_id) = row.and_then(|row| row.wallet_id) {
-        // The acknowledgement can make pending debits clearable. A
-        // provider read started before it cannot decide that clearing.
-        db.collection::<BillingWallet>(BILLING_WALLET)
-            .update_one(
-                doc! { "_id": wallet_id },
-                doc! { "$inc": { "snapshot_generation": 1_i64 } },
+    if let Some(row) = row {
+        if let Some((receipt, _)) = receipt
+            && (receipt.transaction_id != row.transaction_id
+                || receipt.owner_id != row.billing_owner_id
+                || Some(&receipt.wallet_id) != row.wallet_id.as_ref())
+        {
+            super::usage_delivery::record_acknowledgement_issue(
+                db,
+                session,
+                receipt,
+                "delivery_receipt_mismatch",
             )
-            .session(&mut *session)
             .await?;
+        }
+        if let Some(wallet_id) = &row.wallet_id {
+            // The acknowledgement can make pending debits clearable. A
+            // provider read started before it cannot decide that clearing.
+            db.collection::<BillingWallet>(BILLING_WALLET)
+                .update_one(
+                    doc! { "_id": wallet_id },
+                    doc! { "$inc": { "snapshot_generation": 1_i64 } },
+                )
+                .session(&mut *session)
+                .await?;
+        }
+        if let Some((receipt, duplicate)) = receipt
+            && receipt.transaction_id == row.transaction_id
+            && receipt.owner_id == row.billing_owner_id
+            && Some(&receipt.wallet_id) == row.wallet_id.as_ref()
+        {
+            super::usage_delivery::acknowledge(db, session, receipt, *duplicate).await?;
+        }
     }
     Ok(())
 }
@@ -1008,126 +1060,6 @@ async fn mark_dead_letter(db: &mongodb::Database, row_id: &str, reason: &str) ->
     Ok(())
 }
 
-async fn finalized_sums_by_owner_metric(
-    db: &mongodb::Database,
-    failures: &mut super::recovery_batch::Failures,
-) -> AppResult<BTreeMap<(String, String), i64>> {
-    let mut cursor = db
-        .collection::<Document>(USAGE_METER)
-        .aggregate(vec![
-            doc! {
-                "$match": {
-                    "status": "finalized",
-                    "released": true,
-                    "wallet_id": { "$ne": null },
-                    "quantity": { "$ne": null },
-                }
-            },
-            doc! {
-                "$set": {
-                    "lago_billable_quantity_micros": {
-                        "$ifNull": [
-                            "$funding.lago_billable_quantity_micros",
-                            { "$multiply": ["$quantity", 1_000_000_i64] },
-                        ]
-                    }
-                }
-            },
-            doc! { "$match": { "lago_billable_quantity_micros": { "$gt": 0_i64 } } },
-            doc! {
-                "$group": {
-                    "_id": {
-                        "owner": "$billing_owner_id",
-                        "metric": "$lago_metric_code",
-                    },
-                    "quantity": { "$sum": "$lago_billable_quantity_micros" },
-                }
-            },
-        ])
-        .await?;
-
-    let mut out = BTreeMap::new();
-    while let Some(doc) = cursor.try_next().await? {
-        let group = (|| {
-            let invalid = || AppError::Internal("Invalid finalized usage aggregate".into());
-            let id = doc.get_document("_id").map_err(|_| invalid())?;
-            let owner = id.get_str("owner").map_err(|_| invalid())?.to_owned();
-            let metric = id.get_str("metric").map_err(|_| invalid())?.to_owned();
-            let quantity = doc_i64(&doc, "quantity").ok_or_else(invalid)?;
-            Ok(((owner, metric), quantity))
-        })();
-        match group {
-            Ok((key, quantity)) => {
-                out.insert(key, quantity);
-            }
-            Err(error) => failures.note(error),
-        }
-    }
-
-    Ok(out)
-}
-
-fn extract_metric_quantity_micros(value: &serde_json::Value, metric_code: &str) -> Option<i64> {
-    let mut seen = BTreeSet::new();
-    extract_metric_quantity_micros_inner(value, metric_code, &mut seen)
-}
-
-fn extract_metric_quantity_micros_inner(
-    value: &serde_json::Value,
-    metric_code: &str,
-    seen: &mut BTreeSet<usize>,
-) -> Option<i64> {
-    let ptr = value as *const serde_json::Value as usize;
-    if !seen.insert(ptr) {
-        return None;
-    }
-    match value {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find_map(|item| extract_metric_quantity_micros_inner(item, metric_code, seen)),
-        serde_json::Value::Object(map) => {
-            let matches_metric = ["code", "metric_code", "billable_metric_code"]
-                .iter()
-                .any(|key| map.get(*key).and_then(serde_json::Value::as_str) == Some(metric_code));
-            if matches_metric {
-                for key in ["units", "quantity", "amount", "usage"] {
-                    if let Some(quantity) = json_decimal_micros(map.get(key)) {
-                        return Some(quantity);
-                    }
-                }
-            }
-            map.values()
-                .find_map(|item| extract_metric_quantity_micros_inner(item, metric_code, seen))
-        }
-        _ => None,
-    }
-}
-
-fn json_decimal_micros(value: Option<&serde_json::Value>) -> Option<i64> {
-    let text = match value? {
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::String(value) => value.clone(),
-        _ => return None,
-    };
-    // Quantity boundary: Lago emits millionths. Reject finer values instead
-    // of hiding drift through truncation.
-    let quantity: Credits = text.parse().ok()?;
-    (quantity >= Credits::ZERO && quantity.pico() % 1_000_000 == 0)
-        .then(|| quantity.legacy_micros().ok())
-        .flatten()
-}
-
-fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
-    match doc.get(key)? {
-        Bson::Int32(v) => Some(i64::from(*v)),
-        Bson::Int64(v) => Some(*v),
-        Bson::Double(v) if v.is_finite() && *v >= i64::MIN as f64 && *v < -(i64::MIN as f64) => {
-            Some(v.round() as i64)
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 #[path = "rate_ordering_tests.rs"]
 pub(super) mod rate_ordering_tests;
@@ -1135,6 +1067,10 @@ pub(super) mod rate_ordering_tests;
 #[cfg(test)]
 #[path = "reconcile_cma_tests.rs"]
 mod cma_tests;
+
+#[cfg(test)]
+#[path = "usage_capture_tests.rs"]
+mod usage_capture_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1205,6 +1141,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -1311,23 +1248,6 @@ mod tests {
         }));
 
         assert_eq!(decision, LagoPushDecision::Ack);
-    }
-
-    #[test]
-    fn current_usage_decimal_quantity_supports_fractional_and_large_units() {
-        let usage = json!({
-            "customer_usage": {
-                "charges_usage": [{
-                    "billable_metric_code": "platform_requests",
-                    "units": "1000000001.250000"
-                }]
-            }
-        });
-
-        assert_eq!(
-            super::extract_metric_quantity_micros(&usage, "platform_requests"),
-            Some(1_000_000_001_250_000)
-        );
     }
 
     #[tokio::test]
@@ -1676,6 +1596,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<super::super::lago_client::LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(super::super::lago_client::LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -2067,6 +1988,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_capture_runtime_retry_refuses_a_different_verified_target() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("capture_runtime_rebinding").await;
+        let (row, mut lago) = machine_emission_fixture(&db).await;
+        db.collection::<UsageMeterRow>(super::USAGE_METER)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        super::super::usage_delivery::prepare(
+            &db,
+            &row,
+            "machine-customer",
+            LagoEvent::from_usage_row(&row, Some("machine-subscription".into())).unwrap(),
+        )
+        .await
+        .unwrap();
+        db.collection::<super::BillingWallet>(super::BILLING_WALLET)
+            .update_one(
+                doc! {"_id":"wallet-1"},
+                doc! {"$set":{"lago_subscription_id":"replacement-subscription"}},
+            )
+            .await
+            .unwrap();
+        lago.subscription.as_mut().unwrap().external_id = "replacement-subscription".into();
+        let worker = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+        let mut stats = super::ReconcileStats::default();
+        assert!(worker.push_unacked(&lago, &mut stats).await.is_err());
+        assert_eq!(stats.retried, 1);
+        assert!(lago.events.lock().unwrap().is_empty());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn machine_emission_uses_verified_subscription_after_wallet_changes() {
         let db =
             crate::test_utils::connect_transaction_test_database("machine_provider_binding_race")
@@ -2095,6 +2053,17 @@ mod tests {
             Some("machine-subscription")
         );
         assert_eq!(emitted[0].external_customer_id, None);
+        let receipt = db
+            .collection::<mongodb::bson::Document>("billing_usage_deliveries")
+            .find_one(doc! {"transaction_id":&machine.transaction_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.get_str("customer_id"), Ok("machine-customer"));
+        assert_eq!(
+            receipt.get_str("subscription_id"),
+            Ok("machine-subscription")
+        );
         let wallet = db
             .collection::<super::BillingWallet>(super::BILLING_WALLET)
             .find_one(doc! {"_id":"wallet-1"})

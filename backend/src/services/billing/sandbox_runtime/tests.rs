@@ -71,6 +71,7 @@ impl LagoApi for Provider {
         panic!("unused")
     }
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         if !self.balance_readback.load(Ordering::SeqCst) {
             return Err(unavailable("Usage read unavailable in this fixture"));
         }
@@ -590,8 +591,8 @@ async fn paused_compute_and_retained_disk_settle_exactly_once_through_shared_led
         verify_usage_provider_rate(&f.db, f.provider.as_ref(), &row)
             .await
             .unwrap()
-            .as_deref(),
-        Some("test-subscription")
+            .map(|target| target.subscription_id),
+        Some("test-subscription".into())
     );
     f.provider.available.store(false, Ordering::SeqCst);
     assert!(

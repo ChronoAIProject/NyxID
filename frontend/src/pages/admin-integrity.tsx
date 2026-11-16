@@ -138,32 +138,45 @@ function StartupDiagnostics({
   useUiTranslation();
   if (diagnostics.length === 0) return null;
 
+  const warming = diagnostics.find((item) => item.code === "billing_usage_warming");
+  const failures = diagnostics.filter((item) => item.code !== "billing_usage_warming");
   return (
-    <Card className="border-destructive/50">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0">
-        <div className="flex items-center gap-2">
-          <ShieldAlert className="h-5 w-5 text-destructive" />
-          <CardTitle className="text-15">{translateUi("Startup diagnostics")}</CardTitle>
-        </div>
-        <Badge variant="destructive">{translateUi("Action required")}</Badge>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {diagnostics.map((diagnostic) => (
-          <div key={diagnostic.code} className="space-y-2 text-14">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <p className="font-medium text-destructive">
-                {diagnostic.summary}
-              </p>
-              <span className="text-13 text-muted-foreground">
-                {formatTimestamp(diagnostic.detected_at)}
-              </span>
+    <>
+      {warming ? (
+        <p role="status" className="text-14 text-muted-foreground" title={warming.detail}>
+          {warming.summary} · {translateUi("Since {{value1}}", {
+            value1: formatTimestamp(warming.detected_at),
+          })}
+        </p>
+      ) : null}
+      {failures.length > 0 ? (
+        <Card className="border-destructive/50">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 text-destructive" />
+              <CardTitle className="text-15">{translateUi("Startup diagnostics")}</CardTitle>
             </div>
-            <p className="text-muted-foreground">{diagnostic.detail}</p>
-            <p>{diagnostic.remediation}</p>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
+            <Badge variant="destructive">{translateUi("Action required")}</Badge>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {failures.map((diagnostic) => (
+              <div key={diagnostic.code} className="space-y-2 text-14">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="font-medium text-destructive">
+                    {diagnostic.summary}
+                  </p>
+                  <span className="text-13 text-muted-foreground">
+                    {formatTimestamp(diagnostic.detected_at)}
+                  </span>
+                </div>
+                <p className="text-muted-foreground">{diagnostic.detail}</p>
+                <p>{diagnostic.remediation}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+    </>
   );
 }
 

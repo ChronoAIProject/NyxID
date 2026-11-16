@@ -177,6 +177,75 @@ particularly `app/services/fees/apply_taxes_service.rb`,
 `app/services/{plans,charges}/update_service.rb`.
 
 
+## Usage delivery capture
+
+Usage comparison currently reports an informational **warming** line and its
+first completed capture-pass time on Integrity. It makes no current-usage request,
+compares no quantities, and reports neither agreement nor numeric drift. Other
+maintenance failures still appear separately. The timestamp records observation
+startup, not proof of uninterrupted capture across a mixed fleet.
+
+The background usage push prepares an immutable `billing_usage_deliveries` row
+before sending. Retries reuse its target, metric, exact quantity representation,
+properties and event second (`finalized_at`, falling back to the original
+`updated_at`). Acknowledgement advances the target's sequence in
+`billing_usage_comparisons` and marks the receipt in the existing meter
+acknowledgement transaction. Replay cannot advance it twice. A duplicate provider
+transaction id is recorded explicitly; it does not prove an unknown earlier
+payload matched this snapshot. Rejections are excluded until a later eligible
+attempt is accepted; their count and last-rejection time remain as history.
+An eligible retry reopens a rejected receipt as prepared without an expiry,
+preserving that history. Receipt state never decides whether to send. Missing, mismatched or unfamiliar
+receipt states cannot block the meter acknowledgement or its wallet generation
+bump. Unreconciled evidence records a bounded reason and leaves subscription
+coverage unknown; only database errors may abort that transaction. Locally
+acknowledged benefit-only usage creates no delivery.
+
+Each push pass scans at most 64 prepared receipts using their own
+`state/last_checked_at/_id` index. A live unacknowledged meter leaves its receipt
+prepared and moves it to the back of that scan. An already acknowledged or
+missing meter closes the receipt as acknowledged outside capture, without an
+acknowledgement sequence, with a distinct reason and the 100-day expiry. Coverage
+uncertainty is published before closing the receipt and survives later successful
+captures. Receipt maintenance errors are logged and do not stop usage pushing.
+
+Receipts contain identifiers, quantities, timestamps, delivery state and only the
+emitter's property allowlist: `quantity`, `model`, `service_code`, `layer`. They do
+not copy meter documents, request/response bodies, error text, actor/key ids,
+names or email addresses. Runtime receipts retain the customer and subscription
+from existing verification; ordinary receipts retain the memoized wallet target.
+
+Capture has no provider period bounds yet. A prepared receipt has no expiry while
+it is unresolved; acknowledgement or rejection sets `resolved_at` and an
+`expires_at` exactly 100 days later, and the `expires_at` TTL index removes it.
+Repeated rejection preserves its original deadline; a later accepted delivery
+resolves as acknowledged with a new 100-day deadline.
+At a steady rate of N acknowledged events per 30-day month, this retains about
+100N/30 (3.33N) acknowledged receipts, plus 100 days of rejected receipts and one
+row per unresolved transaction, subject to normal TTL-monitor delay. Capture
+state has one document per distinct owner/customer/subscription, independent of
+event count. Owner erasure and org deletion retain both collections just as they
+retain financial usage-meter records; those paths do not shorten either TTL.
+Patch B may replace this interim bound with period-aware retention.
+
+Coverage remains unverified. Old holders can preserve unknown lease-checkpoint
+fields while acknowledging events without receipts; a surviving marker cannot
+certify continuity, and per-row markers cannot recover already expired rows.
+Numeric comparison must establish continuous coverage before using these records.
+The documented plan is monthly and NyxID creates calendar-billed subscriptions:
+the first eligible period starts at the next calendar month boundary in the
+provider's returned bounds after continuous capture is established. Capture alone
+continues warming until comparison is enabled. A subscription with continuous
+acknowledgements is not compared until it is quiet for ten minutes and shows as
+waiting.
+
+The response parser supports the nested plain per-metric shape used by the bill
+fixtures, exact decimal-string units, integer units, and inclusive final-second
+period bounds. Grouped/filtered usage, duplicate metrics, missing metrics,
+unsupported aggregation, invalid periods and unrepresentable quantities are
+explicit findings, never inferred totals. Published Lago v1.50 grouped/filtered
+schemas were unavailable offline; no partition semantics have been inferred.
+
 ## Reconcile ownership and verification status
 
 The periodic billing maintenance pass acquires the MongoDB lease

@@ -8,6 +8,22 @@ use serde_json::{Value, json};
 
 use crate::errors::{AppError, AppResult};
 
+#[path = "lago_current_usage.rs"]
+#[allow(
+    dead_code,
+    reason = "Capture ships the parser before enabling period comparisons"
+)]
+pub(super) mod current_usage;
+
+pub(crate) fn require_subscription_id(subscription_id: &str) -> AppResult<()> {
+    if subscription_id.trim().is_empty() {
+        return Err(AppError::BillingProviderUnavailable(
+            "Current usage requires a subscription id".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) const HTTP_TIMEOUT_SECS: u64 = 20;
 // Bound sender scheduling delay well below either dispatch quiet period.
 const DISPATCH_SEND_WINDOW_SECS: u64 = 30;
@@ -909,18 +925,12 @@ impl LagoApi for LagoClient {
         customer_id: &str,
         subscription_id: &str,
     ) -> AppResult<LagoUsage> {
-        let path = if subscription_id.trim().is_empty() {
-            format!(
-                "customers/{}/current_usage",
-                urlencoding::encode(customer_id)
-            )
-        } else {
-            format!(
-                "customers/{}/current_usage?external_subscription_id={}",
-                urlencoding::encode(customer_id),
-                urlencoding::encode(subscription_id)
-            )
-        };
+        crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
+        let path = format!(
+            "customers/{}/current_usage?external_subscription_id={}",
+            urlencoding::encode(customer_id),
+            urlencoding::encode(subscription_id)
+        );
         let value = self
             .json_request(reqwest::Method::GET, &path, None)
             .await
