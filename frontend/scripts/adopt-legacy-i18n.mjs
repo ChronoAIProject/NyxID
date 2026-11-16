@@ -121,6 +121,14 @@ function refuseRebaseThroughMerges(dir) {
   if (dropped.length) {
     throw new Error(`No files written. This rebase drops merge commit${dropped.length > 1 ? "s" : ""} ${dropped.map((sha) => sha.slice(0, 9)).join(", ")} from the branch's history, and with ${dropped.length > 1 ? "them" : "it"} its own changes and how it was resolved; adoption cannot recover those. ${guidance}`);
   }
+  // Merges below the first replayed commit are not replayed either: git skipped the commits around them
+  // (already upstream), or the rebase started after them on purpose (git rebase --onto <onto> <merge>).
+  // Adoption cannot tell these apart, so it continues and says what was left behind.
+  const below = boundary ? (tryGit("rev-list", "--merges", boundary, `^${ontoCommit}`) ?? "").split("\n").filter(Boolean) : [];
+  if (below.length) {
+    const names = below.map((sha) => sha.slice(0, 9)).join(", ");
+    console.warn(`i18n: notice: this rebase does not replay merge commit${below.length > 1 ? "s" : ""} ${names}, so ${below.length > 1 ? "their" : "its"} catalog resolutions are not carried over (git drops merges when it linearizes a branch). If you rebased from after ${below.length > 1 ? "them" : "it"} on purpose (git rebase --onto origin/main <merge>), nothing is missing. Otherwise run git rebase --abort and merge main instead (git merge origin/main), then npm run adopt:i18n; git rebase --rebase-merges would replay ${below.length > 1 ? "them" : "it"}, but adoption refuses replayed merges.`);
+  }
 }
 
 /**

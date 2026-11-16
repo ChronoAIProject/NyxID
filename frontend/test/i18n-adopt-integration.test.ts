@@ -548,6 +548,28 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
       expectNothingReverted(f);
     });
 
+    it("notes merges a rebase drops below its first replayed commit, and still adopts that commit", () => {
+      const f = fixture();
+      // a1 lands upstream as the same patch, so git skips it and replays only b1, whose parent is the merge M.
+      f.git("checkout", "-q", "-b", "a1", f.base);
+      fs.writeFileSync(path.join(f.root, "src/pages/a1.ts"), "export const a1 = 1;\n");
+      f.git("add", "-A", "frontend/src"); f.git("commit", "-q", "-m", "a1");
+      f.git("checkout", "-q", "-b", "upstream", "split");
+      f.git("cherry-pick", "a1");
+      f.git("checkout", "-q", "-b", "merged", f.base);
+      f.git("merge", "-q", "--no-ff", "-m", "M: merge a1", "a1");
+      const merge = f.git("rev-parse", "HEAD");
+      editMonoliths(f, "b1", (catalog, language) => { catalog["Change me"] = `b1 ${language}`; });
+      expect(spawnSync("git", ["rebase", "upstream"], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+      expect(f.git("rev-parse", "REBASE_HEAD^")).toBe(merge);
+      const result = f.adopt();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toContain(`i18n: notice: this rebase does not replay merge commit ${merge.slice(0, 9)}, so its catalog resolutions are not carried over`);
+      expect(result.stderr).toContain("merge main instead (git merge origin/main)");
+      const catalogs = merged(f);
+      for (const language of LANGUAGES) expect(catalogs[language]).toEqual({ "Change me": `b1 ${language}`, "Remove me": `removed ${language}`, Kept: `kept ${language}` });
+    });
+
     it("places a new key by the branch's source file, after the key's area on onto (N11)", () => {
       const f = fixture();
       commitMergeKeepingMonoliths(f);
