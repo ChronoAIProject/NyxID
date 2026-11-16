@@ -25,6 +25,7 @@ mod openai_tests;
 pub mod progress;
 pub mod receipt;
 mod responses;
+pub(crate) use responses::{RESPONSE_USAGE_LIMIT, recorded_usage as recorded_response_usage};
 pub mod runtime;
 pub mod session;
 mod speech;
@@ -71,3 +72,6 @@ pub fn selected_voice(
 }
 
 pub(crate) mod shared;
+
+#[cfg(test)]
+pub(crate) use tokens::context as token_billing_context_for_test;

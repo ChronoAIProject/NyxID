@@ -16,14 +16,14 @@ pub(crate) enum Phase {
     AfterCommit,
 }
 #[derive(Clone)]
-struct Gate {
+pub(super) struct Gate {
     phase: Phase,
-    entered: Arc<tokio::sync::Notify>,
-    resume: Arc<tokio::sync::Notify>,
+    pub(super) entered: Arc<tokio::sync::Notify>,
+    pub(super) resume: Arc<tokio::sync::Notify>,
     used: Arc<AtomicBool>,
 }
 impl Gate {
-    fn new(phase: Phase) -> Self {
+    pub(super) fn new(phase: Phase) -> Self {
         Self {
             phase,
             entered: Default::default(),
@@ -32,7 +32,7 @@ impl Gate {
         }
     }
 }
-tokio::task_local! {static GATE:Gate;}
+tokio::task_local! {pub(super) static GATE:Gate;}
 pub(crate) async fn point(phase: Phase) {
     if let Ok(g) = GATE.try_with(Clone::clone)
         && g.phase == phase
@@ -42,7 +42,7 @@ pub(crate) async fn point(phase: Phase) {
         g.resume.notified().await;
     }
 }
-async fn at<T>(phase: Phase, future: impl std::future::Future<Output = T>) {
+pub(super) async fn at<T>(phase: Phase, future: impl std::future::Future<Output = T>) {
     let gate = Gate::new(phase);
     let mut running = Box::pin(GATE.scope(gate.clone(), future));
     tokio::select! {_=&mut running=>panic!("missed {phase:?}"),()=gate.entered.notified()=>{},_ =tokio::time::sleep(std::time::Duration::from_secs(15))=>panic!("barrier timeout")}

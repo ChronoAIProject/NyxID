@@ -2,6 +2,7 @@
 mod inventory;
 mod ownership;
 mod selection;
+mod voice;
 use crate::{
     errors::{AppError, AppResult},
     models::{credits::Credits, service_billing::BillingMetric, usage_meter::UsageHold},
@@ -31,7 +32,7 @@ pub(crate) struct Classification {
 fn classified(label: &'static str) -> Classification {
     Classification {
         label,
-        eligible: label == "eligible_now",
+        eligible: matches!(label, "eligible_now" | "eligible_voice"),
     }
 }
 
@@ -67,8 +68,9 @@ pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult
     if metric.is_runtime_allocation() {
         return Ok(classified("excluded_runtime"));
     }
-    if metric == BillingMetric::VoiceSeconds || request.starts_with("voice:") {
-        return Ok(classified("excluded_voice"));
+    let voice_request = voice::is_voice(row);
+    if voice_request && voice::identity(request).is_none() {
+        return Ok(classified("excluded_voice_unknown_shape"));
     }
     if let Ok(owner) = row.get_document("forwarded_owner") {
         match owner.get_str("ingress").map_err(|_| unavailable())? {
@@ -152,7 +154,17 @@ pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult
         return Ok(classified("registry_unavailable"));
     };
     let mut result = classified(registry.ownership(row)?);
-    if present(row, "usage_checkpoint") {
+    if voice_request {
+        if result.eligible {
+            result = match voice::decide(row, registry) {
+                voice::Decision::Ready(_) => classified("eligible_voice"),
+                voice::Decision::Deferred(reason) => classified(reason),
+            };
+        } else if result.label == "owned_by_live_generation" {
+            result = classified("voice_live_session");
+        }
+    }
+    if present(row, "usage_checkpoint") && (!voice_request || result.eligible) {
         result.label = "has_nonfinal_checkpoint";
     }
     Ok(result)
@@ -172,22 +184,20 @@ fn request_blocker(rows: &[Document]) -> Option<&'static str> {
         }
     }
     for row in rows {
+        if voice::is_voice(row)
+            && row
+                .get_str("billing_request_id")
+                .ok()
+                .and_then(voice::identity)
+                .is_none()
+        {
+            return Some("excluded_voice_unknown_shape");
+        }
         if let Ok(metric) =
             bson::from_bson::<BillingMetric>(row.get("metric").cloned().unwrap_or(Bson::Null))
+            && metric.is_runtime_allocation()
         {
-            if metric.is_runtime_allocation() {
-                return Some("excluded_runtime");
-            }
-            if metric == BillingMetric::VoiceSeconds {
-                return Some("excluded_voice");
-            }
-        }
-        if row
-            .get_str("billing_request_id")
-            .ok()
-            .is_some_and(|s| s.starts_with("voice:"))
-        {
-            return Some("excluded_voice");
+            return Some("excluded_runtime");
         }
         if present(row, "pending_platform_usage") || present(row, "pending_resale_quantity") {
             return Some("durable_finalization_intent");
@@ -214,3 +224,6 @@ const STATE_ID: &str = "ordinary";
 mod recovery_tests;
 #[cfg(test)]
 use recovery_tests::{Phase, point as test_point};
+
+#[cfg(test)]
+pub(crate) mod voice_tests;

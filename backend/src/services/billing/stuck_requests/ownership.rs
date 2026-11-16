@@ -69,6 +69,9 @@ pub(crate) async fn registry(
 }
 
 impl Registry {
+    pub(super) fn generation_is_live(&self, generation: &str) -> bool {
+        self.live.contains_key(generation)
+    }
     pub(crate) fn ownership(&self, row: &Document) -> AppResult<&'static str> {
         let horizon =
             crate::services::security_readiness_service::MAX_AGE_SECS * 1000 + OWNER_GRACE_MILLIS;

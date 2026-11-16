@@ -88,12 +88,35 @@ Ordinary unknown forwarded work with a positive reservation is ended only after 
 is absent beyond the registry window and margin. Legacy work additionally predates
 every live registration by an hour. Final quantities, final checkpoints and durable
 intents recover first; tagged pool/Realtime, managed/certified execution, runtime
-and voice retain their own exits. A terminal transaction competes with the real
+retain their own exits. A terminal transaction competes with the real
 finalizer and records a chained metadata audit; ordinary settlement then returns
 unused holds. `stuck_requests::policy::unknown_consumption_policy` is the single
 charging choice: the default final zero waives genuinely unknown consumption.
 The owner chose this rule on 2026-11-15: settle recorded final usage, charge nothing
 for genuinely unknown consumption, and release the unused hold.
+Stranded funded voice requests share the held-request batch and process-death
+proof, including a registry-live voice takeover. Recovery first uses voice's
+recorded response sum or observed seconds (with its existing initial-request
+rule); only missing evidence uses the shared unknown policy. The existing window
+sweep still settles sealed windows or windows past their 24-hour evidence deadline,
+including metering-only windows and rows without ownership proof: each window is
+30 seconds of a call capped at 1,800 seconds. Both paths use the window's own
+recorded seconds when it exists. The shared path reads and decides before fencing
+session/window and meter rows in one transaction; a late finalizer respects the
+winner; a sealed window retains its evidence metadata. Failed windows do not
+abort the billing pass. Their additive `reconcile_failed_at` database timestamp
+orders them behind untried windows, then oldest failure first, in the existing
+100-window batch. Only failures add a retry-marker write. Old replicas ignore
+this marker and the window's additive `recovery_fence`, retaining their previous
+retry order and respecting the existing seal/meter winner. One error summary
+per window pass records the failed count; successful windows still count toward
+recovered settlements. Integrity reports voice identity kind and deferred
+reason, using the same evidence predicate as publication; non-voice pages perform
+no voice reads. Shared held-request recovery logs at most one summary per pass:
+expected waits (live sessions, pending evidence, registry unavailability, time
+budget or publication conflict) at debug, malformed evidence or actual read,
+publication or settlement failures at warn.
+
 The tested but unused reserved-estimate alternative uses the recorded reservation
 quantity, or an exactly recoverable old reservation, and leaves ambiguous old
 estimates unresolved. A paused owner

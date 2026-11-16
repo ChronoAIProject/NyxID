@@ -23,7 +23,7 @@ pub(crate) fn index() -> mongodb::IndexModel {
 pub(super) const PAGE_ROWS: usize = 128;
 const COUNT_KEYS: i64 = 100_001;
 pub(super) fn pipeline(source: Source, after: &str, limit: usize) -> Vec<Document> {
-    let mut projection = doc! {"_id":1,"billing_request_id":1,"billing_owner_id":1,"wallet_id":1,
+    let mut projection = doc! {"_id":1,"billing_request_id":1,"billing_owner_id":1,"wallet_id":1,"actor_user_id":1,
     "status":1,"forwarded":1,"released":1,"metric":1,"created_at":1,"forwarded_owner":1,
     "quantity":1,"pending_platform_usage":1,"pending_resale_quantity":1,
     "pool_attempt":1,"realtime_session.closed":1,"model_tariff.tariff_id":1,"managed_execution_id":1,
@@ -71,7 +71,7 @@ pub(super) fn pipeline(source: Source, after: &str, limit: usize) -> Vec<Documen
             "pipeline":[{"$project":{"_id":1,"owner":format!("${owner}"),"active_settlement":1}}],"as":alias}});
     }
     stages.push(doc!{"$lookup":{"from":METERS,"localField":"billing_request_id","foreignField":"billing_request_id",
-        "pipeline":[{"$limit":129},{"$project":{"_id":0,"billing_request_id":1,"metric":1,
+        "pipeline":[{"$limit":129},{"$project":{"_id":0,"billing_request_id":1,"metric":1,"actor_user_id":1,
             "pool_attempt":1,"realtime_session.closed":1,"managed_execution_id":1,"model_tariff.tariff_id":1,
             "pending_platform_usage.requests":1,"pending_resale_quantity":1,"usage_checkpoint.final_report":1,"usage_checkpoint.recovered":1}}],"as":"request_rows"}});
     stages
@@ -94,8 +94,8 @@ struct Inventory {
     registry_readable: bool,
     registry_failure: Option<ReadFailure>,
     requests: BTreeSet<String>,
-    groups: BTreeMap<(String, bool, String), Group>,
-    holds: BTreeMap<(String, bool, String, String, String), Group>,
+    groups: BTreeMap<(String, bool, String, String), Group>,
+    holds: BTreeMap<(String, bool, String, String, String, String), Group>,
 }
 fn age(now: bson::DateTime, created: bson::DateTime) -> &'static str {
     match now
@@ -127,7 +127,13 @@ impl Inventory {
         let metric = row.get_str("metric").map_err(|_| unavailable())?;
         self.rows += 1;
         self.requests.insert(request.clone());
-        let key = (c.label.to_owned(), c.eligible, age.clone());
+        let identity_kind = voice::kind(&row).to_owned();
+        let key = (
+            c.label.to_owned(),
+            c.eligible,
+            age.clone(),
+            identity_kind.clone(),
+        );
         let g = self.groups.entry(key).or_default();
         g.rows += 1;
         g.requests.insert(request.clone());
@@ -151,6 +157,7 @@ impl Inventory {
                     age.clone(),
                     kind.into(),
                     unit.into(),
+                    identity_kind.clone(),
                 ))
                 .or_default();
             g.held = g.held.checked_add(total)?;
@@ -181,15 +188,20 @@ impl Inventory {
         } else {
             lines.push("holdless_rows_at_least=unknown".into());
         }
-        for ((class, eligible, age), g) in &self.groups {
+        for ((class, eligible, age, voice_kind), g) in &self.groups {
             lines.push(format!(
-                "class={class} eligible={eligible} age={age} rows={} requests={}",
+                "class={class} eligible={eligible} age={age} rows={} requests={}{}",
                 g.rows,
-                g.requests.len()
+                g.requests.len(),
+                if voice_kind.is_empty() {
+                    String::new()
+                } else {
+                    format!(" voice_kind={voice_kind}")
+                }
             ));
         }
-        for ((class, eligible, age, kind, unit), g) in &self.holds {
-            lines.push(format!("class={class} eligible={eligible} age={age} kind={kind} unit={unit} rows={} requests={} held={} resources={}",g.rows,g.requests.len(),g.held,g.resources.len()));
+        for ((class, eligible, age, kind, unit, voice_kind), g) in &self.holds {
+            lines.push(format!("class={class} eligible={eligible} age={age} kind={kind} unit={unit} rows={} requests={} held={} resources={}{}",g.rows,g.requests.len(),g.held,g.resources.len(),if voice_kind.is_empty(){String::new()}else{format!(" voice_kind={voice_kind}")}));
         }
         lines.join("\n")
     }
@@ -265,9 +277,12 @@ async fn scan_once(
                 .batch_size(PAGE_ROWS as u32)
                 .session(&mut *tx)
                 .await?;
-            let mut count = 0;
-            while let Some(row) = cursor.stream(&mut *tx).try_next().await? {
-                count += 1;
+            let mut page: Vec<Document> = cursor.stream(&mut *tx).try_collect().await?;
+            let count = page.len();
+            *stage.lock().unwrap() = "voice_evidence";
+            voice::read(db, tx, &mut page).await?;
+            *stage.lock().unwrap() = "inventory";
+            for row in page {
                 after[i] = row.get_str("_id").map_err(|_| unavailable())?.to_owned();
                 if out.candidates.contains(&after[i]) {
                     continue;
