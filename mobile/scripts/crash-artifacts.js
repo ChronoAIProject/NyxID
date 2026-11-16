@@ -21,7 +21,28 @@ function prepare(root, platform, version, build) {
     platform,
   };
 }
-function collect(info, bundle, map, dsyms) {
+function collect(
+  info,
+  bundle,
+  map,
+  dsyms,
+  environment = process.env,
+  execute = execFileSync,
+  warn = console.warn,
+) {
+  const configured = [
+    "CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN",
+    "CRASH_ARTIFACTS_SENTRY_ORG",
+    "CRASH_ARTIFACTS_SENTRY_PROJECT_MOBILE",
+  ].some((key) => Boolean(environment[key]));
+  try {
+    collectRequired(info, bundle, map, dsyms, environment, execute, configured);
+  } catch (error) {
+    if (configured) throw error;
+    warn("Crash artifacts unavailable; symbol upload is not configured. Continuing store build.");
+  }
+}
+function collectRequired(info, bundle, map, dsyms, environment, execute, configured) {
   if (!fs.existsSync(bundle) || !fs.existsSync(map))
     throw Error("Crash bundle or composed source map missing");
   const name =
@@ -35,7 +56,7 @@ function collect(info, bundle, map, dsyms) {
     for (const file of fs
       .readdirSync(dsyms)
       .filter((f) => f.endsWith(".dSYM"))) {
-      const output = execFileSync(
+      const output = execute(
         "dwarfdump",
         ["--uuid", path.join(dsyms, file)],
         { encoding: "utf8" },
@@ -55,14 +76,15 @@ function collect(info, bundle, map, dsyms) {
     ) + "\n",
   );
   // The uploader reads secrets from its environment and prints no credentials.
-  execFileSync(
-    process.execPath,
-    [
-      path.resolve(__dirname, "../../tools/crash-artifacts/upload.mjs"),
-      directory,
-      info.platform,
-    ],
-    { stdio: "inherit" },
-  );
+  if (configured)
+    execute(
+      process.execPath,
+      [
+        path.resolve(__dirname, "../../tools/crash-artifacts/upload.mjs"),
+        directory,
+        info.platform,
+      ],
+      { stdio: "inherit", env: environment },
+    );
 }
 module.exports = { prepare, collect };
