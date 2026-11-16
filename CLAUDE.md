@@ -76,6 +76,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - Forms use `useAppForm` (`components/ui/form.tsx`), never raw `useForm` (lint-enforced via `no-restricted-imports`): its `setValue` defaults to `shouldDirty/shouldTouch/shouldValidate: true` so non-text controls wired via `watch` + `setValue` (Radix Switch/Select/Checkbox, custom editors) correctly enable dirty-gated submit buttons; programmatic writes (prefill, normalization in effects) opt out per call with `{ shouldDirty: false, shouldTouch: false }`
 - TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, ...); auth state in Zustand (`stores/auth-store.ts`)
 - UI components via Radix UI + shadcn/ui pattern (`components/ui/`); no `console.log` in production code
+- App translations live in the ordered portion map under `src/i18n/locales/app`; keep each JSON file code-unit sorted, add copy to its mapped portion, and run `npm run sync:i18n` (the migration/adoption tool handles pre-split branches).
 
 ### 5. Security
 

@@ -94,7 +94,7 @@ the wizard catalogs without importing the main app.
 | `common` | `src/i18n/locales/common-{en,zh-CN,zh-TW}.json` | Shared date/relative-time formatting |
 | `errors` | `src/i18n/locales/errors-{en,zh-CN,zh-TW}.json` | Shared known error messages and error-envelope templates |
 | `wizard` | `src/i18n/locales/wizard-{en,zh-CN,zh-TW}.json` | Local browser wizard, hosted pairing, shared setup controls |
-| `app` | `src/i18n/locales/{en,zh-CN,zh-TW}.json` | Studio and NyxBot UI |
+| `app` | `src/i18n/locales/app/<portion>/{en,zh-CN,zh-TW}.json`, with `app/zh-CN.ts` and `app/zh-TW.ts` barrels | Studio and NyxBot UI |
 | `translation` | `src/features/landing/i18n/locales/` | Landing page (default namespace) |
 | `onboarding` | `src/features/nyxbot-onboarding/locales/` | Onboarding provider with `defaultNS="onboarding"` |
 
@@ -109,14 +109,48 @@ function Greeting({ name }: { name: string }) {
 }
 ```
 
-App keys are complete English phrases, stored as flat JSON keys. Add the same
-key to all three catalogs, preserving interpolation placeholders. Use `count`
-with `_one` and `_other` English variants when a phrase needs plural forms.
-Interpolate whole phrases instead of joining translated sentence fragments.
-Missing app translations fall back to English, then the source phrase.
-Run `npm run sync:i18n` after changing distinct English values or plurals to
-refresh `en-overrides.json`. Production builds also refresh this generated file;
-the copy audit rejects stale overrides.
+App keys are complete English phrases, stored as flat JSON keys. The ordered
+path-to-portion map is `frontend/scripts/lib/i18n-portions.mjs`; it is the source
+of truth for placement, migration, and missing-key suggestions. Add the same key
+to the owning portion in all three languages, preserving interpolation
+placeholders, and insert it in code-unit sort order. Use `count` with `_one` and
+`_other` English variants when a phrase needs plural forms; all plural siblings
+must remain in one portion. Interpolate whole phrases instead of joining
+translated sentence fragments. Missing app translations fall back to English,
+then the source phrase.
+
+Run `npm run sync:i18n` after changing catalogs. It canonicalizes every app,
+common, error, and wizard JSON file, consolidates cross-portion duplicate keys,
+and regenerates `app/en-overrides.json`. Identical values in every language are
+safe to consolidate and are reported by `check:i18n`; differing values are a
+failure that must be resolved before syncing. Production builds run only the
+override regeneration step, so builds never rewrite source catalogs.
+
+The app portions currently own these paths and key counts:
+
+| Portion | Owned paths | Keys |
+| --- | --- | ---: |
+| `admin` | `pages/admin*`, `components/admin*`, admin hooks and helpers | 1,031 |
+| `assistant-chat` | assistant chat/composer/message/attachment files | 242 |
+| `assistant-agents` | assistant agent, skill, and group files; CMA agent/sandbox pages | 560 |
+| `assistant-account` | assistant account/settings/profile/workspace files | 90 |
+| `assistant-approvals` | assistant approval/action/decision files | 275 |
+| `assistant` | remaining assistant components and assistant libraries | 1,049 |
+| `auth` | sign-in, registration, OAuth, consent, and auth helpers | 419 |
+| `billing` | billing and usage pages/components/hooks | 437 |
+| `channels` | channel, Telegram, and channel hooks/helpers | 494 |
+| `credentials` | keys, API keys, credential dashboard files | 461 |
+| `dashboard` | dashboard, navigation, layout, tools, and trigger files | 1,058 |
+| `machines` | machine pages/components/hooks | 606 |
+| `nodes` | node, device, SSH pages/components/hooks | 148 |
+| `organizations` | organization pages/components/hooks | 131 |
+| `services` | services, providers, service accounts, and catalog helpers | 588 |
+| `settings` | settings and notification settings | 189 |
+| `shared` | keys referenced from multiple mapped areas plus shared libraries/components | 2,343 |
+| `unattributed` | keys with no literal source reference | 2,055 |
+
+Keys used by two or more mapped areas always belong to `shared`; keys with no
+literal reference remain in `unattributed` so the split never deletes copy.
 
 For a helper called during rendering or an event, import `translate` from
 `@/i18n`. Do not evaluate it once at module initialization: that would freeze a
@@ -144,6 +178,40 @@ After changing a file in the wizard's source closure, rebuild its checked-in ass
 ```sh
 npm --prefix frontend run build:wizard
 cargo test -p nyxid-cli --test wizard_bundle_freshness
+```
+
+### In-flight branches from before the split
+
+Use the committed adoption tool for a branch created before the portion split.
+It reads all snapshots with `git show`, applies a three-way delta to app,
+common, error, and wizard catalogs, places additions using the ordered usage
+map, and writes nothing if any value diverges on both sides.
+
+During a merge, run this after the merge has produced `MERGE_HEAD`:
+
+```sh
+cd frontend
+npm run adopt:i18n
+```
+
+The automatic merge form is equivalent to:
+
+```sh
+npm run adopt:i18n -- --branch HEAD --base "$(git merge-base HEAD MERGE_HEAD)" --onto MERGE_HEAD
+```
+
+During a rebase, run the same command while `REBASE_HEAD` is present. It uses
+`REBASE_HEAD` as the old branch, `REBASE_HEAD^` as its base, and `HEAD` as the
+new portion-layout commit. Explicit refs are also accepted:
+
+```sh
+npm run adopt:i18n -- --branch <old-layout-ref> --base <base-ref> --onto <portion-layout-ref>
+```
+
+The initial migration is the same deterministic operation with an empty base:
+
+```sh
+npm run adopt:i18n -- --branch <pre-split-main-ref> --base empty --onto HEAD
 ```
 
 Translate app-owned copy only. Keep user data, resource names, URLs, credentials,

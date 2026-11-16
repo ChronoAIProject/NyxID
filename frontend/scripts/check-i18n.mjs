@@ -3,6 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import {
+  LANGUAGES, allCatalogFiles, analyzePortions, canonicalText, catalogImportIssue,
+  englishOverrides as makeOverrides, isTestSource, loadPortions, readJson,
+} from "./lib/i18n-catalogs.mjs";
+import { portionForPath } from "./lib/i18n-portions.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const locales = path.join(root, "src/i18n/locales");
@@ -12,10 +17,28 @@ const simplifiedOnly = new Set(JSON.parse(fs.readFileSync(path.join(root, "src/i
 const domainGlossary = JSON.parse(fs.readFileSync(path.join(root, "src/i18n/domain-glossary.json"), "utf8"));
 const issues = [];
 const catalogs = new Map();
-const fullEnglish = JSON.parse(fs.readFileSync(path.join(locales, "en.json"), "utf8"));
-const englishOverrides = JSON.parse(fs.readFileSync(path.join(locales, "en-overrides.json"), "utf8"));
-const expectedOverrides = Object.fromEntries(Object.entries(fullEnglish).filter(([key, value]) => key !== value));
-if (JSON.stringify(englishOverrides) !== JSON.stringify(expectedOverrides)) {
+const portions = loadPortions(locales);
+const analysis = analyzePortions(portions);
+issues.push(...analysis.issues);
+for (const { key, portions: owners, identical } of analysis.duplicates) {
+  if (identical) console.warn(`i18n: identical duplicate ${key} in ${owners.join(", ")}; run npm run sync:i18n`);
+}
+for (const file of allCatalogFiles(locales)) {
+  try {
+    if (fs.readFileSync(file, "utf8") !== canonicalText(readJson(file))) issues.push(`${path.relative(root, file)}: non-canonical catalog; run npm run sync:i18n`);
+  } catch (error) {
+    issues.push(`${path.relative(root, file)}: invalid catalog (${error.message})`);
+  }
+}
+for (const language of LANGUAGES) {
+  if (fs.existsSync(path.join(locales, `${language}.json`))) issues.push(`legacy monolith ${language}.json is present; run npm run adopt:i18n (see docs/MULTILINGUAL.md for explicit --branch/--base/--onto)`);
+  for (const portion of Object.keys(portions)) {
+    if (!fs.existsSync(path.join(locales, "app", portion, `${language}.json`))) issues.push(`app/${portion}: missing ${language}.json`);
+  }
+}
+const fullEnglish = analysis.merged.en;
+const overridesFile = path.join(locales, "app/en-overrides.json");
+if (!fs.existsSync(overridesFile) || canonicalText(readJson(overridesFile)) !== canonicalText(makeOverrides(fullEnglish))) {
   issues.push("English runtime overrides are stale; run npm run sync:i18n");
 }
 const placeholders = (text) =>
@@ -23,7 +46,7 @@ const placeholders = (text) =>
 const htmlEntity = /&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
 
 for (const prefix of ["", "wizard-", "common-", "errors-"]) {
-  const english = JSON.parse(fs.readFileSync(path.join(locales, `${prefix}en.json`), "utf8"));
+  const english = prefix ? readJson(path.join(locales, `${prefix}en.json`)) : fullEnglish;
   catalogs.set(prefix, english);
   for (const key of protocolExamples) {
     if (key in english) issues.push(`${prefix}en: protocol example must stay outside catalogs: ${key}`);
@@ -32,7 +55,7 @@ for (const prefix of ["", "wizard-", "common-", "errors-"]) {
     if (htmlEntity.test(key) || htmlEntity.test(value)) issues.push(`${prefix}en: use literal characters instead of HTML entities: ${key}`);
   }
   for (const language of ["zh-CN", "zh-TW"]) {
-    const translated = JSON.parse(fs.readFileSync(path.join(locales, `${prefix}${language}.json`), "utf8"));
+    const translated = prefix ? readJson(path.join(locales, `${prefix}${language}.json`)) : analysis.merged[language];
     for (const key of new Set([...Object.keys(english), ...Object.keys(translated)])) {
       if (!(key in english) || !translated[key]?.trim()) {
         issues.push(`${prefix}${language}: missing or empty translation: ${key}`);
@@ -89,6 +112,22 @@ function sourceFiles(dir) {
     return entry.isDirectory() ? sourceFiles(file) : entry.isFile() ? [file] : [];
   });
 }
+// The import boundary covers all non-test source, including fixtures and locale barrels.
+for (const file of sourceFiles("src").filter((file) => /\.tsx?$/.test(file) && !isTestSource(file))) {
+  const source = fs.readFileSync(path.join(root, file), "utf8");
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  function visit(node) {
+    const specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier :
+      ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || node.expression.getText(ast) === "require" || node.expression.getText(ast).startsWith("import.meta.glob")) ? node.arguments[0] :
+      ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
+    if (specifier && ts.isStringLiteralLike(specifier)) {
+      const issue = catalogImportIssue(file, specifier.text);
+      if (issue) issues.push(`${file}:${ast.getLineAndCharacterOfPosition(node.getStart()).line + 1}: ${issue}`);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+}
 const files = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) &&
     !/\.test\.|fixtures?|mock|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
 let checkedKeys = 0;
@@ -142,7 +181,7 @@ for (const file of files) {
         if (ts.isStringLiteral(key) && key.text) {
           checkedKeys++;
           if (protocolExamples.has(key.text)) report(node, `protocol example sent to translation: ${key.text}`);
-          if (![...catalogs.values()].some((catalog) => key.text in catalog)) report(node, `missing catalog key: ${key.text}`);
+          if (![...catalogs.values()].some((catalog) => key.text in catalog)) report(node, `missing catalog key: ${key.text}; suggested app portion: ${portionForPath(file)}`);
         } else if (ts.isConditionalExpression(key)) {
           checkKey(key.whenTrue);
           checkKey(key.whenFalse);
