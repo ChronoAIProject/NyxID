@@ -5,7 +5,10 @@ import { LoginRequestError } from "./loginRequestErrors";
 import { buildApiError, networkApiError } from "../../lib/api/responseError";
 
 const serverCopy = "NyxID couldn't complete this request. Try again.";
-const rows: [name: string, failure: unknown, step: string, expected: string][] =
+const changedAccess =
+  "The key or connection access changed. Refresh and review the updated permissions before approving.";
+type Row = [name: string, failure: unknown, step: string, expected: string];
+const rows: Row[] =
   [
     ["code step", new Error("local detail"), "code", serverCopy],
     [
@@ -27,6 +30,55 @@ const rows: [name: string, failure: unknown, step: string, expected: string][] =
       "Could not reach the login server. Check your connection and try again.",
     ],
     ["5xx", buildApiError(null, 503), "confirm", serverCopy],
+    [
+      "5xx with server message",
+      buildApiError({ error: "internal_error", message: changedAccess }, 503),
+      "confirm",
+      serverCopy,
+    ],
+    ...["options", "review"].map(
+      (step): Row => [
+        `409 on ${step}`,
+        buildApiError(
+          { error: "conflict", error_code: 987654, message: changedAccess },
+          409,
+        ),
+        step,
+        changedAccess,
+      ],
+    ),
+    [
+      "400 on key creation",
+      buildApiError(
+        {
+          error: "validation_error",
+          error_code: 987654,
+          message: "Choose at least one connection.",
+        },
+        400,
+      ),
+      "new",
+      "Choose at least one connection.",
+    ],
+    [
+      "403 on review",
+      buildApiError(
+        {
+          error: "forbidden",
+          error_code: 987654,
+          message: "You no longer have access to this organization.",
+        },
+        403,
+      ),
+      "review",
+      "You no longer have access to this organization.",
+    ],
+    [
+      "409 on code step",
+      buildApiError({ error: "conflict", message: changedAccess }, 409),
+      "code",
+      serverCopy,
+    ],
     ["parse failure", buildApiError(null, 200), "confirm", serverCopy],
     [
       "11908",

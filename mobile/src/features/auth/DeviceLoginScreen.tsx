@@ -697,7 +697,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         (await stepUp.handle(error, () => handleDecision(decision, true)))
       )
         return;
-      setTerminal((previous) => terminalFromError(error) ?? previous);
+      setTerminal(
+        (previous) => terminalFromError(error, decisionUncertain) ?? previous,
+      );
       setErrorMessage(t(deviceLoginErrorCopy(error), { host: loginServerHost() }));
     } finally {
       if (decisionOperation.current === owner) {

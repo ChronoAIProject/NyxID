@@ -144,12 +144,12 @@ export function agentKeyLoginError(error: unknown): string {
 
 /** Select resolver copy for request failures and key-specific copy for local actions. */
 export function agentKeyActionErrorCopy(failure: unknown, step: string): string {
-  const response = failure as { statusCode?: number; errorCode?: number } | null;
+  const response = failure as { statusCode?: number } | null;
+  const kind = classifyLoginError(failure);
   const useRequestCopy =
     step === "code" ||
     failure instanceof LoginRequestError ||
-    ["rate_limited", "network"].includes(classifyLoginError(failure)) ||
-    (response?.statusCode !== undefined &&
-      ![11908, 11909].includes(response.errorCode ?? 0));
+    ["rate_limited", "network"].includes(kind) ||
+    (response?.statusCode !== undefined && kind !== "rejected");
   return useRequestCopy ? loginErrorCopy(failure) : agentKeyLoginError(failure);
 }

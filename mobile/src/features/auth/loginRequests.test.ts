@@ -5,7 +5,9 @@ import { hookHarness, deferred } from "../assistant/assistantHookTestHarness";
 import { authDevicePreviewSchema } from "../../lib/api/authDeviceSchema";
 import {
   agentKeyOptionsSchema,
+  agentKeyPreviewSchema,
   type AgentKeyApprove,
+  type AgentKeyPreview,
 } from "../../lib/api/agentKeyLoginSchema";
 import * as keyModel from "./agentKeyLoginModel";
 import * as codes from "./deviceUserCode";
@@ -26,7 +28,7 @@ const elements = (root: Element): Element[] => [
         : [],
     ),
 ];
-const preview = (status = "pending", seconds = 60) => ({
+const preview = (status = "pending", seconds = 60): AgentKeyPreview => ({
   ...authDevicePreviewSchema.parse({
     status,
     seconds_remaining: seconds,
@@ -64,7 +66,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
   const api = {
     previewAuthDevice: async () => {
       calls.push("device");
-      return device();
+      return authDevicePreviewSchema.parse(await device());
     },
     approveAuthDevice: async (code: string) => {
       decisionCodes.push(code);
@@ -119,7 +121,9 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
     },
     preview: async (_code: string, flow = "agent-key") => {
       calls.push(flow);
-      return flow === "device" ? device() : agent();
+      return agentKeyPreviewSchema.parse(
+        await (flow === "device" ? device() : agent()),
+      );
     },
   };
   const harness = hookHarness<Element>(
@@ -197,7 +201,20 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
       "../../lib/api/baseUrl": {
         getApiBaseUrl: () => "https://login.example.test/api/v1",
       },
-      "../../lib/api/loginCodeApi": { loginCodeApi: {} },
+      "../../lib/api/loginCodeApi": {
+        loginCodeApi: {
+          options: keyApi.options,
+          mint: async () => {
+            calls.push("mint");
+            await decision();
+            return {
+              request_id: "minted-request",
+              code: "one-time-code",
+              expires_at: "2099-01-01T00:00:00Z",
+            };
+          },
+        },
+      },
       "./LoginCodeStatusView": { LoginCodeStatusView: "LoginCodeStatusView" },
       "../../components/settings/SettingsList": {
         SettingsGroup: "SettingsGroup",
@@ -2211,4 +2228,244 @@ for (const kind of ["device", "agent-key"] as const) {
     assert.deepEqual(env.calls, [kind, "approve"]);
     env.harness.unmount();
   });
+}
+
+test("Agent Key device-flow Continue preserves the requested profile through the Agent Key preview schema", async () => {
+  const env = setup();
+  env.setDevice(async () => ({ ...preview(), requested_profile: "work" }));
+  env.mount("agent-key", { user_code: "ABCDEFGH", flow: "device" });
+  await env.press("Continue");
+  assert.equal(
+    env.nodes().find((node) => node.props.label === "Requested profile")?.props
+      .value,
+    "work",
+  );
+  assert.deepEqual(env.calls, ["device"]);
+  assert.equal(env.approvals.length, 0);
+  env.harness.unmount();
+});
+
+for (const source of ["resume", "automatic"] as const) {
+  test(`Agent Key device-flow ${source} refresh preserves the requested profile through the Agent Key preview schema`, async () => {
+    const env = setup();
+    env.mount("agent-key", { user_code: "ABCDEFGH", flow: "device" });
+    await env.press("Continue");
+    if (source === "automatic") {
+      env.advance(750);
+      await env.press("Choose an Agent Key");
+      const picker = env
+        .nodes()
+        .find((node) => node.type === "WorkspaceSelectionField")!;
+      (picker.props.onChange as (ids: string[]) => void)([
+        (picker.props.options as { value: string }[])[0]!.value,
+      ]);
+      env.harness.flush();
+      env.setDecision(async () => {
+        throw buildApiError(null, 0);
+      });
+      env.advance(750);
+      await env.press("Approve");
+      assertUncertainReview(env, "agent-key");
+    }
+    env.setDevice(async () => ({ ...preview(), requested_profile: "work" }));
+    if (source === "resume") {
+      await env.app("background");
+      env.advance(750);
+      await env.app("active");
+    } else await env.advanceAsync(2000);
+    assert.equal(
+      env.nodes().find((node) => node.props.label === "Requested profile")
+        ?.props.value,
+      "work",
+    );
+    assert.deepEqual(
+      env.calls,
+      source === "resume"
+        ? ["device", "device"]
+        : ["device", "approve", "device"],
+    );
+    env.harness.unmount();
+  });
+}
+
+test("Agent Key device preview schema selection keeps shared Retry-After cooldown recording", async () => {
+  const env = setup();
+  env.setDevice(async () => {
+    throw buildApiError({ error: "rate_limited", error_code: 11206 }, 429, {
+      get: (name) => (name === "Retry-After" ? "12" : null),
+    });
+  });
+  await assert.rejects(
+    env.resolver.previewLoginRequest("ABCDEFGH", "device", "agent-key"),
+  );
+  assert.equal(env.resolver.previewCooldownMs(), 12000);
+  await assert.rejects(
+    env.resolver.previewLoginRequest("ABCDEFGH", "device", "agent-key"),
+    { kind: "rate_limited" },
+  );
+  assert.deepEqual(env.calls, ["device"]);
+  env.advance(12000);
+  env.setDevice(async () => ({ ...preview(), requested_profile: "work" }));
+  const result = await env.resolver.previewLoginRequest(
+    "ABCDEFGH",
+    "device",
+    "agent-key",
+  );
+  assert.equal(
+    "requested_profile" in result && result.requested_profile,
+    "work",
+  );
+});
+
+for (const status of [0, 503]) {
+  test(`Agent Key mint ${status} failure keeps mint retry without uncertainty controls, code input or deferred-link hold`, async () => {
+    const env = setup();
+    env.setDecision(async () => {
+      throw buildApiError(null, status);
+    });
+    env.mount("agent-key", { mint: true });
+    await env.press("Full account session");
+    await env.press("Generate account login code");
+    const expected =
+      status === 0
+        ? "Could not reach the login server. Check your connection and try again."
+        : "NyxID couldn't complete this request. Try again.";
+    assert.ok(env.nodes().some((node) => node.props.children === expected));
+    assert.equal(env.navigationDisabled(), false);
+    assert.ok(
+      !env
+        .nodes()
+        .some(
+          (node) =>
+            node.props.label === "Done" ||
+            node.props.label === "Scan or enter another code" ||
+            node.type === "TextInput",
+        ),
+    );
+    assert.deepEqual(env.calls, ["mint"]);
+    env.setDecision(async () => {});
+    env.advance(750);
+    await env.press("Generate account login code");
+    assert.ok(env.nodes().some((node) => node.type === "LoginCodeStatusView"));
+    assert.deepEqual(env.calls, ["mint", "mint"]);
+    env.harness.unmount();
+
+    const linked = setup();
+    const mint = deferred<void>();
+    linked.setDecision(() => mint.promise);
+    linked.mount("agent-key", { mint: true });
+    await linked.press("Full account session");
+    await linked.press("Generate account login code");
+    linked.params().user_code = "EFGHABCD";
+    linked.harness.render();
+    mint.reject(buildApiError(null, status));
+    await linked.harness.settle();
+    assert.ok(
+      linked
+        .nodes()
+        .some((node) => node.props.label === "Full account session"),
+      "the deferred route applies immediately after mint failure",
+    );
+    assert.ok(
+      !linked
+        .nodes()
+        .some(
+          (node) =>
+            node.props.label === "Done" ||
+            node.props.label === "Scan or enter another code" ||
+            node.type === "TextInput",
+        ),
+    );
+    assert.deepEqual(
+      linked.calls,
+      ["mint"],
+      "applying the link never previews or decides",
+    );
+    linked.harness.unmount();
+  });
+
+  test(`Agent Key restricted mint ${status} failure keeps credential review and retry without request uncertainty`, async () => {
+    const env = setup();
+    env.mount("agent-key", { mint: true });
+    await env.press("Choose an Agent Key");
+    const picker = env
+      .nodes()
+      .find((node) => node.type === "WorkspaceSelectionField")!;
+    (picker.props.onChange as (ids: string[]) => void)([
+      (picker.props.options as { value: string }[])[0]!.value,
+    ]);
+    env.harness.flush();
+    env.setDecision(async () => {
+      throw buildApiError(null, status);
+    });
+    env.advance(750);
+    await env.press("Generate restricted login code");
+    const expected =
+      status === 0
+        ? "Could not reach the login server. Check your connection and try again."
+        : "NyxID couldn't complete this request. Try again.";
+    assert.ok(env.nodes().some((node) => node.props.children === expected));
+    assert.ok(
+      env
+        .nodes()
+        .some((node) => node.props.label === "Generate restricted login code"),
+    );
+    assert.ok(
+      !env
+        .nodes()
+        .some(
+          (node) =>
+            node.props.label === "Done" ||
+            node.props.label === "Scan or enter another code" ||
+            node.props.accessibilityLabel === "User code",
+        ),
+    );
+    assert.equal(env.navigationDisabled(), false);
+    env.setDecision(async () => {});
+    env.advance(750);
+    await env.press("Generate restricted login code");
+    assert.ok(env.nodes().some((node) => node.type === "LoginCodeStatusView"));
+    assert.deepEqual(env.calls, ["mint", "mint"]);
+    env.harness.unmount();
+  });
+}
+
+for (const kind of ["device", "agent-key"] as const) {
+  for (const uncertain of [false, true]) {
+    test(`${kind} ${uncertain ? "uncertain approve retried" : "plain approve"} with an already-delivered error settles ${uncertain ? "approved" : "completed"}`, async () => {
+      const env = setup();
+      const alreadyUsed = buildApiError(
+        {
+          error: "already_delivered",
+          error_code: kind === "device" ? 11205 : 11905,
+        },
+        409,
+      );
+      env.setDecision(async () => {
+        throw uncertain ? buildApiError(null, 0) : alreadyUsed;
+      });
+      await startReviewedDecision(env, kind, "approve");
+      if (uncertain) {
+        assertUncertainReview(env, kind);
+        env.setDecision(async () => {
+          throw alreadyUsed;
+        });
+        env.advance(750);
+        await env.press(
+          kind === "device" ? "Approve full account session" : "Approve",
+        );
+      }
+      assert.equal(env.harness.value().type, "Terminal");
+      assert.equal(
+        env.harness.value().props.state,
+        uncertain ? "approved" : "completed",
+      );
+      assert.equal(env.navigationDisabled(), false);
+      assert.deepEqual(
+        env.calls,
+        uncertain ? [kind, "approve", "approve"] : [kind, "approve"],
+      );
+      env.harness.unmount();
+    });
+  }
 }

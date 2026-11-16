@@ -329,17 +329,19 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       if (current !== generation.current) return;
       actionBusy.current = false;
       if (
+        !mint &&
         criticalWrite &&
+        owner.decision !== null &&
         owner.dispatched &&
         isLoginDecisionUncertain(failure)
       )
-        setDecisionUncertain(owner.decision ?? "approve");
+        setDecisionUncertain(owner.decision);
       if (
         classifyLoginError(failure) === "mfa_step_up" &&
         (await stepUp.handle(failure, () => act(action, true, criticalWrite)))
       )
         return;
-      const terminal = terminalFromError(failure);
+      const terminal = terminalFromError(failure, decisionUncertain);
       if (!mint && terminal && (step !== "code" || terminal !== "unavailable"))
         finish(terminal);
       else if (!automatic)
@@ -368,7 +370,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       flow === "device"
         ? {
             kind: "device" as const,
-            preview: await previewLoginRequest(normalized, flow),
+            preview: await previewLoginRequest(normalized, flow, "agent-key"),
           }
         : await resolveLoginRequest(normalized, "agent-key");
     if (current !== generation.current) return;
@@ -415,7 +417,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       async () => {
         const current = generation.current;
         const requestCode = code;
-        const result = await previewLoginRequest(requestCode, flow);
+        const result = await previewLoginRequest(requestCode, flow, "agent-key");
         if (
           current === generation.current &&
           currentCode.current === requestCode

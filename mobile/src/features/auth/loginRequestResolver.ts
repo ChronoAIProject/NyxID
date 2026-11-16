@@ -26,8 +26,12 @@ export type LoginTerminal =
 export function loginServerHost(): string {
   return new URL(getApiBaseUrl()).host;
 }
-export function terminalFromError(error: unknown): LoginTerminal | null {
+export function terminalFromError(
+  error: unknown,
+  uncertainDecision?: "approve" | "deny" | null,
+): LoginTerminal | null {
   const kind = classifyLoginError(error);
+  if (kind === "completed" && uncertainDecision === "approve") return "approved";
   return kind === "not_found"
     ? "unavailable"
     : kind === "expired" || kind === "completed" || kind === "denied"
@@ -69,13 +73,14 @@ export function recordLoginPreviewFailure(error: unknown) {
 export async function previewLoginRequest(
   code: string,
   kind: LoginRequest["kind"],
+  schema: LoginRequest["kind"] = kind,
 ): Promise<AuthDevicePreview> {
   if (previewCooldownMs())
     throw new LoginRequestError("rate_limited", previewCooldownMs());
   try {
-    return await (kind === "device"
+    return await (kind === "device" && schema === "device"
       ? mobileApi.previewAuthDevice(code)
-      : agentKeyLoginApi.preview(code));
+      : agentKeyLoginApi.preview(code, kind));
   } catch (error) {
     recordLoginPreviewFailure(error);
     throw error;
