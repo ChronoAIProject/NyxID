@@ -29,6 +29,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::services::org_slug;
 
 pub(crate) mod audit;
+mod deletion;
 pub(crate) mod membership;
 pub(crate) mod profile;
 
@@ -271,7 +272,11 @@ pub fn remote_credential_integrity_verification_opt_out(user: &User) -> bool {
 /// once the org is gone; no API call could ever read or mutate them
 /// again. The audit log lives in its own collection and survives
 /// intact.
-pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
+pub async fn delete_org_user(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    actor: &crate::services::audit_service::AuditActor,
+) -> AppResult<()> {
     let _ = get_org_user(db, org_user_id).await?;
 
     // (collection_name, blocker_filter, human_label)
@@ -428,6 +433,8 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             blockers.join(", ")
         )));
     }
+
+    let deletion_marker = deletion::start(db, org_user_id, actor).await?;
 
     // Cascade dead state once the live blockers are clear. Historical
     // approval requests and dead grants would otherwise be unreachable
@@ -750,10 +757,8 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::org_invite::COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
         .await?;
-    // Hard-delete the org user record itself
-    db.collection::<User>(USERS)
-        .delete_one(doc! { "_id": org_user_id })
-        .await?;
+    // Earlier cleanup remains committed if this final unit fails.
+    deletion::complete(db, org_user_id, &deletion_marker, actor).await?;
 
     tracing::info!(org_user_id = %org_user_id, "Org user deleted");
     Ok(())
@@ -1369,7 +1374,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        delete_org_user(&db, &org).await.unwrap();
+        delete_org_user(&db, &org, &audit::fixture_actor())
+            .await
+            .unwrap();
         assert!(
             db.collection::<User>(USERS)
                 .find_one(doc! {"_id":&org})
@@ -1830,3 +1837,6 @@ mod audit_tests;
 
 #[cfg(test)]
 mod lifecycle_tests;
+
+#[cfg(test)]
+mod deletion_tests;
