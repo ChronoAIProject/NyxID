@@ -15,6 +15,9 @@ export const ADOPT_HINT = "run pnpm adopt:i18n (see docs/MULTILINGUAL.md, Native
 const tools = core.catalogTools(LANGUAGES, { label: "mobile" });
 export const { emptyLanguages, analyzePortions, consolidateDuplicates, collectPortions, mergeDeltas } = tools;
 export const discoverPortions = (dir = locales) => core.discoverPortions(dir);
+/** Area directories holding at least one catalog JSON file; stray files (e.g. `.DS_Store`) never make an area. */
+export const catalogAreas = (dir = locales) => core.discoverPortions(dir)
+  .filter((area) => fs.readdirSync(path.join(dir, area)).some((name) => name.endsWith(".json")));
 export const loadPortions = (dir = locales) => tools.loadPortions(dir);
 export const legacyFiles = (dir = locales) => LANGUAGES.map((language) => path.join(dir, `${language}.json`)).filter((file) => fs.existsSync(file));
 
@@ -79,7 +82,8 @@ export const barrelFile = (language, dir = locales) => path.join(dir, `${languag
 /** Write the area catalogs (the shared writer prunes emptied areas) and both barrels. */
 export function writeCatalogs(portions, dir = locales) {
   tools.writePortions(dir, portions);
-  const areas = core.discoverPortions(dir);
+  // The barrels import exactly the areas just written, never a directory that only survives because of a stray file.
+  const areas = Object.keys(tools.nonEmptyPortions(portions));
   for (const language of LANGUAGES) {
     const file = barrelFile(language, dir);
     const text = barrelText(areas, language);
@@ -97,17 +101,18 @@ const placeholders = (text) => (text.match(/\{\{\w+\}\}/g) ?? []).sort(core.code
  */
 export function auditCatalogs(dir = locales) {
   const issues = legacyFiles(dir).map((file) => `legacy monolith ${path.basename(file)} is present; ${ADOPT_HINT}`);
-  const areas = core.discoverPortions(dir);
+  const areas = catalogAreas(dir);
   const barrels = new Set(LANGUAGES.map((language) => `${language}.ts`));
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory() || barrels.has(entry.name) || legacyFiles(dir).some((file) => path.basename(file) === entry.name)) continue;
+    if (entry.isDirectory() || entry.name.startsWith(".") || barrels.has(entry.name) || legacyFiles(dir).some((file) => path.basename(file) === entry.name)) continue;
     issues.push(`unexpected file ${entry.name}; catalogs live in <area>/{${LANGUAGES.join(",")}}.json`);
   }
   const portions = {};
   for (const area of areas) {
     const expected = new Set(LANGUAGES.map((language) => `${language}.json`));
     for (const name of fs.readdirSync(path.join(dir, area))) {
-      if (!expected.has(name)) issues.push(`${area}/${name}: unexpected file; areas hold only ${[...expected].join(" and ")}`);
+      // Non-JSON files (e.g. .DS_Store) are ignored; only unexpected catalogs are reported.
+      if (name.endsWith(".json") && !expected.has(name)) issues.push(`${area}/${name}: unexpected file; areas hold only ${[...expected].join(" and ")}`);
     }
     portions[area] = emptyLanguages();
     for (const language of LANGUAGES) {

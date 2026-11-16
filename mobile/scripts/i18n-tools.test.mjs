@@ -120,6 +120,16 @@ describe("mobile catalog audit", () => {
     assert.deepEqual(catalogWarnings(dir), ["i18n: identical duplicate Save in account, auth; run pnpm sync:i18n"]);
   });
 
+  test("ignores stray non-JSON files in and beside area directories", () => {
+    const dir = catalogDir({ account: ["Save"] });
+    write(path.join(dir, "account/.DS_Store"), "");
+    write(path.join(dir, "emptied/.DS_Store"), "");
+    write(path.join(dir, ".DS_Store"), "");
+    assert.deepEqual(auditCatalogs(dir), []);
+    write(path.join(dir, "account/en.json"), "{}\n");
+    assert.deepEqual(auditCatalogs(dir), ["account/en.json: unexpected file; areas hold only zh-CN.json and zh-TW.json"]);
+  });
+
   test("flags an empty area file", () => {
     const dir = catalogDir({ account: ["Save"], auth: [] });
     assert.deepEqual(auditCatalogs(dir), ["auth/zh-CN.json: empty area; run pnpm sync:i18n", "auth/zh-TW.json: empty area; run pnpm sync:i18n"]);
@@ -360,11 +370,19 @@ describe("mobile adopt and sync tools", () => {
     const r = repository();
     assert.equal(r.run("adopt-i18n.mjs", "--branch", r.base, "--base", "empty", "--onto", r.base).status, 0);
     for (const language of LANGUAGES) write(path.join(r.locales, "auth", `${language}.json`), JSON.stringify({ "Change me": zh("Change me", language), "Sign in": zh("Sign in", language) }));
+    // A stray file keeps the emptied account directory alive after its JSON is pruned.
+    write(path.join(r.locales, "account/.DS_Store"), "");
+    write(path.join(r.locales, ".DS_Store"), "");
     const synced = r.run("sync-i18n.mjs");
     assert.equal(synced.status, 0, synced.stderr);
     assert.equal(synced.stderr, "i18n: identical duplicate Change me in account, auth; moved to shared\n");
     assert.deepEqual(Object.keys(readCatalog(r.locales, "shared", "zh-TW")), ["Change me", "Save"]);
-    assert.equal(fs.existsSync(path.join(r.locales, "account")), false);
+    assert.deepEqual(fs.readdirSync(path.join(r.locales, "account")), [".DS_Store"]);
+    for (const language of LANGUAGES) {
+      const barrel = fs.readFileSync(path.join(r.locales, `${language}.ts`), "utf8");
+      assert.doesNotMatch(barrel, /\.\/account\//);
+      assert.equal(barrel, barrelText(["auth", "shared", "unattributed"], language));
+    }
     assert.deepEqual(auditCatalogs(r.locales), []);
     write(path.join(r.locales, "auth/zh-TW.json"), canonicalText({ Save: "different", "Sign in": zh("Sign in", "zh-TW") }));
     write(path.join(r.locales, "auth/zh-CN.json"), canonicalText({ Save: zh("Save", "zh-CN"), "Sign in": zh("Sign in", "zh-CN") }));
