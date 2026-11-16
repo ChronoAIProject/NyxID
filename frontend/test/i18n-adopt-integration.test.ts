@@ -519,6 +519,27 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
   });
 
   describe("shapes adoption models", () => {
+    it("prints no notice for merges main already contains below the fork (plain rebase)", () => {
+      const f = fixture();
+      // Main itself merges a side branch with --no-ff, the legacy branch forks after that merge, then main splits.
+      f.git("checkout", "-q", "-b", "side-main", f.base);
+      fs.writeFileSync(path.join(f.root, "src/pages/side.ts"), "export const side = 1;\n");
+      f.git("add", "-A", "frontend/src"); f.git("commit", "-q", "-m", "side");
+      f.git("checkout", "-q", "-b", "main-with-merge", f.base);
+      f.git("merge", "-q", "--no-ff", "-m", "main merges side", "side-main");
+      const mainMerge = f.git("rev-parse", "HEAD");
+      f.git("checkout", "-q", "-b", "late-legacy", mainMerge);
+      editMonoliths(f, "b1", (catalog, language) => { catalog["Change me"] = `b1 ${language}`; });
+      splitAt(f, "main-with-merge-split", mainMerge);
+      f.git("checkout", "-q", "late-legacy");
+      expect(spawnSync("git", ["rebase", "main-with-merge-split"], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+      expect(f.git("rev-parse", "REBASE_HEAD^")).toBe(mainMerge);
+      const result = f.adopt();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).not.toContain("i18n: notice");
+      for (const language of LANGUAGES) expect(merged(f)[language]["Change me"]).toBe(`b1 ${language}`);
+    });
+
     it.each(["forward", "reverse"])("adopts a %s merge (legacy branch checked out, or split branch checked out)", (direction) => {
       const f = fixture();
       if (direction === "reverse") f.git("checkout", "-q", "split");
