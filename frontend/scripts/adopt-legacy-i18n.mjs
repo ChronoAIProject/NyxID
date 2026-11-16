@@ -31,34 +31,57 @@ function resolveRefs() {
   throw new Error("no merge or rebase detected; provide --branch, --base and --onto");
 }
 
-function snapshot(ref) {
-  if (ref === "empty") return { app: emptyLanguages(), portions: {}, families: Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()])), sources: [] };
-  const files = git("ls-tree", "-r", "--name-only", ref, "--", `${prefix}/src`).split("\n");
-  const present = new Set(files);
-  const read = (relative) => {
-    const file = `${prefix}/${relative}`;
-    return present.has(file) ? JSON.parse(git("show", `${ref}:${file}`)) : {};
-  };
-  const portions = {};
+/** Read many blobs from one ref with a single `git cat-file --batch` process. */
+function readBlobs(ref, files) {
+  if (!files.length) return new Map();
+  const output = execFileSync("git", ["cat-file", "--batch"], {
+    cwd: repoRoot, input: files.map((file) => `${ref}:${file}\n`).join(""), maxBuffer: 1 << 30,
+  });
+  const blobs = new Map();
+  let offset = 0;
   for (const file of files) {
-    const match = file.slice(prefix.length + 1).match(/^src\/i18n\/locales\/app\/([^/]+)\/(en|zh-CN|zh-TW)\.json$/);
+    const newline = output.indexOf(10, offset);
+    const header = output.toString("utf8", offset, newline);
+    const match = header.match(/^[0-9a-f]+ blob (\d+)$/);
+    if (!match) throw new Error(`${ref}:${file}: unexpected git cat-file header: ${header}`);
+    const start = newline + 1;
+    const end = start + Number(match[1]);
+    blobs.set(file, output.toString("utf8", start, end));
+    offset = end + 1;
+  }
+  return blobs;
+}
+
+function snapshot(ref, { sources: withSources }) {
+  if (ref === "empty") return { app: emptyLanguages(), portions: {}, families: Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()])), sources: [] };
+  const files = execFileSync("git", ["ls-tree", "-r", "-z", "--name-only", ref, "--", `${prefix}/src`], { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28 })
+    .split("\0").filter(Boolean).map((file) => file.slice(prefix.length + 1));
+  const catalogPaths = files.filter((file) => /^src\/i18n\/locales\/.*\.json$/.test(file));
+  const sourcePaths = withSources ? files.filter(isPlacementSource) : [];
+  const blobs = readBlobs(ref, [...catalogPaths, ...sourcePaths].map((file) => `${prefix}/${file}`));
+  const text = (file) => blobs.get(`${prefix}/${file}`);
+  const read = (file) => blobs.has(`${prefix}/${file}`) ? JSON.parse(text(file)) : {};
+  const portions = {};
+  for (const file of catalogPaths) {
+    const match = file.match(/^src\/i18n\/locales\/app\/([^/]+)\/(en|zh-CN|zh-TW)\.json$/);
     if (!match) continue;
     portions[match[1]] ??= emptyLanguages();
-    portions[match[1]][match[2]] = read(file.slice(prefix.length + 1));
+    portions[match[1]][match[2]] = read(file);
   }
   const analysis = analyzePortions(portions);
   if (analysis.issues.length) throw new Error(`${ref}: ${analysis.issues.join("\n")}`);
   const app = Object.keys(portions).length ? analysis.merged : Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${language}.json`)]));
   const families = Object.fromEntries(FAMILIES.map((family) => [family, Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${family}-${language}.json`)]))]));
-  const sources = files.map((file) => file.slice(prefix.length + 1)).filter(isPlacementSource).map((file) => [file, git("show", `${ref}:${prefix}/${file}`)]);
+  const sources = sourcePaths.map((file) => [file, text(file)]);
   return { app, portions, families, sources };
 }
 
 try {
   const refs = resolveRefs();
-  const base = snapshot(refs.base);
-  const branch = snapshot(refs.branch);
-  const onto = snapshot(refs.onto);
+  // Placement reads branch sources, plus onto sources unless adopting from an empty base.
+  const base = snapshot(refs.base, { sources: false });
+  const branch = snapshot(refs.branch, { sources: true });
+  const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
   const conflicts = [];
   const merged = emptyLanguages();
   const families = Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()]));
