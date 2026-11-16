@@ -31,7 +31,9 @@ export function hookHarness<T>(
 ) {
   const inAppBrowserMock = {
     openInAppBrowser: (url: string, options?: unknown) => {
-      const webBrowserMock = (mocks["expo-web-browser"] ?? {}) as {
+      if (!Object.prototype.hasOwnProperty.call(mocks, "expo-web-browser"))
+        throw new Error("inAppBrowser called without an expo-web-browser mock");
+      const webBrowserMock = mocks["expo-web-browser"] as {
         openBrowserAsync?: (url: string, options?: unknown) => unknown;
       };
       const open = webBrowserMock.openBrowserAsync;
@@ -44,7 +46,9 @@ export function hookHarness<T>(
       returnUrl: string,
       options?: unknown,
     ) => {
-      const webBrowserMock = (mocks["expo-web-browser"] ?? {}) as {
+      if (!Object.prototype.hasOwnProperty.call(mocks, "expo-web-browser"))
+        throw new Error("inAppBrowser called without an expo-web-browser mock");
+      const webBrowserMock = mocks["expo-web-browser"] as {
         openAuthSessionAsync?: (
           url: string,
           returnUrl: string,

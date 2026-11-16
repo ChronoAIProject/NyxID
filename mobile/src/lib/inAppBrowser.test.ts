@@ -223,6 +223,24 @@ test("the in-app browser mock resolves a WebBrowser mock registered after harnes
   ]);
 });
 
+test("the in-app browser mock fails loudly without an explicit WebBrowser mock", () => {
+  const h = hookHarness({
+    "react-native": { Platform: { OS: "ios" } },
+  });
+  const consumer = h.load(
+    fileURLToPath(
+      new URL(
+        "../features/assistant/testFixtures/inAppBrowserConsumer.ts",
+        import.meta.url,
+      ),
+    ),
+  ) as { openInAppBrowserForTest(url: string): Promise<unknown> };
+  assert.throws(
+    () => consumer.openInAppBrowserForTest("https://nyx.example/account/unknown"),
+    /inAppBrowser called without an expo-web-browser mock/,
+  );
+});
+
 test("iOS keeps options, argument count and immediate browser invocation unchanged without a lookup", async () => {
   const f = setup("ios");
   const extra: WebBrowserOpenOptions = { controlsColor: "#000000" };

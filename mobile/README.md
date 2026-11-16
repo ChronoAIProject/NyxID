@@ -79,7 +79,7 @@ Each field except the Firebase file path, native association host set and Androi
 | `*_ANDROID_VERSION_CODE` | for release builds | Android `versionCode` — bump per release |
 | `*_UNIVERSAL_LINK_HOST` | optional | iOS `associatedDomains` + Android intent filter |
 | `*_UNIVERSAL_LINK_PATH_PREFIX` | optional | Android intent-filter path |
-| `*_NATIVE_LINK_HOSTS` | optional, empty = `api` | Profile-local association host set: `api` uses the embedded API hosts; `api+frontend` also includes the resolved frontend (falling back to the legal URL) and new-domain frontend. Other values abort the build. The owner's A/B decision is pending; publish the well-known files before adding frontend hosts and rebuilding. |
+| `*_NATIVE_LINK_HOSTS` | optional, empty = `api` | Profile-local association host set: `api` uses the embedded API hosts; `api+frontend` also includes that profile's explicitly configured `FRONTEND_URL` and the new-domain frontend (it never uses the legal URL fallback). Other values abort the build. The owner's A/B decision is pending; publish the well-known files before adding frontend hosts and rebuilding. |
 | `*_ANDROID_HTTPS_APP_LINKS` | optional, default false | Profile-local HTTPS App Links opt-in for the selected API-only or API-plus-frontend host set. Enable only after every selected host serves valid Asset Links; see the native integration runbook. |
 | `*_LEGAL_BASE_URL` | for Privacy / Terms screens | Origin serving `/legal/{privacy,terms}.md` — same files the web dashboard renders. Empty = legal screens show an error. |
 | `*_ALLOWED_EMAILS` | optional | Comma-separated allowlist; empty = allow all signed-in users |

@@ -192,6 +192,13 @@ function resolveProfile(appEnv, env, options = {}) {
   const legalBaseUrl = pick("legalBaseUrl");
   const apiBaseUrl = pick("apiBaseUrl");
   const frontendUrl = explicitFrontendUrl || legalBaseUrl;
+  if (nativeLinkHosts === "api+frontend" && !explicitFrontendUrl) {
+    const frontendVariable = `${appEnv.toUpperCase()}_FRONTEND_URL`;
+    fatal(
+      `${frontendVariable} must be explicitly configured when ` +
+        `${nativeLinkHostsVariable}=api+frontend; the legal base URL cannot be claimed as a native association host.`,
+    );
+  }
   const associatedUrls = [apiBaseUrl, newDomains?.apiBaseUrl ?? ""];
   if (nativeLinkHosts === "api+frontend")
     associatedUrls.push(frontendUrl, newDomains?.frontendUrl ?? "");

@@ -454,20 +454,18 @@ test("http frontend URLs retain iOS association and skip Android HTTPS filters",
   ]);
 });
 
-test("api+frontend uses the resolved legal URL when the frontend URL is empty", () => {
-  const native = nativeLinks(
-    resolveProfile(
-      "dev",
-      profileEnv({
-        DEV_NATIVE_LINK_HOSTS: "api+frontend",
-        DEV_LEGAL_BASE_URL: "http://legal.localhost:3000",
-      }),
-    ),
+test("api+frontend requires an explicitly configured frontend URL", () => {
+  assert.throws(
+    () =>
+      resolveProfile(
+        "dev",
+        profileEnv({
+          DEV_NATIVE_LINK_HOSTS: "api+frontend",
+          DEV_LEGAL_BASE_URL: "http://legal.localhost:3000",
+        }),
+      ),
+    /DEV_FRONTEND_URL.*DEV_NATIVE_LINK_HOSTS.*api\+frontend/,
   );
-  assert.deepEqual(native.associatedDomains, [
-    "applinks:localhost:3001",
-    "applinks:legal.localhost:3000",
-  ]);
 });
 
 for (const value of ["A", "frontend", "api,frontend"]) {

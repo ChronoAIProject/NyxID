@@ -11,7 +11,7 @@ const {
   configureStaleAuthBrowserCleanup(contents: string): string;
 };
 
-// Fixture copied verbatim from the Expo SDK 55.0.12 generated MainActivity.kt.
+// Mirrors Expo SDK 55 MainActivity; re-capture from a fresh `expo prebuild` after any Expo SDK upgrade.
 const mainActivity = readFileSync(
   new URL("./__fixtures__/MainActivity.kt", import.meta.url),
   "utf8",
