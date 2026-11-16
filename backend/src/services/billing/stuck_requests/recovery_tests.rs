@@ -10,6 +10,9 @@ use std::sync::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
     BeforeTerminal,
+    BeforeHoldlessRow(usize),
+    AfterHoldlessRow(usize),
+    AfterHoldlessSummary,
     AfterRows,
     AfterAudit,
     BeforeCommit,
@@ -829,7 +832,7 @@ async fn stuck_request_exit_selects_held_requests_and_preserves_request_wide_fen
             .unwrap()
             .unwrap();
     for _ in 0..4 {
-        recover(&f.db).await.unwrap();
+        recovery::recover(&f.db).await.unwrap();
     }
     assert_eq!(
         untouched,

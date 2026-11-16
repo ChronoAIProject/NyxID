@@ -378,7 +378,7 @@ async fn billing_step_clean_command_counts() {
             Step::Expiry => (3, 12),
             Step::Schedule => (4, 19),
             Step::Ledger => (2, 10),
-            Step::Settlement => (8, 21),
+            Step::Settlement => (10, 23),
             Step::Topup => (2, 2),
         };
         assert_eq!(

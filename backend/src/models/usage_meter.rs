@@ -256,8 +256,22 @@ pub(crate) struct UsageHold {
     pub funding: Option<UsageFunding>,
 }
 
+/// Existing recovery marker; absent on measured usage and ordinary requests.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct StuckRequestExit {
+    pub policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub ended_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_request_exit: Option<StuckRequestExit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_tariff: Option<Box<crate::models::platform_model_tariff::ModelMeterBinding>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

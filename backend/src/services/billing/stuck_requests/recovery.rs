@@ -152,7 +152,7 @@ async fn run(
     Ok(())
 }
 
-fn publication_reason(error: &AppError) -> &'static str {
+pub(super) fn publication_reason(error: &AppError) -> &'static str {
     match error {
         AppError::Conflict(_) => "publication_conflict",
         AppError::DatabaseError(error)
