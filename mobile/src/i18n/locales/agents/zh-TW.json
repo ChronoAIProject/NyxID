@@ -1,0 +1,7 @@
+{
+  "An organization admin can change these settings.": "組織管理員可以變更這些設定。",
+  "Discard memory draft?": "捨棄記憶草稿？",
+  "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord 訊息接收已暫停，正在檢查保留的閘道釋放記錄和安全等待期。NyxID 會持續檢查；重試啟用無法繞過此安全檢查。",
+  "Set up organization billing to serve guests.": "設定組織帳單以服務訪客。",
+  "Your unsaved memory draft will be lost.": "未儲存的記憶草稿將會遺失。"
+}

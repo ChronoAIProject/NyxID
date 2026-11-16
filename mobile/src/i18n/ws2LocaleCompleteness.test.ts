@@ -5,8 +5,8 @@ import ts from "typescript";
 import { ApiError } from "../lib/api/ApiError";
 import { resolveAuthDeviceErrorMessage } from "../lib/api/errorMessages";
 import { agentKeyLoginError } from "../features/auth/agentKeyLoginModel";
-import simplified from "./locales/zh-CN.json";
-import traditional from "./locales/zh-TW.json";
+import simplified from "./locales/zh-CN";
+import traditional from "./locales/zh-TW";
 
 function source(path: string) {
   return ts.createSourceFile(

@@ -1,0 +1,14 @@
+{
+  "Chat column width": "聊天列宽",
+  "Chat layout": "聊天布局",
+  "Decrease {{setting}}": "减小{{setting}}",
+  "How wide conversations can grow on large screens. Saved on this device.": "对话在大屏幕上可扩展的宽度。保存在此设备上。",
+  "Increase {{setting}}": "增大{{setting}}",
+  "Maximum composer height": "输入框最大高度",
+  "Message bubble": "消息气泡",
+  "Reset Chat Layout": "重置聊天布局",
+  "Reset to {{value}} pt": "重置为 {{value}} pt",
+  "Saved on this device for every conversation.": "保存在此设备上，适用于所有对话。",
+  "The color of your messages. Saved on this device.": "您的消息颜色。保存在此设备上。",
+  "The composer grows with your draft up to this height. Saved on this device.": "输入框随草稿增长，直至此高度。保存在此设备上。"
+}
