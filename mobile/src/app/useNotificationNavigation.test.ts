@@ -13,6 +13,7 @@ import * as config from "./navigationLinking";
 import { fixture } from "./workspaceNavigationTestHarness";
 import * as authEpoch from "../lib/auth/authEpoch";
 import * as authAccount from "../lib/auth/authAccount";
+import { setPushDeliverySuppressed } from "../lib/notifications/pushDeliveryState";
 
 import { createNotificationPushController } from "../lib/notifications/notificationPushController";
 
@@ -40,6 +41,7 @@ function setup(initialAccount: string | null = null) {
   const token = (sub: string, revision = 0) =>
     `e30.${Buffer.from(JSON.stringify({ sub, revision })).toString("base64url")}.sig`;
   const telemetry: any[] = [];
+  const browsers: string[] = [];
   let state: any = { ...fixture(), routes: [{ name: "Auth" }] };
   const guards = { current: new Set<symbol>() };
   const actions: any[] = [];
@@ -78,10 +80,14 @@ function setup(initialAccount: string | null = null) {
         },
       },
     },
+    "../features/services/serviceOAuthStore": { recordServiceOAuthReturn: () => {} },
+    "expo-web-browser": { openBrowserAsync: async (url: string) => { browsers.push(url); return { type: "dismiss" }; } },
     "../lib/env": {
+      getFrontendUrl: () => "https://nyx.example",
       NYXID_APP_SCHEME: "nyxid",
       NYXID_TRUSTED_FRONTEND_URLS: ["https://nyx.example"],
-      NYXID_TRUSTED_API_BASE_URLS: [],
+      NYXID_TRUSTED_API_BASE_URLS: ["https://api.nyx.example/api/v1"],
+      NYXID_UNIVERSAL_LINK_HOST: "nyx.onelink.me",
       IS_DEV_BUILD: false,
     },
     "../lib/linkingPrefixes": {
@@ -149,6 +155,7 @@ function setup(initialAccount: string | null = null) {
     invalidations,
     failRead: () => { failRead = true; },
     telemetry,
+    browsers,
     cached,
     linking,
     directLink: (url: string) => {
@@ -220,6 +227,31 @@ test("cold notification waits through sign-in and navigation readiness and is de
   ]);
   f.h.unmount();
   assert.equal(f.unsubscribed(), true);
+});
+
+test("a suppressed cold-start tap is cleared without navigation", async () => {
+  setPushDeliverySuppressed(true);
+  const f = setup();
+  f.tap(response({ conversation_id: "stale-while-unbound" }));
+  await f.h.settle();
+  assert.equal(f.actions.length, 0);
+  assert.equal(f.cleared(), 1);
+  f.h.unmount();
+  setPushDeliverySuppressed(false);
+});
+
+test("notification taps resume after pending delivery is resolved", async () => {
+  const f = setup();
+  await f.signIn();
+  setPushDeliverySuppressed(true);
+  f.tap(response({ conversation_id: "suppressed-thread" }));
+  await f.h.settle();
+  assert.equal(f.actions.length, 0);
+  setPushDeliverySuppressed(false);
+  f.tap(response({ conversation_id: "resumed-thread" }));
+  assert.equal(f.actions.length, 1);
+  assert.match(JSON.stringify(f.actions[0]), /resumed-thread/);
+  f.h.unmount();
 });
 test("warm tap and foreground Open share guards; newest destination replaces an older approval", async () => {
   const f = setup();
@@ -608,3 +640,46 @@ for (const trigger of [
     f.h.unmount();
   });
 }
+
+
+test("service OAuth returns never navigate or supersede a queued notification, warm or cold", async () => {
+  const f = setup();
+  await f.signIn();
+  const guard = Symbol();
+  f.guards.current.add(guard);
+  f.tap(response({ conversation_id: "queued-thread" }));
+  const beforeTelemetry = [...f.telemetry];
+  const routed: string[] = [];
+  let direct = 0;
+  const stop = f.linking.subscribeDirectLinkOpened(() => direct++);
+  const unsubscribe = f.linking.appLinking.subscribe((url: string) => routed.push(url));
+  f.directLink("nyxid://services/oauth-return?status=success");
+  f.setInitialUrl("nyxid://services/oauth-return?status=error&code=access_denied");
+  assert.equal(await f.linking.appLinking.getInitialURL(), null);
+  assert.deepEqual(routed, []);
+  assert.equal(direct, 0);
+  assert.deepEqual(f.telemetry, beforeTelemetry);
+  f.guards.current.delete(guard);
+  f.h.value().flush();
+  assert.equal(f.actions.length, 1);
+  assert.match(JSON.stringify(f.actions[0]), /queued-thread/);
+  stop(); unsubscribe(); f.h.unmount();
+});
+
+test("unsupported first-party HTTPS pages open in-app warm and cold, deduplicate, and preserve native delivery", async () => {
+  const f = setup();
+  const routed: string[] = [];
+  const unsubscribe = f.linking.appLinking.subscribe((url: string) => routed.push(url));
+  f.setInitialUrl("https://api.nyx.example/developer/apps?tab=oauth");
+  assert.equal(await f.linking.appLinking.getInitialURL(), null);
+  f.directLink("https://api.nyx.example/developer/apps?tab=oauth");
+  f.directLink("https://nyx.example/settings/advanced?tab=limits");
+  assert.deepEqual(f.browsers, ["https://nyx.example/developer/apps?tab=oauth", "https://nyx.example/settings/advanced?tab=limits"]);
+  assert.deepEqual(routed, []);
+  for (const url of ["https://evil.example/developer/apps", "https://nyx.onelink.me/developer/apps"]) f.directLink(url);
+  assert.equal(f.browsers.length, 2);
+  f.directLink("https://nyx.example/services");
+  assert.equal(routed.at(-1), "https://nyx.example/services");
+  assert.equal(f.browsers.length, 2);
+  unsubscribe(); f.h.unmount();
+});

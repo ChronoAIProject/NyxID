@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 
+use super::mobile_redirect::is_supported_mobile_redirect_uri;
 use crate::AppState;
 use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
@@ -1309,10 +1310,6 @@ fn resolve_redirect_target(
     }
 }
 
-fn is_supported_mobile_redirect_uri(uri: &str) -> bool {
-    uri.starts_with("nyxid://") || uri.starts_with("exp://")
-}
-
 fn build_success_redirect_url(
     target: &SocialRedirectTarget,
     provider: &str,
@@ -2174,6 +2171,18 @@ mod tests {
         assert!(is_supported_mobile_redirect_uri("exp://192.168.1.1:8081"));
         assert!(!is_supported_mobile_redirect_uri("https://evil.com"));
         assert!(!is_supported_mobile_redirect_uri("http://localhost:3000"));
+    }
+
+    #[test]
+    fn production_social_login_preserves_expo_redirects() {
+        let mut config = crate::test_utils::test_app_config();
+        config.environment = "production".into();
+        assert!(config.is_production());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, format!("{SOCIAL_CLIENT_COOKIE}=mobile; {SOCIAL_REDIRECT_COOKIE}=exp%3A%2F%2F192.168.1.1%3A8081").parse().unwrap());
+        assert!(
+            matches!(resolve_redirect_target(&headers, &config), SocialRedirectTarget::Mobile { redirect_uri } if redirect_uri == "exp://192.168.1.1:8081")
+        );
     }
 
     #[test]

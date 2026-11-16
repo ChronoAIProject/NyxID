@@ -425,6 +425,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             }}
           />
           <SettingsRow
+            icon={ScrollText}
+            label={t("Open-source notices")}
+            onPress={() => navigation.push("OpenSourceNotices")}
+          />
+          <SettingsRow
             icon={Mail}
             label={t("Contact support")}
             value={SUPPORT_EMAIL}

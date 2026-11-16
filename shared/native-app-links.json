@@ -1,0 +1,25 @@
+{
+  "paths": [
+    "/login/device",
+    "/login/agent-key",
+    "/assistant/machines",
+    "/assistant/machines/*",
+    "/chat",
+    "/chat/*",
+    "/groups/*",
+    "/search",
+    "/recents",
+    "/automations",
+    "/automations/*",
+    "/assistant/automations",
+    "/agents",
+    "/agents/*",
+    "/plugins",
+    "/services",
+    "/activity",
+    "/account",
+    "/account/*",
+    "/terms",
+    "/privacy"
+  ]
+}

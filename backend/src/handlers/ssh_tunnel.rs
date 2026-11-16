@@ -152,6 +152,7 @@ pub async fn issue_ssh_certificate(
         &user.email,
         &body.public_key,
         body.principal.trim(),
+        false,
     )
     .await?;
 

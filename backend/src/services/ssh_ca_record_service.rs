@@ -175,10 +175,12 @@ mod tests {
             "person@example.test",
             &subject.public_key().to_openssh().unwrap(),
             "ubuntu",
+            false,
         )
         .await
         .unwrap();
         let certificate = Certificate::from_openssh(&issued.certificate).unwrap();
+        assert!(certificate.extensions().0.is_empty());
         let public = ssh_key::PublicKey::from_openssh(&issued.ca_public_key).unwrap();
         certificate
             .validate([&public.fingerprint(HashAlg::Sha256)])

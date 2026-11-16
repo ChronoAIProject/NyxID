@@ -600,6 +600,9 @@ FCM_SERVICE_ACCOUNT_PATH=           # Firebase service account JSON
 APNS_KEY_PATH= / APNS_KEY_ID= / APNS_TEAM_ID=
 APNS_TOPIC=                         # iOS bundle ID (e.g. dev.nyxid.app)
 APNS_SANDBOX=true                   # Default true in dev
+ANDROID_APP_PACKAGE=               # Public Android application id for assetlinks.json
+ANDROID_APP_SHA256_CERT_FINGERPRINTS= # Comma-separated 32-byte AA:BB:… signing fingerprints
+MOBILE_APP_RETURN_SCHEMES=         # Optional lowercase custom mobile OAuth schemes; malformed values fail startup
 
 # Credential Nodes (optional, defaults shown)
 NODE_HEARTBEAT_INTERVAL_SECS=30

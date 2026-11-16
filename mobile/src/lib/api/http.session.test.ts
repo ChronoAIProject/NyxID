@@ -123,7 +123,8 @@ function setup(
     ) => Promise<unknown>,
     invalidations: () => invalidations,
     sends: () => sends,
-    refresh: exports.refreshAccessTokenIfNeeded as () => Promise<boolean>,
+    refresh: exports.refreshAccessTokenIfNeeded as (force?: boolean) => Promise<boolean>,
+    setExpiry: (expiresAt: number | undefined) => { session.accessTokenExpiresAt = expiresAt; },
     session: () => ({ ...session }),
     commits: () => commits,
     blockSessionRead: () => {
@@ -519,4 +520,16 @@ test("an explicit server rejection of refresh retains the existing 401 sign-out 
   assert.equal(env.sends(), 2);
   assert.equal(env.commits(), 0);
   assert.equal(env.invalidations(), 1);
+});
+
+test("terminal 401 can force one shared refresh despite a future or unknown local expiry", async () => {
+  for (const expiry of [Date.now() + 3_600_000, undefined]) {
+    const env = setup(async () => Response.json({ access_token: "successor", refresh_token: "successor-refresh", expires_in: 3600 }), true);
+    env.setExpiry(expiry);
+    assert.equal(await env.refresh(), false);
+    assert.equal(env.sends(), 0);
+    assert.equal(await env.refresh(true), true);
+    assert.equal(env.sends(), 1);
+    assert.equal(env.session().accessToken, "successor");
+  }
 });

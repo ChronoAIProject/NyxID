@@ -12781,6 +12781,7 @@ mod tests {
             stored.connection_id.as_deref(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();

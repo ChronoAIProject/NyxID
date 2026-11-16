@@ -42,6 +42,37 @@ function linked(path: string) {
   assert.ok(state, path);
   return state;
 }
+
+test("SSH links use the catalog id and preserve an optional exact connection", () => {
+  const deep = linked("ssh/catalog/terminal?principal=ops");
+  const deepRoute = selected(content(hydrate(deep)));
+  assert.equal(deepRoute.name, "SshTerminal");
+  assert.deepEqual(deepRoute.params, {
+    serviceId: "catalog",
+    principal: "ops",
+  });
+
+  const exact = linked(
+    "ssh/catalog/terminal?connectionId=connection&principal=ops",
+  );
+  assert.deepEqual(selected(content(hydrate(exact))).params, {
+    serviceId: "catalog",
+    connectionId: "connection",
+    principal: "ops",
+  });
+
+  const stringAutoConnect = getStateFromPath(
+    "ssh/catalog/terminal?autoConnect=true",
+    navigationLinkingConfig,
+  );
+  const linkedAutoConnect = stringAutoConnect
+    ? selected(content(hydrate(stringAutoConnect))).params as
+        | { autoConnect?: unknown }
+        | undefined
+    : undefined;
+  assert.notEqual(linkedAutoConnect?.autoConnect, true);
+});
+
 const mainEntries = [
   ["AssistantDetails", { agentId: "agent", conversationId: "thread" }],
   ["AssistantHistory", { agentId: "agent" }],
@@ -50,6 +81,10 @@ const mainEntries = [
   ["Agents", { tab: "groups" }],
   ["Plugins", { tab: "skills" }],
   ["Services", undefined],
+  [
+    "SshTerminal",
+    { serviceId: "catalog", connectionId: "connection", principal: "ops" },
+  ],
   ["Machines", undefined],
   ["Activity", { challengeId: "pending" }],
   ["WorkspaceSearch", undefined],
