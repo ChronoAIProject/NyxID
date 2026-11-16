@@ -721,4 +721,56 @@ describe("mobile adopt and sync tools", () => {
     assert.equal(result.status, 0, result.stderr);
     for (const language of LANGUAGES) assert.equal(mergedCatalog(r, language).Save, `area ${language}`);
   });
+
+  for (const direction of ["forward", "reverse"]) {
+    test(`adopts a ${direction} merge (legacy branch checked out, or split branch checked out)`, () => {
+      const r = repository();
+      splitThenLegacyDelta(r);
+      if (direction === "reverse") r.git("checkout", "-q", "split");
+      assert.notEqual(spawnSync("git", ["merge", "--no-commit", direction === "reverse" ? "legacy" : "split"], { cwd: r.repo, encoding: "utf8" }).status, 0);
+      const result = r.run("adopt-i18n.mjs");
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.includes("i18n: MERGE_HEAD has the legacy monoliths and HEAD does not, so MERGE_HEAD is adopted onto HEAD"), direction === "reverse", result.stdout);
+      expectDeltaAdopted(r);
+    });
+  }
+
+  test("guides a reverse merge of a branch that kept the monoliths, and the guidance completes it", () => {
+    const r = repository();
+    mainMovesAfterMixedMerge(r);
+    r.git("checkout", "-q", "split");
+    spawnSync("git", ["merge", "--no-commit", "legacy"], { cwd: r.repo, encoding: "utf8" });
+    const before = r.git("status", "--porcelain");
+    const refused = r.run("adopt-i18n.mjs");
+    assert.notEqual(refused.status, 0);
+    assert.ok(refused.stderr.includes("MERGE_HEAD (--branch) keeps the legacy monoliths beside split areas it inherited from main"), refused.stderr);
+    assert.ok(refused.stderr.includes(`  pnpm adopt:i18n --branch MERGE_HEAD --base ${r.base} --onto HEAD`), refused.stderr);
+    assert.equal(r.git("status", "--porcelain"), before);
+    const guided = runGuidance(r, refused.stderr);
+    assert.equal(guided.status, 0, guided.stderr);
+    expectNothingReverted(r);
+  });
+
+  test("notes merges a rebase drops below its first replayed commit, and still adopts that commit", () => {
+    const r = repository();
+    splitThenLegacyDelta(r);
+    // a1 lands upstream as the same patch, so git skips it and replays only b1, whose parent is the merge M.
+    r.git("checkout", "-q", "-b", "a1", r.base);
+    write(path.join(r.root, "src/features/auth/A1.tsx"), "export const a1 = 1;\n");
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "a1");
+    r.git("checkout", "-q", "-b", "upstream", "split");
+    r.git("cherry-pick", "a1");
+    r.git("checkout", "-q", "-b", "merged", r.base);
+    r.git("merge", "-q", "--no-ff", "-m", "M: merge a1", "a1");
+    const merge = r.git("rev-parse", "HEAD");
+    editMonoliths(r, "b1", (next, language) => { next["Change me"] = `b1 ${language}`; });
+    assert.notEqual(spawnSync("git", ["rebase", "upstream"], { cwd: r.repo, encoding: "utf8" }).status, 0);
+    assert.equal(r.git("rev-parse", "REBASE_HEAD^"), merge);
+    const result = r.run("adopt-i18n.mjs");
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stderr.includes(`i18n: notice: this rebase does not replay merge commit ${merge.slice(0, 9)}, so its catalog resolutions are not carried over`), result.stderr);
+    assert.ok(result.stderr.includes("then pnpm adopt:i18n;"), result.stderr);
+    assert.deepEqual(auditCatalogs(r.locales), []);
+    for (const language of LANGUAGES) assert.equal(mergedCatalog(r, language)["Change me"], `b1 ${language}`);
+  });
 });

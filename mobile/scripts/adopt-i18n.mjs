@@ -30,7 +30,8 @@ try {
     process.exit();
   }
   const repo = gitRepository(root);
-  const refs = repo.resolveAdoptRefs(args, "usage: pnpm adopt:i18n --branch <ref> --base <ref|empty> --onto <ref> | --imports-only");
+  const refs = repo.resolveAdoptRefs(args, "usage: pnpm adopt:i18n --branch <ref> --base <ref|empty> --onto <ref> | --imports-only",
+    { monoliths: LANGUAGES.map((language) => `src/i18n/locales/${language}.json`) });
   const emptyBase = refs.base === "empty";
   // Placement reads branch sources, plus onto sources unless adopting from an empty base.
   const base = snapshot(repo, refs.base, { sources: false });
