@@ -289,6 +289,7 @@ async fn redeem_in_session(
         invite.role,
         invite.scope_source,
         invite.allowed_service_ids,
+        None,
     )
     .await?;
     let membership = org_service::membership::create_in_session(db, creation, tx).await?;

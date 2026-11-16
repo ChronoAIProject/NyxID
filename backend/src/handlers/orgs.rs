@@ -600,10 +600,8 @@ async fn effective_assignment_scope(
 /// get to the membership-create step that would otherwise leave a
 /// freshly inserted org user with zero admins.
 ///
-/// As defense-in-depth, the handler ALSO rolls back the org user insert
-/// if the membership-create step fails for any other reason. Without
-/// that, a partial failure would leave a zero-admin org behind that
-/// nobody could reach -- delete_org also requires a current admin.
+/// The org user, creator membership and required audit intent commit together;
+/// a membership or intent failure leaves no zero-admin organization.
 pub async fn create_org(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -634,70 +632,18 @@ pub(crate) async fn create_org_with_id(
         .ok_or_else(|| AppError::Unauthorized("actor user not found".to_string()))?;
     crate::services::auth_service::ensure_person_user(&actor_user)?;
 
-    let org = match reserved_id {
-        Some(id) => {
-            org_service::create_org_user_with_id(
-                &state.db,
-                id,
-                &body.display_name,
-                body.contact_email.as_deref(),
-                body.avatar_url.as_deref(),
-            )
-            .await?
-        }
-        None => {
-            org_service::create_org_user(
-                &state.db,
-                &body.display_name,
-                body.contact_email.as_deref(),
-                body.avatar_url.as_deref(),
-            )
-            .await?
-        }
-    };
-
-    // Add the creator as Admin. If this fails (network blip, race, etc.)
-    // roll back the org user insert so we never leave behind an org with
-    // no admins. The membership-create call is the only step between the
-    // org user insert and the audit log; if it succeeds the org is
-    // recoverable, if it fails we restore the pre-insert state.
-    let membership = match org_service::create_membership(
+    let id = reserved_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (org, membership) = org_service::profile::create(
         &state.db,
-        &org.id,
-        &actor,
-        OrgRole::Admin,
-        MemberScopeSource::Inherit,
-        None,
+        &id,
+        &body.display_name,
+        body.contact_email.as_deref(),
+        body.avatar_url.as_deref(),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
-    .await
-    {
-        Ok(m) => m,
-        Err(create_err) => {
-            if let Err(rollback_err) = state
-                .db
-                .collection::<User>(crate::models::user::COLLECTION_NAME)
-                .delete_one(mongodb::bson::doc! { "_id": &org.id })
-                .await
-            {
-                tracing::error!(
-                    org_user_id = %org.id,
-                    error = %rollback_err,
-                    "Failed to roll back org user after membership-create failure; manual cleanup required"
-                );
-            }
-            return Err(create_err);
-        }
-    };
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "org_created",
-        Some(serde_json::json!({
-            "org_user_id": org.id,
-            "display_name": body.display_name,
-        })),
-    );
+    .await?;
 
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
@@ -846,7 +792,7 @@ pub async fn update_org(
     require_org_admin(&state.db, &actor, &org_id).await?;
 
     // Validate contact_email when non-empty; empty string clears back to the
-    // synthetic placeholder (see `org_service::update_org_user`). Uses the
+    // synthetic placeholder (see `org_service::profile::update`). Uses the
     // same `validator::ValidateEmail` path as `CreateOrgRequest` so the
     // accept/reject surface matches the create flow.
     if let Some(ref email) = body.contact_email {
@@ -870,14 +816,18 @@ pub async fn update_org(
         }
     }
 
-    let org = org_service::update_org_user(
+    let org = org_service::profile::update(
         &state.db,
         &org_id,
-        body.display_name.as_deref(),
-        body.slug.as_deref(),
-        body.avatar_url.as_deref(),
-        body.contact_email.as_deref(),
-        body.remote_credential_integrity_verification_opt_out,
+        org_service::profile::Update {
+            display_name: body.display_name.as_deref(),
+            slug: body.slug.as_deref(),
+            avatar_url: body.avatar_url.as_deref(),
+            contact_email: body.contact_email.as_deref(),
+            remote_credential_integrity_verification_opt_out: body
+                .remote_credential_integrity_verification_opt_out,
+        },
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
 
@@ -890,18 +840,6 @@ pub async fn update_org(
         feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, membership.role)
             .await?;
     let (is_primary, active_invite_count) = org_state_for_actor(&state.db, &actor, &org_id).await?;
-
-    let contact_email_changed = body.contact_email.is_some();
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "org_updated",
-        Some(serde_json::json!({
-            "org_user_id": org_id,
-            "contact_email_changed": contact_email_changed,
-            "remote_credential_integrity_verification_opt_out_changed": body.remote_credential_integrity_verification_opt_out.is_some(),
-        })),
-    );
 
     Ok(Json(OrgResponse {
         id: org.id,

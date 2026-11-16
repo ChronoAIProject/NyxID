@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
-use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+#[cfg(test)]
 use uuid::Uuid;
+mod audit;
 
 use crate::errors::AppResult;
 use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
@@ -70,6 +71,7 @@ pub async fn list_scopes(
         .collect())
 }
 
+#[cfg(test)]
 pub async fn set_scope(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -77,57 +79,40 @@ pub async fn set_scope(
     allowed_service_ids: Option<Vec<String>>,
     actor_id: &str,
 ) -> AppResult<OrgRoleScope> {
-    let now = Utc::now();
-    let now_bson = bson::DateTime::from_chrono(now);
-    let allowed = match &allowed_service_ids {
-        None => bson::Bson::Null,
-        Some(ids) => {
-            bson::to_bson(ids).map_err(|e| crate::errors::AppError::Internal(e.to_string()))?
-        }
-    };
-
-    let scope = db
-        .collection::<OrgRoleScope>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! { "org_user_id": org_user_id, "role": role.as_str() },
-            doc! {
-                "$set": {
-                    "allowed_service_ids": allowed,
-                    "updated_at": now_bson,
-                    "updated_by": actor_id,
-                },
-                "$setOnInsert": {
-                    "_id": Uuid::new_v4().to_string(),
-                    "org_user_id": org_user_id,
-                    "role": role.as_str(),
-                },
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?
-        .ok_or_else(|| {
-            crate::errors::AppError::Internal(
-                "Role scope upsert did not return the updated row".to_string(),
-            )
-        })?;
-
-    Ok(scope)
+    let mut actor = super::org_service::audit::fixture_actor();
+    actor.user_id = actor_id.to_owned();
+    set_scope_as(db, org_user_id, role, allowed_service_ids, &actor).await
 }
-
+pub async fn set_scope_as(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    role: OrgRole,
+    allowed_service_ids: Option<Vec<String>>,
+    actor: &super::audit_service::AuditActor,
+) -> AppResult<OrgRoleScope> {
+    audit::set(db, org_user_id, role, allowed_service_ids, actor).await
+}
+#[cfg(test)]
 pub async fn clear_scope(
     db: &mongodb::Database,
     org_user_id: &str,
     role: OrgRole,
 ) -> AppResult<()> {
-    db.collection::<OrgRoleScope>(COLLECTION_NAME)
-        .delete_one(doc! { "org_user_id": org_user_id, "role": role.as_str() })
-        .await?;
-    Ok(())
+    clear_scope_as(
+        db,
+        org_user_id,
+        role,
+        &super::org_service::audit::fixture_actor(),
+    )
+    .await
+}
+pub async fn clear_scope_as(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    role: OrgRole,
+    actor: &super::audit_service::AuditActor,
+) -> AppResult<()> {
+    audit::clear(db, org_user_id, role, actor).await
 }
 
 /// Resolve the service scope a membership should enforce right now.

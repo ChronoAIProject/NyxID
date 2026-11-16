@@ -1,4 +1,4 @@
-use super::{ORG_MEMBERSHIPS, USERS, get_org_user, is_duplicate_key_error};
+use super::{ORG_MEMBERSHIPS, USERS, get_org_user_with_session, is_duplicate_key_error};
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -30,6 +30,7 @@ pub(crate) async fn prepare_creation<'a>(
     role: OrgRole,
     scope_source: MemberScopeSource,
     allowed_service_ids: Option<Vec<String>>,
+    mut session: Option<&mut ClientSession>,
 ) -> AppResult<Creation<'a>> {
     let allowed_service_ids = if scope_source == MemberScopeSource::Inherit {
         None
@@ -38,13 +39,15 @@ pub(crate) async fn prepare_creation<'a>(
     };
 
     // Validate the org actually exists and is an org.
-    let _ = get_org_user(db, org_user_id).await?;
+    let _ = get_org_user_with_session(db, org_user_id, session.as_deref_mut()).await?;
     // Validate the member exists and is a person.
-    let member = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": member_user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("user {member_user_id}")))?;
+    let users = db.collection::<User>(USERS);
+    let member = users.find_one(doc! { "_id": member_user_id });
+    let member = match session {
+        Some(session) => member.session(session).await?,
+        None => member.await?,
+    }
+    .ok_or_else(|| AppError::NotFound(format!("user {member_user_id}")))?;
     if !member.user_type.is_person() {
         return Err(AppError::ValidationError(
             "Members must be person accounts, not orgs".to_string(),
@@ -194,6 +197,7 @@ pub(super) async fn create(
         role,
         scope_source,
         allowed_service_ids,
+        None,
     )
     .await?;
     let mut transaction = db.client().start_session().await?;
