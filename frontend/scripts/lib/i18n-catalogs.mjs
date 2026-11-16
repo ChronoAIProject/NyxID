@@ -1,7 +1,12 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import ts from "typescript";
 import { portionForPath } from "./i18n-portions.mjs";
+
+const require = createRequire(import.meta.url);
+let typescript;
+/** TypeScript, loaded on first use: adopting or syncing catalogs with no sources to parse never needs it. */
+const ts = new Proxy({}, { get: (_, name) => (typescript ??= require("typescript"))[name] });
 
 export const LANGUAGES = ["en", "zh-CN", "zh-TW"];
 export const FAMILIES = ["common", "errors", "wizard"];
