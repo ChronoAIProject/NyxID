@@ -147,18 +147,15 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     }
     Ok(())
 }
-pub async fn prepare(
-    state: &AppState,
-    b: &Binding,
-    call: &str,
-    from: &str,
-    to: &str,
-) -> AppResult<(CallSession, bool)> {
+pub(super) fn new_row(b: &Binding, call: &str, from: &str, to: &str) -> CallSession {
     let identity_key = identity(&[super::profiles::provider(b.profile), &b.account_id, call]);
     let now = Utc::now();
-    let row = CallSession {
+    CallSession {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
         id: uuid::Uuid::new_v4().to_string(),
-        identity_key: identity_key.clone(),
+        identity_key,
         user_id: b.user_id.clone(),
         binding_id: b.id.clone(),
         binding_revision: b.revision,
@@ -166,6 +163,8 @@ pub async fn prepare(
         contract_version: 1,
         credential_identity: b.verified_credential_identity.clone(),
         provider_call_id: call.into(),
+        provider_call_leg_id: None,
+        provider_call_session_id: None,
         provider_session_id: None,
         from: from.into(),
         to: to.into(),
@@ -176,6 +175,12 @@ pub async fn prepare(
         answer_dispatched: false,
         relay_dispatched: false,
         hangup_dispatched: false,
+        hangup_attempts: 0,
+        hangup_confirmed: false,
+        provider_seconds: None,
+        billable_seconds: None,
+        absorbed_seconds: None,
+        terminated_quantity_pending: false,
         cap_dispatched: false,
         cap_confirmed: false,
         bootstrap_dispatched: false,
@@ -188,7 +193,9 @@ pub async fn prepare(
         billing_request_id: format!("adapter-call:{}", uuid::Uuid::new_v4()),
         observed_seconds: 0,
         ended_at: None,
+        termination_observed_at: None,
         terminal_evidence: None,
+        admin_evidence_reference: None,
         billing_finalized: false,
         delivery: "generated_not_confirmed".into(),
         heard_prefix_chars: None,
@@ -197,7 +204,19 @@ pub async fn prepare(
         connected_at: None,
         lease_expires_at: now + Duration::seconds(30),
         expires_at: now + Duration::seconds(1800),
-    };
+    }
+}
+pub async fn prepare(
+    state: &AppState,
+    b: &Binding,
+    call: &str,
+    from: &str,
+    to: &str,
+) -> AppResult<(CallSession, bool)> {
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        return super::managed::calls::prepare(state, b, call, from, to, None).await;
+    }
+    let row = new_row(b, call, from, to);
     let mut tx = state.db.client().start_session().await?;
     let db = state.db.clone();
     let binding = b.clone();
@@ -207,6 +226,7 @@ pub async fn prepare(
             super::owner_admission::fence(&db,tx,&binding.user_id).await?;
             let authority=db.collection::<Binding>(BINDINGS).update_one(doc!{"_id":&binding.id,"enabled":true,"revision":binding.revision,"verified_credential_identity":&binding.verified_credential_identity},doc!{"$inc":{"admission_fence":1}}).session(&mut *tx).await?;
             if authority.matched_count!=1{return Err(AppError::AssistantTurnRequired);}
+            if binding.profile==Profile::TelnyxRelay {super::managed::synthesis::initialize(&db,tx,&inserted,None,false).await?;}
             db.collection::<CallSession>(SESSIONS).insert_one(&inserted).session(&mut *tx).await?;Ok(())
         }.await;
         transactions::transaction_result(result)
@@ -253,10 +273,16 @@ pub(super) async fn insert_sms_send(
     let b = b.clone();
     let s = s.clone();
     let row = row.clone();
+    let managed = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        Some(super::managed::admission::read(&db, &b.user_id, &b.credential).await?)
+    } else {
+        None
+    };
     let mut tx = db.client().start_session().await?;
     tx.start_transaction().and_run2(async move |tx| {
         let result: AppResult<()> = async {
             super::owner_admission::fence(&db, tx, &b.user_id).await?;
+            if let Some(a)=&managed {super::managed::admission::fence(&db,tx,a,Utc::now()).await?;}
             let binding = db.collection::<Binding>(BINDINGS).update_one(
                 doc! {"_id":&b.id,"enabled":true,"revision":s.binding_revision,"verified_credential_identity":&s.credential_identity},
                 doc! {"$inc":{"admission_fence":1_i64}},
@@ -269,6 +295,11 @@ pub(super) async fn insert_sms_send(
                 return Err(AppError::AssistantTurnRequired);
             }
             db.collection::<EventReceipt>(EVENTS).insert_one(&row).session(&mut *tx).await?;
+            if let Some(a)=&managed{
+                // Admission binds its still-reserved parts; they are never left unforwarded.
+                let parts=(0..row.reserved_parts.ok_or(AppError::AssistantTurnRequired)?).map(|part|super::sms_delivery::outbound_request_id(&row,part)).collect::<AppResult<Vec<_>>>()?;
+                crate::services::billing::meter::forward_in_session(&db,tx,&parts).await?;
+                super::managed::sms::hold_send(&db,tx,a,&s,&row).await?;super::managed::costs::register(&db,tx,&a.line,&row.id,crate::models::managed_comms::EffectKind::Sms,row.admitted_reference.as_ref().ok_or(AppError::AssistantTurnRequired)?,row.created_at).await?;}
             Ok(())
         }.await;
         transactions::transaction_result(result)
@@ -321,6 +352,10 @@ pub async fn command(state: &AppState, s: &CallSession, field: &str) -> AppResul
     ) {
         return Err(AppError::BadRequest("Invalid call command".into()));
     }
+    if s.managed_claim_id.is_some() && matches!(field, "answer_dispatched" | "bootstrap_dispatched")
+    {
+        super::managed::calls::anchor(state, s).await?;
+    }
     let mut f = doc! {"_id":&s.id,"binding_revision":s.binding_revision};
     f.insert(field, false);
     if field == "relay_dispatched" {
@@ -338,6 +373,9 @@ pub async fn command(state: &AppState, s: &CallSession, field: &str) -> AppResul
 }
 pub async fn receipt(state: &AppState, b: &Binding, event: &str, kind: &str) -> AppResult<bool> {
     let row = EventReceipt {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
         id: uuid::Uuid::new_v4().to_string(),
         identity_key: identity(&[&b.id, &b.revision.to_string(), event]),
         user_id: b.user_id.clone(),
@@ -392,6 +430,11 @@ pub async fn admit(
         return Err(AppError::ValidationError("Utterance exceeds limit".into()));
     }
     super::binding::live(state, b).await?;
+    let managed = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        Some(super::managed::admission::read(&state.db, &b.user_id, &b.credential).await?)
+    } else {
+        None
+    };
     let mut tx = state.db.client().start_session().await?;
     let db = state.db.clone();
     let keys = state.encryption_keys.clone();
@@ -408,6 +451,7 @@ pub async fn admit(
     let claim=tx.start_transaction().and_run2(async move |tx| {
         let result:AppResult<_>=async {
             super::owner_admission::fence(&db,tx,&b.user_id).await?;
+            if let Some(a)=&managed {super::managed::admission::fence(&db,tx,a,Utc::now()).await?;}
             let live=db.collection::<Binding>(BINDINGS).find_one(doc!{"_id":&b.id,"enabled":true,"revision":b.revision}).session(&mut *tx).await?.ok_or(AppError::AssistantTurnRequired)?;
             // Write fence binding revision against concurrent disable/reconfiguration.
             db.collection::<Binding>(BINDINGS).update_one(doc!{"_id":&live.id,"revision":live.revision},doc!{"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now())}}).session(&mut *tx).await?;
@@ -420,7 +464,7 @@ pub async fn admit(
             }
             let updated=db.collection::<CallSession>(SESSIONS).update_one(doc!{"_id":&s.id,"binding_revision":b.revision,"generation":s.generation,"state":{"$in":["prepared","active"]},"expires_at":{"$gt":bson::DateTime::from_chrono(Utc::now())}},doc!{"$inc":{"next_utterance":1},"$set":{"active_turn_id":&ids.turn_id,"reply_turn_id":&ids.turn_id,"delivery":"generated_not_confirmed","heard_prefix_chars":bson::Bson::Null,"heard_prefix_matches_sent":false}}).session(&mut *tx).await?;
             if updated.modified_count!=1{return Err(AppError::AssistantTurnRequired);}
-            let receipt=EventReceipt{id:uuid::Uuid::new_v4().to_string(),identity_key:identity(&[&b.id,&b.revision.to_string(),&s.id,&event]),user_id:b.user_id.clone(),binding_id:b.id.clone(),binding_revision:b.revision,session_id:Some(s.id.clone()),event_kind:"utterance".into(),status:"started".into(),provider_message_id:None,delivery:"unknown".into(),billing_request_id:None,observed_parts:None,reserved_parts:None,billing_finalized:false,from:None,to:None,created_at:Utc::now()};
+            let receipt=EventReceipt{managed_claim_id:None,managed_claim_generation:None,admitted_reference:None,id:uuid::Uuid::new_v4().to_string(),identity_key:identity(&[&b.id,&b.revision.to_string(),&s.id,&event]),user_id:b.user_id.clone(),binding_id:b.id.clone(),binding_revision:b.revision,session_id:Some(s.id.clone()),event_kind:"utterance".into(),status:"started".into(),provider_message_id:None,delivery:"unknown".into(),billing_request_id:None,observed_parts:None,reserved_parts:None,billing_finalized:false,from:None,to:None,created_at:Utc::now()};
             db.collection::<EventReceipt>(EVENTS).insert_one(receipt).session(&mut *tx).await?;
             let existing=db.collection::<AssistantConversation>(THREADS).find_one(doc!{"_id":&s.conversation_id,"user_id":&b.user_id}).session(&mut *tx).await?.is_some();
             let start=engine::TurnStart{
@@ -513,7 +557,12 @@ pub async fn fence_tool(
     Ok(())
 }
 
-/// Freeze the first authoritative terminal observation atomically with its quantity.
+/// BYOK carrier costs belong to the owner. NyxID waives only its own fee after
+/// this server-observed evidence window; managed/platform liability never expires here.
+pub(super) const BYOK_EVIDENCE_WINDOW_HOURS: i64 = 72;
+
+/// Freeze termination and release a managed possibly-live slot in one transaction.
+/// Financial holds remain untouched until independently verified settlement.
 pub async fn terminal(
     state: &AppState,
     s: &CallSession,
@@ -521,21 +570,106 @@ pub async fn terminal(
     seconds: Option<i64>,
     evidence: &str,
 ) -> AppResult<CallSession> {
-    let current = load(state, &s.id).await?;
-    let at = at.min(Utc::now()).max(current.created_at);
-    let quantity = seconds.unwrap_or_else(|| {
-        current
-            .connected_at
-            .map(|start| (at - start).num_seconds().max(0))
-            .unwrap_or(0)
-    });
-    if !(0..=86400).contains(&quantity) {
+    if seconds.is_some_and(|n| !(0..=86400).contains(&n)) {
         return Err(AppError::BadRequest(
             "Invalid terminal call duration".into(),
         ));
     }
-    state.db.collection::<CallSession>(SESSIONS).update_one(doc!{"_id":&s.id,"ended_at":bson::Bson::Null},doc!{"$set":{"state":"closed","ended_at":bson::DateTime::from_chrono(at),"observed_seconds":quantity,"terminal_evidence":evidence},"$inc":{"generation":1}}).await?;
+    let db = crate::services::transaction_service::durable_database(&state.db);
+    crate::services::transaction_service::run_db_only(
+        &db,
+        &(&db, &s.id, at, seconds, evidence),
+        |tx, c| {
+            Box::pin(async move {
+                let (db, id, at, seconds, evidence) = *c;
+                let current = db
+                    .collection::<CallSession>(SESSIONS)
+                    .find_one(doc! {"_id":id})
+                    .session(&mut *tx)
+                    .await?
+                    .ok_or(AppError::AssistantTurnRequired)?;
+                let now = Utc::now();
+                let mut set = doc! {"state":"closed","hangup_confirmed":true};
+                if current.ended_at.is_none() {
+                    set.insert(
+                        "ended_at",
+                        bson::DateTime::from_chrono(at.min(now).max(current.created_at)),
+                    );
+                }
+                if current.termination_observed_at.is_none() {
+                    set.insert("termination_observed_at", bson::DateTime::from_chrono(now));
+                }
+                // A waiver is a frozen fee decision, not zero provider duration. Later
+                // callbacks cannot turn waived work into a new customer charge.
+                if current.provider_seconds.is_none()
+                    && current.terminal_evidence.as_deref() != Some("provider_evidence_unavailable")
+                {
+                    set.insert("terminated_quantity_pending", seconds.is_none());
+                    if let Some(n) = seconds {
+                        set.insert("provider_seconds", n);
+                        set.insert("billable_seconds", n.min(1800));
+                        set.insert("absorbed_seconds", (n - 1800).max(0));
+                        set.insert(
+                            "observed_seconds",
+                            if current.managed_claim_id.is_some() {
+                                n.min(1800)
+                            } else {
+                                n
+                            },
+                        );
+                        set.insert("terminal_evidence", evidence);
+                    }
+                }
+                db.collection::<CallSession>(SESSIONS)
+                    .update_one(doc! {"_id":id}, doc! {"$set":set,"$inc":{"generation":1}})
+                    .session(&mut *tx)
+                    .await?;
+                if current.managed_claim_id.is_some() {
+                    use crate::models::managed_comms::ManagedCallAdmission;
+                    db.collection::<ManagedCallAdmission>(ManagedCallAdmission::COLLECTION_NAME)
+                        .update_one(
+                            doc! {"session_id":id,"slot_held":true},
+                            doc! {"$set":{"slot_held":false}},
+                        )
+                        .session(&mut *tx)
+                        .await?;
+                }
+                Ok(())
+            })
+        },
+    )
+    .await?;
     load(state, &s.id).await
+}
+
+/// Called only after an attempted provider evidence read. Credential loss and
+/// expired records cannot block BYOK cleanup forever. Never applies to managed
+/// or allocated platform credentials, or to calls still possibly live.
+pub(super) async fn waive_unavailable_byok_evidence(
+    state: &AppState,
+    id: &str,
+) -> AppResult<CallSession> {
+    use crate::services::{audit_service, transaction_service};
+    let db = transaction_service::durable_database(&state.db);
+    transaction_service::run_db_only(&db, &(&db,id,state.audit_chain_hmac_key.as_ref().as_ref()), |tx,c| Box::pin(async move {
+        let (db,id,key)=*c;
+        let s=db.collection::<CallSession>(SESSIONS).find_one(doc! {"_id":id}).session(&mut *tx).await?.ok_or(AppError::AssistantTurnRequired)?;
+        if s.managed_claim_id.is_some() || s.ended_at.is_none() || !s.terminated_quantity_pending || s.provider_seconds.is_some() || s.billing_finalized {return Ok(());}
+        let b=db.collection::<Binding>(BINDINGS).find_one(doc! {"_id":&s.binding_id}).session(&mut *tx).await?.ok_or(AppError::AssistantTurnRequired)?;
+        if !matches!(b.credential,CredentialBinding::Connection{..}) {return Ok(());}
+        let now=Utc::now();
+        let Some(observed)=s.termination_observed_at else {
+            // Legacy rows start a fresh server-owned window. Backdated owner
+            // callback times can never accelerate fee waiver.
+            db.collection::<CallSession>(SESSIONS).update_one(doc! {"_id":id},doc! {"$set":{"termination_observed_at":bson::DateTime::from_chrono(now)}}).session(&mut *tx).await?;
+            return Ok(());
+        };
+        if now < observed + Duration::hours(BYOK_EVIDENCE_WINDOW_HOURS) {return Ok(());}
+        db.collection::<CallSession>(SESSIONS).update_one(doc! {"_id":id},doc! {"$set":{"terminal_evidence":"provider_evidence_unavailable","observed_seconds":0_i64,"billable_seconds":0_i64,"terminated_quantity_pending":false}}).session(&mut *tx).await?;
+        audit_service::log_system_event_in_session(db,tx,key,"channel_adapter_provider_evidence_unavailable",serde_json::json!({"session_id":id,"binding_id":s.binding_id,"evidence_window_hours":BYOK_EVIDENCE_WINDOW_HOURS})).await?;
+        Ok(())
+    })).await?;
+    load(state, id).await
 }
 
 pub async fn record_interruption(

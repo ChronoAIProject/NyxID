@@ -140,6 +140,22 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::assistant_group::REQUESTS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (
+            m::managed_comms::ManagedCommsEligibility::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::managed_comms::ManagedLineQuote::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::managed_comms::ManagedLineNotice::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::managed_comms::CallerConfirmationBinding::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::channel_adapter::BINDINGS, doc! {"user_id":owner}),
         (m::channel_adapter::ALLOCATIONS, doc! {"user_id":owner}),
         (
@@ -723,6 +739,15 @@ async fn retain_settled_evidence(db: &Database, job: &PersonalErasureJob) -> App
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(&state.db);
+    if !super::super::call_channels::managed::costs::retain_for_erasure(state, &job.user_id).await?
+    {
+        return Ok(false);
+    }
+    if !super::super::call_channels::managed::lifecycle::erase_personal_fields(&db, &job.user_id)
+        .await?
+    {
+        return Ok(false);
+    }
     if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
         return Ok(false);
     }
@@ -929,7 +954,13 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
             }
         }
         db.collection::<Document>(USERS).delete_one(doc! {"_id":&job.user_id,"is_active":false,"platform_personal_deleting":true,"platform_personal_retirement_pending":{"$ne":true}}).session(&mut tx).await?;
-        Ok(db.collection::<Document>(USERS).find_one(doc! {"_id":&job.user_id}).session(&mut tx).await?.is_none())
+        let removed = db.collection::<Document>(USERS).find_one(doc! {"_id":&job.user_id}).session(&mut tx).await?.is_none();
+        if removed {
+            // The accepted erasure admission barrier remains authoritative.
+            // This temporary managed preparation marker has no retention need.
+            db.collection::<Document>(crate::models::managed_comms::ManagedLineErasure::COLLECTION_NAME).delete_many(doc!{"user_id":&job.user_id}).session(&mut tx).await?;
+        }
+        Ok(removed)
     }.await;
     super::super::org_membership_authority::finish(tx, result).await
 }

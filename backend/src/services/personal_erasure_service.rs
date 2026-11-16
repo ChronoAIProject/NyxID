@@ -110,6 +110,7 @@ pub async fn accept(
             "Organization accounts must use the organization lifecycle".into(),
         ));
     }
+    super::call_channels::managed::lifecycle::prepare_erasure(db, user_id).await?;
     if !preparation::ready_or_enqueue(db, user_id).await? {
         return Err(AppError::ErasurePreparing);
     }
@@ -236,6 +237,7 @@ async fn accept_claimed(
         db.collection::<Document>(USERS).update_one(doc! {"_id":user,"user_type":{"$ne":"org"}},doc! {"$inc":{"erasure_acceptance_revision":1_i64}}).session(&mut tx).await?;
         guard_shared_provider_dependencies(db,user,&mut tx).await?;
         guard_unsettled_channel_effects(db,user,&mut tx).await?;
+        super::call_channels::managed::lifecycle::erasure_guard(db,user,&mut tx).await?;
         channel::guard_in_session(db,user,&mut tx).await?;
         super::erasure_admission::close_in_session(db,user,&mut tx).await?;
         db.collection::<Document>(crate::models::durable_operation_grant::COLLECTION_NAME)

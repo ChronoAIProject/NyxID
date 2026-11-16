@@ -43,14 +43,15 @@ pub fn model_only(service: &DownstreamService) -> bool {
 }
 
 pub fn require_ordinary_use(service: &DownstreamService) -> AppResult<()> {
-    if model_only(service) {
+    if model_only(service) || service.managed_comms_role.is_some() {
         return Err(AppError::NotFound("Service not found".into()));
     }
     Ok(())
 }
 
 pub fn legacy_master_credential(service: &DownstreamService) -> bool {
-    !model_only(service)
+    service.managed_comms_role.is_none()
+        && !model_only(service)
         && !super::retired_service_service::is_retired(service)
         && service.service_category == "internal"
         && service.auth_method != "none"
@@ -61,7 +62,8 @@ pub fn legacy_master_credential(service: &DownstreamService) -> bool {
 }
 
 pub fn legacy_public_master(service: &DownstreamService) -> bool {
-    !model_only(service)
+    service.managed_comms_role.is_none()
+        && !model_only(service)
         && !super::retired_service_service::is_retired(service)
         && service.visibility == "public"
         && service.service_category == "internal"
@@ -100,6 +102,8 @@ pub struct PlatformKeyMetadata {
     pub requires_user_credential: bool,
     pub provider_config_id: Option<String>,
     pub platform_key: Option<PlatformKeyConfig>,
+    #[serde(default)]
+    pub managed_comms_role: Option<crate::models::managed_comms::ManagedCommsRole>,
     /// Computed in the database projection; encrypted bytes never enter discovery.
     pub credential_present: bool,
 }
@@ -128,11 +132,13 @@ struct PlatformKeyView<'a> {
     provider_config_id: Option<&'a str>,
     platform_key: Option<&'a PlatformKeyConfig>,
     credential_present: bool,
+    managed: bool,
 }
 
 impl<'a> From<&'a DownstreamService> for PlatformKeyView<'a> {
     fn from(service: &'a DownstreamService) -> Self {
         Self {
+            managed: service.managed_comms_role.is_some(),
             slug: &service.slug,
             is_active: service.is_active,
             service_type: &service.service_type,
@@ -150,6 +156,7 @@ impl<'a> From<&'a DownstreamService> for PlatformKeyView<'a> {
 impl<'a> From<&'a PlatformKeyMetadata> for PlatformKeyView<'a> {
     fn from(service: &'a PlatformKeyMetadata) -> Self {
         Self {
+            managed: service.managed_comms_role.is_some(),
             slug: &service.slug,
             is_active: service.is_active,
             service_type: &service.service_type,
@@ -166,7 +173,8 @@ impl<'a> From<&'a PlatformKeyMetadata> for PlatformKeyView<'a> {
 
 impl PlatformKeyView<'_> {
     fn has_platform_key(&self) -> bool {
-        if self.service_category == super::retired_service_service::RETIRED_CATEGORY
+        if self.managed
+            || self.service_category == super::retired_service_service::RETIRED_CATEGORY
             || (self.service_category == "internal" && self.slug.starts_with("platform-"))
             || !self.is_active
             || self.service_type != "http"
@@ -537,7 +545,8 @@ pub fn no_auth_available_with_grants(
     owner_id: &str,
     grants: &OwnerGrants,
 ) -> bool {
-    !model_only(service)
+    service.managed_comms_role.is_none()
+        && !model_only(service)
         && service.is_active
         && no_auth_platform_service(service)
         && service.service_type == "http"

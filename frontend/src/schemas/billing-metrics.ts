@@ -11,6 +11,7 @@ export const SERVICE_BILLING_METRICS = [
   "cache_write_tokens",
   "images",
   "voice_seconds",
+  "phone_number_days",
   "sandbox_cpu_millis_seconds",
   "sandbox_memory_mib_seconds",
   "sandbox_disk_gib_seconds",
@@ -52,6 +53,11 @@ export const BILLING_UNITS: Record<
     get label() { return translateUi("cache-write tokens"); },
     get singular() { return translateUi("cache-write token"); },
     tokenFamily: true,
+  },
+  phone_number_days: {
+    get label() { return translateUi("phone number days"); },
+    get singular() { return translateUi("phone number day"); },
+    tokenFamily: false,
   },
   voice_seconds: {
     get label() { return translateUi("voice seconds"); },

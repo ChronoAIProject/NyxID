@@ -41,9 +41,11 @@ const WALLET_ADMISSION_BUSY: &str = "Purchased credit settlement is completing; 
 
 mod machine;
 pub use machine::{
-    MachineFundingCandidates, RuntimeFundingCandidates, prepare_machine_window_funding,
-    prepare_sandbox_window_funding, reserve_machine_window_in_session,
-    reserve_runtime_window_in_session,
+    MachineFundingCandidates, ManagedEffectFundingCandidates, ManagedLifecycleFundingCandidates,
+    RuntimeFundingCandidates, prepare_machine_window_funding, prepare_managed_effect_funding,
+    prepare_managed_rental_funding, prepare_sandbox_window_funding,
+    reserve_machine_window_in_session, reserve_managed_effect_in_session,
+    reserve_managed_rental_in_session, reserve_runtime_window_in_session,
 };
 
 /// Pool admission has a cancellation deadline. Commit every funding hold and

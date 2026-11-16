@@ -284,6 +284,7 @@ mod tests {
                 String::new()
             },
             credential_encrypted: vec![],
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,

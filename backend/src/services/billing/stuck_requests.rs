@@ -66,8 +66,11 @@ fn classify_for(
         .map_err(|_| unavailable())?;
     // Carrier calls have their own terminal-provider evidence, including old
     // rows written before forwarded_owner existed.
-    if request.starts_with("adapter-call:") {
+    if carrier_call(request) {
         return Ok(classified("excluded_channel_outbound"));
+    }
+    if managed_line_effect(request) {
+        return Ok(classified("excluded_managed_line"));
     }
     for (field, label) in [
         ("pool_attempt", "excluded_pool"),
@@ -79,7 +82,7 @@ fn classify_for(
             return Ok(classified(label));
         }
     }
-    if metric.is_runtime_allocation() {
+    if metric.requires_lifecycle_evidence() {
         return Ok(classified("excluded_runtime"));
     }
     let voice_request = voice::is_voice(row);
@@ -188,6 +191,27 @@ fn classify_for(
     Ok(result)
 }
 
+fn carrier_call(request: &str) -> bool {
+    request.starts_with("adapter-call:")
+}
+
+/// Managed-line effect meters are settled only from their durable managed
+/// records (call admission receipts, send/confirmation receipts with fixed
+/// per-part outcomes, inbound liabilities and rental periods), keyed on the
+/// request identity written when the meter opened, never on age or ownership.
+/// Waiving one could contradict a part already recorded as customer-funded.
+fn managed_line_effect(request: &str) -> bool {
+    [
+        "managed-call:",
+        "managed-sms-out:",
+        "managed-inbound:",
+        "managed-line-rental:",
+        "call-confirmation:",
+    ]
+    .iter()
+    .any(|prefix| request.starts_with(prefix))
+}
+
 // Ownership is at request scope: a Realtime/checkpoint coordinator or durable
 // component intent also protects its sibling rows without repeating metadata.
 fn request_blocker(rows: &[Document]) -> Option<&'static str> {
@@ -205,9 +229,16 @@ fn request_blocker(rows: &[Document]) -> Option<&'static str> {
         if row
             .get_str("billing_request_id")
             .ok()
-            .is_some_and(|id| id.starts_with("adapter-call:"))
+            .is_some_and(carrier_call)
         {
             return Some("excluded_channel_outbound");
+        }
+        if row
+            .get_str("billing_request_id")
+            .ok()
+            .is_some_and(managed_line_effect)
+        {
+            return Some("excluded_managed_line");
         }
 
         if voice::is_voice(row)
@@ -221,7 +252,7 @@ fn request_blocker(rows: &[Document]) -> Option<&'static str> {
         }
         if let Ok(metric) =
             bson::from_bson::<BillingMetric>(row.get("metric").cloned().unwrap_or(Bson::Null))
-            && metric.is_runtime_allocation()
+            && metric.requires_lifecycle_evidence()
         {
             return Some("excluded_runtime");
         }

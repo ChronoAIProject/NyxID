@@ -399,6 +399,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: AdminCatalogCommands,
     },
+    /// NyxID-managed phone lines: eligibility, inventory, accounts and margin report
+    Line {
+        #[command(subcommand)]
+        command: crate::commands::admin_line::AdminLineCommands,
+    },
 }
 
 #[derive(Subcommand)]

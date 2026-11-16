@@ -58,6 +58,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Approval Management](#approval-management)
   - [Telegram New Channel Creation](#telegram-new-channel-creation)
   - [NyxBot service adapters](#nyxbot-service-adapters)
+  - [NyxID-managed phone lines](#nyxid-managed-phone-lines)
   - [Webhooks](#webhooks)
 - [Owner NyxBot invocations](#owner-nyxbot-invocations)
 - [Assistant voice and dictation](#assistant-voice-and-dictation)
@@ -9522,6 +9523,80 @@ Provider-facing routes authenticate their own protocol instead of a human login:
 Caller messages never grant owner authority. Specialist guest grants, live
 binding/session authority and catalog operation policy remain mandatory at
 execution. Provider retries do not automatically repeat uncertain effects.
+
+### NyxID-managed phone lines
+
+NyxID-owned numbers in platform custody, claimed by approved merchants and
+answered by one of their specialists. The default-off `nyxbot:managed-lines` flag
+is additive to `nyxbot:service-adapters` and eligibility; new claims, quotes,
+periods, admissions and configuration require security readiness. Operator
+guide: [MANAGED_PHONE_LINES.md](MANAGED_PHONE_LINES.md).
+
+Prefix every path with `/api/v1`. All routes below are in the human-only group:
+a first-party human session is required, and API keys, service accounts,
+delegated and relay tokens are refused. Administrator routes additionally check
+live platform-Admin authority inside their transaction; the report also accepts
+operators. Lists accept `after` and return `next_after_id` (report:
+`next_after`). A stored row that cannot be read never fails a listing: merchant
+lists omit it, the admin line and account lists also return the additive
+`unreadable_ids` array naming rows that need repair, and the cursor still advances
+past them (the server logs only the collection and ID). Lifecycle writes take a UUID v4 `request_id` scoped to the actor:
+replaying the same ID and payload returns the original outcome, while a different
+payload with the same ID is `409`. Money is a decimal credit string.
+
+Merchant routes:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/managed-lines/eligibility` | The caller's eligibility; `404` when not approved. |
+| POST | `/managed-lines/eligibility/terms` | `{revision, terms:{managed_line, elevenlabs_eua}}` records clickwrap acceptance of the exact required versions; 204. |
+| GET | `/managed-lines` | Available lines plus the caller's claimed, suspended and releasing lines with claim, coverage `[covered_from, covered_until)`, `period_index`, binding IDs/revision and any pending renewal quote. |
+| POST | `/managed-lines/{id}/quotes` | `{kind}` with `{"kind":"claim"}`, `{"kind":"renewal","claim_id","generation","period_index"}` or `{"kind":"resume","claim_id","generation"}`; returns rental and usage rates (`purpose`: `rental`, `calls`, `sms`, `premium_voice`), terms, voice options and `accept_before` (15 minutes). Throttled. |
+| POST | `/managed-lines/claims` | `{request_id, quote_id, line_id, agent_id, voice_tier, standard_voice?, enable_sms, caller_confirmations, auto_renew, accepted_terms_versions}`; funds the first 30-day period and creates the bindings in one transaction. Returns `{request_id, kind, line_id, claim_id, period_id}`. |
+| POST | `/managed-lines/coverage` | `{request_id, quote_id, auto_renew, accepted_terms_versions}` with a renewal or resume quote. Renewal begins at the previous `covered_until`; resume begins now. |
+| POST | `/managed-lines/releases` | `{request_id, line_id, claim_id}`; stops new effects and drains to cooldown. Paid periods are not refunded. |
+| PUT | `/managed-lines/{id}/standard-voice` | `{claim_id, binding_revision, option:{voice, language}}`; refused during a live call; 204. |
+| PUT | `/call-adapters/bindings/{id}/caller-confirmations` | `{enabled, voice_revision, sms_binding_id}`. Managed lines use the claim's SMS binding (`sms_binding_id: null`); BYOK requires a provider-proven same-account, same-number SMS binding. 204. |
+
+Administrator routes:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET, PUT | `/admin/managed-comms/eligibility`, `/admin/managed-comms/eligibility/{owner_id}` | List, or create/update with `expected_revision` (`null` to create). A terms change requires merchant acceptance before admissions continue. |
+| POST | `/admin/managed-comms/eligibility/{owner_id}/apply` | `{revision}`: apply an accepted revision to the owner's claims; 204. |
+| POST | `/admin/managed-comms/eligibility/{owner_id}/revoke` | `{revision}`: suspend every claim (`eligibility_revoked`) and disable bindings; 204. |
+| GET | `/admin/managed-lines` | Inventory with state, suspension, claim summary, `live_calls`, stable URLs, regulatory/tariff evidence, `cost_policy_revision` and `premium_enabled`. |
+| POST | `/admin/managed-lines/prepare` | Allocate a line UUID and return its stable `voice_url` and `sms_url`; grants no authority. |
+| POST | `/admin/managed-lines` | Register a prepared line after provider proof (ownership, stable inbound URLs, empty Twilio voice fallback, Telnyx channel limit) and underwriting capacity. |
+| PUT | `/admin/managed-lines/{id}` | `{revision, regulatory, supplier_tariffs, call_slot_limit, calls_per_minute, sms_per_minute}`; re-proves the provider resources, refreshes the Telnyx channel limit and revalidates underwriting capacity. Identity, resources, capabilities and billing services are immutable. Refused for retired lines. |
+| POST | `/admin/managed-lines/{id}/suspend` | `{revision}` for an available or claimed line: disables bindings, fences sessions and requests hangups. Returns `{line_id, claim_id, revision, state, suspension, live_calls, termination_pending}`. Never requires readiness. |
+| POST | `/admin/managed-lines/{id}/resume` | `{revision}` for `suspended{admin}`. A claim whose paid coverage ended meanwhile becomes `suspended{unpaid}` with a fresh seven-day retention window. Same response. |
+| POST | `/admin/managed-lines/{id}/retire` | `{revision, supplier_released_at?}` (RFC 3339) for unclaimed, cooling down, pending-reassignment or admin-suspended lines; on an already retired line it records the supplier release once. Custody is retained; retired lines no longer reserve underwriting capacity. Same response. |
+| POST | `/admin/managed-lines/{id}/approve-reassignment` | `{revision}`: return a line whose cooldown ended to `available`; 204. |
+| POST | `/admin/managed-lines/releases` | Admin release of a claim; same body and response as the merchant route. |
+| PUT | `/admin/managed-lines/{id}/standard-voices` | `{revision, options:[{voice, language}]}`; must include the provider default and keep any claimed voice; 204. |
+| PUT | `/admin/managed-lines/{id}/cost-policy` | `{revision, fx, schemas, inventory}`; each save is a new immutable revision. `inventory` is `{cycle:"calendar_month", cycle_anchor:<RFC 3339>, amount, currency, source, fx_policy_revision}`; the anchor is immutable once saved. 204. |
+| GET | `/admin/managed-lines/accounts` | Trusted Twilio/Telnyx accounts with underwriting and speech configuration (references only, never credentials) and `premium_enabled`. |
+| POST | `/admin/managed-comms/accounts/{id}/rotate` | `{expected_revision, credential}`; proves the same provider account, every line whose number the supplier still holds (supplier-released numbers are skipped; with none left, the provider account identity read) and every unfinished effect before storing; 204. |
+| PUT | `/admin/managed-lines/accounts/{id}/underwriting` | Telnyx underwriting policy (`revision`, `enabled`, acceptance text/version, paid-tier and ceiling evidence, detail-record evidence, tariff/FX revisions, `components`, `rolling_budget`). `components[]` are `{kind, credits_per_second, increment_seconds, minimum_seconds}` with `credits_per_second` an exact decimal credit string such as `"0.0002"`; `rolling_budget` is a decimal string. BSON extended JSON and JSON numbers are refused. 204. |
+| PUT | `/admin/managed-lines/accounts/{id}/premium` | `{revision, per_call_characters, greeting?, wrapup?, premium?}`; premium proves the Telnyx integration-secret identifier and requires plan tier Scale, Business or Enterprise and the OEM terms version; 204. |
+| PUT | `/admin/managed-lines/premium-switch` | `{enabled}`: global premium kill switch, rechecked at every synthesis block; 204. |
+| POST | `/admin/managed-lines/calls/{session_id}/resolve-evidence` | `{provider_seconds, provider_reference}` for a terminated managed call with permanently missing evidence; frozen and audited; 204. `/admin/call-adapters/sessions/{id}/resolve-evidence` is the BYOK equivalent. |
+| GET | `/admin/managed-lines/report` | `from`, `until` (UTC midnights, at most 31 days), optional `line_id`, `after`. Per line/day billed credits, actual and estimated cost, inventory cost, estimated margin, actual margin (only when every component is a reconciled provider record), unknown components, absorbed seconds/parts and budget state. Admin or operator. |
+| GET | `/admin/managed-lines/report/effects` | `line_id`, `from`, `until`, `after`: per-effect `kind`, `created_at`, component coverage, evidence quality and original-currency components. Admin or operator. |
+
+Provider-facing, unauthenticated by session, outside JWT middleware:
+
+| Method | Path | Authentication and transport |
+| --- | --- | --- |
+| POST | `/webhooks/managed-lines/{id}/voice` | Twilio signature or Telnyx Ed25519 for the exact configured URL with the trusted account's material; bounded body; reject-before-answer when no eligible, funded claim or slot. |
+| POST | `/webhooks/managed-lines/{id}/sms` | Same authentication; every inbound message first records liability, then optional delivery to the current claimant. |
+
+`GET /api/v1/admin/chain-verification` includes `managed_comms`
+(`pending_cost_effects`, `unknown_inventory_lines`, `report_path`) for the
+Integrity page. Exhausted managed spend or underwriting capacity returns error
+13400 `managed_budget_exhausted` (HTTP 429); other refused admissions return
+`409` with a non-secret reason.
 
 
 ### Credit Allocations

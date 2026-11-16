@@ -88,7 +88,23 @@ Ordinary unknown forwarded work with a positive reservation is ended only after 
 is absent beyond the registry window and margin. Legacy work additionally predates
 every live registration by an hour. Final quantities, final checkpoints and durable
 intents recover first; tagged pool/Realtime, managed/certified execution, runtime
-retain their own exits. A terminal transaction competes with the real
+retain their own exits. Managed phone-line effect meters (`managed-call:`,
+`managed-sms-out:`, `managed-inbound:`, `managed-line-rental:` and
+`call-confirmation:` request IDs) are excluded by that durable identity in both
+lanes and protect their whole request: their admission, send, liability and
+period records fix each part's funding, so recovery never waives them. Parts
+reserved before an admission transaction (caller confirmations and managed
+replies) are forwarded inside that transaction, which refuses if any part was
+already released. A refused or interrupted effect releases its unforwarded parts
+immediately; the managed reservation sweep releases any left after two minutes
+and finishes managed replies that never passed their dispatch barrier as unsent.
+A dispatched caller-confirmation (managed or owner-funded) or managed reply part
+whose outcome stays unknown settles on provider evidence: a known provider
+message ID is read through the fixed-origin, no-redirect provider read. Without
+provider-confirmed evidence 72 hours after dispatch, the sweep settles it at
+zero, records `terminal_evidence = "provider_evidence_unavailable"` on the send
+receipt and cost evidence with a metadata-only audit, and a later callback never
+charges it. A terminal transaction competes with the real
 finalizer and records a chained metadata audit; ordinary settlement then returns
 unused holds. `stuck_requests::policy::unknown_consumption_policy` is the single
 charging choice: the default final zero waives genuinely unknown consumption.
@@ -823,6 +839,46 @@ is durable. Lago fee/tax cent rounding remains an ordinary provider-refresh
 `external:lago` adjustment. No ledger/hash encoding, dedupe key or checkpoint
 protocol changes. Legacy rows without tax fields settle pre-tax. Deploy all
 replicas before enabling Lago customer taxes; see [operations](BILLING_OPERATIONS.md).
+
+## Managed phone line lifecycle funding
+
+NyxID-managed phone lines ([MANAGED_PHONE_LINES.md](MANAGED_PHONE_LINES.md)) add
+the closed metric `phone_number_days`. It is priced only on a line's dedicated
+rental billing service platform lane and synchronized to Lago like any other
+metric; ordinary proxy requests can never produce it. It appears in reservation
+estimates, final quantities, stale-reservation handling, allowance authoring and
+discovery (`allowance_metrics`), usage rollups, admin usage, the frontend metric
+registry and CLI units.
+
+- **Required prices.** Managed rental, voice, premium and SMS prices are required:
+  missing, stale, retired or unsynced prices fail closed. The ordinary "an
+  unsynced extra is free" rule does not apply, and no legacy fallback exists.
+- **Managed lifecycle contract.** Rental funding uses the existing caller-owned
+  transaction primitive through an explicit managed lifecycle contract
+  (`services/billing/managed_lifecycle.rs`). Ordinary `voice_seconds` and other
+  metrics are not reclassified as runtime allocations; machine runtime callers
+  still reject them.
+- **Period receipts.** Each 30-day period reserves 30 `phone_number_days` with
+  billing request ID `managed-line-rental:{claim_id}:{period_index}` in the same
+  majority transaction as its immutable coverage receipt, the claim/line fences
+  and the monthly spend hold. The period rate is pinned on the receipt; there is
+  no unfunded grace and paid periods are never refunded. Settlement and journaling
+  follow the normal recoverable path; a missing rental receipt produces a
+  metadata-only `managed_rental_diagnostics` row and defers only that row.
+- **Calls.** One admission transaction funds both voice meters
+  (`managed-call:{session_id}:base` and, for premium, `:premium`) with 1,800
+  reserved seconds each, the spend and underwriting holds and the call slot.
+  Finalization verifies every expected usage row; missing rows are a recovery
+  error, never an empty successful settlement. Billable seconds are
+  `min(provider seconds, 1800)`; absorbed seconds are platform exposure and are
+  never billed later.
+- **SMS.** Each inbound part is either customer-funded under the current claim or
+  absorbed, once. Caller confirmations reserve per-part rows
+  `call-confirmation:{operation_id}:{part}`.
+- **Monthly managed spend.** Optional per merchant: pre-tax managed retail
+  charges including benefit-funded shares, by UTC month of admission, enforced by
+  the shared `managed_budgets` primitive (holds replaced by recognized amounts
+  at settlement). Exhaustion returns 13400 `managed_budget_exhausted`.
 
 ## Organization channel guest budgets
 

@@ -51,6 +51,57 @@ effects accept `Delivered` or `NotFound`. Bulk domain retries rearm only effects
 explicitly classified `single_attempt: false`; single-attempt retries use the
 per-effect reconciliation disclosure.
 
+## Managed phone lines
+
+Preparation fences the owner against new claims/renewals, disables managed
+bindings and releases claims. Unsettled effects block acceptance; custody stays
+with the platform. Cleanup, evidence capture and committed rental settlement
+continue when managed security readiness or the admission flag is unavailable.
+
+Local cleanup removes managed eligibility, quotes and notices; it scrubs the
+claim's `user_id`, specialist, consent and binding references. The temporary
+`managed_line_erasure_preparations` preparation marker is deleted in the same transaction
+that removes the source user after local cleanup. It is not a retained tombstone;
+the existing accepted erasure admission barrier prevents successor writes.
+
+Metadata-only financial attribution remains under the existing billing retention
+policy: `managed_line_requests.actor_id` (immutable request/digest outcome),
+`managed_budgets` budget identity (the owner budget key plus month window), usage meters and
+ledger attribution, paid period receipts, admission receipts, effect-route
+identities and supplier-cost evidence. Routing and period records refer to claim
+IDs/generations, rather than preserving the erased claim's personal fields. No
+provider credentials, caller content or transcripts enter these records. Rental
+recovery diagnostics retain meter/request IDs and finite reason codes only.
+
+`managed_line_quarantines` retains unknown authenticated SMS-receipt identities
+so an uncorrelated callback cannot select a later claimant. These metadata-only
+routing tombstones contain trusted-account/line/provider-effect IDs, kind and
+occurrence time; they contain no tenant, caller, body, transcript or credential.
+Like effect-route tombstones they have no TTL and remain subject to the managed
+routing/financial evidence retention policy after owner erasure. They grant no
+new execution authority. `managed_line_rate_windows` is operational throttling
+state, at most one row per line and kind; its sixty-second event window is
+pruned at admission, and its TTL expires two minutes after the latest admission.
+Legacy rows acquire that expiry on their next write and remain bounded by the
+same unique line/kind key meanwhile.
+
+Premium voice, caller confirmations and reconciliation (M5/M6):
+`caller_confirmation_bindings` is personal owner state and is deleted with the
+owner's bindings. `managed_call_confirmations` retains metadata only (session,
+tool invocation, ordinal, payload digest, binding identities/revisions, status,
+per-part billing request IDs, model-asserted consent flag and the admitted
+reference); it never stores the message text or the caller's number.
+`managed_character_allowances`, `managed_character_blocks` and
+`managed_character_months` hold session-scoped character counters and fences
+(no text) for financial recovery. `managed_comms_cost_evidence` drops its
+tenant owner link once finalized billed credits are frozen
+(`costs::retain_for_erasure`); erasure waits until that is possible. Supplier
+inventory costs (`managed_inventory_costs`), cost policies
+(`managed_cost_policies`), speech/premium configuration
+(`managed_voice_accounts`) and the premium switch (`managed_voice_switches`) are
+platform records without personal data. All retained rows follow the billing
+retention policy and grant no new execution authority.
+
 ## Durable phases and completion
 
 The accepted intent has a deterministic per-person identity, explicit policy

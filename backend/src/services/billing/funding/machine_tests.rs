@@ -37,14 +37,17 @@ fn machine_funding_requires_a_finite_distinct_positive_reservation() {
         periods: vec![],
         metric: BillingMetric::MachineRunningSeconds,
         maximum_quantity: MAX_RUNTIME_WINDOW_SECONDS,
+        managed_lifecycle: false,
     };
     assert!(validate_layer(OWNER, &candidates, &layer(300)).is_ok());
     assert!(validate_layer(OWNER, &candidates, &layer(301)).is_err());
     assert!(validate_layer(OWNER, &candidates, &layer(0)).is_err());
     assert!(validate_layer("other-owner", &candidates, &layer(1)).is_err());
     let mut invalid = layer(1);
-    invalid.metric = BillingMetric::VoiceSeconds;
-    assert!(validate_layer(OWNER, &candidates, &invalid).is_err());
+    for metric in [BillingMetric::VoiceSeconds, BillingMetric::PhoneNumberDays] {
+        invalid.metric = metric;
+        assert!(validate_layer(OWNER, &candidates, &invalid).is_err());
+    }
     invalid = layer(1);
     invalid.credits_per_unit_micros = 0;
     invalid.credits_per_unit_pico = Some(0);
@@ -840,6 +843,7 @@ fn sandbox_windows_bind_resource_units_and_reject_invalid_bounds() {
             periods: vec![],
             metric,
             maximum_quantity: 2_457_600,
+            managed_lifecycle: false,
         };
         let mut request = layer(2_457_600);
         request.metric = metric;
@@ -952,5 +956,145 @@ async fn sandbox_bundle_reserves_exact_shared_funds_and_rolls_back_all_component
         wallet(&db).await.available_credits().unwrap(),
         Credits::ZERO
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_phone_number_days_contract_uses_allowance_grant_wallet_tax_and_atomic_rollback() {
+    use crate::models::managed_comms::{ManagedLinePeriod, RateSnapshot};
+    let db = fixture("managed_rental_funding_splits", 100).await;
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    benefits(&db).await;
+    db.collection::<Document>(ALLOWANCES)
+        .update_one(
+            doc! {"_id":"matching"},
+            doc! {"$set":{"metric":"phone_number_days"}},
+        )
+        .await
+        .unwrap();
+    let mut config = super::super::super::taxes::zero_config();
+    config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":"9"}]);
+    let profile =
+        super::super::super::taxes::resolve_config(OWNER, "subscription", &config).unwrap();
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    db.collection::<crate::models::billing_tax_profile::BillingTaxProfile>(
+        crate::models::billing_tax_profile::COLLECTION_NAME,
+    )
+    .insert_one(profile)
+    .await
+    .unwrap();
+    let candidates = prepare_managed_rental_funding(&db, OWNER, SKU, SKU, Utc::now())
+        .await
+        .unwrap();
+    let mut layer = layer(30);
+    layer.metric = BillingMetric::PhoneNumberDays;
+    layer.lago_metric_code = "managed_phone_number_days".into();
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    let reserved = reserve_managed_rental_in_session(
+        &db,
+        &mut tx,
+        OWNER,
+        WALLET,
+        &candidates,
+        layer.clone(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reserved.layers[0].allowance_reservations[0].quantity, 2);
+    assert_eq!(reserved.layers[0].grant_reservations[0].amount, credits(3));
+    let gross =
+        super::super::super::taxes::gross_ceiling(credits(25), "9".parse().unwrap()).unwrap();
+    assert_eq!(reserved.total_reserved_credits, gross);
+    let mut meter = row("managed-rental", &reserved);
+    meter.quantity = Some(30);
+    meter.status = crate::models::usage_meter::UsageStatus::Finalized;
+    db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+        .insert_one(&meter)
+        .session(&mut tx)
+        .await
+        .unwrap();
+    // The lifecycle contract commits its funded coverage receipt with the
+    // meter. Settlement deliberately retains holds if that evidence is absent.
+    let now = Utc::now();
+    db.collection::<ManagedLinePeriod>(ManagedLinePeriod::COLLECTION_NAME)
+        .insert_one(ManagedLinePeriod {
+            id: Uuid::new_v4().to_string(),
+            claim_id: Uuid::new_v4().to_string(),
+            managed_claim_generation: 1,
+            period_index: 0,
+            covered_from: now,
+            covered_until: now + chrono::Duration::days(30),
+            quantity: 30,
+            rate: RateSnapshot {
+                service_id: SKU.into(),
+                service_slug: SKU.into(),
+                metric: BillingMetric::PhoneNumberDays,
+                rate: credits(1),
+                lago_metric_code: layer.lago_metric_code.clone(),
+                revision: "fixture-one".into(),
+            },
+            billing_request_id: meter.billing_request_id.clone(),
+            usage_row_ids: vec![meter.id.clone()],
+            funded: true,
+            spend_hold_id: None,
+            created_at: now,
+        })
+        .session(&mut tx)
+        .await
+        .unwrap();
+    tx.commit_transaction().await.unwrap();
+    // A subsequent failed lifecycle must roll all benefit and gross holds back.
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    reserve_managed_rental_in_session(
+        &db,
+        &mut tx,
+        OWNER,
+        WALLET,
+        &candidates,
+        layer.clone(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    tx.abort_transaction().await.unwrap();
+    assert_eq!(wallet(&db).await.reserved_credits, gross);
+    super::super::super::reservation::claim_released_and_settle(&db, &meter)
+        .await
+        .unwrap();
+    super::super::super::reservation::claim_released_and_settle(&db, &meter)
+        .await
+        .unwrap();
+    assert_eq!(wallet(&db).await.reserved_credits, Credits::ZERO);
+    assert_eq!(wallet(&db).await.pending_lago_debits, gross);
+    let settled = usage(&db, "managed-rental").await;
+    let funded = settled.funding.unwrap();
+    assert_eq!(funded.allowance_funded_quantity, Some(2));
+    assert_eq!(funded.grant_funded, Some(credits(3)));
+    assert_eq!(funded.wallet_funded, Some(credits(25)));
+    // This authority never makes phone rental a valid runtime allocation.
+    let runtime = RuntimeFundingCandidates {
+        owner_id: OWNER.into(),
+        service_id: Some(SKU.into()),
+        service_slug: SKU.into(),
+        periods: vec![],
+        metric: BillingMetric::PhoneNumberDays,
+        maximum_quantity: 30,
+        managed_lifecycle: false,
+    };
+    assert!(validate_layer(OWNER, &runtime, &layer).is_err());
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    assert!(
+        reserve_runtime_window_in_session(&db, &mut tx, OWNER, WALLET, &runtime, layer, Utc::now())
+            .await
+            .is_err()
+    );
+    tx.abort_transaction().await.unwrap();
     db.drop().await.unwrap();
 }

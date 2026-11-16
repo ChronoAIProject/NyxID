@@ -469,7 +469,8 @@ impl BillingRouteContext {
                 | BillingMetric::MachineRunningSeconds
                 | BillingMetric::SandboxCpuMillisSeconds
                 | BillingMetric::SandboxMemoryMibSeconds
-                | BillingMetric::SandboxDiskGibSeconds => 0,
+                | BillingMetric::SandboxDiskGibSeconds
+                | BillingMetric::PhoneNumberDays => 0,
             };
         }
         if self.requested_voice_seconds > 0 {
@@ -494,7 +495,8 @@ impl BillingRouteContext {
             | BillingMetric::MachineRunningSeconds
             | BillingMetric::SandboxCpuMillisSeconds
             | BillingMetric::SandboxMemoryMibSeconds
-            | BillingMetric::SandboxDiskGibSeconds => 0,
+            | BillingMetric::SandboxDiskGibSeconds
+            | BillingMetric::PhoneNumberDays => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens
@@ -968,6 +970,7 @@ mod tests {
             (BillingMetric::Bytes, 4496),
             (BillingMetric::Images, 0),
             (BillingMetric::VoiceSeconds, 0),
+            (BillingMetric::PhoneNumberDays, 0),
             (BillingMetric::MachineRunningSeconds, 0),
         ] {
             assert_eq!(ctx.estimated_quantity(metric), expected, "{metric:?}");

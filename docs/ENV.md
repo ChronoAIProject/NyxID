@@ -295,6 +295,15 @@ Singapore GST / overseas 0% procedure. The personal Billing page reads Lago's
 current bill and finalized subscription invoices through `/billing/bill` and
 `/billing/invoices`; both APIs also accept an authorized `owner_id`.
 
+### NyxID-managed phone lines
+
+Managed phone lines add no environment variables. Renewal, unpaid suspension,
+cost capture and line notices run on the existing billing reconcile cadence;
+underwriting, premium voice, caller confirmations and the global premium switch
+are platform settings authored by administrators. Activation uses the
+`nyxbot:managed-lines` feature flag with security readiness
+([MANAGED_PHONE_LINES.md](MANAGED_PHONE_LINES.md)).
+
 ### Billing flag matrix
 
 `BILLING_ENABLED`, `BILLING_RESALE_ENABLED`, and `BILLING_FAIL_CLOSED` are independent. `BILLING_ENABLED` controls platform metering, wallet provisioning, and the reservation gate; it does not implicitly enable catalog resale. `BILLING_RESALE_ENABLED` controls only the resale ledger layer, and `BILLING_FAIL_CLOSED` is consulted only when `BILLING_ENABLED=true`.

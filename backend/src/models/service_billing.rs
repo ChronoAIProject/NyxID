@@ -37,6 +37,7 @@ pub enum BillingMetric {
     AudioOutputTokens,
     Images,
     VoiceSeconds,
+    PhoneNumberDays,
     MachineRunningSeconds,
     SandboxCpuMillisSeconds,
     SandboxMemoryMibSeconds,
@@ -124,7 +125,7 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
 
 impl BillingMetric {
     /// Stable names enter ledger canonical encoding. Never rename existing units.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Tokens,
         Self::Requests,
         Self::Bytes,
@@ -139,6 +140,7 @@ impl BillingMetric {
         Self::AudioOutputTokens,
         Self::Images,
         Self::VoiceSeconds,
+        Self::PhoneNumberDays,
         Self::MachineRunningSeconds,
         Self::SandboxCpuMillisSeconds,
         Self::SandboxMemoryMibSeconds,
@@ -160,6 +162,7 @@ impl BillingMetric {
             Self::AudioInputTokens => ("audio_input_tokens", "Audio input tokens", true),
             Self::AudioOutputTokens => ("audio_output_tokens", "Audio output tokens", true),
             Self::Images => ("images", "Images", false),
+            Self::PhoneNumberDays => ("phone_number_days", "Phone number days", false),
             Self::VoiceSeconds => ("voice_seconds", "Voice seconds", false),
             Self::MachineRunningSeconds => {
                 ("machine_running_seconds", "Machine running seconds", false)
@@ -203,6 +206,9 @@ impl BillingMetric {
                 | Self::AudioInputTokens
                 | Self::AudioOutputTokens
         )
+    }
+    pub fn requires_lifecycle_evidence(self) -> bool {
+        self.is_runtime_allocation() || self == Self::PhoneNumberDays
     }
     /// These units require a durable lifecycle reservation and observation.
     pub fn is_runtime_allocation(self) -> bool {
@@ -458,6 +464,9 @@ mod tests {
 
     #[test]
     fn voice_duration_is_explicit_and_legacy_usage_defaults_to_zero() {
+        assert_eq!(BillingMetric::PhoneNumberDays.as_str(), "phone_number_days");
+        assert!(BillingMetric::PhoneNumberDays.requires_lifecycle_evidence());
+        assert!(!BillingMetric::PhoneNumberDays.is_runtime_allocation());
         assert_eq!(BillingMetric::VoiceSeconds.as_str(), "voice_seconds");
         assert!(!BillingMetric::VoiceSeconds.is_token_family());
         assert!(!BillingMetric::VoiceSeconds.is_legacy());

@@ -2363,18 +2363,32 @@ async fn handle_tools_list(
         services.push(
             crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
         );
+        services.retain(|service| service.service_slug != "call_channel");
+        if let Some(service) =
+            crate::services::call_channels::managed::confirmations::service_for(&state.db, chat)
+                .await
+        {
+            services.push(service);
+        }
     }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
     let mut tool_defs = match session_id {
         Some(sid) => {
-            let activated = match state.mcp_sessions.get_activated_service_ids(sid).await {
+            let mut activated = match state.mcp_sessions.get_activated_service_ids(sid).await {
                 Ok(activated) => activated,
                 Err(error) => {
                     tracing::error!(%error, "Failed to load activated MCP services");
                     return rpc_error(request.id.clone(), -32603, "Internal error");
                 }
             };
+            // This live, call-scoped internal tool needs no service activation.
+            if services.iter().any(|s| {
+                s.service_id == "call_channel"
+                    && matches!(s.source, mcp_service::McpToolSource::Internal)
+            }) {
+                activated.insert("call_channel".into());
+            }
             mcp_service::generate_tool_definitions(&services, Some(&activated))
         }
         None => mcp_service::generate_tool_definitions(&services, None),
@@ -2462,6 +2476,7 @@ fn audit_chat_tool(name: &str) -> bool {
         "nyx__call_tool" | "nyx__connect_service" | "nyx__wait_for_connection" | "nyx__ssh_exec"
     ) || name.starts_with("nyx__oracle_")
         || name.starts_with("nyxid__")
+        || name == crate::services::call_channels::managed::confirmations::TOOL
 }
 
 fn native_activity_names() -> &'static std::collections::HashSet<String> {
@@ -2484,6 +2499,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
             {
                 names.insert(format!("nyxid__{name}"));
             }
+            names.insert(crate::services::call_channels::managed::confirmations::TOOL.into());
             names
         });
     &NAMES
@@ -3026,6 +3042,44 @@ async fn handle_tools_call_inner(
     response
 }
 
+async fn handle_caller_confirmation(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let Some(chat) = auth.chat.as_ref() else {
+        return guest_refused(request_id.clone());
+    };
+    let input = match serde_json::from_value(arguments.clone()) {
+        Ok(i) => i,
+        Err(_) => return tool_result(request_id.clone(), "Invalid caller confirmation", true),
+    };
+    let Some(id) = request_id.as_ref() else {
+        return tool_result(None, "Confirmation invocation identity is required", true);
+    };
+    let invocation = crate::services::call_channels::session::identity(&[
+        chat.turn_id.as_deref().unwrap_or_default(),
+        &id.to_string(),
+    ]);
+    match Box::pin(
+        crate::services::call_channels::managed::confirmations::send(
+            state,
+            chat,
+            &invocation,
+            input,
+        ),
+    )
+    .await
+    {
+        Ok(value) => tool_result(request_id.clone(), &value.to_string(), false),
+        Err(error) => {
+            let value = crate::services::assistant_account_tools::error_result(error);
+            tool_result(request_id.clone(), &value.value.to_string(), true)
+        }
+    }
+}
+
 async fn dispatch_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3084,7 +3138,7 @@ async fn dispatch_tools_call(
                 "conversation_id": chat.conversation_id,
                 "agent_role": chat.role,
                 "guest": chat.guest,
-                "tool_name": if known_meta_tool || known_account_tool {
+                "tool_name": if known_meta_tool || known_account_tool || tool_name == crate::services::call_channels::managed::confirmations::TOOL {
                     tool_name
                 } else {
                     "service_tool"
@@ -3093,6 +3147,10 @@ async fn dispatch_tools_call(
             })),
         )
         .await;
+    }
+
+    if tool_name == crate::services::call_channels::managed::confirmations::TOOL {
+        return handle_caller_confirmation(state, auth, &arguments, request.id.clone()).await;
     }
 
     if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
@@ -5290,6 +5348,10 @@ async fn handle_meta_call_tool(
         update_activity_label(state, auth, tool_name).await;
     }
 
+    if tool_name == crate::services::call_channels::managed::confirmations::TOOL {
+        return handle_caller_confirmation(state, auth, &inner_args, request_id).await;
+    }
+
     if crate::services::machine_tools::is_tool(tool_name) {
         return handle_machine_tool(state, auth, tool_name, inner_args, request_id).await;
     }
@@ -6086,6 +6148,13 @@ async fn load_all_services_for_meta_tools(
         services.push(
             crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
         );
+        services.retain(|service| service.service_slug != "call_channel");
+        if let Some(service) =
+            crate::services::call_channels::managed::confirmations::service_for(&state.db, chat)
+                .await
+        {
+            services.push(service);
+        }
         Ok(services)
     } else {
         Ok(filter_services_by_scope(services, auth))
@@ -11746,6 +11815,31 @@ mod skill_authoring_discovery_tests {
             confirmation_policy: None,
         });
         auth
+    }
+
+    #[test]
+    fn guest_call_turn_still_refuses_all_native_account_tools() {
+        let mut auth = chat_auth(AgentRole::Subagent, true);
+        auth.chat.as_mut().unwrap().channel_adapter_origin =
+            Some(crate::models::channel_adapter::TurnAuthority {
+                binding_id: "binding".into(),
+                session_id: "call".into(),
+                binding_revision: 1,
+                generation: 1,
+                credential_identity: "identity".into(),
+            });
+        for name in crate::services::assistant_account_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::TOOL_NAMES)
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
+        {
+            let tool = format!("nyxid__{name}");
+            assert!(guest_tool_refusal(&auth, &tool, None).is_some(), "{tool}");
+        }
+        assert!(guest_tool_refusal(&auth, "nyxid__text_current_caller", None).is_some());
+        assert!(
+            !crate::services::call_channels::managed::confirmations::TOOL.starts_with("nyxid__")
+        );
     }
 
     async fn observed_state(name: &str) -> (AppState, Arc<AtomicUsize>) {

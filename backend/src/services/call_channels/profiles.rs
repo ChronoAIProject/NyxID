@@ -514,14 +514,17 @@ impl CustomLlmAdapter {
 }
 
 pub(crate) fn binding_origin(b: &crate::models::channel_adapter::Binding) -> AppResult<String> {
+    origin_for_account(b.profile, &b.account_id)
+}
+pub(crate) fn origin_for_account(p: Profile, account: &str) -> AppResult<String> {
     #[cfg(test)]
     if let Some(origin) = FIXTURE_ORIGINS
         .lock()
         .expect("fixture origins")
-        .get(&b.account_id)
+        .get(account)
         .cloned()
     {
-        return self::origin(b.profile, Some(&origin));
+        return self::origin(p, Some(&origin));
     }
     #[cfg(test)]
     {
@@ -529,7 +532,8 @@ pub(crate) fn binding_origin(b: &crate::models::channel_adapter::Binding) -> App
     }
     #[cfg(not(test))]
     {
-        origin(b.profile, None)
+        let _ = account;
+        origin(p, None)
     }
 }
 #[cfg(test)]

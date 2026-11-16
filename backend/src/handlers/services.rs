@@ -1928,6 +1928,7 @@ async fn create_service_inner(
         auth_type,
         auth_key_name,
         credential_encrypted: encrypted_cred,
+        managed_comms_role: None,
         platform_key: body.platform_key.clone().or_else(|| {
             (body
                 .credential
@@ -2263,7 +2264,9 @@ pub async fn get_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     let viewer_id = auth_user.user_id.to_string();
-    if crate::services::platform_key_service::model_only(&service) {
+    if crate::services::platform_key_service::model_only(&service)
+        || service.managed_comms_role.is_some()
+    {
         super::login_client_context::require_first_party_human(&auth_user)?;
         super::admin_helpers::require_admin_or_operator(
             &state,
@@ -2391,7 +2394,9 @@ pub(crate) async fn update_service_at_revision(
         ));
     }
     let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
-    if crate::services::platform_key_service::model_only(&service) {
+    if crate::services::platform_key_service::model_only(&service)
+        || service.managed_comms_role.is_some()
+    {
         super::login_client_context::require_first_party_human(&auth_user)?;
         require_admin(&state, &auth_user).await?;
     }

@@ -387,6 +387,43 @@ pub async fn mark_forwarded(
     Ok(())
 }
 
+/// Forward a managed effect's part meters inside its admission transaction.
+/// Every existing row must still be reserved and unreleased: a concurrent
+/// release (compensation or the managed sweep) makes admission refuse rather
+/// than bind a released hold, and an admitted effect never has an unforwarded
+/// meter for a sweep to release.
+pub(crate) async fn forward_in_session(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    request_ids: &[String],
+) -> AppResult<()> {
+    let rows = db.collection::<UsageMeterRow>(USAGE_METER);
+    let existing = rows
+        .count_documents(doc! {"billing_request_id":{"$in":request_ids}})
+        .session(&mut *tx)
+        .await?;
+    let mut set = doc! {"status":"forwarded","forwarded":true,"updated_at":"$$NOW"};
+    if let Some(generation) = crate::services::security_readiness_service::local_generation() {
+        set.insert(
+            "forwarded_owner",
+            doc! {"generation_id":{"$literal":generation},"ingress":super::BillingIngress::ChannelOutbound.as_str(),"marked_at":"$$NOW"},
+        );
+    }
+    let changed = rows
+        .update_many(
+            doc! {"billing_request_id":{"$in":request_ids},"status":"reserved","forwarded":false,"released":false},
+            vec![doc! {"$set":set}],
+        )
+        .session(&mut *tx)
+        .await?;
+    if changed.matched_count != existing {
+        return Err(AppError::Conflict(
+            "An effect reservation was released before admission".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn settle(
     db: &mongodb::Database,
     metered: &MeteredProxyContext,
@@ -824,7 +861,13 @@ pub(super) async fn settle_persisted(
     let mut first_error = None;
     for row in finalized_rows {
         if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
-            reservation::record_settlement_failure(db, &row, Utc::now()).await?;
+            // Failure bookkeeping is best effort here: it must never mask the
+            // settlement error itself (a real failure still replaces a wait).
+            if let Err(bookkeeping_error) =
+                reservation::record_settlement_failure(db, &row, Utc::now()).await
+            {
+                tracing::warn!(row_id=%row.id, error=%bookkeeping_error, "Settlement retry bookkeeping deferred");
+            }
             if first_error
                 .as_ref()
                 .is_none_or(super::recovery_batch::is_wait)
@@ -876,6 +919,19 @@ pub async fn fail(
     )
     .await?;
     Ok(())
+}
+
+/// Shared row fixture constructor for carrier authority/retention regressions.
+#[cfg(test)]
+pub(crate) fn test_reserved_row(
+    ctx: &BillingRouteContext,
+    layer: BillingLayer,
+    metric: BillingMetric,
+    code: String,
+    reservation: Option<&BillingReservation>,
+    flush_seq: Option<i64>,
+) -> UsageMeterRow {
+    reserved_row(ctx, layer, metric, code, reservation, flush_seq)
 }
 
 pub(super) fn reserved_row(
@@ -1274,6 +1330,7 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::AudioOutputTokens => "platform_audio_output_tokens",
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
+        BillingMetric::PhoneNumberDays => "managed_phone_number_days",
         BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
         BillingMetric::SandboxCpuMillisSeconds => "cma_sandbox_cpu_millis_seconds",
         BillingMetric::SandboxMemoryMibSeconds => "cma_sandbox_memory_mib_seconds",
@@ -1301,7 +1358,8 @@ pub(super) fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) ->
         | BillingMetric::MachineRunningSeconds
         | BillingMetric::SandboxCpuMillisSeconds
         | BillingMetric::SandboxMemoryMibSeconds
-        | BillingMetric::SandboxDiskGibSeconds => 0,
+        | BillingMetric::SandboxDiskGibSeconds
+        | BillingMetric::PhoneNumberDays => 0,
     }
 }
 

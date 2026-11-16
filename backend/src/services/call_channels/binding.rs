@@ -40,6 +40,9 @@ pub async fn resolve(
     use crate::models::usage_meter::CredentialClass;
     use crate::services::proxy_service as proxy;
     let (mut target, service, class, resource_owner, connection_id, identity) = match credential {
+        CredentialBinding::ManagedLine { .. } => {
+            return super::managed::resolver::resolve(state, actor, credential, profile).await;
+        }
         CredentialBinding::Platform { catalog_service_id } => {
             let service = state
                 .db
@@ -278,6 +281,11 @@ pub async fn allocation(
 }
 
 pub async fn create(state: &AppState, owner: &str, input: SetupInput) -> AppResult<Binding> {
+    if matches!(input.credential, CredentialBinding::ManagedLine { .. }) {
+        return Err(AppError::Forbidden(
+            "Managed bindings are created by the line lifecycle".into(),
+        ));
+    }
     require_enabled(&state.db, owner).await?;
     let adapter = crate::services::channel_adapters::resolve_nyxbot_profile(
         &input.adapter_id,
@@ -334,6 +342,7 @@ pub async fn create(state: &AppState, owner: &str, input: SetupInput) -> AppResu
         b.trusted_account_revision = Some(account.revision);
         b.webhook_public_key = account.webhook_public_key;
     }
+    super::managed::custody::refuse_legacy(&state.db, &b).await?;
     if profiles::provider(b.profile) == "telnyx" {
         protocol::validate_public_key(b.webhook_public_key.as_deref().ok_or_else(unavailable)?)?;
     }
@@ -582,7 +591,16 @@ pub async fn trusted_account(
     state.db.collection::<ProviderAccount>(ACCOUNTS).find_one(doc!{"catalog_service_id":catalog,"provider":profiles::provider(p),"account_id":account}).await?.ok_or_else(unavailable)
 }
 pub fn validate_voice(b: &Binding) -> AppResult<()> {
-    // Twilio's compiled profile deliberately pins Google en-US Standard-A.
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        return super::managed::voice::validate_option(
+            profiles::provider(b.profile),
+            &crate::models::managed_comms::StandardVoiceOption {
+                voice: b.voice.clone(),
+                language: b.language.clone(),
+            },
+        );
+    }
+    // The ordinary Twilio profile keeps its established Google voice default.
     if b.profile == Profile::TwilioRelay && (b.voice != "en-US-Standard-A" || b.language != "en-US")
     {
         return Err(AppError::ValidationError(
@@ -668,8 +686,10 @@ pub async fn authorize(
     Ok(())
 }
 
-/// Informational readiness and tool callbacks share execution's read-only
-/// connection resolver. This performs no refresh, decryption, or last-used write.
+/// New-effect readiness and tool execution share execution's read-only
+/// connection resolver. Existing managed evidence uses admitted references in
+/// managed::resolver; this gate intentionally refuses new work after revocation.
+/// This performs no refresh, decryption, or last-used write.
 pub async fn read_authority(db: &mongodb::Database, b: &Binding) -> AppResult<Resolved> {
     require_enabled(db, &b.user_id).await?;
     super::owner_admission::check(db, &b.user_id).await?;
@@ -680,6 +700,9 @@ pub async fn read_authority(db: &mongodb::Database, b: &Binding) -> AppResult<Re
         .ok_or_else(unavailable)?;
     if current.verified_credential_identity != b.verified_credential_identity {
         return Err(unavailable());
+    }
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        return super::managed::resolver::read_binding(db, &current).await;
     }
     for (kind, resource) in if b.profile == Profile::ElevenlabsCustomLlm {
         vec![("agent", b.resource_id.as_str())]
@@ -693,6 +716,7 @@ pub async fn read_authority(db: &mongodb::Database, b: &Binding) -> AppResult<Re
         if db.collection::<ResourceClaim>(CLAIMS).find_one(doc!{"identity_key":super::session::identity(&[profiles::provider(b.profile),kind,resource]),"user_id":&b.user_id}).await?.is_none(){return Err(AppError::Forbidden("Provider resource ownership unavailable".into()));}
     }
     let (service, class, owner, connection_id, identity, base, method) = match &b.credential {
+        CredentialBinding::ManagedLine { .. } => return Err(unavailable()),
         CredentialBinding::Connection { user_service_id } => {
             let target = crate::services::proxy_service::read_connection_authority(
                 db,
@@ -832,6 +856,11 @@ pub fn operation_paths(
 }
 
 pub async fn verification_key(state: &AppState, b: &Binding) -> AppResult<String> {
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        let a = super::managed::admission::read(&state.db, &b.user_id, &b.credential).await?;
+        super::managed::resolver::read_binding(&state.db, b).await?;
+        return a.account.webhook_public_key.ok_or_else(unavailable);
+    }
     if let CredentialBinding::Platform { catalog_service_id } = &b.credential {
         let account = trusted_account(state, catalog_service_id, &b.account_id, b.profile).await?;
         if b.trusted_account_revision != Some(account.revision)
@@ -850,6 +879,9 @@ pub async fn claim_resources(
     tx: &mut mongodb::ClientSession,
     b: &Binding,
 ) -> AppResult<()> {
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        return Err(unavailable());
+    }
     let resources = if b.profile == Profile::ElevenlabsCustomLlm {
         vec![("agent", b.resource_id.as_str())]
     } else {

@@ -25,6 +25,102 @@ async fn read_registry(f: &Fixture) -> AppResult<Registry> {
     .await
 }
 #[tokio::test]
+async fn managed_line_effect_meters_are_never_stuck_request_candidates() {
+    let f = Fixture::new().await;
+    let _metered = f.open(true).await;
+    roster(
+        &f,
+        "live",
+        Some(bson::DateTime::now()),
+        bson::DateTime::now(),
+    )
+    .await;
+    let r = read_registry(&f).await.unwrap();
+    let mut raw =
+        f.db.collection::<Document>(METERS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    raw.insert(
+        "created_at",
+        bson::DateTime::from_chrono(Utc::now() - Duration::days(8)),
+    );
+    raw.remove("forwarded_owner");
+    assert!(classify(&raw, Some(&r)).unwrap().eligible);
+    let id = uuid::Uuid::new_v4();
+    // Every managed effect is excluded by its durable request identity alone:
+    // an old, ownerless, forwarded, quantity-less ordinary meter shape.
+    for (request, metric) in [
+        (format!("managed-call:{id}:base"), "voice_seconds"),
+        (format!("managed-call:{id}:premium"), "voice_seconds"),
+        (format!("managed-sms-out:{id}:0"), "requests"),
+        (format!("managed-sms-out:{id}:15"), "requests"),
+        (format!("call-confirmation:{id}:0"), "requests"),
+        (format!("call-confirmation:{id}:1"), "requests"),
+        (format!("managed-inbound:{id}:0"), "requests"),
+        (format!("managed-line-rental:{id}:0"), "requests"),
+    ] {
+        let mut row = raw.clone();
+        row.insert("billing_request_id", &request);
+        row.insert("metric", metric);
+        assert!(!present(&row, "quantity"));
+        for holdless in [false, true] {
+            let c = classify_for(&row, Some(&r), holdless).unwrap();
+            assert_eq!(
+                c.label, "excluded_managed_line",
+                "{request} holdless={holdless}"
+            );
+            assert!(!c.eligible, "{request} holdless={holdless}");
+        }
+        // Holdless and terminal recovery read the request's raw rows.
+        assert_eq!(
+            request_blocker(std::slice::from_ref(&row)),
+            Some("excluded_managed_line"),
+            "{request}"
+        );
+        // A sibling managed meter protects the whole request in both modes.
+        let mut parent = raw.clone();
+        parent.insert("request_rows", vec![bson::Bson::Document(row.clone())]);
+        for holdless in [false, true] {
+            let c = classify_for(&parent, Some(&r), holdless).unwrap();
+            assert_eq!(c.label, "excluded_managed_line", "{request} sibling");
+            assert!(!c.eligible);
+        }
+        assert_eq!(
+            request_blocker(&[raw.clone(), row]),
+            Some("excluded_managed_line")
+        );
+    }
+    // Owner-funded carrier sends keep main's classification exactly: the same
+    // ordinary request-metered row classifies identically under that identity.
+    let mut ordinary = raw.clone();
+    ordinary.insert("metric", "requests");
+    let mut byok = ordinary.clone();
+    byok.insert("billing_request_id", format!("adapter-sms-out:{id}:0"));
+    for holdless in [false, true] {
+        assert_eq!(
+            classify_for(&byok, Some(&r), holdless).unwrap(),
+            classify_for(&ordinary, Some(&r), holdless).unwrap(),
+            "holdless={holdless}"
+        );
+    }
+    assert!(classify(&byok, Some(&r)).unwrap().eligible);
+    assert_eq!(request_blocker(std::slice::from_ref(&byok)), None);
+    // Unrelated identities that merely contain a managed word stay ordinary.
+    let mut lookalike = raw.clone();
+    lookalike.insert("billing_request_id", format!("proxy:managed-sms-out:{id}"));
+    assert!(classify(&lookalike, Some(&r)).unwrap().eligible);
+    // Owner-funded carrier calls retain their own exclusion.
+    let mut carrier = raw.clone();
+    carrier.insert("billing_request_id", format!("adapter-call:{id}"));
+    carrier.insert("metric", "voice_seconds");
+    assert_eq!(
+        classify(&carrier, Some(&r)).unwrap().label,
+        "excluded_channel_outbound"
+    );
+}
+#[tokio::test]
 async fn stuck_request_classification_ownership_and_protocol_matrix() {
     let f = Fixture::new().await;
     let _metered = f.open(true).await;

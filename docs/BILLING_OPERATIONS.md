@@ -49,6 +49,18 @@ services, including platform keys, subject to the binding budget and rate limit.
 Enabling the billing flag alone never changes an execution's payer. Check that
 the Lago customer corresponds to the owner of that execution.
 
+## NyxID-managed phone lines
+
+Managed lines reuse merchant wallets, taxes, allowances, grants and the ledger.
+Before registering a line, author and sync the platform-lane prices on its
+dedicated price-only services: rental in **phone number days**, calls and premium
+in **voice seconds**, SMS in **requests** (provider parts). Unsynced managed
+prices block quotes, claims, renewals and admissions instead of making usage
+free. Allowances can target `phone_number_days` like any other metric. Tariff
+evidence on the line and the per-line cost policy feed the margin report under
+**Admin → Platform Credentials → NyxID-managed phone lines**; they never move
+customer money. See [MANAGED_PHONE_LINES.md](MANAGED_PHONE_LINES.md).
+
 ## Organization wallets in the web app
 
 Open `/billing?ownerId=<org UUID>` in Studio or

@@ -146,12 +146,7 @@ pub async fn prove_call(
         )
         .await?;
         active = v["status"] == "in-progress";
-        v["sid"] == call
-            && v["phone_number_sid"] == b.resource_id
-            && v["account_sid"] == b.account_id
-            && v["from"] == from
-            && v["to"] == to
-            && v["direction"] == "inbound"
+        twilio_call_identity(b, call, from, to, &v)
     } else {
         false
     };
@@ -162,6 +157,45 @@ pub async fn prove_call(
     }
     Ok(active)
 }
+fn twilio_call_identity(b: &Binding, call: &str, from: &str, to: &str, v: &Value) -> bool {
+    v["sid"] == call
+        && v["account_sid"] == b.account_id
+        && v["phone_number_sid"] == b.resource_id
+        && v["from"] == from
+        && v["to"] == to
+        && v["direction"] == "inbound"
+}
+/// Socket admission proves the exact retained inbound leg is still live.
+/// Cleanup reads alone confer no authority to attach a new relay.
+pub(super) fn validate_managed_socket_call(
+    b: &Binding,
+    s: &CallSession,
+    v: &Value,
+) -> AppResult<()> {
+    let valid = if b.profile == Profile::TwilioRelay {
+        twilio_call_identity(b, &s.provider_call_id, &s.from, &s.to, v)
+            && v["status"] == "in-progress"
+    } else if b.profile == Profile::TelnyxRelay {
+        let v = &v["data"];
+        v["call_control_id"] == s.provider_call_id
+            && v["account_id"] == b.account_id
+            && v["connection_id"] == b.application_id
+            && v["phone_number_id"] == b.resource_id
+            && v["to"] == s.to
+            && v["from"] == s.from
+            && v["direction"] == "incoming"
+            && v["is_alive"] == true
+    } else {
+        false
+    };
+    if !valid || s.to != b.phone_number || !protocol::phone(&s.from) {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "Admitted call is not the exact live inbound resource".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn telnyx_command(
     state: &AppState,
     b: &Binding,
@@ -251,13 +285,53 @@ pub async fn twilio_update(
     let bytes = profiles::bounded_response(response).await?;
     let confirmed: Value =
         serde_json::from_slice(&bytes).map_err(|_| AppError::VoiceProviderUnavailable)?;
-    if confirmed["sid"] != s.provider_call_id || confirmed["account_sid"] != b.account_id {
+    if confirmed["sid"] != s.provider_call_id
+        || confirmed["account_sid"] != b.account_id
+        || (fields == [("Status", "completed")] && confirmed["status"] != "completed")
+    {
         return Err(AppError::VoiceProviderUnavailable);
     }
     Ok(())
 }
 
 /// Reads are constrained to the durable admitted call, including after disable.
+pub async fn managed_terminal_status(
+    state: &AppState,
+    b: &Binding,
+    s: &CallSession,
+) -> AppResult<Option<(chrono::DateTime<chrono::Utc>, i64)>> {
+    let reference = super::managed::resolver::session_reference(state, b, s).await?;
+    let v = super::managed::resolver::request_existing(
+        state,
+        b,
+        &reference,
+        super::managed::resolver::CleanupOperation::ReadCall,
+        Some(&profiles::binding_origin(b)?),
+    )
+    .await?;
+    let result = terminal_observation(b, s, &v)?;
+    let dead = if b.profile == Profile::TelnyxRelay {
+        v["data"]["call_control_id"] == s.provider_call_id && v["data"]["is_alive"] == false
+    } else {
+        v["sid"] == s.provider_call_id
+            && v["account_sid"] == b.account_id
+            && matches!(
+                v["status"].as_str(),
+                Some("completed" | "failed" | "busy" | "no-answer" | "canceled")
+            )
+    };
+    if dead && result.is_none() {
+        super::session::terminal(
+            state,
+            s,
+            chrono::Utc::now(),
+            None,
+            "provider_terminated_quantity_pending",
+        )
+        .await?;
+    }
+    Ok(result)
+}
 pub async fn terminal_status(
     state: &AppState,
     b: &Binding,
@@ -267,19 +341,145 @@ pub async fn terminal_status(
     if s.binding_id != b.id || s.to != b.phone_number {
         return Err(AppError::AssistantTurnRequired);
     }
-    if b.profile == Profile::TwilioRelay {
-        let v = request(
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        return managed_terminal_status(state, b, s).await;
+    }
+    let path = if b.profile == Profile::TwilioRelay {
+        format!(
+            "/2010-04-01/Accounts/{}/Calls/{}.json",
+            b.account_id, s.provider_call_id
+        )
+    } else {
+        format!(
+            "/v2/calls/{}",
+            protocol::call_segment(b.profile, &s.provider_call_id)?
+        )
+    };
+    let status = request(state, b, r, "GET", &path, None).await;
+    let v = match status {
+        Ok(v) => v,
+        Err(error) => {
+            if let Some(q) = byok_detail_status(state, b, r, s).await? {
+                return Ok(Some(q));
+            }
+            return Err(error);
+        }
+    };
+    let result = terminal_observation(b, s, &v)?;
+    let dead = if b.profile == Profile::TelnyxRelay {
+        v["data"]["call_control_id"] == s.provider_call_id && v["data"]["is_alive"] == false
+    } else {
+        v["sid"] == s.provider_call_id
+            && v["account_sid"] == b.account_id
+            && matches!(
+                v["status"].as_str(),
+                Some("completed" | "failed" | "busy" | "no-answer" | "canceled")
+            )
+    };
+    if dead && result.is_none() {
+        super::session::terminal(
             state,
-            b,
-            r,
-            "GET",
-            &format!(
-                "/2010-04-01/Accounts/{}/Calls/{}.json",
-                b.account_id, s.provider_call_id
-            ),
+            s,
+            chrono::Utc::now(),
             None,
+            "provider_terminated_quantity_pending",
         )
         .await?;
+    }
+    if result.is_none()
+        && let Some(q) = byok_detail_status(state, b, r, s).await?
+    {
+        return Ok(Some(q));
+    }
+    Ok(result)
+}
+/// Source 3 stays closed until a platform admin has attested the schema fixture
+/// for this exact provider account. BYOK keys fetch their own account's record;
+/// owner-signed callback times never establish a price quantity.
+async fn byok_detail_status(
+    state: &AppState,
+    b: &Binding,
+    r: &Resolved,
+    s: &CallSession,
+) -> AppResult<Option<(chrono::DateTime<chrono::Utc>, i64)>> {
+    if b.profile != Profile::TelnyxRelay
+        || !matches!(b.credential, CredentialBinding::Connection { .. })
+    {
+        return Ok(None);
+    }
+    let Some(leg) = s
+        .provider_call_leg_id
+        .as_deref()
+        .filter(|s| protocol::handle(s))
+    else {
+        return Ok(None);
+    };
+    let Some(carrier_session) = s
+        .provider_call_session_id
+        .as_deref()
+        .filter(|s| protocol::handle(s))
+    else {
+        return Ok(None);
+    };
+    if !protocol::handle(&b.application_id) {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let account = state
+        .db
+        .collection::<ProviderAccount>(ACCOUNTS)
+        .find_one(mongodb::bson::doc! {
+            "provider":"telnyx","account_id":&b.account_id,
+            "underwriting.detail_record_options_reference":{"$type":"string"},
+            "underwriting.detail_record_fixture_reference":{"$type":"string"}
+        })
+        .await?;
+    if !account.and_then(|a| a.underwriting).is_some_and(|p| {
+        p.detail_record_options_reference
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+            && p.detail_record_fixture_reference
+                .as_ref()
+                .is_some_and(|s| !s.is_empty())
+            && ["call_leg_id", "connection_id", "answered_at", "finished_at"]
+                .iter()
+                .all(|f| p.detail_record_fields.iter().any(|v| v == f))
+    }) {
+        return Ok(None);
+    }
+    let path = format!(
+        "/v2/detail_records?filter[record_type]=call-control&filter[call_leg_id]={leg}&filter[connection_id]={}",
+        b.application_id
+    );
+    let v = request(state, b, r, "GET", &path, None).await?;
+    let mut rows = v["data"]
+        .as_array()
+        .cloned()
+        .ok_or(AppError::VoiceProviderUnavailable)?;
+    // An authenticated account API plus all retained call identifiers is required.
+    rows.retain(|row| {
+        row["account_id"] == b.account_id && row["call_session_id"] == carrier_session
+    });
+    let reference = crate::models::managed_comms::AdmittedReference {
+        trusted_account_id: String::new(),
+        credential_service_id: String::new(),
+        provider: "telnyx".into(),
+        account_id: b.account_id.clone(),
+        line_id: String::new(),
+        number_resource_id: b.resource_id.clone(),
+        application_id: b.application_id.clone(),
+        provider_call_id: Some(s.provider_call_id.clone()),
+        provider_message_id: None,
+        call_leg_id: Some(leg.into()),
+        call_session_id: Some(carrier_session.into()),
+    };
+    super::managed::calls::detail_quantity(&reference, &json!({"data":rows}))
+}
+fn terminal_observation(
+    b: &Binding,
+    s: &CallSession,
+    v: &Value,
+) -> AppResult<Option<(chrono::DateTime<chrono::Utc>, i64)>> {
+    if b.profile == Profile::TwilioRelay {
         if v["sid"] != s.provider_call_id
             || v["account_sid"] != b.account_id
             || v["phone_number_sid"] != b.resource_id
@@ -305,23 +505,14 @@ pub async fn terminal_status(
         ) {
             return Ok(Some((
                 at.unwrap_or_else(chrono::Utc::now),
-                seconds.unwrap_or(0),
+                match seconds {
+                    Some(n) => n,
+                    None => return Ok(None),
+                },
             )));
         }
         return Ok(at.zip(seconds));
     }
-    let v = request(
-        state,
-        b,
-        r,
-        "GET",
-        &format!(
-            "/v2/calls/{}",
-            protocol::call_segment(b.profile, &s.provider_call_id)?
-        ),
-        None,
-    )
-    .await?;
     let v = &v["data"];
     if v["call_control_id"] != s.provider_call_id || v["is_alive"] != false {
         return Ok(None);
@@ -330,7 +521,9 @@ pub async fn terminal_status(
         .as_str()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|s| s.with_timezone(&chrono::Utc));
-    Ok(at.zip(v["call_duration"].as_i64()))
+    Ok(v["call_duration"]
+        .as_i64()
+        .map(|n| (at.unwrap_or_else(chrono::Utc::now), n)))
 }
 
 /// API evidence for billable SMS parts; webhook keys supplied by an owner are

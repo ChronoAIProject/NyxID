@@ -126,6 +126,7 @@ import {
   AdminUploadRetentionPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
+  AdminManagedLinesReportPage,
   AdminCreditsPage,
   AdminBillingPage,
   AdminInviteCodesPage,
@@ -1214,6 +1215,12 @@ const adminIntegrityRoute = createRoute({
   component: AdminIntegrityPage,
 });
 
+const adminManagedLinesReportRoute = createRoute({
+  path: "managed-lines/report",
+  getParentRoute: () => adminLayout,
+  component: AdminManagedLinesReportPage,
+});
+
 const adminCreditsRoute = createRoute({
   path: "credits",
   getParentRoute: () => adminLayout,
@@ -1392,6 +1399,7 @@ const routeTree = rootRoute.addChildren([
       adminUploadRetentionRoute,
       adminPlatformBotsRoute,
       adminPlatformCredentialsRoute,
+      adminManagedLinesReportRoute,
     ]),
   ]),
 ]);

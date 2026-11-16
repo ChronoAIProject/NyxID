@@ -15,6 +15,32 @@ use crate::{
 };
 
 pub async fn validate(state: &AppState, b: &Binding, r: &Resolved) -> AppResult<()> {
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        let a = super::managed::admission::read(&state.db, &b.user_id, &b.credential).await?;
+        let (cap, role, metric) = if profiles::sms(b.profile) {
+            (
+                a.line.sms.as_ref(),
+                crate::models::managed_comms::ManagedCommsRole::Sms,
+                BillingMetric::Requests,
+            )
+        } else {
+            (
+                a.line.voice.as_ref(),
+                crate::models::managed_comms::ManagedCommsRole::Voice,
+                BillingMetric::VoiceSeconds,
+            )
+        };
+        state
+            .billing
+            .managed_price(
+                &cap.ok_or_else(super::managed::unavailable)?
+                    .billing_service_id,
+                role,
+                metric,
+            )
+            .await?;
+        return Ok(());
+    }
     // The documented inbound Answer/relay APIs cannot enforce a call-leg cap.
     // Platform liability is unavailable until Telnyx exposes a provable bound;
     // this does not affect configured SMS pricing or owner-funded BYOK calls.
@@ -83,6 +109,35 @@ pub async fn context(
     id: &str,
 ) -> AppResult<BillingRouteContext> {
     validate(state, b, r).await?;
+    let managed_service;
+    let r = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        let a = super::managed::admission::read(&state.db, &b.user_id, &b.credential).await?;
+        let cap = if profiles::sms(b.profile) {
+            a.line.sms.as_ref()
+        } else {
+            a.line.voice.as_ref()
+        }
+        .ok_or_else(super::managed::unavailable)?;
+        let service = state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {"_id":&cap.billing_service_id})
+            .await?
+            .ok_or_else(super::managed::unavailable)?;
+        managed_service = Resolved {
+            service,
+            key: zeroize::Zeroizing::new(String::new()),
+            identity: r.identity.clone(),
+            class: r.class,
+            resource_owner: b.user_id.clone(),
+            connection_id: None,
+        };
+        &managed_service
+    } else {
+        r
+    };
     let owner = state
         .billing
         .owner_resolver()
@@ -138,6 +193,25 @@ pub async fn reserve(
         state.billing.open_required(&ctx).await
     } else {
         state.billing.open(&ctx).await
+    }
+}
+/// Compensate an effect that was never sent: a reserved, never-forwarded part
+/// is released (settling it would match nothing) and a forwarded one settles
+/// at zero. Every meter is attempted; anything left over stays unadmitted and
+/// is released by the managed reservation sweep.
+pub async fn cancel(state: &AppState, meters: &[MeteredProxyContext], reason: &str) {
+    for meter in meters {
+        let released = state.billing.fail(meter, reason).await;
+        let settled = state
+            .billing
+            .settle(meter, PlatformUsage::default(), None, None)
+            .await;
+        if released.is_err() || settled.is_err() {
+            tracing::warn!(
+                reason,
+                "Effect reservation compensation deferred to recovery"
+            );
+        }
     }
 }
 pub async fn settle(state: &AppState, meter: &MeteredProxyContext, seconds: i64) -> AppResult<()> {

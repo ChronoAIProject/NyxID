@@ -310,6 +310,7 @@ pub async fn find_matching_enabled_rule(
         .ok_or_else(|| AppError::NotFound("Public endpoint not found".to_string()))?;
 
     super::retired_service_service::require_available(&service)?;
+    super::platform_key_service::require_ordinary_use(&service)?;
 
     let method = normalize_method(method)?;
     let path = normalize_runtime_path(path)?;
@@ -517,6 +518,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,

@@ -253,6 +253,11 @@ export const AdminIntegrityPage = lazy(() =>
     default: m.AdminIntegrityPage,
   })),
 );
+export const AdminManagedLinesReportPage = lazy(() =>
+  import("@/pages/admin-managed-lines-report").then((m) => ({
+    default: m.AdminManagedLinesReportPage,
+  })),
+);
 export const AdminCreditsPage = lazy(() =>
   import("@/pages/admin-credits").then((m) => ({
     default: m.AdminCreditsPage,

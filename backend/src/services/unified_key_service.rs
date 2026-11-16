@@ -66,6 +66,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
     if catalog.provider_config_id.as_deref() != Some(&token.provider_config_id)
         || !catalog.is_active
         || catalog.service_type != "http"
+        || catalog.managed_comms_role.is_some()
         || crate::services::retired_service_service::is_retired(catalog)
     {
         return Err(AppError::BadRequest(
@@ -358,7 +359,7 @@ fn is_auto_provisionable_catalog_service(
     has_any_provider_requirement: bool,
     has_required_provider_requirement: bool,
 ) -> bool {
-    if super::retired_service_service::is_retired(service) {
+    if service.managed_comms_role.is_some() || super::retired_service_service::is_retired(service) {
         return false;
     }
     let is_truly_no_auth = service.is_active
@@ -1027,6 +1028,7 @@ async fn create_key_inner(
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
 
+        crate::services::platform_key_service::require_ordinary_use(&svc)?;
         if crate::services::retired_service_service::is_retired(&svc) {
             return Err(AppError::NotFound(format!(
                 "Catalog service '{slug}' not found"
@@ -1527,6 +1529,7 @@ async fn create_key_inner(
             auth_scheme: None,
             auth_key_name: String::new(),
             credential_encrypted: empty_credential.clone(),
+            managed_comms_role: None,
             platform_key: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -5661,6 +5664,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,

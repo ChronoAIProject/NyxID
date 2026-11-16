@@ -3846,6 +3846,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
 
     crate::services::oracle_login_profile_service::ensure_indexes(db).await?;
     crate::services::oracle_worker_enrollment_service::ensure_indexes(db).await?;
+    crate::services::call_channels::managed::indexes::ensure_indexes(db).await?;
     crate::services::call_channels::session::ensure_indexes(db)
         .await
         .map_err(|e| mongodb::error::Error::custom(e.to_string()))?;
@@ -6301,6 +6302,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,

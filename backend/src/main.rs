@@ -1401,6 +1401,7 @@ async fn server_run(cli: Cli) {
     // NyxBot: destroy idle subagents and retry deferred team wake-ups.
     handlers::assistant_team::spawn_sweeps(state.clone());
     services::call_channels::coordinator::spawn_sweep(state.clone());
+    services::call_channels::managed::lifecycle::spawn_sweep(state.clone());
     services::platform_manager_transport::spawn_sweeps(
         state.clone(),
         services::platform_manager_transport::compose(

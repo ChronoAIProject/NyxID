@@ -20,8 +20,17 @@ pub enum Profile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CredentialBinding {
-    Connection { user_service_id: String },
-    Platform { catalog_service_id: String },
+    Connection {
+        user_service_id: String,
+    },
+    Platform {
+        catalog_service_id: String,
+    },
+    ManagedLine {
+        line_id: String,
+        managed_claim_id: String,
+        managed_claim_generation: i64,
+    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Binding {
@@ -89,10 +98,22 @@ pub struct CallSession {
     pub user_id: String,
     pub binding_id: String,
     pub binding_revision: i64,
+    /// Managed tenancy is independent of the socket claim and generation.
+    #[serde(default)]
+    pub managed_claim_id: Option<String>,
+    #[serde(default)]
+    pub managed_claim_generation: Option<i64>,
+    #[serde(default)]
+    pub admitted_reference: Option<super::managed_comms::AdmittedReference>,
     pub profile: Profile,
     pub contract_version: u32,
     pub credential_identity: String,
     pub provider_call_id: String,
+    /// Carrier leg/session identity, independent of the relay socket session.
+    #[serde(default)]
+    pub provider_call_leg_id: Option<String>,
+    #[serde(default)]
+    pub provider_call_session_id: Option<String>,
     pub provider_session_id: Option<String>,
     pub from: String,
     pub to: String,
@@ -107,6 +128,18 @@ pub struct CallSession {
     pub relay_dispatched: bool,
     #[serde(default)]
     pub hangup_dispatched: bool,
+    #[serde(default)]
+    pub hangup_attempts: i64,
+    #[serde(default)]
+    pub hangup_confirmed: bool,
+    #[serde(default)]
+    pub provider_seconds: Option<i64>,
+    #[serde(default)]
+    pub billable_seconds: Option<i64>,
+    #[serde(default)]
+    pub absorbed_seconds: Option<i64>,
+    #[serde(default)]
+    pub terminated_quantity_pending: bool,
     #[serde(default)]
     pub cap_dispatched: bool,
     #[serde(default)]
@@ -126,8 +159,13 @@ pub struct CallSession {
     /// Immutable terminal evidence; settlement retries use this quantity.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
+    /// Server receipt time of the first terminal observation, never a callback timestamp.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub termination_observed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub terminal_evidence: Option<String>,
+    #[serde(default)]
+    pub admin_evidence_reference: Option<String>,
     pub billing_finalized: bool,
     pub delivery: String,
     #[serde(default)]
@@ -151,6 +189,13 @@ pub struct EventReceipt {
     pub user_id: String,
     pub binding_id: String,
     pub binding_revision: i64,
+    /// Managed tenancy is independent of the socket claim and generation.
+    #[serde(default)]
+    pub managed_claim_id: Option<String>,
+    #[serde(default)]
+    pub managed_claim_generation: Option<i64>,
+    #[serde(default)]
+    pub admitted_reference: Option<super::managed_comms::AdmittedReference>,
     pub session_id: Option<String>,
     pub event_kind: String,
     pub status: String,
@@ -173,6 +218,10 @@ pub struct EventReceipt {
 /// Platform account trust is writable only by a platform administrator.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderAccount {
+    #[serde(default)]
+    pub underwriting: Option<super::managed_comms::ManagedUnderwriting>,
+    #[serde(default)]
+    pub fence: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub catalog_service_id: String,

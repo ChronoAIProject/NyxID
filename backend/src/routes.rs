@@ -3219,8 +3219,133 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/admin/managed-lines/accounts/{id}/premium",
+            axum::routing::put(handlers::managed_comms::configure_voice_account),
+        )
+        .route(
+            "/admin/managed-lines/premium-switch",
+            axum::routing::put(handlers::managed_comms::premium_switch),
+        )
+        .route(
+            "/call-adapters/bindings/{id}/caller-confirmations",
+            axum::routing::put(handlers::managed_comms::caller_confirmations),
+        )
+        .route(
+            "/admin/managed-lines/{id}/cost-policy",
+            axum::routing::put(handlers::managed_comms::cost_policy),
+        )
+        .route(
+            "/admin/managed-lines/report",
+            get(handlers::managed_comms::cost_report),
+        )
+        .route(
+            "/admin/managed-lines/report/effects",
+            get(handlers::managed_comms::cost_effects),
+        )
+        .route(
             "/triggers/{id}/runs/{run_id}/cancel",
             post(handlers::triggers::cancel_run),
+        )
+        .route(
+            "/admin/managed-lines/accounts/{id}/underwriting",
+            axum::routing::put(handlers::managed_comms::underwriting),
+        )
+        .route(
+            "/admin/managed-lines/calls/{id}/resolve-evidence",
+            post(handlers::managed_comms::resolve_evidence),
+        )
+        .route(
+            "/admin/call-adapters/sessions/{id}/resolve-evidence",
+            post(handlers::managed_comms::resolve_evidence),
+        )
+        .route("/managed-lines", get(handlers::managed_comms::lines))
+        .route(
+            "/managed-lines/{id}/standard-voice",
+            axum::routing::put(handlers::managed_comms::select_standard_voice),
+        )
+        .route(
+            "/admin/managed-lines/{id}/standard-voices",
+            axum::routing::put(handlers::managed_comms::configure_standard_voices),
+        )
+        .route(
+            "/managed-lines/{id}/quotes",
+            post(handlers::managed_comms::quote_line),
+        )
+        .route(
+            "/managed-lines/claims",
+            post(handlers::managed_comms::claim_line),
+        )
+        .route(
+            "/managed-lines/coverage",
+            post(handlers::managed_comms::continue_line),
+        )
+        .route(
+            "/managed-lines/releases",
+            post(handlers::managed_comms::release_line),
+        )
+        .route(
+            "/admin/managed-lines/releases",
+            post(handlers::managed_comms::admin_release_line),
+        )
+        .route(
+            "/admin/managed-lines/{id}/approve-reassignment",
+            post(handlers::managed_comms::approve_reassignment),
+        )
+        .route(
+            "/managed-lines/eligibility",
+            get(handlers::managed_comms::read),
+        )
+        .route(
+            "/managed-lines/eligibility/terms",
+            post(handlers::managed_comms::accept),
+        )
+        .route(
+            "/admin/managed-comms/eligibility",
+            get(handlers::managed_comms::list),
+        )
+        .route(
+            "/admin/managed-comms/eligibility/{id}",
+            axum::routing::put(handlers::managed_comms::save),
+        )
+        .route(
+            "/admin/managed-comms/eligibility/{id}/revoke",
+            post(handlers::managed_comms::revoke),
+        )
+        .route(
+            "/admin/managed-comms/eligibility/{id}/apply",
+            post(handlers::managed_comms::apply),
+        )
+        .route(
+            "/admin/managed-lines/prepare",
+            post(handlers::managed_comms::prepare),
+        )
+        .route(
+            "/admin/managed-lines",
+            get(handlers::managed_comms::admin_lines).post(handlers::managed_comms::register),
+        )
+        .route(
+            "/admin/managed-lines/accounts",
+            get(handlers::managed_comms::managed_accounts),
+        )
+        .route(
+            "/admin/managed-lines/{id}",
+            axum::routing::put(handlers::managed_comms::update_line),
+        )
+        .route(
+            "/admin/managed-lines/{id}/suspend",
+            post(handlers::managed_comms::suspend_line),
+        )
+        .route(
+            "/admin/managed-lines/{id}/resume",
+            post(handlers::managed_comms::resume_line),
+        )
+        .route(
+            "/admin/managed-lines/{id}/retire",
+            post(handlers::managed_comms::retire_line),
+        )
+        .route(
+            "/admin/managed-comms/accounts/{id}/rotate",
+            post(handlers::managed_comms::rotate),
         )
         .route(
             "/channel-adapter-bindings",
@@ -3846,6 +3971,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
+        .route("/api/v1/webhooks/managed-lines/{id}/voice", post(handlers::managed_comms::voice_webhook).layer(axum::extract::DefaultBodyLimit::max(crate::services::call_channels::protocol::MAX_INGRESS)))
+        .route("/api/v1/webhooks/managed-lines/{id}/sms", post(handlers::managed_comms::sms_webhook).layer(axum::extract::DefaultBodyLimit::max(crate::services::call_channels::protocol::MAX_INGRESS)))
         .route("/api/v1/webhooks/call-adapters/{id}", post(handlers::call_adapters::webhook))
         .route("/api/v1/webhooks/call-adapters/{id}/sms-receipts/{send}", post(handlers::call_adapters::sms_receipt))
         .route("/api/v1/webhooks/call-adapters/{id}/socket/{sid}", get(handlers::call_adapters::socket))

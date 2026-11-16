@@ -390,6 +390,7 @@ async fn lookup_user_service_status(
 fn build_llm_service_filter(provider_config_id: Option<&str>) -> mongodb::bson::Document {
     let mut filter = doc! {
         "slug": { "$regex": format!("^{}", LLM_SERVICE_SLUG_PREFIX) },
+        "managed_comms_role": Bson::Null,
         "is_active": true,
     };
 

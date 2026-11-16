@@ -1357,6 +1357,7 @@ pub(crate) async fn catalog_info(
     db: &mongodb::Database,
     service: DownstreamService,
 ) -> AppResult<CatalogConnectInfo> {
+    crate::services::platform_key_service::require_ordinary_use(&service)?;
     if service.service_type == "ssh" {
         return Err(AppError::BadRequest(
             "SSH services cannot be connected through a hosted connect link".to_string(),

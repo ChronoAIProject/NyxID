@@ -60,9 +60,24 @@ pub async fn configure_account(
         adapter.profile(),
     )
     .await?;
-    let filter =
-        doc! {"provider":profiles::provider(adapter.profile()),"account_id":&input.account_id};
-    let saved=state.db.collection::<ProviderAccount>(ACCOUNTS).find_one_and_update(filter,doc!{"$set":{"catalog_service_id":input.catalog_service_id,"webhook_public_key":input.webhook_public_key,"configured_by":admin,"updated_at":bson::DateTime::from_chrono(Utc::now())},"$inc":{"revision":1},"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string()}}).upsert(true).return_document(mongodb::options::ReturnDocument::After).await?.ok_or_else(||AppError::Conflict("Trusted account changed".into()))?;
+    let provider = profiles::provider(adapter.profile());
+    let context = (&state.db, admin, &input, provider);
+    let saved = crate::services::transaction_service::run_db_only(&state.db, &context, |tx, c| Box::pin(async move {
+        let &(db, admin, input, provider) = c;
+        let filter = doc! {"provider":provider,"account_id":&input.account_id};
+        if let Some(old) = db.collection::<ProviderAccount>(ACCOUNTS).find_one(filter.clone()).session(&mut *tx).await? {
+            super::managed::custody::account_dependencies(db,tx,&old.id).await?;
+        }
+        // Canonical credential services cannot be rebound through a second account.
+        if db.collection::<ProviderAccount>(ACCOUNTS).find_one(doc!{"catalog_service_id":&input.catalog_service_id,"$or":[{"provider":{"$ne":provider}},{"account_id":{"$ne":&input.account_id}}]}).session(&mut *tx).await?.is_some() {
+            return Err(AppError::Conflict("Credential service already belongs to another trusted account".into()));
+        }
+        // Registration marks this same catalog row, serializing concurrent setup.
+        if db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME).update_one(doc!{"_id":&input.catalog_service_id,"managed_comms_role":bson::Bson::Null},doc!{"$inc":{"managed_comms_fence":1_i64}}).session(&mut *tx).await?.matched_count!=1 {
+            return Err(AppError::Conflict("Managed account configuration requires its dedicated operation".into()));
+        }
+        db.collection::<ProviderAccount>(ACCOUNTS).find_one_and_update(filter,doc!{"$set":{"catalog_service_id":&input.catalog_service_id,"webhook_public_key":&input.webhook_public_key,"configured_by":admin,"updated_at":bson::DateTime::from_chrono(Utc::now())},"$inc":{"revision":1_i64,"fence":1_i64},"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string()}}).upsert(true).return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?.ok_or_else(||AppError::Conflict("Trusted account changed".into()))
+    })).await?;
     audit(
         state,
         admin,
@@ -230,6 +245,14 @@ pub async fn revoke_allocation(state: &AppState, id: &str) -> AppResult<()> {
         .find_one(doc! {"_id":id})
         .await?
         .ok_or_else(|| AppError::NotFound("Allocation not found".into()))?;
+    super::managed::custody::refuse_resources(
+        &state.db,
+        &allocation.provider,
+        &allocation.resource_id,
+        &allocation.phone_number,
+        &allocation.application_id,
+    )
+    .await?;
     let bindings:Vec<Binding>=state.db.collection::<Binding>(BINDINGS).find(doc!{"user_id":&allocation.user_id,"account_id":&allocation.account_id,"resource_id":&allocation.resource_id}).await?.try_collect().await?;
     for b in &bindings {
         disable(state, &b.user_id, &b.id).await?;
@@ -306,7 +329,10 @@ pub async fn list(state: &AppState, owner: &str, after: Option<&str>) -> AppResu
     Ok(state
         .db
         .collection::<Binding>(BINDINGS)
-        .find(page_filter(doc! {"user_id":owner}, after))
+        .find(page_filter(
+            doc! {"user_id":owner,"credential.kind":{"$ne":"managed_line"}},
+            after,
+        ))
         .sort(doc! {"_id":1})
         .limit(101)
         .await?
@@ -315,6 +341,7 @@ pub async fn list(state: &AppState, owner: &str, after: Option<&str>) -> AppResu
 }
 pub async fn disable(state: &AppState, owner: &str, id: &str) -> AppResult<()> {
     let b = owned(state, owner, id).await?;
+    super::managed::custody::refuse_legacy(&state.db, &b).await?;
     let changed=state.db.collection::<Binding>(BINDINGS).update_one(doc!{"_id":id,"user_id":owner,"revision":b.revision},doc!{"$inc":{"revision":1},"$set":{"enabled":false,"updated_at":bson::DateTime::from_chrono(Utc::now())}}).await?;
     if changed.matched_count != 1 {
         return Err(AppError::Conflict("Binding changed".into()));
@@ -325,6 +352,13 @@ pub async fn disable(state: &AppState, owner: &str, id: &str) -> AppResult<()> {
         "channel_adapter_binding_disabled",
         serde_json::json!({"binding_id":id,"revision":b.revision+1}),
     );
+    close_disabled_binding(state, &b).await
+}
+/// Shared post-commit shutdown for ordinary disable and managed revocation.
+/// Durable expired leases make every omitted/failed session recoverable.
+pub(super) async fn close_disabled_binding(state: &AppState, b: &Binding) -> AppResult<()> {
+    let id = &b.id;
+    let owner = &b.user_id;
     // Immediate cleanup is bounded; every remaining session becomes eligible
     // for the fair recovery sweep and cannot retain its old generation.
     state
@@ -348,7 +382,7 @@ pub async fn disable(state: &AppState, owner: &str, id: &str) -> AppResult<()> {
             crate::services::assistant_nyxagent::request_stop(&state.db, owner, &s.conversation_id)
                 .await;
         if profiles::relay(s.profile) {
-            let _ = super::coordinator::close(state, &b, &s, false).await;
+            let _ = super::coordinator::close(state, b, &s, false).await;
         } else {
             super::session::finish_noncall(state, &s.id, "binding_disabled").await?;
         }
@@ -357,6 +391,7 @@ pub async fn disable(state: &AppState, owner: &str, id: &str) -> AppResult<()> {
 }
 pub async fn reverify(state: &AppState, owner: &str, id: &str) -> AppResult<Binding> {
     let mut b = owned(state, owner, id).await?;
+    super::managed::custody::refuse_legacy(&state.db, &b).await?;
     let r = binding::resolve(state, owner, &b.credential, b.profile).await?;
     binding::validate_agent(state, owner, &b.agent_id).await?;
     if let CredentialBinding::Platform { catalog_service_id } = &b.credential {
@@ -439,6 +474,7 @@ pub async fn ensure_idle(state: &AppState, id: &str) -> AppResult<()> {
 }
 pub async fn remove(state: &AppState, owner: &str, id: &str) -> AppResult<()> {
     let b = owned(state, owner, id).await?;
+    super::managed::custody::refuse_legacy(&state.db, &b).await?;
     if b.enabled {
         return Err(AppError::Conflict(
             "Disable this binding before removing it".into(),
@@ -472,6 +508,11 @@ async fn release_unused_claims(
     tx: &mut mongodb::ClientSession,
     b: &Binding,
 ) -> AppResult<()> {
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        return Err(AppError::Conflict(
+            "Managed custody cannot be released by legacy management".into(),
+        ));
+    }
     let provider = profiles::provider(b.profile);
     let fields = if b.profile == Profile::ElevenlabsCustomLlm {
         vec![("agent", "resource_id", b.resource_id.as_str())]
@@ -551,6 +592,7 @@ pub async fn remove_account(state: &AppState, id: &str) -> AppResult<()> {
     }
     let mut tx = state.db.client().start_session().await?;
     tx.start_transaction().await?;
+    super::managed::custody::account_dependencies(&state.db, &mut tx, id).await?;
     if state
         .db
         .collection::<ResourceAllocation>(ALLOCATIONS)

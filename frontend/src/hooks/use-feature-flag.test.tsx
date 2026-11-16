@@ -151,6 +151,7 @@ describe("feature flag catalog", () => {
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
       NYXBOT_ADAPTERS: "nyxbot:service-adapters",
+      MANAGED_LINES: "nyxbot:managed-lines",
       NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
       NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
       DISCORD_GATEWAY: "channel:discord-gateway",

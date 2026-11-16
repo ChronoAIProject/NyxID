@@ -287,3 +287,4 @@ pub mod assistant_tool_result;
 pub mod channel_turn_preparation;
 
 pub mod gateway_reply;
+pub mod managed_comms;

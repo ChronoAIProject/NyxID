@@ -19,6 +19,7 @@ pub async fn run(command: AdminCommands) -> Result<()> {
         AdminCommands::Provider { command } => super::admin_catalog::run_provider(command).await,
         AdminCommands::Tools { command } => super::admin_tools::run(command).await,
         AdminCommands::Catalog { command } => super::admin_catalog::run_catalog(command).await,
+        AdminCommands::Line { command } => super::admin_line::run(command).await,
     }
 }
 
