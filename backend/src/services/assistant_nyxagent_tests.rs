@@ -460,6 +460,7 @@ fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -620,6 +621,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -660,6 +662,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -711,6 +714,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -794,6 +798,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -866,6 +871,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -938,6 +944,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -1288,6 +1295,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            group_reply_in_settlement: false,
             platform_model_context: None,
             automation_work: None,
             artifact_watch_id: None,
@@ -3555,6 +3563,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -4642,6 +4651,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -4706,6 +4716,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -8030,5 +8041,209 @@ async fn notification_write_failure_rolls_back_settlement_and_retry_commits_both
         .unwrap()
         .unwrap();
     assert_eq!(saved.get_i64("count").unwrap(), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_approval_settlement_is_durable_and_stop_wins() {
+    use crate::services::assistant_model_observer as observed;
+    let db = connect_transaction_test_database("model_approval_settlement").await;
+    let state = test_app_state(db.clone());
+    for stop in [false, true] {
+        let row = begin_turn(&db, "owner", &request(None, "test"), &state.encryption_keys)
+            .await
+            .unwrap();
+        let attempt = observed::ModelRequest::capture(
+            &db,
+            &row.id,
+            &row.credential_api_key_id,
+            &row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        attempt
+            .approval_refused(&AppError::ApprovalUnsupported, "https://example.test")
+            .await
+            .unwrap();
+        attempt.complete().await.unwrap();
+        if stop {
+            request_stop(&db, "owner", &row.id).await.unwrap();
+        }
+        // Even a late success/engine terminal cannot hide the recorded refusal;
+        // a committed Stop remains the higher-priority outcome.
+        settle(&db, &state.encryption_keys, "owner", &row, "", None).await;
+        let rows = messages(&db, "owner", &row.id, 10, None).await.unwrap();
+        let reply = rows.last().unwrap();
+        assert_eq!(
+            reply.error_code.as_deref(),
+            Some(if stop {
+                "cancelled"
+            } else {
+                "model_approval_required"
+            })
+        );
+        assert_eq!(reply.text.contains("/approvals/settings"), !stop);
+        if !stop {
+            let reason = reply
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_ref()
+                .unwrap();
+            assert_eq!(reason.stage, "model_approval");
+            assert_eq!(reason.nyxid_error_code, Some(12502));
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_approval_scope_fences_and_legacy_rows() {
+    use crate::services::assistant_model_observer as observed;
+    let db = connect_transaction_test_database("model_approval_scope").await;
+    for scope in [
+        "guest",
+        "shared",
+        "specialist",
+        "stopped",
+        "replaced",
+        "rotated",
+        "owner",
+    ] {
+        let mut row = stale_test_row(Utc::now());
+        row.active_turn.as_mut().unwrap().started_at = Utc::now();
+        row.guest_turn = scope == "guest";
+        row.shared_agent_thread = scope == "shared";
+        if scope == "specialist" {
+            row.role = AgentRole::Subagent;
+        }
+        let mut legacy = bson::to_document(&row).unwrap();
+        let active = legacy.get_document_mut("active_turn").unwrap();
+        active.remove("model_refusal");
+        let old: AssistantConversation = bson::from_document(legacy).unwrap();
+        assert!(old.active_turn.unwrap().model_refusal.is_none());
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let turn = &row.active_turn.as_ref().unwrap().turn_id;
+        assert!(
+            observed::ModelRequest::capture(&db, &row.id, "wrong-key", turn)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let attempt = observed::ModelRequest::capture(&db, &row.id, "key", turn)
+            .await
+            .unwrap()
+            .unwrap();
+        if scope == "stopped" {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.stop_requested":true}},
+                )
+                .await
+                .unwrap();
+        } else if scope == "rotated" {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"credential_api_key_id":"successor-key"}},
+                )
+                .await
+                .unwrap();
+        } else if scope == "replaced" {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.turn_id":"successor"}},
+                )
+                .await
+                .unwrap();
+        }
+        attempt
+            .approval_refused(&AppError::ApprovalUnsupported, "https://example.test")
+            .await
+            .unwrap();
+        attempt.complete().await.unwrap();
+        let saved = get(&db, "owner", &row.id).await.unwrap();
+        assert_eq!(
+            saved.active_turn.unwrap().model_refusal.is_some(),
+            matches!(scope, "owner" | "specialist")
+        );
+        if scope == "owner" {
+            assert!(matches!(
+                observed::ModelRequest::capture(&db, &row.id, "key", turn).await,
+                Err(AppError::ApprovalUnsupported)
+            ));
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_approval_proposal_claim_is_once_across_concurrent_attempts() {
+    use crate::services::assistant_model_observer as observed;
+    let db = connect_transaction_test_database("model_approval_claim").await;
+    let mut row = stale_test_row(Utc::now());
+    row.active_turn.as_mut().unwrap().started_at = Utc::now();
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let turn = &row.active_turn.as_ref().unwrap().turn_id;
+    let first = observed::ModelRequest::capture(&db, &row.id, "key", turn)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = observed::ModelRequest::capture(&db, &row.id, "key", turn)
+        .await
+        .unwrap()
+        .unwrap();
+    // The stop watcher must not see a proposal claim until its transaction
+    // commits, and an aborted insert must leave another attempt able to claim.
+    let mut aborted = db.client().start_session().await.unwrap();
+    aborted.start_transaction().await.unwrap();
+    observed::CURRENT_MODEL
+        .scope(
+            Some(first.clone()),
+            observed::before_approval_request(Some(&mut aborted)),
+        )
+        .await
+        .unwrap();
+    let pending = get(&db, "owner", &row.id).await.unwrap();
+    assert!(observed::approval_error(pending.active_turn.as_ref().unwrap()).is_none());
+    aborted.abort_transaction().await.unwrap();
+    let claim = |request: observed::ModelRequest| {
+        let db = db.clone();
+        async move {
+            observed::CURRENT_MODEL
+                .scope(Some(request), async {
+                    let mut session = db.client().start_session().await?;
+                    session
+                        .start_transaction()
+                        .and_run2(async |session| {
+                            let result = observed::before_approval_request(Some(session)).await;
+                            crate::services::api_key_mutation_service::transaction_result(result)
+                        })
+                        .await
+                        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+                })
+                .await
+        }
+    };
+    let (a, b) = tokio::join!(claim(first.clone()), claim(second.clone()));
+    assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1);
+    assert!(
+        matches!(a, Err(AppError::ApprovalUnsupported))
+            || matches!(b, Err(AppError::ApprovalUnsupported))
+    );
+    first.complete().await.unwrap();
+    second.complete().await.unwrap();
+    let saved = get(&db, "owner", &row.id).await.unwrap();
+    assert!(observed::approval_error(&saved.active_turn.unwrap()).is_some());
     db.drop().await.unwrap();
 }

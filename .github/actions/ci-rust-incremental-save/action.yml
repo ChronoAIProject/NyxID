@@ -1,0 +1,23 @@
+name: Save ordinary CI incremental cache
+description: Save the incremental paths using the key and path from ci-rust-cache.
+inputs:
+  key:
+    description: incremental-key output from ci-rust-cache.
+    required: true
+  path:
+    description: incremental-path output from ci-rust-cache. Do not edit it.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Prune unused crates and bound the saved graph
+      shell: bash
+      run: |
+        python3 .github/scripts/incremental_cache.py prune
+        python3 .github/scripts/backend_disk.py before-save
+    - name: Save incremental cache
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}

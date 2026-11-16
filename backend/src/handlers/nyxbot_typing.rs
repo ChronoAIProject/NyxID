@@ -33,23 +33,25 @@ pub(crate) fn start(
     crate::services::assistant_checking_notice::destination(row)?;
     let state = state.clone();
     let row = row.clone();
-    Some(tokio::spawn(async move {
-        let Ok(Some(prepared)) = resolve(&state, &row, &event_id).await else {
-            return;
-        };
-        let mut interval = tokio::time::interval(Duration::from_secs(4));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if !live(&state, &row, &event_id, &prepared.channel)
-                .await
-                .unwrap_or(false)
-                || !prepared.destination.send(&state).await.unwrap_or(false)
-            {
-                break;
+    Some(
+        crate::services::shutdown::process().spawn_worker(async move {
+            let Ok(Some(prepared)) = resolve(&state, &row, &event_id).await else {
+                return;
+            };
+            let mut interval = tokio::time::interval(Duration::from_secs(4));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if !live(&state, &row, &event_id, &prepared.channel)
+                    .await
+                    .unwrap_or(false)
+                    || !prepared.destination.send(&state).await.unwrap_or(false)
+                {
+                    break;
+                }
             }
-        }
-    }))
+        }),
+    )
 }
 
 fn event_filter(row: &AssistantConversation, event_id: &str) -> bson::Document {

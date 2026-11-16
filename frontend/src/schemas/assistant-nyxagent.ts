@@ -731,6 +731,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  can_manage: z.boolean().optional(),
   guest_access_description: z.string().optional(),
   org_specialist: z
     .object({
@@ -764,7 +765,7 @@ export const nyxAgentChannelAgentSchema = z.object({
   /** `pending`, `active` or `failed`. */
   status: z.string(),
   last_error: z.string().nullable().default(null),
-  owner_linked: z.boolean(),
+  owner_linked: z.boolean().optional(),
   /** The agent this bot reaches; null means the owner's NyxBot. */
   agent_id: z.string().nullable().default(null),
   /** The organization that owns the bot; null for the user's own bot. */
@@ -805,6 +806,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  can_manage: z.boolean().optional(),
   guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),
   has_thread_history: z.boolean().optional(),

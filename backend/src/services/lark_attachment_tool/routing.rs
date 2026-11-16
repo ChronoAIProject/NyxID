@@ -207,6 +207,7 @@ mod tests {
     }
     fn target(catalog: &DownstreamService) -> ProxyTarget {
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(catalog.slug.clone()),
             execution_request: None,
             execution_permission: None,

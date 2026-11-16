@@ -191,6 +191,8 @@ export function grantOptions(connections: GrantService[], agent?: AssistantAgent
   const org = agent?.owner_kind === "org";
   const seen = new Set<string>();
   return connections.flatMap((row) => {
+    // Voice powers the chat experience rather than a specialist tool choice.
+    if ((row.catalog_slug ?? row.slug) === "nyxbot-voice") return [];
     const value = org ? row.id : row.slug;
     if (seen.has(value)) return [];
     seen.add(value);

@@ -28,7 +28,7 @@ use std::{
 pub const REFRESH_SECONDS: u64 = 5;
 const SWEEP_SECONDS: u64 = 60;
 const BATCH: i64 = 100;
-const LEASE: &str = "assistant-upload-retention";
+pub(crate) const LEASE: &str = "assistant-upload-retention";
 
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -713,7 +713,7 @@ pub async fn sweep(db: &Database) -> AppResult<usize> {
 
 pub fn spawn(state: AppState) {
     let refresh_state = state.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(REFRESH_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -728,11 +728,13 @@ pub fn spawn(state: AppState) {
             }
         }
     });
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(SWEEP_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if Box::pin(sweep(&state.db)).await.is_err() {
                 tracing::warn!("Upload retention sweep deferred");
             }

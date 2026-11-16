@@ -49,42 +49,44 @@ pub(crate) fn start(
     let conversation = conversation.to_owned();
     let user = user.to_owned();
     let turn = turn.to_owned();
-    let task = AbortOnDropHandle::new(tokio::spawn(async move {
-        let collection = db.collection::<bson::Document>(COLLECTION_NAME);
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut saved_cursor = 0;
-        loop {
-            tick.tick().await;
-            let reply = receiver.borrow_and_update().clone();
-            if reply.cursor <= saved_cursor {
-                continue;
+    let task = AbortOnDropHandle::new(crate::services::shutdown::process().spawn_worker(
+        async move {
+            let collection = db.collection::<bson::Document>(COLLECTION_NAME);
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut saved_cursor = 0;
+            loop {
+                tick.tick().await;
+                let reply = receiver.borrow_and_update().clone();
+                if reply.cursor <= saved_cursor {
+                    continue;
+                }
+                let Ok(value) = bson::to_bson(&reply) else {
+                    continue;
+                };
+                let write = collection.update_one(
+                    doc! {"_id": &conversation, "user_id": &user, "active_turn.turn_id": &turn,
+                    "active_turn.stop_requested": false,
+                    "$or": [
+                        {"active_turn.reply.cursor": {"$exists": false}},
+                        {"active_turn.reply.cursor": {"$lt": reply.cursor}}
+                    ]},
+                    doc! {"$set": {"active_turn.reply": value}},
+                );
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    std::future::IntoFuture::into_future(write),
+                )
+                .await
+                {
+                    Ok(Ok(result)) if result.matched_count == 0 => break,
+                    Ok(Ok(_)) => saved_cursor = reply.cursor,
+                    // Keep the latest text and retry; checkpoint outages cannot stall tokens.
+                    _ => {}
+                }
             }
-            let Ok(value) = bson::to_bson(&reply) else {
-                continue;
-            };
-            let write = collection.update_one(
-                doc! {"_id": &conversation, "user_id": &user, "active_turn.turn_id": &turn,
-                "active_turn.stop_requested": false,
-                "$or": [
-                    {"active_turn.reply.cursor": {"$exists": false}},
-                    {"active_turn.reply.cursor": {"$lt": reply.cursor}}
-                ]},
-                doc! {"$set": {"active_turn.reply": value}},
-            );
-            match tokio::time::timeout(
-                Duration::from_secs(2),
-                std::future::IntoFuture::into_future(write),
-            )
-            .await
-            {
-                Ok(Ok(result)) if result.matched_count == 0 => break,
-                Ok(Ok(_)) => saved_cursor = reply.cursor,
-                // Keep the latest text and retry; checkpoint outages cannot stall tokens.
-                _ => {}
-            }
-        }
-    }));
+        },
+    ));
     (sender, task)
 }
 

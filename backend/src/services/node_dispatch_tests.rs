@@ -782,11 +782,12 @@ async fn remote_credential_ack_and_admin_disconnect_reach_owner() {
             .send_credential_update_and_wait(
                 &node_id,
                 &CredentialUpdateParams {
+                    version: None,
                     target_revision: None,
                     service_slug: "service".to_string(),
                     injection_method: "header".to_string(),
                     header_name: Some("Authorization".to_string()),
-                    header_value: Some("secret".to_string()),
+                    header_value: Some(zeroize::Zeroizing::new("secret".to_string())),
                     param_name: None,
                     param_value: None,
                     target_url: None,
@@ -1132,6 +1133,7 @@ async fn node_endpoint_2126_remote_metadata_ack_and_capability_fence() {
         .await
         .unwrap();
     let params = CredentialUpdateParams {
+        version: None,
         service_slug: "monitor".into(),
         injection_method: "target_url".into(),
         header_name: None,
@@ -1206,4 +1208,82 @@ async fn node_endpoint_2126_remote_metadata_ack_and_capability_fence() {
         CredentialAckOutcome::Ok,
     );
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn node_credential_order_2472_owner_routing_preserves_update_remove_generations_and_receipts()
+{
+    use crate::services::node_ws_manager::CredentialVersion;
+    let mut fixture = two_replica_fixture("ordered_delivery_routing")
+        .await
+        .expect("test MongoDB required");
+    let version = CredentialVersion {
+        credential_id: uuid::Uuid::new_v4().to_string(),
+        credential_generation: 3,
+    };
+    let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+    let params = CredentialUpdateParams {
+        version: Some(version.clone()),
+        target_revision: None,
+        service_slug: "ordering-fixture".into(),
+        injection_method: "header".into(),
+        header_name: Some("Authorization".into()),
+        header_value: Some(value.clone()),
+        param_name: None,
+        param_value: None,
+        target_url: None,
+    };
+    let dispatch = fixture.caller_dispatch.clone();
+    let node = fixture.node_id.clone();
+    let owner = fixture.owner_manager.clone();
+    let (sent, ()) = tokio::join!(
+        dispatch.send_credential_update_and_wait(&node, &params, Duration::from_secs(3)),
+        async {
+            let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+            assert!(frame["header_value"].as_str().unwrap() == value.as_str());
+            assert_eq!(frame["credential_generation"], 3);
+            assert!(frame["credential_id"].as_str().unwrap() == version.credential_id);
+            owner.deliver_credential_ack(
+                &node,
+                frame["request_id"].as_str().unwrap(),
+                CredentialAckOutcome::Versioned(version.clone()),
+            );
+        }
+    );
+    sent.unwrap();
+    let (sent, ()) = tokio::join!(
+        dispatch.send_credential_remove_versioned(
+            &node,
+            "ordering-fixture",
+            &version,
+            Duration::from_secs(3)
+        ),
+        async {
+            let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+            assert_eq!(frame["type"], "credential_remove");
+            assert_eq!(frame["credential_generation"], 3);
+            assert!(frame["header_value"].is_null());
+            owner.deliver_credential_ack(
+                &node,
+                frame["request_id"].as_str().unwrap(),
+                CredentialAckOutcome::Versioned(version.clone()),
+            );
+        }
+    );
+    sent.unwrap();
+    // A correlated receipt for a lower held generation does not complete delivery.
+    let (sent, ()) = tokio::join!(
+        dispatch.send_credential_update_and_wait(&node, &params, Duration::from_secs(3)),
+        async {
+            let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+            let mut older = version.clone();
+            older.credential_generation -= 1;
+            owner.deliver_credential_ack(
+                &node,
+                frame["request_id"].as_str().unwrap(),
+                CredentialAckOutcome::Versioned(older),
+            );
+        }
+    );
+    assert!(sent.is_err());
 }

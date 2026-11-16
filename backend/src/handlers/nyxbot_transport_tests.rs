@@ -108,7 +108,7 @@ async fn due(state: &AppState, id: &str) {
         .unwrap();
 }
 
-async fn native_discord_identity(
+pub(super) async fn native_discord_identity(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> (
@@ -152,7 +152,7 @@ async fn native_discord_identity(
     )
 }
 
-async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
+pub(super) async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
     use crate::services::{
         discord_gateway::transport::relay_allowed,
         nyxbot_gateway_release_service::settle_native_drains,
@@ -606,6 +606,31 @@ async fn pending_org_return_waits_for_stale_cleanup_before_retrying() {
     assert!(recovered.pending_route_api_key_id.is_none());
     inactive_key(&state, &org, &pending.id).await;
     inactive_key(&state, &org, &row.route_api_key_id).await;
+    // A newly queued retirement can be ahead of MongoDB time. Complete its
+    // captured obligation before asserting remote cleanup, as a later pass does.
+    let releases = state
+        .db
+        .collection::<crate::models::nyxbot_gateway_release::NyxbotGatewayRelease>(
+            crate::models::nyxbot_gateway_release::COLLECTION_NAME,
+        );
+    releases
+        .update_many(
+            doc! {"channel_id": &row.id, "state": "due"},
+            doc! {"$set": {"next_attempt_at": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let mut due = releases
+        .find(doc! {"channel_id": &row.id, "state": "due"})
+        .await
+        .unwrap();
+    while let Some(obligation) = due.try_next().await.unwrap() {
+        let claimed = releases::claim(&state.db, Some(&obligation.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(releases::execute(&state, claimed).await.unwrap());
+    }
     assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
     gateway.abort();
     agent.abort();

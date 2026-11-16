@@ -161,24 +161,14 @@ pub async fn create_invite_code(
     let max_uses = body.max_uses.unwrap_or(10);
     let admin_id = auth_user.user_id.to_string();
 
-    let invite = invite_code_service::create_invite_code(
+    let invite = invite_code_service::create_invite_code_as(
         &state.db,
         &admin_id,
         max_uses,
         body.note.as_deref(),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_invite_code_create",
-        Some(serde_json::json!({
-            "invite_code_id": invite.id,
-            "code": invite.code,
-            "max_uses": invite.max_uses,
-        })),
-    );
 
     emit_event(
         state.telemetry.as_deref(),
@@ -237,17 +227,13 @@ pub async fn update_invite_code(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    let updated = invite_code_service::update_invite_code_note(&state.db, &id, body.note).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_invite_code_update",
-        Some(serde_json::json!({
-            "invite_code_id": id,
-            "fields_changed": ["note"],
-        })),
-    );
+    let updated = invite_code_service::update_invite_code_note_as(
+        &state.db,
+        &id,
+        body.note,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     // Resolve usage users for the single updated code so the response carries
     // the same enrichment shape as the list endpoint. The drawer reuses this
@@ -269,14 +255,12 @@ pub async fn deactivate_invite_code(
 ) -> AppResult<Json<DeactivateInviteCodeResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    invite_code_service::deactivate_invite_code(&state.db, &id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_invite_code_deactivate",
-        Some(serde_json::json!({ "invite_code_id": id })),
-    );
+    invite_code_service::deactivate_invite_code_as(
+        &state.db,
+        &id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(DeactivateInviteCodeResponse {
         message: "Invite code deactivated".to_string(),
@@ -303,6 +287,7 @@ mod pure_tests {
             is_active: true,
             created_at: now,
             updated_at: now,
+            reservations: vec![],
             usages: vec![InviteCodeUsage {
                 user_id: "user-1".to_string(),
                 used_at: now,
@@ -426,6 +411,7 @@ mod pure_tests {
             is_active: true,
             created_at: now,
             updated_at: now,
+            reservations: vec![],
             usages: vec![],
         };
         let users = make_users_map();
@@ -460,6 +446,7 @@ mod pure_tests {
             is_active: true,
             created_at: now,
             updated_at: now,
+            reservations: vec![],
             usages: vec![
                 InviteCodeUsage {
                     user_id: "user-1".to_string(),
@@ -556,6 +543,183 @@ mod tests {
 
     fn test_peer() -> ConnectInfo<SocketAddr> {
         ConnectInfo("127.0.0.1:12345".parse().unwrap())
+    }
+
+    async fn capacity_fixtures(db: &mongodb::Database, admin: &str) -> [(InviteCode, i32); 3] {
+        use mongodb::bson::{Document, doc};
+
+        let mut codes = Vec::new();
+        for _ in 0..3 {
+            codes.push(
+                invite_code_service::create_invite_code(db, admin, 1, None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        for code in &codes[..2] {
+            invite_code_service::reserve_invite_code(db, &code.code, "pending@example.test")
+                .await
+                .unwrap();
+        }
+        let rows = db.collection::<Document>(crate::models::invite_code::COLLECTION_NAME);
+        rows.update_one(
+            doc! {"_id": &codes[0].id},
+            vec![doc! {"$set": {"reservations": {"$map": {
+                "input": "$reservations", "as": "r",
+                "in": {"$mergeObjects": ["$$r", {"expires_at": {"$subtract": ["$$NOW", 1]}}]},
+            }}}}],
+        )
+        .await
+        .unwrap();
+        // Legacy counts remain authoritative even without a usage entry.
+        rows.update_one(
+            doc! {"_id": &codes[2].id},
+            doc! {"$unset": {"reservations": ""}, "$set": {"used_count": 1}},
+        )
+        .await
+        .unwrap();
+        let [expired, live, legacy]: [InviteCode; 3] = codes.try_into().unwrap();
+        [(expired, 0), (live, 1), (legacy, 1)]
+    }
+
+    fn assert_reported_capacity(code: &InviteCodeResponse, expected: i32) {
+        assert_eq!(code.used_count, expected, "reported count for {}", code.id);
+        // The frontend's badge derives availability from these same fields.
+        assert_eq!(
+            code.is_active && code.used_count < code.max_uses,
+            expected == 0
+        );
+        let json = serde_json::to_value(code).unwrap();
+        assert!(json.get("reservations").is_none());
+        assert!(!json.to_string().contains("pending@example.test"));
+    }
+
+    #[tokio::test]
+    async fn admin_list_counts_only_live_reservations_without_writes() {
+        use futures::TryStreamExt;
+        use mongodb::bson::{Document, doc};
+        use std::sync::{Arc, Mutex};
+
+        let commands = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = commands.clone();
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "invite_admin_capacity",
+            mongodb::event::EventHandler::callback(move |event| {
+                if let mongodb::event::command::CommandEvent::Started(event) = event {
+                    observed.lock().unwrap().push(event.command_name);
+                }
+            }),
+        )
+        .await;
+        let admin = insert_admin(&db).await;
+        let fixtures = capacity_fixtures(&db, &admin).await;
+        let rows = db.collection::<Document>(crate::models::invite_code::COLLECTION_NAME);
+        let before: Vec<Document> = rows
+            .find(doc! {})
+            .sort(doc! {"_id": 1})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        commands.lock().unwrap().clear();
+        let response = list_invite_codes(State(state.clone()), test_auth_user(&admin))
+            .await
+            .unwrap()
+            .0;
+        let reads = std::mem::take(&mut *commands.lock().unwrap());
+        println!("INVITE_ADMIN_COMMANDS list: {reads:?}");
+        assert_eq!(reads.len(), 5);
+        assert!(
+            reads
+                .iter()
+                .all(|name| matches!(name.as_str(), "find" | "aggregate"))
+        );
+        let after: Vec<Document> = rows
+            .find(doc! {})
+            .sort(doc! {"_id": 1})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(after, before, "admin read must not reclaim or mutate rows");
+        for (fixture, expected) in &fixtures {
+            let code = response
+                .invite_codes
+                .iter()
+                .find(|code| code.id == fixture.id)
+                .unwrap();
+            assert_reported_capacity(code, *expected);
+        }
+
+        // Lazy reclaim remains the only counter mutation: the next signup
+        // replaces the expired pending entry, and stored/reported counts agree.
+        let expired = &fixtures[0].0;
+        invite_code_service::reserve_invite_code(&db, &expired.code, "next@example.test")
+            .await
+            .unwrap();
+        let stored = rows
+            .find_one(doc! {"_id": &expired.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.get_i32("used_count").unwrap(), 1);
+        assert_eq!(stored.get_array("reservations").unwrap().len(), 1);
+        let response = list_invite_codes(State(state), test_auth_user(&admin))
+            .await
+            .unwrap()
+            .0;
+        let code = response
+            .invite_codes
+            .iter()
+            .find(|code| code.id == expired.id)
+            .unwrap();
+        assert_reported_capacity(code, 1);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_note_response_counts_only_live_reservations() {
+        use mongodb::bson::{Document, doc};
+
+        let db = crate::test_utils::connect_transaction_test_database("invite_note_capacity").await;
+        let admin = insert_admin(&db).await;
+        let fixtures = capacity_fixtures(&db, &admin).await;
+        let state = test_app_state(db.clone());
+        let rows = db.collection::<Document>(crate::models::invite_code::COLLECTION_NAME);
+        for (fixture, expected) in fixtures {
+            let before = rows
+                .find_one(doc! {"_id": &fixture.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let response = update_invite_code(
+                State(state.clone()),
+                test_peer(),
+                test_auth_user(&admin),
+                HeaderMap::new(),
+                Path(fixture.id.clone()),
+                Json(UpdateInviteCodeRequest {
+                    note: Some("edited".into()),
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_reported_capacity(&response, expected);
+            assert_eq!(response.note.as_deref(), Some("edited"));
+            let after = rows
+                .find_one(doc! {"_id": &fixture.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.get("used_count"), before.get("used_count"));
+            assert_eq!(after.get("reservations"), before.get("reservations"));
+            assert_eq!(after.get("usages"), before.get("usages"));
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

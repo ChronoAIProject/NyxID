@@ -7,6 +7,7 @@ import {
 } from "expo-speech-recognition";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { volumeLevel } from "./voice/dictationLevel";
 import { dictationLocale } from "./voice/dictationLocale";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
@@ -18,26 +19,42 @@ type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 const NO_SPEECH = "No speech was detected. Try again.";
 const DENIED =
   "Allow microphone and speech recognition access in Settings to dictate. You can keep typing.";
+const START_FAILED =
+  "Dictation could not start. Please try again. You can keep typing.";
+/** Give people time to read the native prompt, separately from the foreground handoff. */
+const PERMISSION_TIMEOUT_MS = 60_000;
+/** Locale discovery or a native recognizer must not leave the composer starting forever. */
+const START_TIMEOUT_MS = 8000;
 /** A stopped recognizer that never reports `end` still releases the microphone. */
 const STOP_TIMEOUT_MS = 8000;
 /** How long a new attempt waits for an aborted one's `end`. */
 const RELEASE_TIMEOUT_MS = 1500;
+
+function permissionDeniedMessage() {
+  return Platform.OS === "android"
+    ? "Allow microphone access in Settings to dictate. You can keep typing."
+    : DENIED;
+}
 
 function dictationError(code: ExpoSpeechRecognitionErrorCode) {
   switch (code) {
     case "aborted":
       return undefined;
     case "not-allowed":
-      return DENIED;
+      return permissionDeniedMessage();
     case "no-speech":
     case "speech-timeout":
       return NO_SPEECH;
     case "language-not-supported":
-      return "Dictation isn't available in your iPhone's language. You can keep typing.";
+      return Platform.OS === "android"
+        ? "Dictation isn't available in your selected language. Choose another language or keep typing."
+        : "Dictation isn't available in your device's language. You can keep typing.";
     case "network":
       return "Speech recognition needs a connection for your language. Check your connection and try again.";
     case "service-not-allowed":
-      return "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.";
+      return Platform.OS === "android"
+        ? "Speech recognition isn't available right now. Check microphone access and your device's speech recognition service, then try again. You can keep typing."
+        : "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.";
     case "audio-capture":
       return "The microphone couldn't record. Close other apps using it and try again.";
     case "interrupted":
@@ -85,7 +102,7 @@ function release(owner: AudioOwner) {
   Recognizer.abort();
 }
 
-/** The chosen dictation language when still supported, else the iPhone's. */
+/** The chosen dictation language when still supported, else the device's. */
 async function recognitionLanguage() {
   const chosen = await savedDictationLanguage();
   let phone: string | undefined;
@@ -126,8 +143,8 @@ function levelSource() {
 }
 
 /**
- * Composer dictation on Apple's speech recognizer (on-device when the iPhone
- * supports it). The words appear in the composer as they are recognized and
+ * Composer dictation on the device's speech recognizer (on-device when
+ * supported). The words appear in the composer as they are recognized and
  * join the draft when recording finishes. Crew voice instead opts into native
  * utterance boundaries and sends successful final results through its sender.
  */
@@ -146,6 +163,7 @@ export function useComposerDictation({
   /** Crew voice ends each utterance at native silence detection. */
   continuous?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const focused = useIsFocused();
   const { sheetOpen } = useWorkspaceAccessibility();
   enabled = enabled && !sheetOpen;
@@ -198,7 +216,9 @@ export function useComposerDictation({
     setPermissionDenied(false);
     const controller = new AbortController();
     const identity = { scope, epoch };
-    let permission = true;
+    let permissionPrompt:
+      | { androidBackgroundAllowed: boolean; androidBackgrounded: boolean }
+      | undefined;
     /** Recognition was started and has not reported `end`: the mic may be on. */
     let native = false;
     let audioOwner: AudioOwner | undefined;
@@ -211,6 +231,8 @@ export function useComposerDictation({
     let failure: string | undefined;
     let nativeStartedAt = 0;
     let subscriptions: { remove(): void }[] = [];
+    let permissionTimer: ReturnType<typeof setTimeout> | undefined;
+    let startTimer: ReturnType<typeof setTimeout> | undefined;
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
       [finalText.trim(), interimText.trim()].filter(Boolean).join(" ");
@@ -226,6 +248,8 @@ export function useComposerDictation({
       for (const subscription of subscriptions) subscription.remove();
       subscriptions = [];
       appState.remove();
+      clearTimeout(permissionTimer);
+      clearTimeout(startTimer);
       clearTimeout(stopTimer);
     };
     const cancel = () => {
@@ -295,32 +319,89 @@ export function useComposerDictation({
       },
     };
     const appState = AppState.addEventListener("change", (state) => {
-      if (
-        !valid() ||
-        state === "active" ||
-        (permission && state === "inactive")
-      )
+      if (!valid()) return;
+      if (state === "active") {
+        if (permissionPrompt?.androidBackgrounded) {
+          permissionPrompt.androidBackgroundAllowed = false;
+          permissionPrompt.androidBackgrounded = false;
+        }
         return;
+      }
+      // Only a real native permission request may pause before capture starts.
+      if (permissionPrompt && !native) {
+        if (state === "inactive") return;
+        if (
+          state === "background" &&
+          permissionPrompt.androidBackgroundAllowed
+        ) {
+          permissionPrompt.androidBackgrounded = true;
+          return;
+        }
+      }
       discard();
     });
     operation.current = attempt;
     setCaption({ final: "", interim: "" });
     setPhase("permission");
     try {
-      const result = await Recognizer.requestPermissionsAsync();
-      if (!valid()) return;
-      if (!result.granted) {
-        setPermissionDenied(true);
+      if (Platform.OS === "android" && !Recognizer.isRecognitionAvailable()) {
         throw new Error(
-          result.restricted
-            ? "Speech recognition is restricted on this iPhone in Screen Time. You can keep typing."
-            : DENIED,
+          "This device doesn't have a speech recognition service available. You can keep typing.",
         );
       }
-      await waitForVoiceForeground(AppState, controller.signal, valid);
-      permission = false;
+      let result = await Recognizer.getPermissionsAsync();
       if (!valid()) return;
+      if (AppState.currentState !== "active") throw new Error(START_FAILED);
+      if (!result.granted) {
+        permissionPrompt = {
+          androidBackgroundAllowed: Platform.OS === "android",
+          androidBackgrounded: false,
+        };
+        try {
+          permissionTimer = setTimeout(() => {
+            if (!valid()) return;
+            cancel();
+            operation.current = undefined;
+            setPhase("idle");
+            setError(START_FAILED);
+          }, PERMISSION_TIMEOUT_MS);
+          result = await Recognizer.requestPermissionsAsync();
+          clearTimeout(permissionTimer);
+          permissionTimer = undefined;
+          if (!valid()) return;
+          if (!result.granted) {
+            setPermissionDenied(true);
+            throw new Error(
+              result.restricted
+                ? Platform.OS === "android"
+                  ? "Speech recognition is restricted on this device. You can keep typing."
+                  : "Speech recognition is restricted on this device in Screen Time. You can keep typing."
+                : permissionDeniedMessage(),
+            );
+          }
+          try {
+            await waitForVoiceForeground(AppState, controller.signal, valid, {
+              allowInitialBackground: permissionPrompt.androidBackgroundAllowed,
+            });
+          } catch {
+            if (!valid()) return;
+            throw new Error(START_FAILED);
+          }
+        } finally {
+          clearTimeout(permissionTimer);
+          permissionPrompt = undefined;
+        }
+      }
+      if (!valid()) return;
+      if (AppState.currentState !== "active") throw new Error(START_FAILED);
       setPhase("connecting");
+      startTimer = setTimeout(() => {
+        if (!valid()) return;
+        cancel();
+        operation.current = undefined;
+        setPhase("idle");
+        setError((previous) => previous ?? START_FAILED);
+      }, START_TIMEOUT_MS);
       const lang = await recognitionLanguage();
       if (!valid()) return;
       await releasing;
@@ -330,6 +411,7 @@ export function useComposerDictation({
       subscriptions = [
         Recognizer.addListener("start", () => {
           if (!valid()) return;
+          clearTimeout(startTimer);
           listening = true;
           setPhase("listening");
         }),
@@ -397,7 +479,7 @@ export function useComposerDictation({
     /** Settled words and the recognizer's still-changing tail, for display only. */
     final: caption.final,
     interim: caption.interim,
-    error,
+    error: error ? t(error) : undefined,
     permissionDenied,
     subscribeLevel: levels.subscribe,
     active: phase !== "idle",
@@ -408,7 +490,9 @@ export function useComposerDictation({
     openSettings: () => {
       void Linking.openSettings().catch(() =>
         setError(
-          "Open your iPhone Settings to allow microphone and speech recognition access.",
+          Platform.OS === "android"
+            ? "Open your device Settings to allow microphone access."
+            : "Open your device Settings to allow microphone and speech recognition access.",
         ),
       );
     },

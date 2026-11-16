@@ -385,6 +385,9 @@ pub async fn claim_orphans(db: &Database, worker: &str) -> AppResult<Vec<VoiceSe
         .sort(doc!{"lease_until":1}).limit(2).await?.try_collect().await?;
     let mut claimed = Vec::new();
     for row in candidates {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if let Some(row)=rows.find_one_and_update(doc!{"_id":row.id,"generation":row.generation,"live_slot":row.live_slot,
             "lease_until":{"$lte":bson::DateTime::from_chrono(now)}},doc!{"$inc":{"generation":1},"$set":{
             "lease_owner":worker,"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(LEASE_SECONDS))}})

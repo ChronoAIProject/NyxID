@@ -147,6 +147,12 @@ export function storedAssistantError(code: string | null): string {
       return "This task reached its continuation limit. Its context is saved; send guidance to continue.";
     case "continuation_no_progress":
       return "Paused because the task repeated without progress. Send new guidance to continue.";
+    case "model_policy_denied":
+      return "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.";
+    case "model_org_approval_required":
+      return "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.";
+    case "model_approval_required":
+      return "This model request requires approval that this thread cannot present. Review Approval settings before retrying.";
     case "model_not_configured":
     case "model_unavailable":
       return "This agent is unavailable.";

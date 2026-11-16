@@ -4,6 +4,7 @@ import type { VoiceOption, VoicePreferences } from "./voiceContracts";
 import {
   chooseVoiceOption,
   composerTrailingControl,
+  resolveVoicePreferences,
   voiceElapsed,
   voiceOptionKey,
   voiceTariff,
@@ -97,6 +98,60 @@ test("an unavailable saved voice source remains selected and never falls back", 
     unavailable,
   );
   assert.equal(chooseVoiceOption([], preferences(unavailable)), undefined);
+});
+
+test("first-use preferences follow the iPad hands-free default and selected source", () => {
+  const selected = option({
+    connection_id: connectionId,
+    key_source: "own",
+    model: "selected-model",
+  });
+  assert.deepEqual(resolveVoicePreferences(selected, null), {
+    service_id: selected.service_id,
+    connection_id: connectionId,
+    key_source: "own",
+    model: "selected-model",
+    voice: "marin",
+    input_mode: "automatic",
+    language: null,
+    notify_on_completion: false,
+  });
+});
+
+test("next-call choices preserve saved PTT, missing voices, language and notices without mutating them", () => {
+  const selected = option();
+  const saved = {
+    ...preferences(selected),
+    voice: "retired",
+    language: "zh-CN",
+    notify_on_completion: true,
+  };
+  const before = { ...saved };
+  assert.deepEqual(resolveVoicePreferences(selected, saved), saved);
+  assert.deepEqual(
+    resolveVoicePreferences(selected, saved, {
+      input_mode: "automatic",
+      voice: "marin",
+    }),
+    { ...saved, input_mode: "automatic", voice: "marin" },
+  );
+  assert.deepEqual(saved, before);
+});
+
+test("Grok preferences require hold to talk even when saved or next-call choice is automatic", () => {
+  const selected = option();
+  const grok = option({
+    voice: { ...selected.voice, protocol: "xai_realtime" },
+  });
+  assert.equal(resolveVoicePreferences(grok).input_mode, "push_to_talk");
+  assert.equal(
+    resolveVoicePreferences(
+      grok,
+      { ...preferences(grok), input_mode: "automatic" },
+      { input_mode: "automatic" },
+    ).input_mode,
+    "push_to_talk",
+  );
 });
 
 test("platform tariffs retain exact decimal rates and only list synced applicable components", () => {

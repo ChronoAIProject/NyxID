@@ -4,12 +4,14 @@ use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 
 fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
     HealthFacts {
+        org_guest_billing: None,
         inbound_outcome: None,
         platform,
         status,
         webhook_registered: true,
         failure_reason: None,
         outbound_reason: None,
+        thread_reason: None,
         subscription_registered: None,
         backoff_active: false,
         gateway: false,
@@ -164,12 +166,14 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
     ];
     for (platform, status, registered, reason, backoff, expected) in rows {
         let facts = HealthFacts {
+            org_guest_billing: None,
             inbound_outcome: None,
             platform,
             status,
             webhook_registered: *registered,
             failure_reason: *reason,
             outbound_reason: None,
+            thread_reason: None,
             subscription_registered: None,
             backoff_active: *backoff,
             gateway: false,
@@ -585,4 +589,52 @@ async fn discord_health_batch_matches_personal_org_global_and_revoked_membership
         );
     }
     db.drop().await.unwrap();
+}
+
+#[test]
+fn org_guest_billing_advice_yields_to_real_faults_for_gateway_and_relay() {
+    for gateway in [false, true] {
+        let mut healthy = facts("lark", "active");
+        healthy.gateway = gateway;
+        assert_eq!(
+            recommend(&healthy).action,
+            if gateway { "gateway" } else { "none" }
+        );
+        healthy.org_guest_billing = Some("billing_not_configured");
+        assert_eq!(recommend(&healthy).action, "enable_billing");
+        for kind in 0..10 {
+            let mut failure = healthy.clone();
+            match kind {
+                0 => failure.failure_reason = Some(codes::AUTH_REVOKED),
+                1 => failure.failure_reason = Some(codes::NATIVE_RELAY_CONFLICT),
+                2 => failure.status = "failed",
+                3 => failure.subscription_registered = Some(false),
+                4 => failure.outbound_reason = Some(codes::SCOPES_MISSING),
+                5 => failure.thread_reason = Some("thread_reply_failed"),
+                6 => failure.backoff_active = true,
+                7 => failure.failure_reason = Some("discord_gateway_invalid_token"),
+                8 => failure.failure_reason = Some(codes::NYXBOT_ORG_RESTORATION_PENDING),
+                _ => {
+                    failure.discord_intake = Some(discord::Intake {
+                        receiving_side: "relay",
+                        state: "stopped".into(),
+                        code: Some(discord::RELAY_STOPPED),
+                        block_reason: None,
+                        handed_over_at: None,
+                        last_inbound_at: None,
+                    })
+                }
+            }
+            let with_billing = recommend(&failure);
+            failure.org_guest_billing = None;
+            failure.gateway = false;
+            let without_billing = recommend(&failure);
+            assert_eq!(
+                with_billing.action, without_billing.action,
+                "{gateway} {kind}"
+            );
+            assert_eq!(with_billing.text, without_billing.text, "{gateway} {kind}");
+            assert_ne!(with_billing.action, "gateway");
+        }
+    }
 }

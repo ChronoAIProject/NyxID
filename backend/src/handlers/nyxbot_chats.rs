@@ -66,63 +66,13 @@ pub(super) async fn adopt_relay_chat(
         )
         .await;
     }
-    let threads = state.db.collection::<NyxbotThread>(THREADS);
-    let Some(legacy) = threads
-        .find_one(doc! {"channel_id": &row.id, "$or": [
-        {"partition": &relay_partition}, {"relay_partition": &relay_partition, "kind": "private"}]})
-        .await?
-    else {
-        return Ok(());
-    };
-    let legacy = legacy.partition;
-    // The gateway conversation carries no chat of its own yet (only its
-    // placeholder from `put_conversation`).
-    if threads
-        .find_one(doc! {"channel_id": &row.id, "partition": partition,
-        "kind": {"$ne": null}})
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-    // The gateway may re-create its placeholder in between: once more then.
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-        threads
-            .delete_one(doc! {"channel_id": &row.id, "partition": partition, "kind": null})
-            .await?;
-        match threads
-            .update_one(
-                doc! {"channel_id": &row.id, "partition": &legacy},
-                doc! {"$set": {"partition": partition, "relay_partition": &relay_partition,
-                "updated_at": bson::DateTime::now()}},
-            )
-            .await
-        {
-            Ok(moved) if moved.matched_count == 1 => break,
-            // Another message of the chat got there first.
-            Ok(_) => return Ok(()),
-            Err(error) if super::is_duplicate(&error) && attempts < 2 => continue,
-            Err(error) if super::is_duplicate(&error) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let conversations = state
-        .db
-        .collection::<crate::models::assistant_conversation::AssistantConversation>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        );
-    for field in ["channel", "reply_channel"] {
-        conversations
-            .update_many(
-                doc! {"user_id": &row.user_id, format!("{field}.nyxbot_channel_id"): &row.id,
-                format!("{field}.partition"): &legacy},
-                doc! {"$set": {format!("{field}.partition"): partition}},
-            )
-            .await?;
-    }
-    Ok(())
+    crate::services::nyxbot_thread_mutation::adopt_personal(
+        &state.db,
+        row,
+        &relay_partition,
+        partition,
+    )
+    .await
 }
 
 /// Reuse a gateway-era private chat only with the exact sender/chat/topic
@@ -372,30 +322,24 @@ pub(super) async fn record_chat_with_relay(
             );
         }
     }
-    let threads = state.db.collection::<NyxbotThread>(THREADS);
-    // Before NyxID passed each message's own chat type on, a group reached
-    // through a default route looked like private chats (one per member):
-    // those records go once the group is seen as a group.
-    if facts.kind != "private" {
-        threads
-            .delete_many(doc! {"channel_id": &row.id, "kind": "private",
-            "platform_chat_id": &facts.chat_id, "partition": {"$ne": partition}})
-            .await?;
-    }
-    threads
-        .find_one_and_update(
-            doc! {"channel_id": &row.id, "partition": partition},
-            crate::services::nyxbot_chat_settings_service::record_update(
-                row,
-                facts.kind == "private" && facts.thread_id.is_none(),
-                set,
-                now,
-            ),
-        )
-        .upsert(true)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
+    let obsolete = (facts.kind != "private").then(|| {
+        doc! {
+            "channel_id":&row.id,"kind":"private","platform_chat_id":&facts.chat_id,
+            "partition":{"$ne":partition}
+        }
+    });
+    crate::services::nyxbot_thread_mutation::record(
+        &state.db,
+        doc! {"channel_id":&row.id,"partition":partition},
+        crate::services::nyxbot_chat_settings_service::record_update(
+            row,
+            facts.kind == "private" && facts.thread_id.is_none(),
+            set,
+            now,
+        ),
+        obsolete,
+    )
+    .await
 }
 
 /// A private chat's name: "You" for the owner, else the sender's name (never
@@ -565,7 +509,7 @@ pub(super) fn spawn_title_lookup(state: &AppState, row: &NyxbotChannel, chat: &N
     let state = state.clone();
     let bot_id = row.channel_bot_id.clone();
     let id = chat.id.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let result: AppResult<()> = async {
             if let Some(title) = fetch_title(&state, &bot_id, &chat_id).await? {
                 store_title(&state, &id, &title).await?;
@@ -1321,20 +1265,22 @@ fn follow_response(
         "off"
     };
     dto.follow_guidance = if on && is_group(chat) {
-        Some(if row.transport == "gateway" {
-            "Thread follow is unavailable on this gateway version.".into()
-        } else if let Ok(a) = crate::services::channel_adapters::resolve_adapter(
-            &row.platform,
-            &state.token_exchange_cache,
-        ) {
-            if a.thread_capabilities().thread_follow {
-                a.thread_follow_guidance().into()
+        Some(
+            if row.transport == "gateway" && !dto.thread_capabilities.thread_follow {
+                "Thread follow is unavailable on this gateway version.".into()
+            } else if let Ok(a) = crate::services::channel_adapters::resolve_adapter(
+                &row.platform,
+                &state.token_exchange_cache,
+            ) {
+                if a.thread_capabilities().thread_follow {
+                    a.thread_follow_guidance().into()
+                } else {
+                    "This platform does not support thread follow.".into()
+                }
             } else {
-                "This platform does not support thread follow.".into()
-            }
-        } else {
-            "Thread follow is unavailable.".into()
-        })
+                "Thread follow is unavailable.".into()
+            },
+        )
     } else {
         None
     };
@@ -1815,6 +1761,17 @@ pub(crate) async fn validate_post(
     agent_id: Option<&str>,
 ) -> AppResult<()> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
+    validate_post_rows(state, owner, &row, &chat, agent_id, None).await
+}
+
+async fn validate_post_rows(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    agent_id: Option<&str>,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<()> {
     if row.status != "active" {
         return Err(AppError::Conflict("The channel bot is not active".into()));
     }
@@ -1834,7 +1791,7 @@ pub(crate) async fn validate_post(
             "Posting is off for this chat; the owner can allow it".into(),
         ));
     }
-    require_org_access(state, &row).await?;
+    require_org_access_with(state, row, checked).await?;
     if chat.platform_chat_id.is_none() {
         return Err(AppError::ValidationError(
             "Chat has no known address".into(),
@@ -1997,6 +1954,9 @@ pub(crate) async fn post_current_turn(
             report = super::images::report_or_failure(
                 state,
                 super::images::ImageSendContext {
+                    source: crate::models::image_preparation::Source::Post {
+                        api_key_id: chat.api_key_id.clone(),
+                    },
                     owner: &chat.user_id,
                     conversation_id: &chat.conversation_id,
                     turn_id,
@@ -2124,6 +2084,27 @@ pub(super) async fn prepare_post(
     chat_id: &str,
     agent_id: Option<&str>,
 ) -> AppResult<PostTarget> {
+    load_post(state, owner, chat_id, agent_id, true).await
+}
+
+pub(super) async fn load_post(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    agent_id: Option<&str>,
+    admit: bool,
+) -> AppResult<PostTarget> {
+    load_post_with(state, owner, chat_id, agent_id, admit, None).await
+}
+
+pub(super) async fn load_post_with(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    agent_id: Option<&str>,
+    admit: bool,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<PostTarget> {
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
@@ -2154,8 +2135,13 @@ pub(super) async fn prepare_post(
             .route_id
             .clone()
             .ok_or_else(|| AppError::Conflict("The channel bot has no route".into()))?;
-        require_org_access(state, &row).await?;
-        let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        require_org_access_with(state, &row, checked).await?;
+        let bot = crate::services::platform_bot_authority::bot_with(
+            &state.db,
+            &row.channel_bot_id,
+            checked,
+        )
+        .await?;
         if !bot.is_active || bot.status == "suspended" {
             return Err(AppError::ChannelBotInactive(
                 "Bot has been deactivated".to_string(),
@@ -2171,8 +2157,10 @@ pub(super) async fn prepare_post(
             .get(&bot.id)
             .cloned()
             .unwrap_or(adapter);
-        crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
-        let auth = super::route_key_auth(state, &row).await?;
+        if admit {
+            crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
+        }
+        let auth = super::route_key_auth_with(state, &row, checked).await?;
         let now = Utc::now();
         // The bot's own route, addressed at this chat; nothing is stored.
         let conversation = ChannelConversation {
@@ -2367,24 +2355,33 @@ async fn send_post_planned_impl(
     .await?;
     let mut last = None;
     for (index, part) in parts.into_iter().enumerate() {
-        let attempt = match journal::claim(&state.db, &delivery, index).await? {
-            journal::PartClaim::Sent(previous) => {
-                last = Some(crate::handlers::channel_relay::AsyncReplyResponse {
-                    message_id: previous
-                        .outbound_message_id
-                        .ok_or_else(journal::unconfirmed)?,
-                    platform_message_id: previous.platform_message_id,
-                    delivered_as: None,
-                });
-                continue;
-            }
-            journal::PartClaim::Send(attempt) => attempt,
-        };
-        match crate::services::telegram_formatting::scope(
+        let attempt =
+            match crate::services::channel_text_preparation::claim(&state.db, &delivery, index)
+                .await?
+            {
+                journal::PartClaim::Sent(previous) => {
+                    last = Some(crate::handlers::channel_relay::AsyncReplyResponse {
+                        message_id: previous
+                            .outbound_message_id
+                            .ok_or_else(journal::unconfirmed)?,
+                        platform_message_id: previous.platform_message_id,
+                        delivered_as: None,
+                    });
+                    continue;
+                }
+                journal::PartClaim::Send(attempt) => attempt,
+            };
+        match crate::services::channel_text_preparation::with_part(
             &state.db,
-            journal::formatting_receipt(&delivery, index, &attempt),
-            Some(&target.bot.id),
-            send_post_one(state, target, part, fence),
+            &delivery,
+            index,
+            &attempt,
+            crate::services::telegram_formatting::scope(
+                &state.db,
+                journal::formatting_receipt(&delivery, index, &attempt),
+                Some(&target.bot.id),
+                send_post_one(state, target, part, fence),
+            ),
         )
         .await
         {
@@ -2444,7 +2441,17 @@ async fn send_post_planned_impl(
                     .await?;
                     return Err(error);
                 }
-                // Keep the pre-dispatch Sending marker on ambiguous effects.
+                if crate::services::channel_text_preparation::active()
+                    && crate::services::channel_text_preparation::release(
+                        &state.db, &delivery, index, &attempt,
+                    )
+                    .await?
+                {
+                    return Err(AppError::RateLimitedWithRetry {
+                        retry_after: crate::services::channel_text_preparation::RETRY_SECS,
+                    });
+                }
+                // Sending is never evidence of an unsent request.
                 return Err(journal::unconfirmed());
             }
         }
@@ -2473,14 +2480,21 @@ async fn revalidate_post_target(
     target: &PostTarget,
     fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
 ) -> AppResult<()> {
-    validate_post(
-        state,
-        &target.channel.user_id,
-        &target.thread.id,
-        target.agent_id.as_deref(),
+    let (channel, thread) = load_chat(state, &target.channel.user_id, &target.thread.id).await?;
+    let checked = crate::services::platform_bot_authority::read_personal_routes(
+        &state.db,
+        &channel.channel_bot_id,
     )
     .await?;
-    let (channel, thread) = load_chat(state, &target.channel.user_id, &target.thread.id).await?;
+    validate_post_rows(
+        state,
+        &target.channel.user_id,
+        &channel,
+        &thread,
+        target.agent_id.as_deref(),
+        Some(&checked),
+    )
+    .await?;
     if channel.channel_bot_id != target.bot.id
         || channel.route_id != target.channel.route_id
         || channel.route_api_key_id != target.channel.route_api_key_id
@@ -2493,7 +2507,12 @@ async fn revalidate_post_target(
     {
         return Err(AppError::Conflict("Post target changed".into()));
     }
-    let bot = channel_bot_service::get_bot(&state.db, &target.bot.id).await?;
+    let bot = crate::services::platform_bot_authority::bot_with(
+        &state.db,
+        &target.bot.id,
+        Some(&checked),
+    )
+    .await?;
     if bot.user_id != target.bot.user_id
         || bot.platform != target.bot.platform
         || bot.platform_bot_id != target.bot.platform_bot_id
@@ -2515,7 +2534,7 @@ async fn revalidate_post_target(
         }
         // The internal route key is plumbing for this exact recipient-owned
         // destination, never authority donated by the shared agent's owner.
-        super::route_key_auth(state, &channel).await?;
+        super::route_key_auth_with(state, &channel, Some(&checked)).await?;
     }
     if let Some(access) = fence
         .and_then(|c| c.org_agent_access.as_ref())
@@ -2585,6 +2604,18 @@ async fn send_post_one_impl(
         outbound,
         target.adapter.as_ref(),
     );
+    let effect_guard = effect_guard.or_else(|| {
+        crate::services::channel_text_preparation::active().then(|| {
+            let state = state.clone();
+            let target = target.clone();
+            std::sync::Arc::new(move || {
+                let state = state.clone();
+                let target = target.clone();
+                Box::pin(async move { revalidate_post_target(&state, &target, None).await })
+                    as futures::future::BoxFuture<'static, AppResult<()>>
+            }) as crate::services::channel_platform::PostEffectGuard
+        })
+    });
     if let Some(guard) = effect_guard {
         crate::services::channel_platform::with_post_effect_guard(guard, send).await
     } else {
@@ -2785,9 +2816,9 @@ pub(crate) async fn post_automation_images(
                     continue;
                 }
             };
-            let pending = existing.as_ref().is_none_or(|claim| {
-                claim.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Pending
-            });
+            let pending = existing
+                .as_ref()
+                .is_none_or(crate::services::channel_image_delivery::can_prepare);
             if let Some(existing) = existing.as_ref().filter(|_| !pending) {
                 report.outcomes.push(super::images::existing_item(existing));
                 continue;
@@ -2813,6 +2844,9 @@ pub(crate) async fn post_automation_images(
             let one = super::images::report_or_failure_with_stop(
                 state,
                 super::images::ImageSendContext {
+                    source: crate::models::image_preparation::Source::Automation {
+                        run_id: run.id.clone(),
+                    },
                     owner: &run.user_id,
                     conversation_id: &item.conversation_id,
                     turn_id: &item.turn_id,
@@ -2889,6 +2923,9 @@ pub(crate) async fn post_automation_images(
             let one = super::images::report_or_failure_with_stop(
                 state,
                 super::images::ImageSendContext {
+                    source: crate::models::image_preparation::Source::Automation {
+                        run_id: run.id.clone(),
+                    },
                     owner: &run.user_id,
                     conversation_id: &reference.assignment.recipient_conversation,
                     turn_id: &reference.recipient_turn,
@@ -3083,8 +3120,64 @@ pub async fn list_channel_chats(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    let row = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id":&id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Channel not found".into()))?;
+    if let Some(binding) = &row.org_specialist {
+        let access =
+            crate::services::org_agent_service::access(&state.db, &owner, &binding.org_id).await?;
+        if !crate::services::org_agent_service::can_use(&access) && row.user_id != owner {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        if matches!(access, crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } if role.can_proxy())
+        {
+            return Ok(Json(member_chat_settings(&state, &row).await?));
+        }
+    }
     let chats = list_chats(&state, &owner, Some(&id)).await?;
-    Ok(Json(json!({"chats": chats})))
+    Ok(Json(json!({"chats": chats, "can_manage":true})))
+}
+
+// Filter before sorting/limiting. The bounded list has no total, cursor or
+// has-more computed from hidden records. Single-chat routes keep load_chat's admin gate.
+async fn member_chat_settings(state: &AppState, row: &NyxbotChannel) -> AppResult<Value> {
+    let chats: Vec<NyxbotThread> = state.db.collection(THREADS)
+        .find(doc! {"channel_id":&row.id,"kind":{"$in":["group","channel"]},"record_scope":{"$ne":"platform_thread"}})
+        .sort(doc! {"_id":1}).limit(LIST_LIMIT).await?.try_collect().await?;
+    let on = super::thread_follow::enabled(state, &row.user_id).await?;
+    let mut views = Vec::new();
+    for chat in chats {
+        let dto = follow_response(state, row, &chat, on, 0);
+        let mut view = serde_json::to_value(dto).map_err(|e| AppError::Internal(e.to_string()))?;
+        let allowed = [
+            "id",
+            "channel_agent_id",
+            "platform",
+            "bot_label",
+            "kind",
+            "title",
+            "agent_id",
+            "reply_mode",
+            "members",
+            "members_setting",
+            "owner_seen",
+            "allow_posts",
+            "threads",
+            "threads_setting",
+            "thread_capabilities",
+            "follow_readiness",
+            "follow_guidance",
+        ];
+        view.as_object_mut()
+            .expect("chat DTO")
+            .retain(|k, _| allowed.contains(&k.as_str()));
+        view["can_manage"] = json!(false);
+        views.push(view);
+    }
+    Ok(json!({"chats":views,"can_manage":false}))
 }
 
 pub async fn update_channel_chat(

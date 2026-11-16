@@ -434,6 +434,8 @@ Every proxy call routed through an org carries the routing context in its audit 
 }
 ```
 
+Organization creation/profile updates, role-scope changes, membership add/update/revoke and invitation issue/cancel/redeem commit a bounded audit intent with the source mutation; invite redemption commits its claim and membership in the same transaction. Role-scope sets preserve the resulting list when it fits; longer lists keep an ordered prefix within an 8 KiB BSON-array budget plus count, truncation marker and SHA-256 of the submitted IDs joined in order with newlines. The existing relay chains each occurrence once, preserving each event’s existing facts within the audit string bounds—never an invitation nonce or join URL.
+
 Personal-routed calls record `routed_via: "personal"` and omit the org fields. Audit writes are fire-and-forget (`audit_service::log_async`) so audit failures never block the proxy request — degraded audit storage degrades observability, not availability.
 
 ---
@@ -497,7 +499,7 @@ General API keys can also call the nine AI-service inventory GETs listed below. 
 
 **Last-admin guard.** `PATCH` and `DELETE` on a member refuse to remove the last active admin. An admin who tries to demote or revoke themselves while they are the only admin gets `409 Conflict` with the message "cannot remove or demote the last active admin". The intent is to keep the org recoverable: `DELETE /orgs/{id}` also requires a current admin and would otherwise leave any owned services / keys / policies stranded. Admins who actually want to dissolve the org must `DELETE /orgs/{id}` instead, which cascades memberships once the live blockers are clear.
 
-`POST /orgs` rejects API keys at the human-only router. Its handler also rejects org-owned actors with `OrgCannotAuthenticate` as defense in depth, and rolls back the org user insert if the membership-create step fails for any other reason — no matter what, no zero-admin org row is ever left behind.
+`POST /orgs` rejects API keys at the human-only router. Its handler also rejects org-owned actors with `OrgCannotAuthenticate` as defense in depth, and commits the org user, its slug/defaults, creator-admin membership, enrollment writes and required audit intent together. A failure before commit leaves none of those writes; post-commit response-enrichment failures can still return an error while the organization and its audit evidence persist. This path does not provision a wallet.
 
 ### Invites
 

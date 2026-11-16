@@ -11,8 +11,8 @@ import {
   grantSignature,
   profileHasConflict,
   type AssistantAgent,
+  type GrantService,
 } from "./agentContracts";
-import type { ServiceConnection } from "../services/serviceContracts";
 
 const agent: AssistantAgent = agentSchema.parse({
   id: "agent-1",
@@ -27,18 +27,12 @@ const agent: AssistantAgent = agentSchema.parse({
   account_read: false,
   guest_access: { "api-github": "read" },
 });
-const key: ServiceConnection = {
+const key: GrantService = {
   id: "service-1",
   label: "GitHub",
   slug: "api-github",
-  status: "active",
-  is_active: true,
-  auto_connected: false,
-  credential_type: "oauth2",
-  catalog_service_slug: "api-github",
-  catalog_service_name: "GitHub",
-  error_message: null,
-  credential_source: { type: "personal" },
+  executable: true,
+  catalog_slug: "api-github",
 };
 
 test("specialist creation validates handle and required purpose", () => {
@@ -122,6 +116,69 @@ test("grant options use the server scoped inventory with exact org IDs", () => {
   ]);
   assert.deepEqual(grantOptions(rows), [{ value: "calendar", label: "Calendar", iconSlug: "calendar", iconUrl: undefined }]);
   assert.equal(grantOptions([{ id: "public", slug: "chrono-llm-public", label: "Chrono LLM (public)", executable: true }])[0]?.value, "chrono-llm-public");
+});
+
+test("specialist tool grants exclude NyxBot Voice by catalog identity and legacy slug", () => {
+  const voice = {
+    ...key,
+    id: "voice-connection",
+    label: "NyxBot Voice",
+    slug: "my-bot-voice",
+    catalog_slug: "nyxbot-voice",
+  };
+  assert.deepEqual(
+    grantOptions([
+      voice,
+      {
+        ...voice,
+        id: "legacy-voice",
+        slug: "nyxbot-voice",
+        catalog_slug: undefined,
+      },
+      key,
+    ]).map((option) => option.value),
+    ["api-github"],
+  );
+  assert.deepEqual(
+    grantOptions(
+      [voice, key],
+      { ...agent, owner_kind: "org", owner_id: "org-1" },
+    ).map((option) => option.value),
+    [key.id],
+  );
+});
+
+test("other server-approved connections remain grantable even when not executable", () => {
+  const connections = [
+    key,
+    {
+      ...key,
+      id: "public",
+      slug: "public-tools",
+    },
+    {
+      ...key,
+      id: "offline",
+      slug: "offline-tools",
+      executable: false,
+    },
+    {
+      ...key,
+      id: "similarly-named",
+      slug: "nyxbot-voice-helper",
+      catalog_slug: undefined,
+    },
+    {
+      ...key,
+      id: "different-catalog",
+      slug: "nyxbot-voice",
+      catalog_slug: "other-service",
+    },
+  ];
+  assert.deepEqual(
+    grantOptions(connections).map((option) => option.value),
+    connections.map((connection) => connection.slug),
+  );
 });
 
 test("permission signatures ignore ordering and detect account/guest authority changes", () => {

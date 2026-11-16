@@ -203,6 +203,12 @@ export function storedError(
     return "This agent is unavailable. Ask NyxBot to check its configuration.";
   if (code === "model_unavailable")
     return "This agent is unavailable. Ask NyxBot to check its configuration.";
+  if (code === "model_policy_denied")
+    return "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.";
+  if (code === "model_org_approval_required")
+    return "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.";
+  if (code === "model_approval_required")
+    return "This model request requires approval that this thread cannot present. Review Approval settings before retrying.";
   if (code === "model_interrupted")
     return "The response was interrupted. Some actions may already have completed — check them before retrying.";
   if (code === "session_busy")

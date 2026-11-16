@@ -1,29 +1,28 @@
 export type KeyboardFrame = { screenY: number; height: number };
 
-/** Fabric modal measurements use the sheet's root, while keyboard events use
- * the presenting window. A bottom-anchored safe-area provider supplies the
- * root's actual bottom, including a drawer's existing origin.
- */
-export function keyboardInViewportWindow(
-  keyboard: KeyboardFrame,
-  safeAreaFrame: { y: number; height: number },
-): KeyboardFrame {
+export function visibleKeyboardFrame(
+  frame: KeyboardFrame | undefined,
+  windowHeight: number,
+): KeyboardFrame | undefined {
   if (
-    !Number.isFinite(safeAreaFrame.y) ||
-    !Number.isFinite(safeAreaFrame.height) ||
-    safeAreaFrame.height <= 0
+    !frame ||
+    !Number.isFinite(windowHeight) ||
+    windowHeight <= 0 ||
+    !Number.isFinite(frame.screenY) ||
+    !Number.isFinite(frame.height) ||
+    frame.height <= 0 ||
+    frame.height > windowHeight ||
+    frame.screenY < 0 ||
+    frame.screenY >= windowHeight
   )
-    return keyboard;
+    return undefined;
   return {
-    ...keyboard,
-    screenY: Math.min(
-      keyboard.screenY,
-      safeAreaFrame.y + safeAreaFrame.height - keyboard.height,
-    ),
+    screenY: frame.screenY,
+    height: Math.min(frame.height, windowHeight - frame.screenY),
   };
 }
 
-/** Only consume the part of this view that the visible keyboard actually covers. */
+/** Intersect the view and visible keyboard in the same window coordinates. */
 export function keyboardOverlap(
   frame: { y: number; height: number },
   keyboard?: KeyboardFrame,
@@ -39,8 +38,9 @@ export function keyboardOverlap(
   ) {
     return 0;
   }
-  return Math.min(
-    frame.height,
-    Math.max(0, frame.y + frame.height - keyboard.screenY),
+  return Math.max(
+    0,
+    Math.min(frame.y + frame.height, keyboard.screenY + keyboard.height) -
+      Math.max(frame.y, keyboard.screenY),
   );
 }

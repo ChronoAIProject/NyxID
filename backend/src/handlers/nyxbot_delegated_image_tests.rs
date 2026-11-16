@@ -191,6 +191,9 @@ async fn send_refs(
     images::send_turn_images(
         &f.state,
         ImageSendContext {
+            source: crate::models::image_preparation::Source::Event {
+                event_id: f.event.id.clone(),
+            },
             owner: OWNER,
             conversation_id: &row.id,
             turn_id: &row.active_turn.as_ref().unwrap().turn_id,

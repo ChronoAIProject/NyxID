@@ -10,6 +10,16 @@ export function TermsOfServiceScreen({ navigation }: Props) {
       docKey="terms"
       telemetryBackTarget="terms_back"
       onBack={() => navigation.goBack()}
+      onOpenDocument={(docKey) => {
+        if (docKey !== "privacy") return;
+        if (
+          navigation
+            .getState()
+            .routes.some((route) => route.name === "PrivacyPolicy")
+        )
+          navigation.popTo("PrivacyPolicy");
+        else navigation.push("PrivacyPolicy");
+      }}
     />
   );
 }

@@ -281,8 +281,8 @@ async fn require_platform_admin_for_broker_capability(
             .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
     });
 
-    if state.broker_require_admin_capability()
-        && (requested_broker_capability == Some(true) || requested_broker_scope)
+    if (requested_broker_capability == Some(true) || requested_broker_scope)
+        && state.broker_require_admin_capability().await?
     {
         require_admin(state, auth_user).await.map_err(|_| {
             AppError::Forbidden(

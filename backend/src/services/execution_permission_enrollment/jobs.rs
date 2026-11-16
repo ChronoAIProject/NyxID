@@ -119,26 +119,44 @@ pub(super) async fn batch(db: &Database, job: &Job) -> AppResult<bool> {
 }
 
 pub async fn run(db: Database) {
+    let shutdown = crate::services::shutdown::process();
     loop {
+        let Some(_work) = shutdown.background() else {
+            break;
+        };
         if lifecycle::repair_due(&db).await.is_err() {
             tracing::warn!(
                 reason = "person_repair_failed",
                 "Execution enrollment repair delayed"
             );
         }
+        let Some(_claim) = shutdown.background() else {
+            break;
+        };
         match claim(&db).await {
             Ok(Some(job)) => {
+                let release = shutdown.register_release(crate::services::shutdown::Release {
+        safe_after_stop: true,
+                    db: db.clone(), collection: JOBS,
+                    filter: doc! {"_id": &job.id, "generation": &job.generation, "lease_token": &job.lease_token, "state": "running"},
+                    update: doc! {"$set": {"lease_until": null, "lease_token": null, "state": "pending"}},
+                });
                 if batch(&db, &job).await.is_err() {
                     // Never persist error text (which may contain database values).
-                    let _ = db.collection::<Job>(JOBS).update_one(lease(&job), doc! {
+                    let released = db.collection::<Job>(JOBS).update_one(lease(&job), doc! {
                         "$set":{"state":"pending","lease_token":null,"last_error":"reconcile_failed",
                             "lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5)),"updated_at":bson::DateTime::now()}
                     }).await;
+                    if released.is_ok() {
+                        release.completed();
+                    }
                     tracing::warn!(
                         reason = "reconcile_failed",
                         "Execution enrollment reconciliation delayed"
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                } else {
+                    release.completed();
                 }
             }
             Ok(None) => tokio::time::sleep(std::time::Duration::from_secs(5)).await,

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import * as scrollFollower from "./assistantTranscriptScroll";
 import { hookHarness } from "./assistantHookTestHarness";
 import type { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
@@ -639,4 +642,144 @@ test("opening reveals by 800ms despite loading, no native acknowledgement or cha
     h.unmount();
     assert.equal(timers.size, 0, "unmount clears deadline");
   }
+});
+
+test("an abandoned conversation render cannot strand the committed chat behind its opening overlay", () => {
+  type Effect = {
+    slot: number;
+    dependencies: unknown[];
+    run: () => void | (() => void);
+    cleanup?: () => void;
+  };
+  const slots: unknown[] = [];
+  const effects = new Map<number, Effect>();
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  let pending: Effect[] = [];
+  let cursor = 0;
+  let now = 0;
+  let timerId = 0;
+  const react = {
+    useRef: <T>(initial: T) => {
+      const slot = cursor++;
+      return (slots[slot] ??= { current: initial });
+    },
+    useState: <T>(initial?: T) => {
+      const slot = cursor++;
+      if (!(slot in slots)) slots[slot] = initial;
+      return [slots[slot], (next: T) => (slots[slot] = next)];
+    },
+    useEffect: (run: Effect["run"], dependencies: unknown[]) => {
+      const slot = cursor++;
+      const committed = effects.get(slot);
+      if (
+        !committed ||
+        dependencies.length !== committed.dependencies.length ||
+        dependencies.some(
+          (value, index) => !Object.is(value, committed.dependencies[index]),
+        )
+      )
+        pending.push({ slot, dependencies, run });
+    },
+    useLayoutEffect: (run: Effect["run"], dependencies: unknown[]) => {
+      react.useEffect(run, dependencies);
+    },
+  };
+  const filename = fileURLToPath(
+    new URL("./useTranscriptScrollFollow.ts", import.meta.url),
+  );
+  const exports: Record<string, unknown> = {};
+  runInNewContext(
+    ts.transpileModule(readFileSync(filename, "utf8"), {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText,
+    {
+      exports,
+      require: (name: string) => {
+        if (name === "react") return react;
+        if (name === "./assistantTranscriptScroll") return scrollFollower;
+        throw new Error(`Unexpected hook dependency: ${name}`);
+      },
+      setTimeout: (callback: () => void, delay: number) => {
+        timers.set(++timerId, { at: now + delay, callback });
+        return timerId;
+      },
+      clearTimeout: (id: number) => timers.delete(id),
+      ...animationClock().globals,
+    },
+    { filename },
+  );
+  const hook =
+    exports.useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
+  const render = (scope: string, commit = true) => {
+    cursor = 0;
+    pending = [];
+    const result = hook({ current: null }, scope, { loading: true });
+    // Shared ref writes survive abandoned renders, but only committed effects
+    // replace the last dependencies and run their cleanup/setup callbacks.
+    if (commit) {
+      for (const effect of pending) effects.get(effect.slot)?.cleanup?.();
+      for (const effect of pending) {
+        effect.cleanup = effect.run() || undefined;
+        effects.set(effect.slot, effect);
+      }
+    }
+    return result;
+  };
+  const advance = (ms: number) => {
+    now += ms;
+    for (const [id, timer] of [...timers]) {
+      if (timer.at > now) continue;
+      timers.delete(id);
+      timer.callback();
+    }
+    return render("first");
+  };
+
+  assert.equal(render("first").ready, false);
+  const firstDeadline = [...timers.values()][0];
+  assert.ok(
+    firstDeadline,
+    "the committed render installs a readiness deadline",
+  );
+  const obsoleteDeadline = firstDeadline.callback;
+  const firstTimer = timerId;
+  render("abandoned", false);
+  assert.equal(
+    timerId,
+    firstTimer,
+    "discarding a render cannot install effects",
+  );
+  assert.equal(render("first").ready, false);
+  assert.equal(
+    timers.size,
+    1,
+    "the committed generation replaces its deadline",
+  );
+  obsoleteDeadline();
+  assert.equal(
+    render("first").ready,
+    false,
+    "obsolete deadlines cannot reveal",
+  );
+  const committedTimer = timerId;
+  assert.equal(advance(400).ready, false);
+  assert.equal(
+    timerId,
+    committedTimer,
+    "same-chat renders preserve the deadline",
+  );
+  assert.equal(advance(399).ready, false);
+  assert.equal(
+    advance(1).ready,
+    true,
+    "the current chat is reachable by 800ms",
+  );
+  assert.equal(timers.size, 0);
+  render("next");
+  assert.equal(timers.size, 1);
+  for (const effect of effects.values()) effect.cleanup?.();
+  assert.equal(timers.size, 0, "unmount clears the replacement deadline");
 });

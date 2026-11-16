@@ -116,6 +116,10 @@ pub(crate) async fn post(
 }
 
 pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
+    advance_inner(state, group, false).await;
+}
+
+pub(crate) async fn advance_inner(state: &AppState, group: &AssistantGroup, background: bool) {
     let result: AppResult<()> = Box::pin(async {
         let requests = groups::pending_requests(&state.db, &group.id).await?;
         for request in requests {
@@ -130,6 +134,14 @@ pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
                 Err(e) => return Err(e),
             };
             for agent_id in &request.pending_agent_ids {
+                let _claim = if background {
+                    let Some(work) = state.shutdown.background() else {
+                        return Ok(());
+                    };
+                    Some(work)
+                } else {
+                    None
+                };
                 if personal::member_thread(&state.db, &access.actor, &group.id, agent_id)
                     .await?
                     .is_some_and(|r| engine::live_turn(&r, Utc::now()).is_some())
@@ -355,5 +367,5 @@ pub(crate) async fn member_settled(
     if result.is_err() {
         tracing::debug!("Organization group reply deferred");
     }
-    Box::pin(advance(state, &access.group)).await;
+    Box::pin(advance_inner(state, &access.group, true)).await;
 }

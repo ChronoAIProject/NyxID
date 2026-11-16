@@ -20,11 +20,11 @@ use crate::services::billing::route_inventory::BillingEgressPermit;
 use crate::services::internal_auth::InternalAuth;
 use crate::services::node_owner_service::{NodeOwnerFence, ReplicaIdentity};
 use crate::services::node_ws_manager::{
-    CredentialUpdateParams, NodeProxyFailure, NodeProxyRequest, NodeProxyResponse,
-    NodeRequestSignature, NodeSshExecRequest, NodeSshExecResult, NodeSshNodeKeyExecRequest,
-    NodeSshTunnelRequest, NodeWebTerminalRequest, NodeWsManager, NodeWsProxyRequest,
-    NodeWsProxySession, PendingCredentialCiphertextParams, ProxyResponseType, SshTunnelChunk,
-    StreamChunk, WebTerminalChunk, WsProxyFrame, base64_bytes, sign_proxy_request,
+    CredentialUpdateParams, CredentialVersion, NodeProxyFailure, NodeProxyRequest,
+    NodeProxyResponse, NodeRequestSignature, NodeSshExecRequest, NodeSshExecResult,
+    NodeSshNodeKeyExecRequest, NodeSshTunnelRequest, NodeWebTerminalRequest, NodeWsManager,
+    NodeWsProxyRequest, NodeWsProxySession, PendingCredentialCiphertextParams, ProxyResponseType,
+    SshTunnelChunk, StreamChunk, WebTerminalChunk, WsProxyFrame, base64_bytes, sign_proxy_request,
     sign_ssh_exec_request, sign_ssh_node_exec_request, sign_ssh_tunnel_request,
     sign_web_terminal_request, sign_ws_proxy_request,
 };
@@ -317,7 +317,7 @@ impl NodeDispatch {
                 "Failed to initialize internal node stream".to_string(),
             ))
         })?;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let mut stream = response.bytes_stream();
             loop {
                 tokio::select! {
@@ -496,7 +496,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let (tx, rx) = mpsc::channel(256);
                 let sessions = self.remote_duplex.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -603,7 +603,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let (tx, rx) = mpsc::channel(256);
                 let sessions = self.remote_duplex.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -730,7 +730,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let (tx, rx) = mpsc::channel(512);
                 let sessions = self.remote_duplex.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _ = tx.closed() => break,
@@ -905,7 +905,7 @@ impl NodeDispatch {
         let (incoming_tx, incoming_rx) =
             mpsc::channel::<DuplexServerFrame>(if machine_desktop { 2 } else { 512 });
         let (mut sink, mut stream) = socket.split();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             loop {
                 tokio::select! {
                     _ = incoming_tx.closed() => break,
@@ -1039,6 +1039,7 @@ impl NodeDispatch {
         self.send_command(
             node_id,
             NodeCommand::CredentialRemove {
+                version: None,
                 service_slug: service_slug.to_string(),
                 timeout_ms: None,
             },
@@ -1055,7 +1056,26 @@ impl NodeDispatch {
         self.send_command(
             node_id,
             NodeCommand::CredentialRemove {
+                version: None,
                 service_slug: service_slug.to_string(),
+                timeout_ms: Some(duration_millis(timeout)?),
+            },
+        )
+        .await
+    }
+
+    pub async fn send_credential_remove_versioned(
+        &self,
+        node_id: &str,
+        slug: &str,
+        version: &CredentialVersion,
+        timeout: Duration,
+    ) -> AppResult<()> {
+        self.send_command(
+            node_id,
+            NodeCommand::CredentialRemove {
+                service_slug: slug.to_owned(),
+                version: Some(version.clone()),
                 timeout_ms: Some(duration_millis(timeout)?),
             },
         )
@@ -1258,6 +1278,8 @@ enum NodeCommand {
         timeout_ms: Option<u64>,
     },
     CredentialRemove {
+        #[serde(default, flatten)]
+        version: Option<CredentialVersion>,
         service_slug: String,
         timeout_ms: Option<u64>,
     },
@@ -1451,16 +1473,18 @@ async fn internal_duplex(
     };
     upgrade
         .max_message_size(config.max_message_bytes)
-        .on_upgrade(move |socket| async move {
-            serve_internal_duplex(
-                dispatch,
-                node_id,
-                authenticated_body,
-                config.handshake_timeout,
-                socket,
-            )
-            .await;
-        })
+        .on_upgrade(crate::services::shutdown::process().upgrade_callback(
+            move |socket| async move {
+                serve_internal_duplex(
+                    dispatch,
+                    node_id,
+                    authenticated_body,
+                    config.handshake_timeout,
+                    socket,
+                )
+                .await;
+            },
+        ))
 }
 
 async fn serve_internal_duplex(
@@ -2179,6 +2203,7 @@ async fn execute_local_command(
             None => manager.send_credential_update_if(node_id, &params, connection_id),
         },
         NodeCommand::CredentialRemove {
+            version,
             service_slug,
             timeout_ms,
         } => match timeout_ms {
@@ -2189,10 +2214,16 @@ async fn execute_local_command(
                         &service_slug,
                         Duration::from_millis(timeout),
                         connection_id,
+                        version.as_ref(),
                     )
                     .await
             }
-            None => manager.send_credential_remove_if(node_id, &service_slug, connection_id),
+            None => manager.send_credential_remove_if(
+                node_id,
+                &service_slug,
+                connection_id,
+                version.as_ref(),
+            ),
         },
         NodeCommand::PendingCredentialsAvailable => {
             manager.send_pending_credentials_available_if(node_id, connection_id)
@@ -2238,8 +2269,8 @@ impl Drop for RemoteProxyCancellationGuard {
         let Some(request) = self.request.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = request.send().await;
             });
         }
@@ -2491,7 +2522,7 @@ impl NodeDispatch {
                 self.remote_duplex.insert(key.clone(), sender.clone());
                 let sessions = self.remote_duplex.clone();
                 let (tx, rx) = mpsc::channel(2);
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     loop {
                         tokio::select! {
                             _=tx.closed()=>break,

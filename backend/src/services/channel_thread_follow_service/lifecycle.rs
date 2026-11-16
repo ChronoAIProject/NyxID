@@ -276,7 +276,10 @@ pub async fn relink(
                 super::super::org_channel_service::fence_management(db,session,&current,&manager).await?;
                 super::super::org_channel_service::live_doc(db,session,"assistant_agents",doc!{"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},true).await?;
                 binding.revision=uuid::Uuid::new_v4().to_string();
-                binding.guests=Default::default();
+                let enabled = binding.guests.enabled;
+                binding.guests=super::super::org_channel_service::new_guest_policy(
+                    super::super::org_channel_service::guest_grants_ready(db).await?);
+                binding.guests.enabled=enabled;
                 db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":channel},doc!{"$set":{"org_specialist":bson::to_bson(&binding).map_err(|_|not_found())?},"$inc":{"notification_epoch":1_i64}}).session(&mut *session).await?;
                 super::super::org_channel_service::lifecycle::retire_in_session(db,session,channel,None).await?;
             }
@@ -416,13 +419,14 @@ pub async fn carry_over_in_session(
         .collect();
     let source: Vec<bson::Document> = documents
         .find(doc! {"channel_id":from,"user_id":owner,"partition":&stable})
-        .projection(doc! {"partition":1,"_id":0})
+        .projection(super::super::nyxbot_thread_mutation::projection())
         .session(&mut *session)
         .await?
         .stream(&mut *session)
         .try_collect()
         .await?;
     let mut partitions = Vec::new();
+    let mut identities = Vec::new();
     let mut kept_conflicting = 0;
     for row in &source {
         if let Ok(partition) = row.get_str("partition") {
@@ -430,17 +434,21 @@ pub async fn carry_over_in_session(
                 kept_conflicting += 1;
             } else {
                 partitions.push(partition);
+                identities.push(super::super::nyxbot_thread_mutation::observed(row)?);
             }
         }
     }
-    let moved = rows
-        .update_many(
-            doc! {"channel_id":from,"user_id":owner,"partition":{"$in":&partitions}},
-            doc! {"$set":{"channel_id":to}},
-        )
-        .session(&mut *session)
-        .await?
-        .modified_count;
+    let mut moved = 0;
+    for batch in identities.chunks(128) {
+        let result = rows
+            .update_many(doc! {"$or":batch}, doc! {"$set":{"channel_id":to}})
+            .session(&mut *session)
+            .await?;
+        if result.matched_count != batch.len() as u64 {
+            return Err(not_found());
+        }
+        moved += result.modified_count;
+    }
     for field in ["channel", "reply_channel"] {
         db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
             .update_many(doc! {"user_id":owner,format!("{field}.nyxbot_channel_id"):from,format!("{field}.partition"): {"$in":&partitions}},

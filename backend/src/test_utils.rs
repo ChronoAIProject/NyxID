@@ -1857,6 +1857,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
+        shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
         auth_device_eight_char_codes: false,
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
@@ -1932,6 +1933,9 @@ pub(crate) fn test_app_config() -> AppConfig {
         apns_key_id: None,
         apns_team_id: None,
         apns_topic: None,
+        android_app_package: None,
+        android_app_sha256_cert_fingerprints: Vec::new(),
+        mobile_app_return_schemes: Vec::new(),
         apns_sandbox: true,
         key_provider: "local".to_string(),
         aws_kms_key_arn: None,
@@ -2201,6 +2205,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        shutdown: crate::services::shutdown::Runtime::default(),
         local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
@@ -2357,7 +2362,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
-        broker_policy: Arc::new(std::sync::RwLock::new(BrokerPolicy::from_config(&config))),
+        broker_policy: Arc::new(std::sync::RwLock::new(
+            BrokerPolicy::from_config(&config).into(),
+        )),
         upload_retention: Default::default(),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the

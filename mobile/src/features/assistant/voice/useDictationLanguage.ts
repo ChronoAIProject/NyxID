@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ExpoSpeechRecognitionModule as Recognizer } from "expo-speech-recognition";
+import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { dictationLocale } from "./dictationLocale";
 import {
   languageLabel,
@@ -13,6 +14,7 @@ import {
  * it, else the device's. Changing it applies from the next recording.
  */
 export function useDictationLanguage(active: boolean) {
+  const { t } = useAppLanguage();
   const [saved, setSaved] = useState<string>();
   const [supported, setSupported] = useState<readonly string[]>([]);
   useEffect(() => {
@@ -36,16 +38,20 @@ export function useDictationLanguage(active: boolean) {
   } catch {
     phone = undefined;
   }
-  const automatic = phone ? dictationLocale(phone, supported) ?? phone : undefined;
+  const automatic = phone
+    ? (dictationLocale(phone, supported) ?? phone)
+    : undefined;
   const current =
-    saved && (!supported.length || supported.includes(saved)) ? saved : automatic;
+    saved && (!supported.length || supported.includes(saved))
+      ? saved
+      : automatic;
   return {
     value: saved ?? AUTOMATIC,
-    label: current ? languageLabel(current) : "Your device's language",
+    label: current ? languageLabel(current) : t("Your device's language"),
     options: [
       {
         value: AUTOMATIC,
-        label: "Device language",
+        label: t("Device language"),
         detail: automatic ? languageLabel(automatic) : undefined,
       },
       ...languageOptions(supported),

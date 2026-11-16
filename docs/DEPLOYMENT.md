@@ -404,6 +404,158 @@ groups and restarts to install the unique index.
 
 ---
 
+## Rolling deploys and graceful drain
+
+SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
+returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
+Both public and internal replica listeners continue serving during the work wait,
+including ordinary requests and new turns that arrive while routing converges.
+There is no drain rejection on these request paths and no database lookup in
+`/ready`.
+
+The process stops taking new background queue claims, scheduled work and polls.
+Already claimed work finishes, with turn heartbeats, capacity renewal, node
+ownership renewal and security capability observations kept alive. The wait
+counts detached turns and delivery work as well as HTTP bodies and upgraded
+streams. Idle node management sockets are closed at handover; their pending
+operations keep the wait open. MCP notification subscriptions, assistant `/live`, and dedicated CMA agent/response
+event observers do not count as work. They end cleanly five seconds after
+drain starts, allowing readiness propagation before reconnecting. MCP clients
+resume the durable outbox with `Last-Event-ID`; assistant clients poll and refresh
+on `ready`/`resync` after reconnect. Dedicated CMA observers display Disconnected
+and retain the cursor for their existing Reconnect action; closing observation
+does not cancel the remote task. Generic proxy streams remain work because their
+upstream resume guarantees vary. An otherwise idle drain waits for those bodies
+to close. Turn/provider streams, downloads, managed setup results, native response
+replay delivery barriers and interactive sessions still wait for completion and
+can consume the full work-wait budget. Once work is idle, Axum finishes accepted connections while
+retaining the bound sockets. If an accepted request starts more work at that
+boundary, both listeners resume serving until that work finishes.
+
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` defaults to **25 seconds**. The default fits
+Kubernetes' default 30-second termination grace period and needs no setting.
+The budget includes cleanup and the finish audit: the smaller of five seconds
+or 10% is reserved for cleanup. At the default, subscriptions end at five seconds,
+the work wait ends at 22.5 seconds, and remaining turns are interrupted with
+`turn_lost` / `shutdown`. Remaining local execution and response streams stop
+after at most another 0.5 seconds of ordinary settlement. Fenced settlement,
+release and the finish audit share the 2.5-second cleanup reserve; the process
+exits by the 25-second deadline, leaving five seconds for signal delivery,
+scheduling and process teardown before Kubernetes kills it. The asynchronous
+start audit has its own 1.25-second bound within this budget, not extra exit time.
+A blocking preStop hook must not consume the five-second margin.
+
+Work that needs longer than the budget when a deploy starts is ended and recorded
+as interrupted by shutdown. To let that work finish across a deploy, raise both
+values together: for an extended budget, the termination grace period must exceed
+the drain budget by at least 30 seconds. For example, set
+`SHUTDOWN_DRAIN_TIMEOUT_SECS=600` and use this Deployment fragment:
+
+```yaml
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 630
+      containers:
+        - name: nyxid
+          env:
+            - name: SHUTDOWN_DRAIN_TIMEOUT_SECS
+              value: "600"
+```
+
+The process exits earlier when work finishes. A second SIGTERM or ctrl-c skips
+the remaining wait and begins the same bounded cleanup. Explicit timeout values
+retain their existing behavior; `0` restores the old immediate-exit path,
+including its existing ten-second Discord cancellation allowance.
+
+At the end, runners settle remaining turns through the existing fenced path
+with stable code `turn_lost` and stage `shutdown`. Cleanup cancels remaining local
+execution, attempts settlement for this worker's remaining claims, closes node
+WebSockets with going-away code 1001, releases owned cluster leases and capacity
+slots without deleting polling checkpoints, and removes this generation's
+security observation after stopping its writer. Releases compare generations
+or exact claim tokens. One metadata-only `backend_shutdown_drain` chained audit
+and structured log describe the outcome, including the count of subscriptions
+ended by shutdown. Logs at drain start show the signal, budget and in-flight
+counts; another log records a second signal. Database failures and stuck cleanup
+have a shared deadline; they cannot extend the exit budget.
+
+The chained, metadata-only `backend_shutdown_drain_started` and
+`backend_shutdown_drain` events share the process's unique `generation`. The start
+records the budget, cleanup reserve and in-flight counts, including node operations.
+A start without a finish indicates the process was killed before the drain
+completed (a failed finish audit can also leave only a start); compare `budget_secs`
+with the platform's termination grace period. `0` emits no drain events.
+
+Start and finish records also include `open_http_at_start` and, at finish,
+`open_http_at_finish`: the largest 20 route-template/method/kind groups, their
+counts and oldest ages in whole seconds, plus `other_count` for omitted units.
+Groups also distinguish the resolved, unowned catalog `service` slug for active
+public `connection`/`internal` discovery entries regardless of creator (excluding
+internal `platform-*` and model-only rows, with empty/UUID-shaped slugs and every
+other resolved service reported as `custom`, omitted before resolution) on
+proxy/public/LLM routes and the fixed stream `content_type` family (`event-stream`,
+`json`, `other`), never private service slugs, user connection aliases or raw
+content-type headers.
+Kinds distinguish pending requests from response bodies/upgraded streams; age
+starts when that kind is registered. Raw paths, IDs, queries, headers and extension
+methods are never captured (`<unmatched>` / `OTHER` are fixed fallbacks).
+Detached/background guards have no static labels, so retain aggregate counts.
+While draining, `backend_shutdown_drain_progress` records elapsed time, counts,
+node operations and the same `open_http` summary at 10, 25, 60 and 300 seconds,
+skipping points at or beyond the budget (only 10 seconds applies by default).
+These at-most-four chained appends use
+the start audit's time bound and are cancelled before finish; they cannot keep
+work non-idle or extend cleanup. The last successful checkpoint bounds how far
+a killed drain got, though an audit failure can also explain a missing checkpoint.
+
+After both listeners bind, `backend_process_started` records the generation,
+build, bind time, and the latest other generation and heartbeat observed under
+the same instance name (if any), through the chained audit path; its background
+lookup is bounded to one second and the entire attempt to three seconds, without
+holding up serving. `previous_lookup` distinguishes `found`, `none`, and
+`unavailable`; a retained heartbeat is evidence of a prior process, not proof it
+was still alive, and gracefully retired observations are removed. Two process
+starts without an intervening drain for the earlier generation indicate an
+unobserved exit (including a crash or kill); a missing audit or a crash before
+listener binding can leave no start record, so one start alone does not prove a
+routing fault. Drain start, progress and finish records include `recent_traffic`:
+at most twelve five-second buckets with UTC boundaries and aggregate `received`
+and `responded` counts across both listeners, including probes and errors.
+`responded` counts middleware response-header completion, not body completion or
+confirmed client delivery; the newest bucket is partial and concurrent snapshots
+are approximate. Counting uses fixed process-local atomics and no request data or
+database calls; only those drain snapshots persist the rolling history.
+
+Cleanup does not clear uncertain provider-send barriers, wallet locks or
+purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
+retain their mutation locks; Discord identify rate windows retain their expiry. These records
+keep their existing recovery rules because releasing them could repeat an
+external effect. `billing:reconcile` uses its own cooperative stop and exact-token
+release after the current financial unit completes. If the deadline aborts that
+pass, its lease retains the default 30-second TTL; bulk shutdown release excludes
+it. Credit-schedule progress leases retain their existing 300-second expiry
+because they have no exact ownership token. Completion tasks, including detached audits, compensation and
+ledger appends, remain tracked while execution is stopped.
+
+Operators must match these settings in their platform's rollout configuration:
+
+- The default 25-second drain fits Kubernetes' default 30-second grace period.
+  For an extended drain budget, set the grace period at least 30 seconds higher;
+  allow the legacy Discord allowance when using `0`.
+- Readiness probe on `/ready`; liveness probe on `/health`.
+- Replace one replica at a time with surge capacity, allowing the successor to
+  become ready before terminating another replica.
+- Keep the draining replica's internal address reachable until it exits, because
+  peers forward node operations to the process that owns the socket.
+
+These are configuration requirements, not a description of production rollout
+tooling. That tooling is outside this repository. If the platform kills the
+process earlier, or MongoDB cannot confirm settlement within cleanup, peers use
+the unchanged stale-heartbeat recovery: 75 seconds plus the 15-second sweep
+cadence. A worker loss never automatically replays execution. A fully drained
+turn has its complete reply and needs no recovery.
+
 ## Environment Configuration
 
 ### Required Variables
@@ -749,7 +901,7 @@ curl https://auth.example.com/health
 ```
 
 Use this for:
-- Load balancer health checks
+- Liveness monitoring (load balancer readiness uses `/ready`)
 - Container orchestration liveness probes
 - Uptime monitoring (Uptime Robot, Pingdom, etc.)
 
@@ -764,7 +916,7 @@ livenessProbe:
   periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /health
+    path: /ready
     port: 3001
   initialDelaySeconds: 5
   periodSeconds: 5

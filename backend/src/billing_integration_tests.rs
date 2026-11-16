@@ -1,8 +1,11 @@
 mod bills;
+pub(crate) mod hold_release;
 mod operations;
 mod org_wallet;
 mod taxes;
 mod usage;
+pub(crate) mod usage_checkpoints;
+mod wallet_snapshot;
 mod wallet_view;
 
 use std::collections::BTreeSet;
@@ -206,16 +209,19 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 
 #[derive(Default)]
 pub(crate) struct FakeLago {
+    pub(crate) recorded_events: AtomicUsize,
     tax_rate: Option<String>,
     tax_unavailable: bool,
     tax_delay: Option<std::time::Duration>,
     tax_fetches: AtomicUsize,
+    tax_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     bill_data: Option<serde_json::Value>,
     invoice_data: Option<serde_json::Value>,
     invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
     topup_wallets: std::sync::Mutex<Vec<String>>,
     wallet_balance: Option<crate::models::credits::Credits>,
+    balance_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
@@ -244,7 +250,13 @@ impl LagoApi for FakeLago {
         _: &str,
         _: &str,
     ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
-        self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0
+            && let Some((entered, resume)) = &self.tax_read_gate
+        {
+            entered.notify_one();
+            resume.notified().await;
+        }
         if let Some(delay) = self.tax_delay {
             tokio::time::sleep(delay).await;
         }
@@ -311,12 +323,15 @@ impl LagoApi for FakeLago {
     }
 
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+        self.recorded_events.fetch_add(1, Ordering::SeqCst);
         Ok(LagoAck {
             transaction_id: event.transaction_id.clone(),
         })
     }
 
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
+        self.recorded_events
+            .fetch_add(events.len(), Ordering::SeqCst);
         Ok(events
             .iter()
             .map(|event| LagoAck {
@@ -338,6 +353,10 @@ impl LagoApi for FakeLago {
     }
 
     async fn wallet_balance(&self, _customer_id: &str) -> AppResult<i64> {
+        if let Some((entered, resume)) = &self.balance_read_gate {
+            entered.notify_one();
+            resume.notified().await;
+        }
         Ok(10_000)
     }
 

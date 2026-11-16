@@ -369,16 +369,16 @@ pub async fn create(
     model_id: &str,
     input: NewTariff,
 ) -> AppResult<ModelTariff> {
-    security_readiness_service::require_activation(db, READINESS).await?;
+    security_readiness_service::require_serving(db, READINESS).await?;
     if super::super::platform_model_execution::certification::image_contract(&input.contract) {
-        security_readiness_service::require_activation(
+        security_readiness_service::require_serving(
             db,
             super::super::platform_model_execution::images::READINESS,
         )
         .await?;
     }
     if super::super::platform_model_execution::certification::family_contract(&input.contract) {
-        security_readiness_service::require_activation(
+        security_readiness_service::require_serving(
             db,
             super::super::platform_model_execution::certification::READINESS,
         )
@@ -596,6 +596,23 @@ pub async fn sync(
     if t.status != TariffStatus::Pending {
         return Ok(false);
     }
+    super::plan_sync::run(
+        db,
+        plan,
+        None,
+        super::plan_sync::CacheWrite::Rate,
+        sync_locked(db, lago, plan, t),
+    )
+    .await
+    .map(|result| result.unwrap_or(false))
+}
+
+async fn sync_locked(
+    db: &Database,
+    lago: &dyn LagoApi,
+    plan: &str,
+    t: &ModelTariff,
+) -> AppResult<bool> {
     let Some(service) = db
         .collection::<DownstreamService>(SERVICES)
         .find_one(doc! {"_id":&t.service_id})
@@ -644,6 +661,9 @@ pub async fn sync(
         return Err(unavailable("invalid_tariff"));
     }
     for c in &t.components {
+        if !super::reconcile::continue_reconcile() {
+            return Ok(false);
+        }
         if c.explicit_free {
             continue;
         }
@@ -670,21 +690,22 @@ pub async fn sync(
         }
         let pico = amounts::decimal_to_pico(&c.credits_per_unit)
             .ok_or_else(|| invalid("Invalid price"))?;
-        db.collection::<BillingRateCache>(RATES)
-            .replace_one(
-                doc! {"_id":BillingRateCache::cache_id(&c.lago_metric_code,None)},
-                BillingRateCache {
-                    id: BillingRateCache::cache_id(&c.lago_metric_code, None),
-                    lago_metric_code: c.lago_metric_code.clone(),
-                    model: None,
-                    credits_per_unit_micros: pico / 1_000_000,
-                    credits_per_unit_pico: Some(pico),
-                    synced_at: Utc::now(),
-                    retired_at: None,
-                },
-            )
-            .upsert(true)
-            .await?;
+        super::rate_cache::replace(
+            db,
+            &BillingRateCache {
+                id: BillingRateCache::cache_id(&c.lago_metric_code, None),
+                lago_metric_code: c.lago_metric_code.clone(),
+                model: None,
+                credits_per_unit_micros: pico / 1_000_000,
+                credits_per_unit_pico: Some(pico),
+                synced_at: Utc::now(),
+                retired_at: None,
+            },
+        )
+        .await?;
+    }
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
     }
     publish(db, t).await
 }
@@ -759,6 +780,9 @@ pub async fn retry_pending(db: &Database, lago: &dyn LagoApi, plan: &str) -> App
         .await?;
     let mut count = 0;
     for t in pending {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         count += u64::from(sync(db, lago, plan, &t).await?);
     }
     Ok(count)
@@ -936,6 +960,7 @@ pub async fn retire(
                 .iter()
                 .map(|c| c.lago_metric_code.as_str())
                 .collect();
+            super::rate_cache::advance_in_session(db, session).await?;
             db.collection::<BillingRateCache>(RATES)
                 .update_many(
                     doc! {"lago_metric_code":{"$in":codes}},

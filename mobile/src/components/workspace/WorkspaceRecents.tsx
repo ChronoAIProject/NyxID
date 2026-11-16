@@ -27,16 +27,20 @@ export function recentUnread(
 export function WorkspaceRecentRow({
   item,
   unread = 0,
+  disabled = false,
   onSelect,
 }: {
   item: WorkspaceRecent;
   unread?: number;
+  disabled?: boolean;
   onSelect: (target: WorkspaceChatTarget) => void;
 }) {
   const { colors } = useTheme();
   return (
     <Pressable
       accessibilityRole="button"
+      disabled={disabled}
+      accessibilityState={{ disabled }}
       accessibilityLabel={`Open recent ${item.title}${item.status ? `, ${item.status}` : ""}${unread > 0 ? `, ${unread} unread` : ""}`}
       onPress={() => onSelect(item.target)}
       style={({ pressed }) => [
@@ -48,7 +52,7 @@ export function WorkspaceRecentRow({
         numberOfLines={1}
         style={[
           styles.title,
-          { color: colors.textPrimary },
+          { color: disabled ? colors.textMuted : colors.textPrimary },
           unread > 0 ? styles.titleUnread : null,
         ]}
       >
@@ -59,7 +63,10 @@ export function WorkspaceRecentRow({
           testID="sidebar-unread-count"
           style={[
             styles.count,
-            { color: colors.textPrimary, backgroundColor: colors.navActive },
+            {
+              color: disabled ? colors.textMuted : colors.textPrimary,
+              backgroundColor: colors.navActive,
+            },
           ]}
         >
           {unread > 99 ? "99+" : String(unread)}
@@ -72,7 +79,7 @@ export function WorkspaceRecentRow({
             styles.status,
             {
               color:
-                item.status === "Needs you"
+                !disabled && item.status === "Needs you"
                   ? colors.warningTone.text
                   : colors.textMuted,
             },
@@ -89,11 +96,13 @@ export function WorkspaceRecentRow({
 }
 export function WorkspaceRecents({
   visible,
+  disabled = false,
   unread = EMPTY_NOTIFICATION_MARKERS,
   onSelect,
   onSeeAll,
 }: {
   visible: boolean;
+  disabled?: boolean;
   /** Per-thread unread counts from the sidebar's one notification summary. */
   unread?: NotificationMarkers;
   onSelect: (target: WorkspaceChatTarget) => void;
@@ -113,6 +122,7 @@ export function WorkspaceRecents({
         <WorkspaceRecentRow
           key={item.key}
           item={item}
+          disabled={disabled}
           unread={recentUnread(item, unread)}
           onSelect={onSelect}
         />
@@ -136,6 +146,8 @@ export function WorkspaceRecents({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="See all recent chats"
+        disabled={disabled}
+        accessibilityState={{ disabled }}
         onPress={onSeeAll}
         style={styles.row}
       >

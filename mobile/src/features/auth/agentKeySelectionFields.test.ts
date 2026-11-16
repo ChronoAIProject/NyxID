@@ -312,6 +312,13 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
         },
       },
     },
+    "../../lib/api/mobileApi": { mobileApi: {} },
+    "../../lib/api/baseUrl": { getApiBaseUrl: () => "https://login.example.test/api/v1" },
+    "./useUncertainLoginPreview": { useUncertainLoginPreview: () => ({ reset() {} }) },
+    "./useLoginRequestResume": { useLoginRequestResume: () => {} },
+    "./useLoginRequestHandoff": { useLoginRequestHandoff: () => () => true },
+    "./useLoginPreviewCooldown": { useLoginPreviewCooldown: () => ({ coolingDown: false }) },
+    "./LoginRequestTerminalView": { LoginRequestTerminalView: "Terminal" },
     "./useMfaStepUp": { useMfaStepUp: () => ({ handle: async () => false, prompt: null }) },
     "./LoginCodeStatusView": { LoginCodeStatusView: "LoginCodeStatusView" },
     "./AuthSessionContext": {
@@ -335,6 +342,9 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
       static override now() { return actionTime; }
     },
   });
+  harness.mock("./loginRequestResolver", harness.load(
+    fileURLToPath(new URL("./loginRequestResolver.ts", import.meta.url)),
+  ));
   const { AgentKeyLoginScreen } = harness.load(
     fileURLToPath(new URL("./AgentKeyLoginScreen.tsx", import.meta.url)),
   ) as { AgentKeyLoginScreen: (props: unknown) => Element };

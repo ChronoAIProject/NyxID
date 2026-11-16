@@ -796,10 +796,10 @@ promotes a `pending_webhook` bot to `active`, fenced by the current bot identity
 credentials, owner and ingress lease. Authenticated native Discord provider
 admission also activates a pending bot under its current source/key/binding.
 Neither path claims an Interactions webhook was registered. No additional
-environment variable is needed. Deploy with ingress off. Activation uses the
-existing security rollout readiness roster and drain assertion: all serving
-replicas must advertise `channel:discord-gateway`, since old transport writers
-do not wait for socket shutdown before remote setup. Then enable a test owner.
+environment variable is needed. Deploy with ingress off. Activation requires recorded observed support for
+`channel:discord-gateway`: all live replicas must advertise it, since old transport
+writers do not wait for socket shutdown before remote setup. No roster/drain
+assertion is required; support converges automatically before enabling a test owner.
 Acquisition and renewal use serving readiness: recorded active capabilities
 continue through supported roster overlaps; hard readiness loss stops local ingress.
 Interaction-only bots require no change while the ingress flag stays off.
@@ -1097,7 +1097,8 @@ outcome; an expired winner never becomes a lost-message resend recommendation.
 Gateway support requires CMA ≥ `a570be21`, `CMAEG_MEDIA_ENABLED=true`, and NyxID
 responding within `CMAEG_PROVIDER_REQUEST_TIMEOUT_MS` (default 30 seconds).
 Downloads happen after admission in the run, outside that header budget. Upgrade
-all replicas and drain old workers before enabling the default-off flag. See
+all replicas to compatible media readers before enabling the default-off flag;
+readiness-gated paths need no roster/drain declaration. See
 [inbound channel media](chat/10-uploads.md#inbound-channel-media) for immutable
 bind receipts, Stop/orphan cleanup, the 192 MiB shared byte budget, file/step
 limits and the admin rollback drain.
@@ -1212,22 +1213,40 @@ plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
 `state`, `attempt`, `code` and `created_at`, with cleanup indexes on
 `attachment_id` and `(user_id, conversation_id)` and **no TTL**
 (`services/channel_image_delivery.rs`, `models/nyxbot_image_delivery.rs`).
-States move `pending` -> `sending{attempt}` -> `sent | failed{code} |
-skipped{code} | unknown` through compare-and-set on the attempt token. Only the
-winner of the `pending -> sending` race dispatches; success is reported only
-after an acknowledged matching completion write, an ambiguous write settles
-locally as `unknown`, and a claim found `sending` reports
-`in_progress_or_unknown`. A later caller reports an existing claim's durable
-state (`previously_delivered`, the same failure or skip code, in progress or
-unknown) without resending and without repeating another path's failure line.
-A definite refusal before any provider request (cancelled, deadline,
-after-unknown, billing preflight or another pre-dispatch error) releases its
-own `sending{attempt}` back to `pending` with an attempt-token CAS, clearing
-attempt and code. This call reports the skip or failure; a later post or
-automation may acquire the pending image. Unsupported audiences, missing
-anchors and unavailable sources remain permanent refusals. Once provider I/O
-begins, even a timeout or failed settlement retains the durable barrier and
-never releases it for retry.
+New writers add `preparation.version: 1` to the existing `sending{attempt}`
+state. The `preparing` phase records the original routing identifiers and a
+180-second MongoDB-time lease before loading bytes. The existing 15-second
+channel worker scans one indexed page and reclaims expired preparations with a
+new exact attempt. It reconstructs the source from the saved reply, live turn,
+automation run or private manager delivery; no content is copied into the claim.
+Recovery also works when the parent stream or text delivery has already ended.
+
+Immediately before the first upload or message effect, the writer revalidates
+current authority and changes the exact, unexpired preparation to phase
+`sending`. Later calls within that attachment retain the same 60-second bound.
+The slow original worker cannot send after reclamation. A confirmed completion
+records `sent`; a crash after crossing the boundary remains uncertain and is
+never retried, even if no final message receipt exists. A documented refusal of
+the first provider request can release the preparation; a refusal after an
+accepted upload cannot. Historical `sending` and `unknown` rows without this
+proof are never reinterpreted.
+
+A proven pre-effect refusal retains outer state `sending` with phase `released`.
+This fences the old attempt and permits a later independently authorized post or
+automation to acquire the slot. Transient failures retry after 30 seconds.
+Cancellation, billing refusal, an uncertain earlier image, or a permanent source
+or authority refusal parks automatic recovery. A new authorized request may
+still acquire a released slot. Unsupported audiences, missing anchors and
+unavailable sources retain their permanent outcomes. The current call reports
+the same skip/failure counts; confirmed images are never resent.
+
+Older replicas understand every outer state and leave new preparations alone.
+An ordinary rolling update from the preceding build requires no operator step.
+A binary rollback also needs no data change; old workers leave these preparations
+pending until a supporting replica returns. Existing v1 image barriers still
+apply. After a crash, a recovered attachment can arrive after its text. Recovery
+never repeats that text or changes its pinned media notice.
+
 Claims live as long as their source image: they are deleted in the same
 transactions that delete `assistant_attachments` (retention, conversation and
 group deletion, user purge), a sender that finds its source gone after claiming
@@ -2503,6 +2522,14 @@ content under the same automation run is rejected. These journals have no TTL
 and are purged on owner deletion. They do not replace ordinary relay receipts or
 the legacy/v2 image migration checks.
 
+Saved manager and scheduled chat text parts now stay pending under an additive
+MongoDB-time preparation lease until a transaction fences the current parent and
+part at the provider boundary. Existing workers recover only that proven-unsent
+state and recheck live authority between effects. Older multipart writers can
+claim pending parts only by replacing the attempt and setting sending, fencing
+new preparations; no operator action is required for an ordinary rolling update.
+See the full saved reply contract above for bounds and rollback.
+
 ### Channel reply length
 
 NyxBot and specialist turns destined for a chat receive turn-only length guidance
@@ -2796,3 +2823,21 @@ not resolve unknown creation/deletion, override operator review, switch existing
 native bots back to relay, or shorten the persisted 90-second post-delete drain.
 A missing release proof remains blocked for review. No message contents, tokens
 or upstream prose are added to health or repair metadata.
+
+### Recovering late assistant answers
+
+Late NyxBot answers retain their saved transcript and use a metadata-only
+preparation lease on the originating event. A crash while preparing direct text
+can be recovered by another replica; the exact claim is checked again at the
+provider boundary. Confirmed parts are skipped. An interrupted send remains
+uncertain and is never resent, while an existing authorized owner thread shows
+one “Delivery unconfirmed” notice. Attachments keep their separate existing
+send barriers. Generic relay calls remain passthrough and gain no content store.
+See [the late-answer contract](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes)
+for timeouts and rolling-upgrade/rollback behavior.
+
+Within one provider-boundary authority check, helpers share one fresh bot
+ownership observation (bot, platform installation and profile reservation) and
+one loaded scheduled destination. This does not cache authority across effects:
+each attachment upload, text part and subsequent provider effect reads it again.
+A confirmed prefix never authorizes its suffix.

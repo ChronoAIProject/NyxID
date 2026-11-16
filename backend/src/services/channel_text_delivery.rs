@@ -64,6 +64,7 @@ pub async fn begin_with_notice(
         retry_at: None,
         parts: vec![
             TextPart {
+                preparation: None,
                 formatting_fallback: None,
                 state: TextPartState::Pending,
                 attempt_id: None,
@@ -127,6 +128,8 @@ pub async fn claim(db: &Database, row: &ChannelTextDelivery, index: usize) -> Ap
         )
         .await?;
     if changed.matched_count == 1 {
+        #[cfg(test)]
+        super::durable_wake_tests::after("text_part_prepared").await;
         return Ok(PartClaim::Send(attempt));
     }
     let current = load(db, &row.logical_key).await?.ok_or_else(unconfirmed)?;
@@ -160,12 +163,25 @@ pub async fn finish(
     platform_id: Option<&str>,
     outbound_id: Option<&str>,
 ) -> AppResult<()> {
+    #[cfg(test)]
+    if state == TextPartState::Sent {
+        super::durable_wake_tests::after("text_part_provider_accepted").await;
+    }
+    let mut filter = doc! {"_id": &row.id, format!("parts.{index}.attempt_id"): attempt};
+    if state == TextPartState::Sent {
+        filter.insert(format!("parts.{index}.state"), "sending");
+    } else {
+        filter.insert("$or", bson::bson!([
+            {format!("parts.{index}.state"):"sending"},
+            {format!("parts.{index}.state"):"pending",format!("parts.{index}.preparation.version"):1}
+        ]));
+    }
     let changed = db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
-        doc! {"_id": &row.id, format!("parts.{index}.state"): "sending",
-            format!("parts.{index}.attempt_id"): attempt},
+        filter,
         doc! {"$set": {format!("parts.{index}.state"): bson::to_bson(&state).map_err(|_| unconfirmed())?,
             format!("parts.{index}.platform_message_id"): platform_id,
-            format!("parts.{index}.outbound_message_id"): outbound_id}},
+            format!("parts.{index}.outbound_message_id"): outbound_id},
+            "$unset":{format!("parts.{index}.preparation"):""}},
     ).await?;
     if changed.matched_count != 1 {
         return Err(unconfirmed());
@@ -176,6 +192,26 @@ pub async fn finish(
 pub const UNCERTAIN: &str =
     "Multipart delivery is incomplete or uncertain; accepted parts will not be resent";
 
+// Aggregation updates do not interpret numeric dotted components as array
+// indexes. Replace the selected element while preserving the rest of the plan.
+pub(super) fn part_update(index: usize, fields: bson::Document) -> bson::Document {
+    doc! {"parts": {"$map": {
+        "input": {"$range": [0, {"$size": "$parts"}]}, "as": "i",
+        "in": {"$let": {"vars": {"part": {"$arrayElemAt": ["$parts", "$$i"]}},
+            "in": {"$cond": [
+                {"$eq": ["$$i", index as i64]},
+                {"$mergeObjects": ["$$part", fields]},
+                "$$part",
+            ]},
+        }},
+    }}}
+}
+
+pub(super) fn part_field(index: usize, field: &str) -> bson::Document {
+    doc! {"$let": {"vars": {"part": {"$arrayElemAt": ["$parts", index as i64]}},
+    "in": format!("$$part.{field}")}}
+}
+
 pub async fn defer(
     db: &Database,
     row: &ChannelTextDelivery,
@@ -183,11 +219,20 @@ pub async fn defer(
     attempt: &str,
     retry_after: u64,
 ) -> AppResult<()> {
-    let retry_at =
-        chrono::Utc::now() + chrono::Duration::seconds(retry_after.clamp(1, 86400) as i64);
+    let mut set = part_update(
+        index,
+        doc! {"state":"pending", "preparation":bson::Bson::Null},
+    );
+    set.insert(
+        "retry_at",
+        doc! {"$add":["$$NOW", retry_after.clamp(1,86400) as i64 * 1000]},
+    );
     let changed = db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
-        doc! {"_id":&row.id, format!("parts.{index}.state"):"sending", format!("parts.{index}.attempt_id"):attempt},
-        doc! {"$set": {format!("parts.{index}.state"):"pending", "retry_at":bson::DateTime::from_chrono(retry_at)}},
+        doc! {"_id":&row.id, format!("parts.{index}.attempt_id"):attempt,"$or":[
+            {format!("parts.{index}.state"):"sending"},
+            {format!("parts.{index}.state"):"pending",format!("parts.{index}.preparation.version"):1}
+        ]},
+        vec![doc! {"$set": set}],
     ).await?;
     if changed.matched_count != 1 {
         return Err(unconfirmed());

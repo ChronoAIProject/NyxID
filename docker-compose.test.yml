@@ -1,0 +1,41 @@
+# Explicitly load with docker-compose.yml and a dedicated project name.
+# Disposable test data stays in memory; journaling and transactions remain on.
+services:
+  mongodb:
+    container_name: ${COMPOSE_PROJECT_NAME:-nyxid-tests}-mongodb
+    restart: "no"
+    entrypoint: ["docker-entrypoint.sh"]
+    command:
+      - mongod
+      - --port
+      - "${NYXID_TEST_MONGODB_PORT:-27019}"
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --wiredTigerCacheSizeGB
+      - "2"
+      - --setParameter
+      - minSnapshotHistoryWindowInSeconds=0
+      - --setParameter
+      - enableTestCommands=1
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: null
+      MONGO_INITDB_ROOT_PASSWORD: null
+      GLIBC_TUNABLES: glibc.pthread.rseq=1
+    ports:
+      - "127.0.0.1:${NYXID_TEST_MONGODB_PORT:-27019}:${NYXID_TEST_MONGODB_PORT:-27019}"
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "${NYXID_TEST_MONGODB_PORT:-27019}", "--eval", "db.adminCommand('ping')"]
+    volumes:
+      - type: tmpfs
+        target: /data/db
+        tmpfs:
+          size: 8589934592
+      - type: tmpfs
+        target: /data/configdb
+        tmpfs:
+          size: 67108864
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576

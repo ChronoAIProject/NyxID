@@ -12,6 +12,9 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Irreversible supplemental result attempts, scoped to this settled reply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplemental_result_claims: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation_work: Option<super::trigger_run::AutomationWork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,12 +190,30 @@ pub struct TurnMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnFailureReason {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_setup_step: Option<GuestSetupStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_route: Option<Box<super::assistant_conversation::ModelRouteDiagnostic>>,
     pub source: String,
     pub stage: String,
     pub code: String,
     pub http_status: Option<u16>,
     pub nyxid_error_code: Option<u32>,
+}
+
+/// Bounded internal setup location; never an upstream error or payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestSetupStep {
+    Capacity,
+    OrgAccess,
+    AgentAccess,
+    TurnAdmission,
+    CredentialLoad,
+    ModelExecution,
+    RouteValidation,
+    LeaseExpired,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

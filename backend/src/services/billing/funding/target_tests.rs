@@ -108,6 +108,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
         let row = UsageMeterRow {
             model_tariff: None,
             org_channel_guest: None,
+            stuck_request_exit: None,
             rollup_pending: true,
             id: "row".into(),
             transaction_id: "transaction".into(),
@@ -140,6 +141,8 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             quantity: Some(30),
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            usage_checkpoint: None,
+            realtime_session: None,
             pool_attempt: None,
             machine_usage: None,
             status: UsageStatus::Finalized,

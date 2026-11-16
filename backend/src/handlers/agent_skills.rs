@@ -170,21 +170,23 @@ impl Reader<'_> {
         let thread_key = self.thread_key.map(str::to_owned);
         let scopes = self.scopes.cloned().unwrap_or_default();
         let chat = self.chat.clone();
-        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            Box::pin(fetch_ornn_classified(OrnnFetch {
-                state: &state,
-                person: &person,
-                path: &path,
-                thread_key,
-                scopes,
-                chat,
-                method,
-                body: Body::from(body),
-                bound_skill_read,
-                owner_access,
-            }))
-            .await
-        }));
+        let task = tokio_util::task::AbortOnDropHandle::new(
+            crate::services::shutdown::process().spawn(async move {
+                Box::pin(fetch_ornn_classified(OrnnFetch {
+                    state: &state,
+                    person: &person,
+                    path: &path,
+                    thread_key,
+                    scopes,
+                    chat,
+                    method,
+                    body: Body::from(body),
+                    bound_skill_read,
+                    owner_access,
+                }))
+                .await
+            }),
+        );
         match tokio::time::timeout(std::time::Duration::from_secs(30), task).await {
             Ok(Ok(outcome)) => outcome,
             _ => OrnnOutcome::Uncertain,

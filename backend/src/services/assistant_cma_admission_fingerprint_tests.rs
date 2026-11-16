@@ -76,6 +76,7 @@ impl Fixture {
 
     fn connection_target(service: DownstreamService) -> ProxyTarget {
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some("cma".into()),
             execution_request: None,
             execution_permission: None,

@@ -1102,7 +1102,7 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
         let usage_context = usage_context.clone();
         let usage_complete = usage_complete.clone();
 
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let mut received_any_event = false;
             let mut downstream_closed = false;
             let mut usage_accumulator = ReportedLlmUsageAccumulator::default();

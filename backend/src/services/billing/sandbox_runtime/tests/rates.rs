@@ -194,6 +194,12 @@ async fn rate_change_caps_coverage_and_preserves_delayed_usage_at_accepted_price
         doc! {"$set":{"sync_claim_until":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
     f.provider.available.store(false, Ordering::SeqCst);
     assert_eq!(f.billing.retry_sandbox_rate_cards().await.unwrap(), 0);
+    // Advance the fixture to the next pass after the uncertain plan lease expires.
+    crate::services::billing::plan_writers_tests::expire_plan_lease(
+        &f.db,
+        &f.billing.config.lago_plan_code,
+    )
+    .await;
     f.provider.available.store(true, Ordering::SeqCst);
     assert_eq!(f.billing.retry_sandbox_rate_cards().await.unwrap(), 1);
     assert_eq!(

@@ -255,6 +255,7 @@ impl Fixture {
             .unwrap()
             .unwrap();
         super::super::proxy_service::ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,

@@ -1361,6 +1361,7 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                     execution_task: None,
                     delegated_images: Default::default(),
@@ -1687,6 +1688,11 @@ pub async fn for_key_with_access(
     };
     let live = super::assistant_nyxagent::live_turn(&conversation, Utc::now())
         .filter(|turn| !turn.stop_requested);
+    // A model-policy terminal fact ends this exact turn's execution authority.
+    // Authentication already loaded the row; retries add no read or new card.
+    if live.is_some_and(|turn| super::assistant_model_observer::approval_error(turn).is_some()) {
+        return Err(AppError::ApprovalUnsupported);
+    }
     let turn_live = live.is_some();
     let shared = access.is_some_and(|a| a.shared().is_some());
     let org_guest = access

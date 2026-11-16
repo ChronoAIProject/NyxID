@@ -189,7 +189,7 @@ impl Cache {
         let mut workers = tokio::task::JoinSet::new();
         let watch_db = db.clone();
         let notify = wake.clone();
-        workers.spawn(async move {
+        crate::services::shutdown::process().spawn_worker_joined(&mut workers, async move {
             loop {
                 // Reopening before refresh plus periodic full reload covers lost
                 // resume tokens, deletes (no post-image), and startup races.

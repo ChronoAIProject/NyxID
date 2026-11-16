@@ -31,6 +31,8 @@ export type WorkspaceParamList = {
   Plugins: { tab?: "connectors" | "skills"; agentId?: string } | undefined;
   Agents: { tab?: "agents" | "groups" } | undefined;
   Activity: { challengeId?: string } | undefined;
+  /** Stacked approval inbox used while a terminal remains pending. */
+  ActivityReview: undefined;
   /** The owner's durable notification feed (bell); hidden while the flag is off. */
   Notifications: undefined;
   AccountSettings:
@@ -55,6 +57,7 @@ export type AuthoredSkillPageParams = {
 type SharedEntryParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
+  OpenSourceNotices: undefined;
   DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
   AgentKeyLogin:
     | { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean }
@@ -78,6 +81,15 @@ export type WorkspaceContentParamList = Omit<
   AgentDetail: { agentId: string };
   AgentProfileEdit: { agentId: string; field: AgentProfileField };
   GroupEditor: { groupId?: string } | undefined;
+  SshTerminal: {
+    /** Catalog service id used by the terminal WebSocket and deep links. */
+    serviceId: string;
+    /** Exact UserService connection id when opened from Services/Plugins. */
+    connectionId?: string;
+    principal?: string;
+    /** Only Services/Plugins may set this boolean; link parsing never does. */
+    autoConnect?: boolean;
+  };
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
   SkillDetail: SkillPageParams;
@@ -174,8 +186,10 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "Agents",
   "Plugins",
   "Services",
+  "SshTerminal",
   "Machines",
   "Activity",
+  "ActivityReview",
   "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",
@@ -219,4 +233,5 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "AgentKeyLogin",
   "TermsOfService",
   "PrivacyPolicy",
+  "OpenSourceNotices",
 ];

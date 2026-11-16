@@ -3018,6 +3018,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
         .route(
+            "/nyxagent/channels/preview",
+            post(handlers::org_specialist_channels::preview),
+        )
+        .route(
             "/nyxagent/custom-event-bindings",
             get(handlers::nyxbot_event_bindings::list)
                 .post(handlers::nyxbot_event_bindings::create),
@@ -3794,6 +3798,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/apple-app-site-association",
             get(handlers::oidc_discovery::apple_app_site_association),
+        )
+        .route(
+            "/assetlinks.json",
+            get(handlers::oidc_discovery::android_asset_links),
         );
 
     let public_oauth = Router::new()
@@ -3820,6 +3828,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .route("/ready", get(handlers::health::ready))
         .route("/favicon.ico", get(handlers::brand_icons::favicon_ico))
         .route("/favicon.svg", get(handlers::brand_icons::favicon_svg))
         .route("/icon-512.png", get(handlers::brand_icons::icon_png))

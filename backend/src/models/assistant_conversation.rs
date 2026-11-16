@@ -48,6 +48,9 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Metadata-only continuation; rendered inside the consuming admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake: Option<super::assistant_wake::WakeReference>,
     /// Server-verified channel provenance, bound individually to accepted sources.
     /// Reply-recipient joins do not contribute provenance to an existing turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -390,6 +393,10 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// This personal crew reply and its hand-offs commit with engine settlement.
+    /// Old turns retain the legacy callback path until they have settled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub group_reply_in_settlement: bool,
     /// Server-created binding for the paired platform-model bridge; never bearer authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_model_context: Option<String>,

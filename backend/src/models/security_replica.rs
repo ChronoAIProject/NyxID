@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "security_replicas";
 
-/// Observed process support, never a substitute for draining old writers or
-/// configuring the complete serving roster. One row per process generation.
+/// Observed process support, with optional legacy roster/drain diagnostics.
+/// One row per process generation; pre-observation binaries remain invisible.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecurityReplica {
     #[serde(rename = "_id")]

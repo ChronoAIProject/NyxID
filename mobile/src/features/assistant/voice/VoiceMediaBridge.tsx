@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from "react";
-import { StyleSheet } from "react-native";
+import { Platform, StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
 import { claimVoiceAudioSession } from "./audioSessionOwnership";
 import { createNativeOpenAIMedia } from "./createNativeOpenAIMedia";
@@ -54,7 +54,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
 
   constructor(
     private readonly createOpenAI:
-      (() => VoiceMediaAdapter | undefined) | null = createNativeOpenAIMedia,
+      | (() => VoiceMediaAdapter | undefined)
+      | null = createNativeOpenAIMedia,
   ) {}
 
   get usesNativeMedia(): boolean {
@@ -569,6 +570,10 @@ export function VoiceMediaBridge({
     loaded.current = false;
     return media.connect((message) => {
       const serialized = JSON.stringify(message).replace(/</g, "\\u003c");
+      // Chromium can defer microphone access until its document has native focus.
+      // Queue focus before the explicit start command on Android's UI thread.
+      if (Platform.OS === "android" && message.type === "prepare")
+        webView.current?.requestFocus();
       webView.current?.injectJavaScript(
         `window.__nyxVoiceMessage && window.__nyxVoiceMessage(${serialized}); true;`,
       );

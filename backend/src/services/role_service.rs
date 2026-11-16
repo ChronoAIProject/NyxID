@@ -4,7 +4,9 @@ use mongodb::bson::doc;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
+use crate::models::group::COLLECTION_NAME as GROUPS;
+#[cfg(test)]
+use crate::models::group::Group;
 use crate::models::role::{
     ADMIN_USAGE_READ_PERMISSION, CATALOG_MANAGER_ROLE_SLUG, CATALOG_SERVICES_WRITE_PERMISSION,
     COLLECTION_NAME as ROLES, CREDIT_GRANTS_WRITE_PERMISSION, CREDITS_MANAGER_ROLE_SLUG,
@@ -13,6 +15,9 @@ use crate::models::role::{
     PLATFORM_USER_ROLE_SLUG, Role, USAGE_VIEWER_ROLE_SLUG,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
+use crate::services::audit_service::AuditActor;
+
+mod audit;
 
 const PLATFORM_ADMIN_ROLE_NAME: &str = "Admin";
 const PLATFORM_OPERATOR_ROLE_NAME: &str = "Operator";
@@ -111,25 +116,7 @@ async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> Ap
     let now = Utc::now();
 
     if let Some(existing) = roles.find_one(doc! { "slug": spec.slug }).await? {
-        roles
-            .update_one(
-                doc! { "_id": &existing.id },
-                doc! { "$set": {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "permissions": &permissions,
-                    "is_default": spec.is_default,
-                    "is_system": true,
-                    "client_id": null,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
-
-        return roles
-            .find_one(doc! { "_id": &existing.id })
-            .await?
-            .ok_or_else(|| AppError::Internal("System role disappeared after update".to_string()));
+        return normalize_system_role(db, spec, &existing).await;
     }
 
     let role = Role {
@@ -145,9 +132,44 @@ async fn ensure_system_role(db: &mongodb::Database, spec: &SystemRoleSpec) -> Ap
         updated_at: now,
     };
 
-    roles.insert_one(&role).await?;
+    #[cfg(test)]
+    super::startup_seed_tests::missing(db, "role", spec.slug).await;
+    if let Some(existing) =
+        super::startup_seed_service::insert_or_read(&roles, &role, doc! {"slug": spec.slug}).await?
+    {
+        return normalize_system_role(db, spec, &existing).await;
+    }
     tracing::info!(slug = spec.slug, "Seeded system role");
     Ok(role)
+}
+
+async fn normalize_system_role(
+    db: &mongodb::Database,
+    spec: &SystemRoleSpec,
+    existing: &Role,
+) -> AppResult<Role> {
+    let roles = db.collection::<Role>(ROLES);
+    let permissions = permissions_vec(spec.permissions);
+    let now = Utc::now();
+    roles
+        .update_one(
+            doc! { "_id": &existing.id },
+            doc! { "$set": {
+                "name": spec.name,
+                "description": spec.description,
+                "permissions": &permissions,
+                "is_default": spec.is_default,
+                "is_system": true,
+                "client_id": null,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    roles
+        .find_one(doc! { "_id": &existing.id })
+        .await?
+        .ok_or_else(|| AppError::Internal("System role disappeared after update".to_string()))
 }
 
 async fn get_platform_role_by_slug(db: &mongodb::Database, slug: &str) -> AppResult<Role> {
@@ -380,6 +402,7 @@ pub struct PlatformRoleBackfillResult {
 }
 
 /// Create a new role.
+#[cfg(test)]
 pub async fn create_role(
     db: &mongodb::Database,
     name: &str,
@@ -388,6 +411,30 @@ pub async fn create_role(
     permissions: &[String],
     is_default: bool,
     client_id: Option<&str>,
+) -> AppResult<Role> {
+    create_role_as(
+        db,
+        name,
+        slug,
+        description,
+        permissions,
+        is_default,
+        client_id,
+        &fixture_actor(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_role_as(
+    db: &mongodb::Database,
+    name: &str,
+    slug: &str,
+    description: Option<&str>,
+    permissions: &[String],
+    is_default: bool,
+    client_id: Option<&str>,
+    actor: &AuditActor,
 ) -> AppResult<Role> {
     crate::handlers::admin_helpers::validate_slug(slug)?;
 
@@ -414,7 +461,7 @@ pub async fn create_role(
         updated_at: now,
     };
 
-    db.collection::<Role>(ROLES).insert_one(&role).await?;
+    audit::create(db, &role, actor).await?;
     Ok(role)
 }
 
@@ -446,6 +493,7 @@ pub async fn list_roles(db: &mongodb::Database, client_id: Option<&str>) -> AppR
 }
 
 /// Update a role. System roles only allow description and permissions updates.
+#[cfg(test)]
 pub async fn update_role(
     db: &mongodb::Database,
     role_id: &str,
@@ -454,6 +502,30 @@ pub async fn update_role(
     description: Option<&str>,
     permissions: Option<&[String]>,
     is_default: Option<bool>,
+) -> AppResult<Role> {
+    update_role_as(
+        db,
+        role_id,
+        name,
+        slug,
+        description,
+        permissions,
+        is_default,
+        &fixture_actor(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_role_as(
+    db: &mongodb::Database,
+    role_id: &str,
+    name: Option<&str>,
+    slug: Option<&str>,
+    description: Option<&str>,
+    permissions: Option<&[String]>,
+    is_default: Option<bool>,
+    actor: &AuditActor,
 ) -> AppResult<Role> {
     let existing = get_role(db, role_id).await?;
 
@@ -506,49 +578,44 @@ pub async fn update_role(
         update.insert("is_default", d);
     }
 
-    db.collection::<Role>(ROLES)
-        .update_one(doc! { "_id": role_id }, doc! { "$set": update })
-        .await?;
-
-    get_role(db, role_id).await
+    audit::update_role(db, role_id, update, actor).await
 }
 
 /// Delete a role (non-system roles only). Removes from all users and groups.
+#[cfg(test)]
 pub async fn delete_role(db: &mongodb::Database, role_id: &str) -> AppResult<()> {
+    delete_role_as(db, role_id, &fixture_actor()).await
+}
+
+pub async fn delete_role_as(
+    db: &mongodb::Database,
+    role_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
     let role = get_role(db, role_id).await?;
 
     if role.is_system {
         return Err(AppError::SystemRoleProtected(role.slug));
     }
 
-    // Remove role from all users
-    db.collection::<User>(USERS)
-        .update_many(
-            doc! { "role_ids": role_id },
-            doc! { "$pull": { "role_ids": role_id } },
-        )
-        .await?;
-
-    // Remove role from all groups
-    db.collection::<Group>(GROUPS)
-        .update_many(
-            doc! { "role_ids": role_id },
-            doc! { "$pull": { "role_ids": role_id } },
-        )
-        .await?;
-
-    db.collection::<Role>(ROLES)
-        .delete_one(doc! { "_id": role_id })
-        .await?;
-
-    Ok(())
+    audit::delete(db, role_id, actor).await
 }
 
 /// Assign a role to a user.
+#[cfg(test)]
 pub async fn assign_role_to_user(
     db: &mongodb::Database,
     user_id: &str,
     role_id: &str,
+) -> AppResult<()> {
+    assign_role_to_user_as(db, user_id, role_id, &fixture_actor()).await
+}
+
+pub async fn assign_role_to_user_as(
+    db: &mongodb::Database,
+    user_id: &str,
+    role_id: &str,
+    actor: &AuditActor,
 ) -> AppResult<()> {
     // Verify role exists
     let _role = get_role(db, role_id).await?;
@@ -564,30 +631,26 @@ pub async fn assign_role_to_user(
         return Err(AppError::RoleAlreadyAssigned);
     }
 
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id },
-            doc! { "$addToSet": { "role_ids": role_id } },
-        )
-        .await?;
-
-    Ok(())
+    audit::user_role(db, user_id, role_id, audit::Membership::Assign, actor).await
 }
 
 /// Revoke a role from a user.
+#[cfg(test)]
 pub async fn revoke_role_from_user(
     db: &mongodb::Database,
     user_id: &str,
     role_id: &str,
 ) -> AppResult<()> {
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id },
-            doc! { "$pull": { "role_ids": role_id } },
-        )
-        .await?;
+    revoke_role_from_user_as(db, user_id, role_id, &fixture_actor()).await
+}
 
-    Ok(())
+pub async fn revoke_role_from_user_as(
+    db: &mongodb::Database,
+    user_id: &str,
+    role_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
+    audit::user_role(db, user_id, role_id, audit::Membership::Revoke, actor).await
 }
 
 /// Get all directly-assigned roles for a user.
@@ -624,10 +687,20 @@ pub struct BulkAssignResult {
 ///
 /// If `user_ids` is `Some`, assigns only to those users. If `None`, assigns to
 /// all users who don't already have the role.
+#[cfg(test)]
 pub async fn bulk_assign_role(
     db: &mongodb::Database,
     role_id: &str,
     user_ids: Option<&[String]>,
+) -> AppResult<BulkAssignResult> {
+    bulk_assign_role_as(db, role_id, user_ids, &fixture_actor()).await
+}
+
+pub async fn bulk_assign_role_as(
+    db: &mongodb::Database,
+    role_id: &str,
+    user_ids: Option<&[String]>,
+    actor: &AuditActor,
 ) -> AppResult<BulkAssignResult> {
     // Verify role exists
     let _role = get_role(db, role_id).await?;
@@ -648,20 +721,16 @@ pub async fn bulk_assign_role(
     };
 
     let now = bson::DateTime::from_chrono(Utc::now());
-    let result = users_coll
-        .update_many(
-            update_filter,
-            doc! {
-                "$addToSet": { "role_ids": role_id },
-                "$set": { "updated_at": now },
-            },
-        )
-        .await?;
-
-    Ok(BulkAssignResult {
-        assigned_count: result.modified_count,
+    audit::bulk(audit::Bulk {
+        db: db.clone(),
+        role_id,
+        user_ids,
         already_assigned_count,
+        filter: update_filter,
+        update: doc! { "$addToSet": { "role_ids": role_id }, "$set": { "updated_at": now } },
+        actor,
     })
+    .await
 }
 
 /// Get IDs of all roles marked as `is_default: true`.
@@ -1736,5 +1805,21 @@ mod tests {
             .expect("query")
             .expect("user role");
         assert!(default_ids.contains(&user_role.id));
+    }
+}
+
+#[cfg(test)]
+mod audit_tests;
+
+// Fixture conveniences delegate to the same preparation and transaction as
+// production. There is no unaudited mutation implementation in test builds.
+#[cfg(test)]
+fn fixture_actor() -> AuditActor {
+    AuditActor {
+        user_id: Uuid::nil().to_string(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
     }
 }

@@ -81,6 +81,10 @@ export const channelBotHealthSchema = z.object({
   error: z.string().nullable(),
   recommended_action: z.enum(RECOMMENDED_ACTIONS),
   recommended_action_text: z.string(),
+  /** NyxBot linkage evidence, omitted for bots without a NyxBot row. */
+  nyxbot_status: z.string().optional(),
+  nyxbot_last_error: z.string().nullable().optional(),
+  nyxbot_restore_state: z.string().optional(),
   /** Whether the caller may run the recovery action. */
   can_write: z.boolean(),
   diagnostics: channelBotDiagnosticsSchema,

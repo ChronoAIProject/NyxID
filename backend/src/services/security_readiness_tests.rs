@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::feature_flag_service as flags;
 
-fn local(name: &str, generation: &str, roster: &[&str], required: bool) -> Runtime {
+pub(super) fn local(name: &str, generation: &str, roster: &[&str], required: bool) -> Runtime {
     Runtime {
         identity: ReplicaIdentity {
             instance_name: name.into(),
@@ -10,9 +10,10 @@ fn local(name: &str, generation: &str, roster: &[&str], required: bool) -> Runti
         },
         config: RolloutConfig::parse(&roster.join(","), true).unwrap(),
         platform_policy_required: required,
+        activation_progress: Default::default(),
     }
 }
-fn row(local: &Runtime, now: DateTime<Utc>) -> SecurityReplica {
+pub(super) fn row(local: &Runtime, now: DateTime<Utc>) -> SecurityReplica {
     SecurityReplica {
         id: local.identity.generation_id.clone(),
         instance_name: local.identity.instance_name.clone(),
@@ -503,7 +504,7 @@ fn roster_cases(now: DateTime<Utc>) -> Vec<(Runtime, Vec<SecurityReplica>, &'sta
 }
 
 #[test]
-fn each_roster_warning_requires_prior_activation_and_never_allows_activation() {
+fn each_advisory_keeps_legacy_ready_false_but_allows_recorded_serving() {
     let now = Utc::now();
     for (local, rows, warning) in roster_cases(now) {
         for active in [None, Some(now)] {
@@ -552,21 +553,13 @@ fn every_live_generation_must_support_capability_even_with_activation() {
 fn every_hard_assessment_blocker_still_refuses_serving() {
     let now = Utc::now();
     let a = local("a", "a1", &["a"], true);
-    for case in 0..8 {
+    for case in [0, 3, 4, 5, 6, 7] {
         let mut local = a.clone();
         let mut rows = vec![row(&a, now)];
         let (capability, cutover, code) = match case {
             0 => {
                 rows.clear();
                 (CAPABILITIES[0], false, "executing_process_not_observed")
-            }
-            1 => {
-                local.config.drained = false;
-                (CAPABILITIES[0], false, "old_replicas_not_declared_drained")
-            }
-            2 => {
-                rows[0].drained = false;
-                (CAPABILITIES[0], false, "old_replicas_not_declared_drained")
             }
             3 => {
                 rows[0].observed_at = now + Duration::seconds(6);
@@ -605,7 +598,7 @@ fn every_hard_assessment_blocker_still_refuses_serving() {
 }
 
 #[tokio::test]
-async fn activation_is_strict_durable_and_concurrent_heartbeats_keep_one_timestamp() {
+async fn activation_is_durable_and_concurrent_heartbeats_keep_one_timestamp() {
     let db = crate::test_utils::connect_test_database("readiness_activation")
         .await
         .unwrap();
@@ -615,7 +608,7 @@ async fn activation_is_strict_durable_and_concurrent_heartbeats_keep_one_timesta
     for (local, rows, warning) in roster_cases(Utc::now()) {
         replicas.delete_many(doc! {}).await.unwrap();
         replicas.insert_many(rows).await.unwrap();
-        record_clean_activations(&db, &local, &[capability])
+        record_activations(&db, &local, &[capability], Instant::now())
             .await
             .unwrap();
         let report = report_for(&db, &local, capability).await.unwrap();
@@ -624,9 +617,9 @@ async fn activation_is_strict_durable_and_concurrent_heartbeats_keep_one_timesta
     let a = local("a", "a1", &["a"], false);
     replicas.delete_many(doc! {}).await.unwrap();
     replicas.insert_one(row(&a, Utc::now())).await.unwrap();
-    // Reads may serve a clean fleet but never write activation evidence.
+    // Even clean reads wait for durable evidence; requests never write it.
     let before = report_for(&db, &a, capability).await.unwrap();
-    assert!(before.ready && before.serving_ready && !before.activated);
+    assert!(before.ready && !before.serving_ready && !before.activated);
     let barrier = tokio::sync::Barrier::new(16);
     let results = futures::future::join_all((0..16).map(|_| async {
         barrier.wait().await;
@@ -657,9 +650,14 @@ async fn activation_is_strict_durable_and_concurrent_heartbeats_keep_one_timesta
             .insert_one(row(&local("a", generation, &["a"], false), Utc::now()))
             .await
             .unwrap();
-        record_clean_activations(&db, &a, &[capability, AUTOMATION_COMPLETION])
-            .await
-            .unwrap();
+        record_activations(
+            &db,
+            &a,
+            &[capability, AUTOMATION_COMPLETION],
+            Instant::now(),
+        )
+        .await
+        .unwrap();
         let report = report_for(&db, &a, capability).await.unwrap();
         assert!(report.activated && report.serving_ready && report.serving_with_roster_warnings);
         assert!(!report.ready);
@@ -737,10 +735,10 @@ async fn clean_serving_keeps_two_read_commands_and_no_writes() {
     require_serving(&db, CAPABILITIES[0]).await.unwrap();
     assert_eq!(*commands.lock().unwrap(), baseline);
     commands.lock().unwrap().clear();
-    require_activation(&db, CAPABILITIES[0]).await.unwrap();
+    require_flag_enable(&db, CAPABILITIES[0]).await.unwrap();
     assert_eq!(*commands.lock().unwrap(), baseline);
     eprintln!(
-        "main require = {baseline:?}; require_serving = {baseline:?}; require_activation = {baseline:?}"
+        "main require = {baseline:?}; require_serving = {baseline:?}; require_flag_enable = {baseline:?}"
     );
 }
 
@@ -873,7 +871,7 @@ async fn serving_diagnostics_are_shared_throttled_chained_and_failure_is_nonfata
         rows[0].event_data.as_ref().unwrap()["first_observed_capability"],
         capability
     );
-    // Simulate the next shared window without an hour-long test.
+    // Simulate the next shared window without a day-long test.
     let windows = db.collection::<bson::Document>(RATE_WINDOW_COLLECTION_NAME);
     windows
         .delete_many(doc! {"namespace": diagnostics::EVENT})
@@ -968,7 +966,7 @@ async fn activation_refuses_hard_failures_and_serving_never_ignores_database_err
     for case in 0..4 {
         let mut row = row(&a, Utc::now());
         match case {
-            0 => row.drained = false,
+            0 => row.protocol = 2,
             1 => row.capabilities.clear(),
             2 => row.observed_at = Utc::now() + Duration::seconds(10),
             _ => row.observed_at = Utc::now() - Duration::seconds(46),
@@ -978,7 +976,7 @@ async fn activation_refuses_hard_failures_and_serving_never_ignores_database_err
             .upsert(true)
             .await
             .unwrap();
-        record_clean_activations(&db, &a, &[CAPABILITIES[0]])
+        record_activations(&db, &a, &[CAPABILITIES[0]], Instant::now())
             .await
             .unwrap();
         assert!(
@@ -1088,11 +1086,11 @@ async fn recording_failure_does_not_fail_observation_or_skip_other_capabilities(
 }
 
 #[tokio::test]
-async fn unknown_flag_activation_is_ungated_but_unknown_execution_fails_closed() {
+async fn unknown_flag_enable_is_ungated_but_unknown_execution_fails_closed() {
     let db = crate::test_utils::connect_test_database("unknown_capability")
         .await
         .unwrap();
-    require_activation(&db, "ordinary-custom-flag")
+    require_flag_enable(&db, "ordinary-custom-flag")
         .await
         .unwrap();
     assert!(matches!(
@@ -1273,7 +1271,7 @@ async fn runtime_process_child() {
             Err(AppError::SecurityReadinessUnavailable)
         ));
         assert!(matches!(
-            require_activation(&db, flag).await,
+            require_flag_enable(&db, flag).await,
             Err(AppError::SecurityReadinessUnavailable)
         ));
         return;
@@ -1322,20 +1320,19 @@ async fn runtime_process_child() {
         (FlagTargetKind::User, Some(user.clone())),
         (FlagTargetKind::Org, Some(org)),
     ] {
-        assert!(matches!(
-            mutate(
-                &db,
-                flag,
-                Mutation::Override {
-                    kind,
-                    target_id: target_id.clone(),
-                    enabled: Some(true)
-                },
-                &actor
-            )
-            .await,
-            Err(AppError::SecurityReadinessUnavailable)
-        ));
+        let enabled = mutate(
+            &db,
+            flag,
+            Mutation::Override {
+                kind,
+                target_id: target_id.clone(),
+                enabled: Some(true),
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+        assert!(enabled.override_row.unwrap().enabled);
         let disabled = mutate(
             &db,
             flag,
@@ -1350,6 +1347,19 @@ async fn runtime_process_child() {
         .unwrap();
         assert!(!disabled.override_row.unwrap().enabled);
     }
+    let model_flag = crate::services::platform_model_service::FLAG;
+    assert!(
+        flags::set_platform_override(&db, model_flag, &flags::FlagTarget::Global, true, &user)
+            .await
+            .unwrap()
+            .enabled
+    );
+    assert!(
+        !flags::set_platform_override(&db, model_flag, &flags::FlagTarget::Global, false, &user)
+            .await
+            .unwrap()
+            .enabled
+    );
     // Seed an existing global cohort and a personal opt-out, then exercise the
     // production transactional clear-that-enables gate under every warning.
     let enrollment_flag = crate::services::execution_permission_enrollment::FLAG;
@@ -1376,27 +1386,25 @@ async fn runtime_process_child() {
             .await
             .unwrap();
     }
-    assert!(matches!(
-        mutate(
-            &db,
-            enrollment_flag,
-            Mutation::Override {
-                kind: FlagTargetKind::User,
-                target_id: Some(user.clone()),
-                enabled: None,
-            },
-            &actor
-        )
-        .await,
-        Err(AppError::SecurityReadinessUnavailable)
-    ));
+    mutate(
+        &db,
+        enrollment_flag,
+        Mutation::Override {
+            kind: FlagTargetKind::User,
+            target_id: Some(user.clone()),
+            enabled: None,
+        },
+        &actor,
+    )
+    .await
+    .unwrap();
     assert!(
         overrides
             .find_one(doc! {"flag_key":enrollment_flag,"target_key":&user,"enabled":false})
             .await
             .unwrap()
-            .is_some(),
-        "refused clear must roll back the delete"
+            .is_none(),
+        "allowed clear removes the opt-out"
     );
 }
 

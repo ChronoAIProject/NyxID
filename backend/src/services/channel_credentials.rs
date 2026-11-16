@@ -337,6 +337,7 @@ pub async fn start_connection(
         Some(&connection),
         None,
         Some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+        None,
     )
     .await;
     match result {

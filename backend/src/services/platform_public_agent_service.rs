@@ -827,6 +827,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .try_collect()
         .await?;
     for marker in &scopes {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         drain_scope(db, &marker.id).await?;
     }
     let expired_turns:Vec<PlatformPublicSession>=db.collection::<PlatformPublicSession>(SESSIONS).find(doc! {
@@ -834,6 +837,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         "$or":[{"turn_recovery_retry_at":{"$exists":false}},{"turn_recovery_retry_at":{"$lte":bson::DateTime::now()}}],
     }).sort(doc! {"active_turn.expires_at":1,"_id":1}).limit(i64::from(limit)).await?.try_collect().await?;
     for row in &expired_turns {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if super::platform_public_credential_service::recover_expired_turn(db, row)
             .await
             .is_err()
@@ -854,6 +860,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .await?;
     let mut processed = (scopes.len() + expired_turns.len()) as u32;
     for row in expired {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         let mut session = db.client().start_session().await?;
         session
             .start_transaction()
@@ -887,6 +896,9 @@ pub async fn sweep_public_lifecycle(state: &AppState, limit: u32) -> AppResult<R
         .try_collect()
         .await?;
     for record in records {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         process_cleanup_state(db, Some(state), &record.id).await?;
         processed += 1;
     }
@@ -1180,31 +1192,59 @@ pub(crate) mod tests {
         assert!(session_row(&db, &row).await.cleanup_complete);
         db.drop().await.unwrap();
     }
-    #[tokio::test]
-    async fn cleanup_retains_unknown_upstream_and_completes_only_never_dispatched_sessions() {
+    async fn cleanup_proof_with_cutoff_offset(offset_ms: Option<i64>) {
         let db = crate::test_utils::connect_transaction_test_database("public_cleanup_proof").await;
         ensure_indexes(&db).await.unwrap();
         let local = fixture(&db, 5, false).await;
         let remote = fixture(&db, 6, true).await;
+        // Freeze the two simulated clocks; no sleep or system-clock change.
+        let fixture_clock = Utc::now();
+        db.collection::<Document>(SESSIONS).update_many(
+            doc! {"_id":{"$in":[&local.id,&remote.id]}},
+            doc! {"$set":{"created_at":bson::DateTime::from_chrono(fixture_clock-Duration::minutes(1))}},
+        ).await.unwrap();
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        revoke_in_session(
-            &db,
-            &mut session,
-            &PublicRevocationScope::Manager {
-                manager: ManagerAuthority {
-                    profile_id: "profile".into(),
-                    manager_bot_id: "99".into(),
-                    entry: EntryIdentity::TelegramV1 {
-                        telegram_bot_id: 99,
-                    },
-                    manager_authority_epoch: 3,
+        let scope = PublicRevocationScope::Manager {
+            manager: ManagerAuthority {
+                profile_id: "profile".into(),
+                manager_bot_id: "99".into(),
+                entry: EntryIdentity::TelegramV1 {
+                    telegram_bot_id: 99,
                 },
+                manager_authority_epoch: 3,
             },
-            PublicRevocationReason::ManagerRetired,
-        )
-        .await
-        .unwrap();
+        };
+        if let Some(offset_ms) = offset_ms {
+            let (scope_key, session_filter, maximum_epoch) = marker_identity(&scope);
+            let marker = PublicRevocationMarker {
+                id: uuid::Uuid::new_v4().to_string(),
+                scope_key,
+                session_filter,
+                maximum_epoch,
+                revoked_before: Some(fixture_clock + Duration::milliseconds(offset_ms)),
+                drain_pending: true,
+                reason: "manager_retired".into(),
+                effect_revision: 1,
+            };
+            db.collection::<PublicRevocationMarker>(REVOCATION_SCOPES)
+                .insert_one(&marker)
+                .session(&mut session)
+                .await
+                .unwrap();
+            revoke_page_in_session(&db, &mut session, &marker)
+                .await
+                .unwrap();
+        } else {
+            revoke_in_session(
+                &db,
+                &mut session,
+                &scope,
+                PublicRevocationReason::ManagerRetired,
+            )
+            .await
+            .unwrap();
+        }
         session.commit_transaction().await.unwrap();
         let state = crate::test_utils::test_app_state(db.clone());
         sweep_public_lifecycle(&state, 100).await.unwrap();
@@ -1250,6 +1290,21 @@ pub(crate) mod tests {
             record.attempts, 1,
             "a pending retry must respect its due time"
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_retains_unknown_upstream_and_completes_only_never_dispatched_sessions() {
+        cleanup_proof_with_cutoff_offset(None).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_retains_unknown_upstream_with_database_clock_five_ms_behind() {
+        cleanup_proof_with_cutoff_offset(Some(-5)).await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_retains_unknown_upstream_with_database_clock_five_ms_ahead() {
+        cleanup_proof_with_cutoff_offset(Some(5)).await;
     }
 
     #[tokio::test]

@@ -321,10 +321,12 @@ pub async fn socket(
         return Err(AppError::AssistantTurnRequired);
     }
     coordinator::authenticate_socket(&state, &b, &s, &headers, &q.ticket).await?;
-    Ok(ws
-        .max_message_size(16384)
-        .max_frame_size(16384)
-        .on_upgrade(move |socket| coordinator::socket(state, b, s, socket)))
+    Ok(ws.max_message_size(16384).max_frame_size(16384).on_upgrade(
+        state
+            .shutdown
+            .clone()
+            .upgrade_callback(move |socket| coordinator::socket(state, b, s, socket)),
+    ))
 }
 pub async fn completions(
     State(state): State<AppState>,
@@ -346,7 +348,7 @@ pub async fn completions(
     };
     let (mut output, worker) = adapter.start(state.clone(), &b, &s, &body).await?;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, Infallible>>(64);
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let mut completed = false;
         let deadline = tokio::time::sleep(std::time::Duration::from_secs(1800));
         tokio::pin!(deadline);

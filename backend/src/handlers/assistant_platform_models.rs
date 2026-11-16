@@ -145,6 +145,7 @@ pub(crate) async fn execute(
         &request,
     )
     .await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&plan.offering);
     if request.has_images() && body.len() as i64 > plan.tariff.tariff().bounds.max_request_bytes {
         return Err(AppError::RequestBodyTooLarge {
             max_bytes: plan.tariff.tariff().bounds.max_request_bytes as usize,
@@ -242,7 +243,7 @@ pub(crate) async fn execute(
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     let response_request_id = request_id.clone();
     let worker_cancel = cancel.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_cleanup(async move {
         let context = execution::Context {
             db: &state.db,
             keys: &state.encryption_keys,

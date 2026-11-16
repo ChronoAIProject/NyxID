@@ -1364,7 +1364,7 @@ pub async fn allocation_summary(
     Ok(Json(AllocationOverviewResponse {
         allocations_v1: state.config.billing_allocations_enabled,
         recipient_schedules: state.config.billing_allocations_enabled
-            && crate::services::security_readiness_service::require_activation(
+            && crate::services::security_readiness_service::require_serving(
                 &state.db,
                 billing::schedules::recipients::READINESS,
             )

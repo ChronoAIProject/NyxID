@@ -362,7 +362,7 @@ async fn ingress_correlated_inner(
             }
             let task_state = state.clone();
             let sms_binding = b.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 let sid = s.id.clone();
                 let _ = sms_turn(task_state.clone(), sms_binding, s, event_id, text).await;
                 let _ = session::finish_noncall(&task_state, &sid, "sms_turn_finished").await;
@@ -464,7 +464,7 @@ pub(crate) async fn turn_with_history(
     let stream_state = state.clone();
     let stream_session = s.clone();
     let terminal = sender.clone();
-    let relay = tokio::spawn(async move {
+    let relay = crate::services::shutdown::process().spawn(async move {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
@@ -516,7 +516,7 @@ pub(crate) async fn turn_with_history(
     });
     let worker_session = s.clone();
     let egress = crate::services::assistant_nyxagent_egress::channel(state.clone(), s.clone());
-    let worker = tokio::spawn(async move {
+    let worker = state.shutdown.clone().spawn(async move {
         let result = runtime::run_owner_turn(
             state.clone(),
             egress,
@@ -1084,12 +1084,17 @@ async fn close_inner(
     Ok(())
 }
 pub fn spawn_sweep(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
-            tick.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut tick).await else {
+                break;
+            };
             if let Ok(rows) = session::expired(&state).await {
                 for s in rows {
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
                     let _ = state
                         .db
                         .collection::<bson::Document>(SESSIONS)
@@ -1107,7 +1112,9 @@ pub fn spawn_sweep(state: AppState) {
                     }
                 }
             }
-            let _ = super::sms_delivery::sweep(&state).await;
+            if let Some(_claim) = state.shutdown.background() {
+                let _ = super::sms_delivery::sweep(&state).await;
+            }
         }
     });
 }

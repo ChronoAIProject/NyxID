@@ -472,9 +472,13 @@ pub(crate) async fn sweep(state: &AppState) -> crate::errors::AppResult<()> {
 async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
     use crate::errors::AppError;
     for _ in 0..8 {
+        let Some(_work) = state.shutdown.background() else {
+            break;
+        };
         let Some(w) = watches::claim(&state.db).await? else {
             break;
         };
+        let release = watches::retain_shutdown_release(&state.db, &w, &state.shutdown);
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
             Ok(Err(AppError::Conflict(reason)))
@@ -493,6 +497,7 @@ async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
             }
             _ => watches::defer(&state.db, &w).await?,
         }
+        release.completed();
     }
     Ok(())
 }
@@ -528,11 +533,13 @@ pub(crate) async fn drain_cancellations(
 }
 
 pub(crate) fn spawn_sweep(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) = Box::pin(sweep(&state)).await {
                 tracing::debug!(code = error.error_code(), "Async service sweep deferred");
             }

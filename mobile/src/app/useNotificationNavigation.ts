@@ -21,6 +21,11 @@ import {
 } from "../lib/auth/authAccount";
 import { nativeNotificationUrl } from "../lib/notifications/notificationDestination";
 import { notificationPushSignalFromResponse } from "../lib/notifications/notificationPushSignal";
+import {
+  isPushDeliveryStateHydrated,
+  isPushDeliverySuppressed,
+  pushDeliveryStateHydrated,
+} from "../lib/notifications/pushDeliveryState";
 
 type AccountBinding = { accountId: string | null; invalidated: boolean };
 
@@ -135,8 +140,16 @@ export function useNotificationNavigation(
       invalidated: false,
     };
     coldBinding.current = binding;
-    const handle = (response: Notifications.NotificationResponse | null) => {
+    const handle = async (
+      response: Notifications.NotificationResponse | null,
+    ): Promise<void> => {
       if (!mounted || !response) return;
+      if (!isPushDeliveryStateHydrated()) await pushDeliveryStateHydrated();
+      if (!mounted) return;
+      if (isPushDeliverySuppressed()) {
+        void Notifications.clearLastNotificationResponseAsync().catch(() => {});
+        return;
+      }
       const id = `${response.notification.request.identifier}:${response.actionIdentifier}`;
       if (handled.current === id) return;
       const destination = extractUrlFromNotificationResponse(response);
@@ -152,7 +165,7 @@ export function useNotificationNavigation(
     const subscription = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         receivedTap = true;
-        handle(response);
+        void handle(response);
       },
     );
     void Notifications.getLastNotificationResponseAsync()
@@ -166,7 +179,7 @@ export function useNotificationNavigation(
             );
           return;
         }
-        handle(response);
+        void handle(response);
       })
       .catch(() => {});
     return () => {

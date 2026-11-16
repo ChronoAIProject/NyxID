@@ -83,7 +83,7 @@ export function ProfileFieldEditScreen({
       {!isConnected ? (
         <Notice message={t("You're offline. Connect to save changes.")} />
       ) : null}
-      {error ? <Notice tone="error" message={error} /> : null}
+      {error ? <Notice tone="error" message={t(error)} /> : null}
       <SettingsGroup inset={false} footer={t(copy.footer)}>
         <SettingsTextField
           accessibilityLabel={t(copy.title)}

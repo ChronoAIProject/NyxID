@@ -8,12 +8,15 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   AppState,
+  Keyboard,
   Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
+  type TextInput,
 } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import { AuthSubmitButton } from "./AuthSubmitButton";
@@ -184,6 +187,48 @@ export function AuthHomeScreen({ navigation }: Props) {
   const isMountedRef = useRef(true);
   const emailLoginLock = useRef(false);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const emailInputRef = useRef<TextInput>(null);
+  const passwordInputRef = useRef<TextInput>(null);
+  const mfaInputRef = useRef<TextInput>(null);
+  const scrollOffset = useRef(0);
+  const focusRevision = useRef(0);
+
+  const revealFocusedInput = useCallback((input: TextInput | null) => {
+    // Native insets handle the initial keyboard animation. A focus change
+    // with the keyboard already open does not always emit a new frame.
+    const revision = ++focusRevision.current;
+    const keyboard = Keyboard.metrics();
+    const scroller = scrollViewRef.current;
+    if (Platform.OS !== "ios" || !keyboard || !input || !scroller) return;
+    const viewport = scroller.getNativeScrollRef();
+    if (!viewport) return;
+    const measuredOffset = scrollOffset.current;
+    input.measureInWindow((_x, y, _width, height) => {
+      viewport.measureInWindow((_left, top, _viewWidth, viewHeight) => {
+        const currentKeyboard = Keyboard.metrics();
+        if (
+          revision !== focusRevision.current ||
+          scrollViewRef.current !== scroller ||
+          scrollOffset.current !== measuredOffset ||
+          currentKeyboard?.screenY !== keyboard.screenY
+        ) {
+          return;
+        }
+        const bottom = Math.min(top + viewHeight, keyboard.screenY);
+        const delta =
+          y < top + spacing.xl
+            ? y - top - spacing.xl
+            : Math.max(0, y + height + spacing.xl - bottom);
+        if (delta) {
+          scroller.scrollTo({
+            y: Math.max(0, measuredOffset + delta),
+            animated: true,
+          });
+        }
+      });
+    });
+  }, []);
 
   const showToast = (message: string, kind: ToastKind) => {
     setToast({ message, kind });
@@ -309,7 +354,9 @@ export function AuthHomeScreen({ navigation }: Props) {
     try {
       const available = await publicConfig.refetch();
       if (!isMountedRef.current || !focusedRef.current || AppState.currentState !== "active") return;
-      if (available.error) throw available.error;
+      // The query owns discovery errors and its retry UI. Copying one into
+      // loginError would leave a stale banner after configuration recovers.
+      if (available.error) return;
       requireSocialProvider(available.data, provider);
       capture({ name: "ui.mobile_provider_connect_initiated", props: { provider, method: "oauth" } });
       const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL);
@@ -411,6 +458,11 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <BrandNebula />
       <ScrollView
+        ref={scrollViewRef}
+        onScroll={(event) => {
+          scrollOffset.current = event.nativeEvent.contentOffset.y;
+        }}
+        scrollEventThrottle={16}
         style={flowStyles.content}
         contentContainerStyle={[
           flowStyles.scrollContent,
@@ -419,6 +471,8 @@ export function AuthHomeScreen({ navigation }: Props) {
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
       >
         {/* Hero: the portal mark on a faint halo, rising in on arrival. */}
         <RiseIn>
@@ -512,6 +566,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               {prompt.showPasswordFields && (
                 <>
                   <AuthTextInput
+                    ref={emailInputRef}
                     frameStyle={styles.field}
                     leading={<Mail size={18} color={colors.textMuted} />}
                     style={styles.input}
@@ -524,8 +579,10 @@ export function AuthHomeScreen({ navigation }: Props) {
                     keyboardType="email-address"
                     autoCapitalize="none"
                     autoComplete="email"
+                    onFocus={() => revealFocusedInput(emailInputRef.current)}
                   />
                   <AuthTextInput
+                    ref={passwordInputRef}
                     frameStyle={styles.field}
                     leading={<LockKeyhole size={18} color={colors.textMuted} />}
                     style={styles.input}
@@ -537,6 +594,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                     editable={!isAnyPending && !mfaChallenge}
                     secureTextEntry={!showPassword}
                     autoComplete="current-password"
+                    onFocus={() => revealFocusedInput(passwordInputRef.current)}
                     trailing={<Pressable
                     accessibilityRole="button"
                     accessibilityLabel={showPassword ? "Hide password" : "Show password"}
@@ -555,11 +613,12 @@ export function AuthHomeScreen({ navigation }: Props) {
               )}
               {mfaChallenge && <View>
                 <Text style={styles.heroTagline}>{prompt.title}</Text>
-                <AuthTextInput frameStyle={mode === "light" ? styles.field : undefined} accessibilityLabel={prompt.label}
+                <AuthTextInput ref={mfaInputRef} frameStyle={mode === "light" ? styles.field : undefined} accessibilityLabel={prompt.label}
                   placeholder={prompt.placeholder}
                   keyboardType={recoveryMode ? "default" : "number-pad"} style={styles.input} value={mfaCode}
                   onChangeText={setMfaCode} maxLength={32} autoCapitalize="none" autoCorrect={false}
-                  autoComplete="one-time-code" editable={!isEmailAuthPending} />
+                  autoComplete="one-time-code" editable={!isEmailAuthPending}
+                  onFocus={() => revealFocusedInput(mfaInputRef.current)} />
                 <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setRecoveryMode(!recoveryMode); setMfaCode(""); }}>
                   <Text style={styles.heroTagline}>{prompt.toggle}</Text>
                 </Pressable>

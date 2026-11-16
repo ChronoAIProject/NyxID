@@ -1,6 +1,7 @@
+import type { ReactNode } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { AddRouteDialog } from "./channel-bot-detail";
+import { AddRouteDialog, ChannelBotDetailPage } from "./channel-bot-detail";
 
 const { refetch, apiKeys, queryState, create } = vi.hoisted(() => ({
   refetch: vi.fn(),
@@ -65,7 +66,7 @@ vi.mock("@/hooks/use-runtime-config", () => ({
 }));
 vi.mock("@/hooks/use-channel-platforms", () => ({
   useChannelPlatformViews: () => ({
-    getPlatform: (id: string) => ({ label: id === "discord" ? "Discord" : "Slack", webhookDocs: null }),
+    getPlatform: (id: string) => ({ label: id === "discord" ? "Discord" : "Slack", webhookDocs: null, activities: [] }),
   }),
 }));
 
@@ -101,4 +102,41 @@ it("does not call legacy app credentials missing after a successful check", asyn
   render(<WebhookSetupChecklist bot={{ id: "bot", platform: "lark", status: "pending_webhook", app_secret_configured: false, last_verification: { status: "verified" } } as import("@/types/channels").ChannelBotDetail} />);
   expect(screen.getByText("App credentials verified. Callback and member verification are separate.")).toBeVisible();
   expect(screen.queryByText(/If credentials are missing/)).not.toBeInTheDocument();
+});
+
+
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ botId: "org-bot" }),
+  useNavigate: () => vi.fn(),
+  Link: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
+vi.mock("@/hooks/use-orgs", () => ({
+  useOrgs: () => ({ data: [{ id: "org-1", display_name: "Team", your_role: "member" }] }),
+}));
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: (select: (state: { user: { id: string } }) => unknown) => select({ user: { id: "member" } }),
+}));
+vi.mock("@/hooks/use-channel-bots", () => ({
+  useChannelBot: () => ({ data: {
+    id: "org-bot", user_id: "org-1", platform: "lark", label: "Team helper",
+    status: "active", platform_bot_username: "team_helper", conversations_count: 7,
+    setup_instructions: ["Existing admin setup details"],
+  }, isLoading: false }),
+  useDeleteChannelBot: () => ({ mutateAsync: vi.fn() }),
+  useVerifyChannelBot: () => ({ mutateAsync: vi.fn() }),
+  useUpdateChannelBot: () => ({ mutateAsync: vi.fn() }),
+}));
+vi.mock("@/hooks/use-channel-activities", () => ({
+  useChannelActivities: () => ({ data: undefined }),
+}));
+vi.mock("@/components/channels/channel-bot-health-card", () => ({
+  ChannelBotHealthCard: () => <p>Bot health</p>,
+}));
+
+it("uses membership for read-only settings with main's detail response and no can_write field", () => {
+  render(<ChannelBotDetailPage />);
+  expect(screen.getByText("An organization admin can change these settings.")).toBeVisible();
+  expect(screen.getByText("Bot health")).toBeVisible();
+  expect(apiKeys).toHaveBeenCalledWith({ orgId: "org-1", enabled: false });
+  expect(screen.queryByRole("button", { name: /Delete Bot|Add Route|Verify/i })).not.toBeInTheDocument();
 });

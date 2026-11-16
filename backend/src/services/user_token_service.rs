@@ -775,6 +775,7 @@ pub async fn initiate_oauth_connect(
     connection_id: Option<&str>,
     connect_link_id: Option<&str>,
     flow_kind: Option<OAuthFlowKind>,
+    app_return_uri: Option<&str>,
 ) -> AppResult<OAuthInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -971,6 +972,7 @@ pub async fn initiate_oauth_connect(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
+        app_return_uri: app_return_uri.map(String::from),
         flow_kind: flow_kind.map(|kind| kind.as_wire().to_string()),
         attempt_nonce: attempt_nonce.clone(),
         connection_id: connection_id.map(String::from),
@@ -1323,6 +1325,7 @@ pub async fn request_device_code(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
+        app_return_uri: None,
         flow_kind: None,
         attempt_nonce: None,
         connection_id: connection_id.map(String::from),
@@ -3145,6 +3148,9 @@ pub async fn refresh_expiring_oauth_keys(
     };
 
     for key in &candidates {
+        let Some(_claim) = super::shutdown::process().background() else {
+            break;
+        };
         match refresh_user_api_key_in_place(db, encryption_keys, key, notifier).await {
             Ok(_) => report.refreshed += 1,
             Err(error) => {
@@ -3653,6 +3659,7 @@ mod tests {
                 connection_id: None,
                 connect_link_id: None,
                 redirect_path: None,
+                app_return_uri: None,
                 flow_kind: None,
                 attempt_nonce: None,
                 authorization_nonce: None,
@@ -4379,6 +4386,7 @@ mod tests {
                     connection,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -4507,6 +4515,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -4566,6 +4575,7 @@ mod tests {
                     &[],
                     None,
                     key.connection_id.as_deref(),
+                    None,
                     None,
                     None,
                 )
@@ -4734,6 +4744,7 @@ mod tests {
                         &["workspace:admin".into()],
                         None,
                         key.connection_id.as_deref(),
+                        None,
                         None,
                         None,
                     )
@@ -5312,6 +5323,7 @@ mod tests {
                 key.connection_id.as_deref(),
                 Some(&link),
                 chat.then_some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+                None,
             )
             .await
             .unwrap();
@@ -5441,6 +5453,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -5538,6 +5551,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -5594,6 +5608,7 @@ mod tests {
                 key.connection_id.as_deref(),
                 None,
                 Some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+                None,
             )
             .await;
             assert!(matches!(result, Err(AppError::ValidationError(_))));
@@ -5646,6 +5661,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                None,
                 None,
                 None,
                 None,
@@ -6365,6 +6381,7 @@ mod tests {
             Some(&connection_id),
             None,
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -6483,6 +6500,7 @@ mod tests {
             Some(&connection_id),
             None,
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -6574,6 +6592,7 @@ mod tests {
             &[],
             None,
             Some(&connection_id),
+            None,
             None,
             None,
         )
@@ -6672,6 +6691,7 @@ mod tests {
                     conn,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -6712,6 +6732,7 @@ mod tests {
                         conn,
                         None,
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -6738,6 +6759,7 @@ mod tests {
                         &[],
                         Some(&scopes),
                         conn,
+                        None,
                         None,
                         None,
                     )
@@ -6779,6 +6801,7 @@ mod tests {
                     additional,
                     scope_override,
                     conn,
+                    None,
                     None,
                     None,
                 )
@@ -6870,6 +6893,7 @@ mod tests {
                     &[],
                     None,
                     key.connection_id.as_deref(),
+                    None,
                     None,
                     None,
                 )
@@ -7035,6 +7059,7 @@ mod tests {
                 Some(&connection_id),
                 None,
                 None,
+                None,
             )
             .await
             .expect_err("unreviewed or excluded scopes must be rejected on the shared app");
@@ -7067,6 +7092,7 @@ mod tests {
                     additional,
                     scope_override,
                     Some(&connection_id),
+                    None,
                     None,
                     None,
                 )

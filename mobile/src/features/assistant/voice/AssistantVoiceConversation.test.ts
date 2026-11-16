@@ -1,11 +1,8 @@
-import {
-  composerInputMinHeight,
-  composerVoiceMinHeight,
-} from "../composerGeometry";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "../assistantHookTestHarness";
+import { voiceSettingsView } from "../../account/voiceSettingsModel";
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
 import type { VoiceStartRecovery } from "./voiceStartError";
 import type {
@@ -122,9 +119,14 @@ function setup(
     checkingConflict?: boolean;
     inputEnabled?: boolean;
     preferencesOpen?: boolean;
+    translate?: (phrase: string) => string;
   } = {},
 ) {
   const events: unknown[][] = [];
+  const queryFunctions = new Map<
+    string,
+    (context: { signal: AbortSignal }) => Promise<unknown>
+  >();
   const layoutAnimations: unknown[] = [];
   let focused = true;
   let online = true;
@@ -138,12 +140,22 @@ function setup(
   let endConflictResult: Promise<boolean> = Promise.resolve(false);
   let onStart: () => unknown = () => {};
   const savedPreferences: VoicePreferences[] = [];
+  const startContext: {
+    saved: VoicePreferences | null | undefined;
+    selected: VoiceOption | undefined;
+  }[] = [];
   const snapshots: (VoiceSnapshot | undefined)[] = [];
   const listeners = new Set<(event: VoiceMediaEvent) => void>();
   const environment = {
     origin: "https://nyx.example",
     epoch: 7,
     api: {
+      options: async (_thread: string, _signal: AbortSignal) => ({
+        options: input.options ?? [input.source ?? source],
+      }),
+      settings: async (_signal: AbortSignal) => ({
+        voice: input.saved === undefined ? saved : input.saved,
+      }),
       savePreferences: async (preferences: VoicePreferences) => {
         events.push(["save", preferences.input_mode]);
         if (saveFails) throw new Error("private save error");
@@ -184,8 +196,14 @@ function setup(
     endingConflict: false,
     checkingConflict: input.checkingConflict ?? false,
     confirmedEnded: false,
-    start: async (preferences: VoicePreferences, protocol: string) => {
+    start: async (
+      preferences: VoicePreferences,
+      protocol: string,
+      saved?: VoicePreferences | null,
+      selected?: VoiceOption,
+    ) => {
       events.push(["start", preferences, protocol]);
+      startContext.push({ saved, selected });
       return onStart();
     },
     end: () => {
@@ -257,10 +275,6 @@ function setup(
     onReview: (id?: string) => {
       events.push(["review", id]);
     },
-    minimized: false,
-    onExpand: () => {
-      events.push(["expand"]);
-    },
     preferencesOpen: input.preferencesOpen ?? false,
     onSnapshot: (value: VoiceSnapshot | undefined) => snapshots.push(value),
     onPreferencesClose: () => {
@@ -273,6 +287,11 @@ function setup(
         useNativeSheetDismiss: (onClose: () => void) => ({
           modalProps: { visible: true, animationType: "slide" },
           close: () => onClose(),
+        }),
+      },
+      "../../../i18n/LanguageProvider": {
+        useAppLanguage: () => ({
+          t: input.translate ?? ((phrase: string) => phrase),
         }),
       },
       "../../../lib/accessibility/useReducedMotion": {
@@ -343,6 +362,11 @@ function setup(
       "react-native-safe-area-context": {
         useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
       },
+      "react-native-reanimated": {
+        default: { View: "WaveBar" },
+        View: "WaveBar",
+        useAnimatedStyle: (factory: () => unknown) => factory(),
+      },
       "@react-navigation/native": { useIsFocused: () => focused },
       "expo-web-browser": {
         openBrowserAsync: async (url: string) => {
@@ -351,8 +375,19 @@ function setup(
         },
       },
       "@tanstack/react-query": {
-        useQuery: ({ queryKey }: { queryKey: unknown[] }) =>
-          queryKey.includes("voice-options") ? query.options : query.settings,
+        useQuery: ({
+          queryKey,
+          queryFn,
+        }: {
+          queryKey: unknown[];
+          queryFn: (context: { signal: AbortSignal }) => Promise<unknown>;
+        }) => {
+          const kind = queryKey.includes("voice-options")
+            ? "options"
+            : "settings";
+          queryFunctions.set(kind, queryFn);
+          return query[kind];
+        },
       },
       "expo-linear-gradient": { LinearGradient: "LinearGradient" },
       "lucide-react-native": Object.fromEntries(
@@ -362,6 +397,7 @@ function setup(
           "ChevronUp",
           "MessageSquareText",
           "X",
+          "Ellipsis",
           "Mic",
           "MicOff",
           "CircleHelp",
@@ -423,7 +459,6 @@ function setup(
         },
       },
       "../DictationWaveform": { DictationWaveform: "DictationWaveform" },
-      "../composerGeometry": { composerInputMinHeight, composerVoiceMinHeight },
       "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
       "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
     },
@@ -437,12 +472,6 @@ function setup(
         intervals.delete(token);
       },
     },
-  );
-  harness.mock(
-    "./VoiceComposerShell",
-    harness.load(
-      fileURLToPath(new URL("./VoiceComposerShell.tsx", import.meta.url)),
-    ),
   );
   const component = harness.load(
     fileURLToPath(new URL("./AssistantVoiceConversation.tsx", import.meta.url)),
@@ -478,6 +507,7 @@ function setup(
     voice,
     levels,
     query,
+    queryFunctions,
     all,
     text: () =>
       all()
@@ -495,6 +525,7 @@ function setup(
     find,
     environment,
     savedPreferences,
+    startContext,
     snapshots,
     voicePicker: () =>
       all().find((row) => row.type === "WorkspaceSelectionSheet"),
@@ -540,16 +571,6 @@ function setup(
   };
 }
 
-test("voice setup starts with the exact saved source, voice, input mode and notification preferences", async () => {
-  const f = setup();
-  assert.doesNotMatch(f.text(), /Tap to start/);
-  assert.equal(f.events.length, 1);
-  assert.equal(f.events[0]?.[0], "start");
-  assert.deepEqual(JSON.parse(JSON.stringify(f.events[0]?.[1])), saved);
-  assert.equal(f.events[0]?.[2], "openai_live");
-  f.harness.unmount();
-});
-
 const creditFailure = {
   error: "Insufficient voice credits (billing_reservation · code 11300)",
   recovery: {
@@ -559,86 +580,162 @@ const creditFailure = {
   },
 };
 
-test("a rejected reservation shows a failed start and recovery while keeping diagnostics collapsed", () => {
-  const f = setup(creditFailure);
-  assert.match(f.text(), /Unable to start/);
-  assert.doesNotMatch(f.text(), /Ready to talk|Connected to this conversation/);
-  assert.equal(
-    f.all().some((row) => row.props.message === creditFailure.recovery.message),
-    true,
-  );
-  assert.equal(f.text().includes(creditFailure.error), false);
-  assert.equal(f.button("Try again").props.disabled, false);
-  f.button("Show error details").props.onPress();
-  assert.equal(f.text().includes(creditFailure.error), true);
-  assert.equal(
-    f.button("Hide error details").props.accessibilityState.expanded,
-    true,
-  );
-  f.voice.error = undefined;
-  f.voice.recovery = undefined;
-  f.voice.starting = true;
+test("the explicit voice entry automatically starts once with the exact saved source", async () => {
+  const f = setup();
+  assert.equal(f.starts().length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
+  assert.equal(f.starts()[0]?.[2], "openai_live");
+  assert.deepEqual(f.startContext, [{ saved, selected: source }]);
   f.harness.render();
-  assert.match(f.text(), /Connecting/);
-  assert.doesNotMatch(f.text(), /Unable to start|11300/);
-  f.harness.unmount();
-});
-
-test("billing recovery opens the configured Web billing page and text recovery closes voice", async () => {
-  const f = setup(creditFailure);
-  await f.button("Review billing on Web").props.onPress();
-  assert.deepEqual(f.events, [["billing", "https://nyx.example/billing"]]);
-  // No call was created, so text recovery only closes voice.
-  f.button("Continue with text").props.onPress();
-  assert.deepEqual(f.events.slice(1), [["close"]]);
-  f.harness.unmount();
-});
-
-test("billing browser errors retain the reservation error and provide fixed website guidance", async () => {
-  const f = setup(creditFailure);
-  f.failBrowser();
-  await f.button("Review billing on Web").props.onPress();
-  assert.equal(
-    f
-      .all()
-      .some((row) => /Billing could not open/.test(row.props.message ?? "")),
-    true,
+  f.query.options.data = { options: [...f.query.options.data.options] };
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 1);
+  assert.equal(f.find("Start voice"), undefined);
+  assert.doesNotMatch(
+    f.text(),
+    /Hey, what can I do|Tap to start|Ready to talk/,
   );
-  assert.match(f.text(), /Unable to start/);
-  assert.doesNotMatch(f.text(), /private device error/);
   f.harness.unmount();
 });
 
-test("a failed paid reservation retries the same automatic default without exposing alternatives", async () => {
-  const f = setup(creditFailure);
-  f.query.options.data.options.push({
-    ...source,
-    connection_id: sessionId,
-    key_source: "own",
-    default_model: false,
+test("auto-start waits for both options and saved settings", () => {
+  for (const pending of ["settings", "options"] as const) {
+    const f = setup({
+      settingsPending: pending === "settings",
+      optionsPending: pending === "options",
+    });
+    assert.equal(f.starts().length, 0);
+    f.query.settings.data = { voice: saved };
+    f.query.settings.isSuccess = true;
+    f.query.settings.isPending = false;
+    f.query.options.isSuccess = true;
+    f.query.options.isPending = false;
+    f.harness.render();
+    assert.equal(f.starts().length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
+    f.harness.unmount();
+  }
+});
+
+test("first-use OpenAI defaults to automatic and a platform default without replacing saved PTT", () => {
+  const first = setup({
+    saved: null,
+    options: [
+      {
+        ...source,
+        default_model: false,
+        key_source: "own",
+        connection_id: sessionId,
+      },
+      source,
+    ],
   });
-  f.harness.render();
   assert.equal(
-    f.all().some((row) => row.props.label === "Choose another voice source"),
-    false,
+    (first.starts()[0]?.[1] as VoicePreferences).input_mode,
+    "automatic",
   );
-  await f.button("Try again").props.onPress();
-  assert.deepEqual(JSON.parse(JSON.stringify(f.events[0]?.[1])), saved);
+  assert.equal(
+    (first.starts()[0]?.[1] as VoicePreferences).key_source,
+    "platform",
+  );
+  first.harness.unmount();
+  const ptt = setup({ saved: { ...saved, input_mode: "push_to_talk" } });
+  assert.equal(
+    (ptt.starts()[0]?.[1] as VoicePreferences).input_mode,
+    "push_to_talk",
+  );
+  ptt.harness.unmount();
+});
+
+test("account Settings and actual call entry choose identical first-use preferences", () => {
+  const grok: VoiceOption = {
+    ...source,
+    voice: { ...source.voice, protocol: "xai_realtime" },
+  };
+  for (const selected of [source, grok]) {
+    const options: VoiceOption[] = [
+      {
+        ...selected,
+        default_model: false,
+        key_source: "own",
+        connection_id: sessionId,
+      },
+      selected,
+    ];
+    const settings = voiceSettingsView(options, null);
+    const call = setup({ options, saved: null });
+    assert.ok(settings);
+    assert.equal(call.starts().length, 1);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(call.starts()[0]?.[1])),
+      settings.preferences,
+    );
+    assert.equal(
+      settings.preferences.input_mode,
+      selected.voice.protocol === "xai_realtime" ? "push_to_talk" : "automatic",
+    );
+    call.harness.unmount();
+  }
+});
+
+test("a saved own source wins over an available platform source", () => {
+  const own = {
+    ...source,
+    key_source: "own" as const,
+    connection_id: sessionId,
+    model: "saved-model",
+    default_model: false,
+  };
+  const preferences = {
+    ...saved,
+    key_source: own.key_source,
+    connection_id: own.connection_id,
+    model: own.model,
+  };
+  const f = setup({ saved: preferences, options: [source, own] });
+  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), preferences);
   f.harness.unmount();
 });
 
-test("other startup errors also avoid claiming the call is ready or connected", () => {
-  const f = setup({ error: "Microphone permission was denied" });
-  assert.match(f.text(), /Unable to start/);
-  assert.doesNotMatch(f.text(), /Ready to talk|Connected to this conversation/);
-  assert.equal(
-    f.all().some((row) => row.props.label === "Review billing on Web"),
-    false,
-  );
+test("missing sources, unavailable sources and missing saved voices never substitute or start", () => {
+  for (const options of [
+    [],
+    [
+      {
+        ...source,
+        available: false,
+        unavailable_reason: "Reconnect saved provider",
+      },
+    ],
+    [source],
+  ]) {
+    const f = setup({
+      options,
+      saved:
+        options.length && options[0]?.available
+          ? { ...saved, voice: "retired" }
+          : saved,
+    });
+    assert.equal(f.starts().length, 0);
+    assert.equal(f.find("Start voice"), undefined);
+    assert.ok(f.notices().length);
+    assert.deepEqual(f.savedPreferences, []);
+    f.harness.unmount();
+  }
+});
+
+test("an unavailable source is not presented as connecting or as a guessed supplier", () => {
+  const f = setup({ options: [] });
+  assert.match(f.text(), /Voice unavailable/);
+  assert.doesNotMatch(f.text(), /Connecting/);
+  f.openPreferences();
+  assert.match(f.text(), /Voice source unavailable/);
+  assert.doesNotMatch(f.text(), /OpenAI/);
   f.harness.unmount();
 });
 
-test("Grok forces Hold to talk even when the saved microphone mode was automatic", async () => {
+test("Grok stays on its saved supplier and always uses explicit Hold to talk", () => {
   const grok: VoiceOption = {
     ...source,
     voice: {
@@ -648,64 +745,845 @@ test("Grok forces Hold to talk even when the saved microphone mode was automatic
     },
   };
   const f = setup({ source: grok });
-  await Promise.resolve();
+  assert.equal(f.starts()[0]?.[2], "xai_realtime");
   assert.equal(
-    (f.events[0]?.[1] as VoicePreferences).input_mode,
+    (f.starts()[0]?.[1] as VoicePreferences).input_mode,
     "push_to_talk",
   );
-  assert.equal(f.events[0]?.[2], "xai_realtime");
-  assert.match(f.text(), /Hold to talk/);
-  assert.doesNotMatch(f.text(), /Hands-free/);
+  f.openPreferences();
+  assert.equal(f.find("Hands-free mode"), undefined);
+  assert.match(f.text(), /Grok supports Hold to talk/);
   f.harness.unmount();
 });
 
-test("unavailable defaults cannot start and display clear guidance", () => {
-  const f = setup({ source: { ...source, available: false } });
-  assert.equal(f.button("Voice unavailable").props.disabled, true);
-  assert.deepEqual(f.events, []);
-  f.harness.unmount();
-});
-
-test("voice never exposes source or configuration selectors, and starts with the available default", async () => {
-  const f = setup();
-  f.query.options.data.options.unshift({
-    ...source,
-    model: "old",
-    model_label: "Old choice",
-    default_model: false,
+test("a failed start requires an explicit retry and hides billing diagnostics by default", async () => {
+  const f = setup({
+    ...creditFailure,
+    options: [
+      { ...source, key_source: "own", connection_id: sessionId },
+      source,
+    ],
   });
-  f.query.options.data.options.push({
-    ...source,
-    key_source: "own",
-    connection_id: sessionId,
-    default_model: false,
-  });
+  assert.equal(f.starts().length, 0);
+  assert.match(f.text(), /Unable to start/);
+  assert.ok(f.notices().includes(creditFailure.recovery.message));
+  assert.equal(f.text().includes(creditFailure.error), false);
   f.harness.render();
+  assert.equal(f.starts().length, 0);
+  f.button("Show error details").props.onPress();
+  assert.equal(f.text().includes(creditFailure.error), true);
+  await f.button("Try again").props.onPress();
+  assert.equal(f.starts().length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
+  f.harness.unmount();
+});
+
+test("billing recovery opens the configured Web page and text recovery does not create another call", async () => {
+  const f = setup(creditFailure);
+  await f.button("Review billing on Web").props.onPress();
+  f.button("Continue with text").props.onPress();
+  assert.deepEqual(f.events, [
+    ["billing", "https://nyx.example/billing"],
+    ["close"],
+  ]);
+  f.harness.unmount();
+});
+
+test("billing browser failures keep the recovery error and sanitize platform details", async () => {
+  const f = setup(creditFailure);
+  f.failBrowser();
+  await f.button("Review billing on Web").props.onPress();
+  assert.match(f.notices().join(" "), /Billing could not open/);
+  assert.doesNotMatch(f.notices().join(" "), /private browser error/);
+  assert.match(f.text(), /Unable to start/);
+  f.harness.unmount();
+});
+
+test("normal voice is a narrow control strip with no welcome, captions, mode picker or internal transcript", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      captions: [
+        {
+          id: "segment",
+          speaker: "user",
+          text: "do not duplicate this text",
+          sealed: true,
+          complete: true,
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /Listening/);
+  assert.doesNotMatch(
+    f.text(),
+    /do not duplicate|Hey, what can I do|Hands-free|Settings/,
+  );
   assert.equal(
-    f
-      .all()
-      .some((row) => /source|model/i.test(row.props.accessibilityLabel ?? "")),
+    f.all().some((row) => row.type === "ScrollView"),
     false,
   );
-  assert.doesNotMatch(
-    JSON.stringify(f.harness.value()),
-    /GPT Live|Old choice|Source & model/,
-  );
-  await Promise.resolve();
   assert.equal(
-    (f.events.find((event) => event[0] === "start")?.[1] as VoicePreferences)
-      ?.model,
-    source.model,
+    f.all().some((row) => row.type === "Modal"),
+    false,
+  );
+  assert.ok(f.button("Mute microphone"));
+  assert.ok(f.button("End voice"));
+  assert.equal(
+    f.find("Voice preferences"),
+    undefined,
+    "top-right header owns preferences",
   );
   f.harness.unmount();
 });
 
-test("closing voice releases push-to-talk and ends the call", async () => {
+test("snapshots go to the one main timeline and are cleared on unmount", () => {
   const f = setup({ active: true });
+  assert.equal(f.snapshots.at(-1), snapshot);
+  f.voice.snapshot = {
+    ...snapshot,
+    captions: [
+      {
+        id: "segment",
+        speaker: "assistant",
+        text: "authoritative words",
+        sealed: true,
+        complete: false,
+      },
+    ],
+  };
+  f.harness.render();
+  assert.equal(f.snapshots.at(-1), f.voice.snapshot);
+  assert.doesNotMatch(f.text(), /authoritative words/);
+  f.harness.unmount();
+  assert.equal(f.snapshots.at(-1), undefined);
+});
+
+test("Listening follows actual input permission, Speaking follows playback, and captions do not invent audio activity", () => {
+  const f = setup({
+    active: true,
+    inputEnabled: false,
+    snapshot: {
+      ...snapshot,
+      captions: [
+        {
+          id: "old",
+          speaker: "assistant",
+          text: "old partial",
+          complete: false,
+          sealed: false,
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /Microphone paused/);
+  assert.doesNotMatch(f.text(), /Listening|Assistant is speaking/);
+  f.voice.inputEnabled = true;
+  f.harness.render();
+  assert.match(f.text(), /Listening/);
+  f.levels.speaking = true;
+  f.harness.render();
+  assert.match(f.text(), /Assistant is speaking/);
+  f.voice.speakerMuted = true;
+  f.harness.render();
+  assert.doesNotMatch(f.text(), /Assistant is speaking/);
+  f.harness.unmount();
+});
+
+test("a verified quiet-call terminal state shows Close without the stale idle warning", () => {
+  const f = setup({
+    snapshot: {
+      ...snapshot,
+      session: {
+        ...snapshot.session,
+        state: "closed",
+        closed_at: "2026-10-16T04:04:25Z",
+        end_reason: "idle",
+        end_requested: true,
+        idle_warning: true,
+      },
+    },
+  });
+  assert.match(f.text(), /Call ended/);
+  assert.doesNotMatch(f.text(), /Unable to start/);
+  assert.deepEqual(f.notices(), []);
+  assert.ok(f.button("Return to chat"));
+  assert.equal(f.find("End voice"), undefined);
+  assert.equal(f.starts().length, 0);
+  f.button("Return to chat").props.onPress();
+  assert.deepEqual(f.events, [["close"]]);
+  f.harness.unmount();
+});
+
+for (const state of ["closed", "failed"] as const) {
+  test(`a terminal ${state} conflict with end_requested offers Close without starting a replacement`, () => {
+    const f = setup({
+      conflict: { ...snapshot.session, state, end_requested: true },
+    });
+    assert.match(f.text(), /Call ended/);
+    assert.doesNotMatch(f.text(), /Confirming|Call already active/);
+    assert.ok(f.button("Return to chat"));
+    assert.equal(f.find("Request end again"), undefined);
+    assert.equal(f.find("Check call status"), undefined);
+    assert.equal(f.starts().length, 0);
+    f.button("Return to chat").props.onPress();
+    assert.deepEqual(f.events, [["close"]]);
+    f.harness.unmount();
+  });
+}
+
+test("a terminal session supersedes its own pending cleanup without dismissing a different active call", () => {
+  const f = setup({
+    snapshot: {
+      ...snapshot,
+      session: { ...snapshot.session, state: "closed", end_requested: true },
+    },
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+  });
+  assert.match(f.text(), /Call ended/);
+  assert.ok(f.button("Return to chat"));
+  assert.equal(f.find("Request end again"), undefined);
+  f.voice.conflict = {
+    ...snapshot.session,
+    id: "33333333-3333-4333-8333-333333333333",
+  };
+  f.harness.render();
+  assert.match(f.text(), /Call already active/);
+  assert.ok(f.button("End existing call"));
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("microphone levels do not invent transcription and mute keeps its input action", async () => {
+  const f = setup({ active: true });
+  const delivered = [...f.snapshots];
+  f.emit({ type: "level", input: 0.5, output: 0 });
+  assert.deepEqual(f.snapshots, delivered);
+  assert.deepEqual(f.voice.snapshot?.captions, []);
+  assert.doesNotMatch(f.text(), /Transcribing/);
+  await f.button("Mute microphone").props.onPress();
+  assert.deepEqual(f.events, [["mute", true]]);
+  assert.equal(f.voice.inputEnabled, false);
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, muted: true },
+  };
+  f.harness.render();
+  f.emit({ type: "level", input: 0.8, output: 0.3 });
+  assert.match(f.text(), /Microphone off/);
+  assert.ok(f.button("Unmute microphone"));
+  assert.equal(f.snapshots.at(-1), f.voice.snapshot);
+  assert.deepEqual(f.voice.snapshot.captions, []);
+  assert.doesNotMatch(f.text(), /Transcribing/);
+  f.harness.unmount();
+});
+
+test("mute is an input action and speaker mute stays inside preferences", async () => {
+  const f = setup({ active: true });
+  f.button("Mute microphone").props.onPress();
+  assert.equal(f.find("Mute speaker"), undefined);
+  f.openPreferences();
+  f.button("Mute speaker").props.onPress();
+  assert.deepEqual(f.events, [
+    ["mute", true],
+    ["speaker", true],
+  ]);
+  await f.button("No sound? Resume audio").props.onPress();
+  assert.deepEqual(f.events.at(-1), ["resume"]);
+  f.harness.unmount();
+});
+
+test("voice and mode changes are saved for next call without changing this call", async () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  assert.match(f.text(), /Changes apply to your next call/);
+  await f.button("Hold to talk mode").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(
+    f.savedPreferences.map((row) => row.input_mode),
+    ["push_to_talk"],
+  );
+  assert.equal(
+    f.events.some(([event]) => event === "mode"),
+    false,
+  );
+  assert.equal(f.find("Hold to talk"), undefined);
+  f.button("Voice").props.onPress();
+  f.voicePicker()!.props.onChange(["marin"]);
+  await f.harness.settle();
+  assert.equal(f.savedPreferences.at(-1)?.voice, "marin");
+  assert.equal(f.savedPreferences.at(-1)?.service_id, saved.service_id);
+  assert.equal(f.savedPreferences.at(-1)?.input_mode, "push_to_talk");
+  assert.equal(f.button("Voice").props.value, "Marin");
+  assert.equal(f.starts().length, 0);
+  assert.equal(
+    f.events.some(([event]) => event === "end" || event === "mode"),
+    false,
+  );
+  f.harness.unmount();
+});
+
+test("voice preferences show one saved-voice row while all server voices stay inside the picker", () => {
+  const voices = [
+    ...source.voice.voices,
+    ...Array.from({ length: 32 }, (_, index) => ({
+      id: `server-voice-${index}`,
+      label: `Server choice ${index + 1}`,
+    })),
+  ];
+  const f = setup({
+    active: true,
+    source: { ...source, voice: { ...source.voice, voices } },
+  });
+  assert.equal(f.find("Voice"), undefined);
+  assert.equal(f.voicePicker(), undefined);
+  f.openPreferences();
+  assert.equal(f.button("Voice").props.value, "Cedar");
+  assert.equal(f.voicePicker(), undefined);
+  assert.equal(f.all().filter((row) => row.type === "SettingsRow").length, 1);
+  for (const row of voices) {
+    assert.equal(f.find(`${row.label} voice`), undefined);
+    assert.equal(f.find(row.label), undefined);
+  }
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  assert.equal(picker.props.label, "Voice");
+  assert.equal(picker.props.title, "Choose voice");
+  assert.equal(picker.props.description, "Changes apply to your next call.");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(picker.props.options)),
+    voices.map((row) => ({ value: row.id, label: row.label })),
+  );
+  assert.equal(picker.props.options.length, 34);
+  assert.deepEqual(JSON.parse(JSON.stringify(picker.props.value)), ["cedar"]);
+  assert.deepEqual(JSON.parse(picker.props.scopeKey), [
+    7,
+    thread,
+    JSON.stringify([source.service_id, null, "platform", source.model]),
+  ]);
+  assert.equal(f.savedPreferences.length, 0);
+  assert.equal(f.voice.connected, true);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("browsing and cancelling the voice picker never saves or changes the current call", async () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  await f.harness.settle();
+  assert.equal(f.savedPreferences.length, 0);
+  assert.deepEqual(f.events, []);
+  picker.props.onClose();
+  f.harness.flush();
+  assert.equal(f.voicePicker(), undefined);
+  assert.equal(f.button("Voice").props.value, "Cedar");
+  assert.deepEqual(f.events, []);
+  assert.equal(f.voice.connected, true);
+  f.harness.unmount();
+});
+
+test("applying a voice persists once and preserves the selected source and live call", async () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  picker.props.onChange(["marin"]);
+  picker.props.onChange(["marin"]);
+  picker.props.onClose();
+  await f.harness.settle();
+  assert.equal(f.voicePicker(), undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.savedPreferences)), [
+    { ...saved, voice: "marin" },
+  ]);
+  assert.equal(f.button("Voice").props.value, "Marin");
+  assert.equal(f.events.filter(([event]) => event === "save").length, 1);
+  assert.equal(
+    f.events.some(([event]) =>
+      ["start", "end", "mode"].includes(String(event)),
+    ),
+    false,
+  );
+  assert.equal(f.voice.connected, true);
+  assert.equal(f.voice.snapshot?.session.id, sessionId);
+  f.harness.unmount();
+});
+
+test("failed voice saves retain the previous selection and show a retryable error", async () => {
+  const f = setup({ active: true });
+  f.failSave();
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  picker.props.onChange(["marin"]);
+  picker.props.onClose();
+  await f.harness.settle();
+  assert.equal(f.savedPreferences.length, 0);
+  assert.equal(f.button("Voice").props.value, "Cedar");
+  assert.match(f.notices().join(" "), /could not be saved/);
+  f.button("Voice").props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.voicePicker()!.props.value)), [
+    "cedar",
+  ]);
+  assert.equal(
+    f.events.some(([event]) =>
+      ["start", "end", "mode"].includes(String(event)),
+    ),
+    false,
+  );
+  assert.equal(f.voice.connected, true);
+  f.harness.unmount();
+});
+
+test("opening the voice picker releases held input without ending the call", () => {
+  const f = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+  });
+  f.openPreferences();
   f.voice.holding = true;
-  f.button("End voice and close").props.onPress();
+  f.voice.inputEnabled = true;
+  f.button("Voice").props.onPress();
+  assert.ok(f.voicePicker());
+  assert.deepEqual(f.events, [["hold", false]]);
+  assert.equal(f.voice.holding, false);
+  assert.equal(f.voice.inputEnabled, false);
+  assert.equal(f.voice.connected, true);
+  f.harness.unmount();
+});
+
+test("dismissed or unfocused voice pickers ignore delayed Apply callbacks", async () => {
+  for (const dismiss of ["picker", "preferences", "focus"] as const) {
+    const f = setup({ active: true });
+    f.openPreferences();
+    f.button("Voice").props.onPress();
+    const picker = f.voicePicker();
+    assert.ok(picker);
+    if (dismiss === "picker") picker.props.onClose();
+    if (dismiss === "preferences") {
+      f.button("Close voice preferences").props.onPress();
+      f.harness.render();
+    }
+    if (dismiss === "focus") f.setFocused(false);
+    f.harness.flush();
+    picker.props.onChange(["marin"]);
+    await f.harness.settle();
+    assert.equal(f.savedPreferences.length, 0, dismiss);
+    assert.equal(f.voicePicker(), undefined, dismiss);
+    assert.equal(f.voice.connected, true, dismiss);
+    f.harness.unmount();
+  }
+});
+
+test("voice picker Apply is fenced to its account epoch, chat, and voice source", async () => {
+  for (const change of ["epoch", "chat", "source"] as const) {
+    const f = setup({ active: true });
+    f.openPreferences();
+    f.button("Voice").props.onPress();
+    const picker = f.voicePicker();
+    assert.ok(picker);
+    if (change === "epoch") f.environment.epoch++;
+    if (change === "chat") f.props.thread = `nyxa-${"b".repeat(32)}`;
+    if (change === "source") {
+      const own = { ...source, connection_id: "another-connection" };
+      f.query.options.data = { options: [own] };
+      f.query.settings.data = {
+        voice: { ...saved, connection_id: own.connection_id },
+      };
+    }
+    f.harness.render();
+    picker.props.onChange(["marin"]);
+    await f.harness.settle();
+    assert.equal(f.savedPreferences.length, 0, change);
+    assert.equal(f.voicePicker(), undefined, change);
+    f.button("Voice").props.onPress();
+    assert.notEqual(f.voicePicker()!.props.scopeKey, picker.props.scopeKey);
+    f.harness.unmount();
+  }
+});
+
+test("preference-save failures stay actionable and never imply the live call changed", async () => {
+  const f = setup({ active: true });
+  f.failSave();
+  f.openPreferences();
+  await f.button("Hold to talk mode").props.onPress();
+  await f.harness.settle();
+  assert.match(f.notices().join(" "), /could not be saved/);
+  assert.equal(
+    f.button("Hands-free mode").props.accessibilityState.selected,
+    true,
+  );
+  assert.equal(
+    f.events.some(([event]) => event === "mode"),
+    false,
+  );
+  f.harness.unmount();
+});
+
+test("pricing is fetched from the selected option and stays folded by default", () => {
+  const f = setup({ active: true });
+  assert.doesNotMatch(f.text(), /tariff|credits per/);
+  f.openPreferences();
+  assert.doesNotMatch(f.text(), /tariff unavailable/);
+  f.button("View voice pricing").props.onPress();
+  assert.match(f.text(), /Voice tariff unavailable/);
+  f.button("Hide voice pricing").props.onPress();
+  assert.doesNotMatch(f.text(), /Voice tariff unavailable/);
+  f.harness.unmount();
+});
+
+test("End silences input and retains its media owner until bounded cleanup finishes, then returns to text without terminal proof", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ active: true });
+  const originalSnapshot = structuredClone(f.voice.snapshot);
+  const mediaOwner = f.all().find((row) => row.type === "VoiceMediaBridge")!;
+  f.setEnd(pending.promise);
+  f.voice.holding = true;
+  f.button("End voice").props.onPress();
+  f.harness.flush();
+  assert.deepEqual(f.events, [["hold", false], ["end"]]);
+  assert.equal(f.voice.inputEnabled, false);
+  assert.match(f.text(), /Ending/);
+  assert.equal(f.find("Mute microphone"), undefined);
+  assert.equal(f.find("Try again"), undefined);
+  assert.equal(f.button("Return to chat").props.disabled, true);
+  f.button("Return to chat").props.onPress();
+  assert.equal(
+    f.all().find((row) => row.type === "VoiceMediaBridge")?.props.media,
+    mediaOwner.props.media,
+  );
+  assert.equal(
+    f.events.some(([event]) => event === "close"),
+    false,
+  );
+  pending.resolve(false);
   await f.harness.settle();
   assert.deepEqual(f.events, [["hold", false], ["end"], ["close"]]);
+  assert.deepEqual(f.voice.snapshot, originalSnapshot);
+  assert.equal(f.voice.confirmedEnded, false);
+  assert.equal(f.find("Request end again"), undefined);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a verified terminal End also returns to the text composer once", async () => {
+  const f = setup({ active: true });
+  f.setEnd(Promise.resolve(true));
+  f.button("End voice").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  f.harness.unmount();
+});
+
+test("a failed remote End returns to text after bounded cleanup without claiming success", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ active: true });
+  f.setEnd(pending.promise);
+  f.button("End voice").props.onPress();
+  f.harness.flush();
+  assert.deepEqual(f.events, [["end"]]);
+  pending.reject(new Error("private transport details"));
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  assert.equal(f.voice.snapshot?.session.state, "active");
+  assert.equal(f.voice.confirmedEnded, false);
+  assert.doesNotMatch(f.text(), /private transport/);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a late terminal snapshot after returning to text cannot close the surface twice", async () => {
+  const f = setup({ active: true });
+  f.setEnd(Promise.resolve(false));
+  f.button("End voice").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  f.voice.connected = false;
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, state: "closed", end_requested: true },
+  };
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("returning after End does not fabricate a terminal snapshot before later empty discovery", async () => {
+  const f = setup({ active: true });
+  f.setEnd(Promise.resolve(false));
+  f.button("End voice").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  f.voice.connected = false;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.voice.snapshot?.session.state, "active");
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("verified empty discovery closes disconnected controls once and preserves the truthful partial snapshot", async () => {
+  const retained: VoiceSnapshot = {
+    ...snapshot,
+    captions: [
+      {
+        id: "partial-caption",
+        speaker: "assistant",
+        text: "A retained partial reply",
+        sealed: false,
+        complete: false,
+      },
+    ],
+  };
+  const original = structuredClone(retained);
+  const f = setup({ snapshot: retained });
+  f.voice.checkingConflict = true;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, []);
+  f.voice.checkingConflict = false;
+  f.harness.render();
+  await f.harness.settle();
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.deepEqual(f.voice.snapshot, original);
+  assert.deepEqual(f.snapshots.at(-1), original);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a confirmed terminal call in another conversation closes recovery without a local snapshot or replacement call", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  assert.match(f.text(), /Finishing call/);
+  assert.equal(f.voice.snapshot, null);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.equal(f.voice.snapshot, null);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("empty discovery cannot close a connected, starting, unknown, or conflicting call", async () => {
+  for (const guard of [
+    "connected",
+    "starting",
+    "unknown",
+    "conflict",
+  ] as const) {
+    const f = setup({ snapshot });
+    f.voice.confirmedEnded = true;
+    if (guard === "connected") f.voice.connected = true;
+    if (guard === "starting") f.voice.starting = true;
+    if (guard === "unknown") f.voice.conflictUnknown = true;
+    if (guard === "conflict")
+      f.voice.conflict = { ...snapshot.session, id: "another-session" };
+    f.harness.render();
+    await f.harness.settle();
+    assert.deepEqual(f.events, [], guard);
+    assert.equal(f.starts().length, 0, guard);
+    f.harness.unmount();
+  }
+});
+
+test("a disconnected nonterminal snapshot cannot expose a new start while recovery catches up", () => {
+  const f = setup({ snapshot, error: "Voice connection lost" });
+  assert.equal(f.find("Try again"), undefined);
+  assert.ok(f.button("End voice"));
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("rapid End taps issue one request and a late completion cannot close another surface", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ active: true });
+  f.setEnd(pending.promise);
+  const end = f.button("End voice");
+  end.props.onPress();
+  end.props.onPress();
+  assert.deepEqual(f.events, [["end"]]);
+  f.harness.unmount();
+  pending.resolve(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(f.events, [["end"]]);
+});
+
+test("checking unknown status is read-only and never masquerades as Ending", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ conflictUnknown: true });
+  f.setCheck(pending.promise);
+  assert.equal(f.find("End voice"), undefined);
+  assert.equal(f.button("Return to chat").props.disabled, false);
+  f.button("Check call status").props.onPress();
+  f.harness.flush();
+  assert.match(f.text(), /Checking call status/);
+  assert.doesNotMatch(f.text(), /Ending/);
+  assert.deepEqual(f.events, [["checkConflict"]]);
+  pending.resolve(false);
+  await f.harness.settle();
+  assert.equal(
+    f.events.some(([event]) => event === "close" || event === "end"),
+    false,
+  );
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("unknown or checking recovery can return to text without an End or a replacement call", async () => {
+  for (const state of ["unknown", "checking"] as const) {
+    const f = setup({
+      conflictUnknown: state === "unknown",
+      checkingConflict: state === "checking",
+    });
+    assert.equal(f.button("Return to chat").props.disabled, false, state);
+    f.button("Return to chat").props.onPress();
+    await f.harness.settle();
+    assert.deepEqual(f.events, [["close"]], state);
+    assert.equal(f.voice.conflictUnknown, state === "unknown", state);
+    assert.equal(f.voice.checkingConflict, state === "checking", state);
+    assert.equal(f.voice.snapshot, null, state);
+    f.harness.unmount();
+  }
+});
+
+test("returning during a status read leaves the other chat's call untouched and ignores late completion", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({
+    conflict: snapshot.session,
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  const originalConflict = f.voice.conflict;
+  f.setCheck(pending.promise);
+  f.button("Check call status").props.onPress();
+  f.harness.flush();
+  assert.match(f.text(), /Checking call status/);
+  assert.equal(f.button("Return to chat").props.disabled, false);
+  f.button("Return to chat").props.onPress();
+  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
+  assert.equal(f.voice.conflict, originalConflict);
+  f.harness.unmount();
+  pending.resolve(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
+});
+
+test("a pending previous End can be checked or left without repeating End or starting another call", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+  });
+  const originalConflict = f.voice.conflict;
+  assert.match(f.text(), /Finishing call/);
+  assert.equal(f.starts().length, 0);
+  assert.equal(f.find("End existing call"), undefined);
+  assert.equal(f.find("Request end again"), undefined);
+  await f.button("Check call status").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["checkConflict"]]);
+  f.button("Return to chat").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
+  assert.equal(f.voice.conflict, originalConflict);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("another chat's existing call is never taken over or replaced implicitly", async () => {
+  const f = setup({
+    conflict: snapshot.session,
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  assert.match(f.text(), /Call already active/);
+  assert.match(f.text(), /open in another chat/);
+  assert.equal(f.starts().length, 0);
+  await f.button("End existing call").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["endConflict"], ["close"]]);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("returning from another chat's active-call conflict does not End that call", async () => {
+  const f = setup({
+    conflict: snapshot.session,
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  const originalConflict = f.voice.conflict;
+  assert.ok(f.button("End existing call"));
+  f.button("Return to chat").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.equal(f.voice.conflict, originalConflict);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("leaving or losing network during recovery never ends an unrelated call", async () => {
+  for (const change of ["offline", "blur"] as const) {
+    const f = setup({
+      conflict: snapshot.session,
+      conflictThread: `nyxa-${"b".repeat(32)}`,
+    });
+    if (change === "offline") f.setOnline(false);
+    else f.setFocused(false);
+    await f.harness.settle();
+    assert.deepEqual(f.events, [], change);
+    assert.equal(f.starts().length, 0, change);
+    f.harness.unmount();
+  }
+});
+
+test("clearing a detected conflict does not consume the same entry as a new call", () => {
+  const f = setup({ conflict: snapshot.session });
+  assert.equal(f.starts().length, 0);
+  f.voice.conflict = null;
+  f.voice.conflictUnknown = false;
+  f.harness.render();
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("PTT uses press, release and cancellation while respecting server input gates", () => {
+  const f = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+    inputEnabled: false,
+  });
+  const hold = f.button("Hold to talk");
+  hold.props.onPressIn();
+  hold.props.onPressOut();
+  hold.props.onResponderTerminate();
+  assert.deepEqual(f.events, [
+    ["hold", true],
+    ["hold", false],
+    ["hold", false],
+  ]);
+  hold.props.onAccessibilityAction({ nativeEvent: { actionName: "activate" } });
+  assert.equal(f.voice.holding, true);
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, input_muted: true },
+  };
+  f.harness.render();
+  assert.equal(f.button("Hold to talk").props.disabled, true);
   f.harness.unmount();
 });
 
@@ -904,7 +1782,7 @@ test("only active work contributes to the in-progress task count and stays stopp
     assert.match(f.text(), /Tasks can continue after the call ends/);
     f.button("Stop task").props.onPress();
     assert.deepEqual(f.events, [["stopTask", serviceId]]);
-    assert.ok(f.find("End voice and close"));
+    assert.ok(f.find("End voice"));
     f.harness.unmount();
   }
 });
@@ -1082,14 +1960,15 @@ test("task details stay attached to the request when snapshots reorder or remove
   f.harness.unmount();
 });
 
-test("a new call gets a fresh media engine while ordinary updates preserve its owner", () => {
+test("ordinary snapshots keep the media owner and a new attempt remounts only its engine", () => {
   const f = setup({ active: true });
-  const first = f.media();
+  const bridge = () => f.all().find((row) => row.type === "VoiceMediaBridge")!;
+  const original = bridge();
   f.voice.snapshot = {
     ...snapshot,
     captions: [
       {
-        id: "caption-1",
+        id: "segment",
         speaker: "user",
         text: "你好",
         sealed: true,
@@ -1098,1052 +1977,132 @@ test("a new call gets a fresh media engine while ordinary updates preserve its o
     ],
   };
   f.harness.render();
-  assert.equal(f.media().key, first.key);
-  assert.equal(f.media().props.media, first.props.media);
-  f.voice.media = { ...f.voice.media!, id: 2 };
+  assert.equal(bridge().key, original.key);
+  assert.equal(bridge().props.media, original.props.media);
   f.voice.mediaAttempt = 2;
   f.harness.render();
-  assert.notEqual(f.media().key, first.key);
-  assert.notEqual(f.media().props.media, first.props.media);
+  assert.notEqual(bridge().key, original.key);
   f.harness.unmount();
 });
 
-test("closing voice before a call returns to the message composer", () => {
-  const f = setup();
-  f.button("Close voice").props.onPress();
-  // Nothing is connected or retained, so there is no call to End.
-  assert.deepEqual(
-    f.events.map((e) => e[0]),
-    ["start", "close"],
-  );
-  f.harness.unmount();
-});
-
-test("closing voice ends the call and leaves accepted tasks running", async () => {
-  const f = setup({ active: true });
-  f.button("End voice and close").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  f.harness.unmount();
-});
-
-test("push-to-talk disables input during server muting and exposes accessible press controls", () => {
-  const f = setup({
-    active: true,
-    saved: { ...saved, input_mode: "push_to_talk" },
-    snapshot: {
-      ...snapshot,
-      session: { ...snapshot.session, input_muted: true },
-    },
-  });
-  const hold = f.button("Hold to talk");
-  assert.equal(hold.props.disabled, true);
-  assert.equal(typeof hold.props.onPressIn, "function");
-  assert.equal(typeof hold.props.onPressOut, "function");
-  assert.equal(typeof hold.props.onAccessibilityAction, "function");
-  f.harness.unmount();
-});
-
-test("both listening modes time the connected call, and Hold to talk keeps its explicit microphone controls", () => {
-  const walkie = setup({
-    active: true,
-    saved: { ...saved, input_mode: "push_to_talk" },
-  });
-  const labels = walkie.all().map((row) => row.props?.accessibilityLabel);
-  assert.equal(
-    labels.some((label) => String(label ?? "").startsWith("Call time")),
-    true,
-    "connected call time is independent of listening mode",
-  );
-  const nodes = walkie.all();
-  const hold = nodes.findIndex(
-    (row) => row.props?.accessibilityLabel === "Hold to talk",
-  );
-  const hint = nodes.findIndex(
-    (row, index) =>
-      index > hold &&
-      row.type === "Text" &&
-      [row.props.children].flat().includes("Hold to talk"),
-  );
-  assert.ok(hold >= 0 && hint > hold, "the instruction follows the microphone");
-  const mute = nodes.find(
-    (row) => row.props?.accessibilityLabel === "Mute microphone",
-  )!;
-  assert.ok(
-    [mute.props.children]
-      .flat(Infinity)
-      .some((child: any) => child?.type === "MicOff"),
-    "the left control is a mute symbol, not a second mic",
-  );
-  assert.doesNotMatch(
-    walkie.text(),
-    /Audio is sent only/,
-    "details stay collapsed",
-  );
-  walkie.harness.unmount();
-  const phone = setup({ active: true });
-  assert.ok(
-    phone
-      .all()
-      .some((row) =>
-        String(row.props?.accessibilityLabel ?? "").startsWith("Call time"),
-      ),
-  );
-  assert.ok(
-    phone.all().some((row) => row.type === "PhoneOff"),
-    "End hangs up",
-  );
-  assert.doesNotMatch(
-    phone.text(),
-    /Talk any time|Resume audio/,
-    "no helpers once connected",
-  );
-  phone.button("Voice help").props.onPress();
-  phone.harness.render();
-  assert.ok(phone.button("Resume audio"), "recovery lives in the help popover");
-  phone.harness.unmount();
-});
-
-test("loss of connectivity ends local voice and disables starting until the app reconnects", () => {
-  const live = setup({ active: true });
-  live.setOnline(false);
-  assert.deepEqual(live.events, [["end"]]);
-  live.harness.unmount();
-  const f = setup();
-  f.setOnline(false);
-  assert.equal(f.button("Try again").props.disabled, true);
-  // Without a connected call there is nothing to End.
-  assert.deepEqual(
-    f.events.map((e) => e[0]),
-    ["start"],
-  );
-  assert.equal(
-    f
-      .all()
-      .some(
-        (row) => row.type === "Notice" && /offline/i.test(row.props.message),
-      ),
-    true,
-  );
-  f.harness.unmount();
-});
-
-test("the voice composer's animated bubble follows listening, speaking and thinking", () => {
-  const f = setup({ active: true });
-  assert.equal(f.levels.media, f.voice.media);
-  assert.equal(f.aura().phase, "listening");
-  assert.equal(f.aura().input, f.levels.input);
-  assert.equal(f.aura().output, f.levels.output);
-  assert.equal(f.aura().reducedMotion, false);
-  assert.match(f.text(), /Listening/);
-  f.levels.speaking = true;
-  f.harness.render();
-  assert.equal(f.aura().phase, "speaking");
-  assert.match(f.text(), /Speaking/);
-  f.levels.speaking = false;
-  f.voice.snapshot = {
-    ...snapshot,
-    captions: [
-      {
-        id: "caption-1",
-        speaker: "user",
-        text: "Summarise my inbox",
-        sealed: true,
-        complete: true,
-      },
-    ],
-  };
-  f.harness.render();
-  assert.equal(f.aura().phase, "thinking");
-  assert.match(f.text(), /Thinking/);
-  f.harness.unmount();
-});
-
-test("Reduce Motion reaches the aura", () => {
-  const f = setup({ active: true, reducedMotion: true });
-  assert.equal(f.aura().reducedMotion, true);
-  f.harness.unmount();
-});
-
-test("round call controls mute the microphone and speaker and End closes the call", async () => {
-  const f = setup({
-    active: true,
-    saved: { ...saved, input_mode: "push_to_talk" },
-  });
-  f.button("Mute microphone").props.onPress();
-  f.button("Mute speaker").props.onPress();
-  const hold = f.button("Hold to talk");
-  hold.props.onPressIn();
-  hold.props.onPressOut();
-  f.button("End voice and close").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [
-    ["mute", true],
-    ["speaker", true],
-    ["hold", true],
-    ["hold", false],
-    ["end"],
-    ["close"],
-  ]);
-  f.harness.unmount();
-});
-
-test("automatic mode has no hold button and the call shows no in-call pickers", () => {
-  const f = setup({ active: true });
-  assert.equal(
-    f.all().some((row) => row.props.accessibilityLabel === "Hold to talk"),
-    false,
-  );
-  assert.equal(
-    f
-      .all()
-      .some((row) =>
-        /^(Voice|Microphone):/.test(row.props.accessibilityLabel ?? ""),
-      ),
-    false,
-  );
-  f.harness.unmount();
-});
-
-test("call startup shows its mode and status without extra greeting or settings guidance", () => {
-  const f = setup();
-  assert.doesNotMatch(
-    f.text(),
-    /Hey, what can I do for you today|Settings › Voice/,
-  );
-  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
-  assert.match(f.text(), /Hands-free/);
-  assert.match(f.text(), /Connecting/);
-  assert.equal(f.aura().phase, "resting");
-  f.harness.unmount();
-});
-
-test("only unsealed live captions appear in the voice composer", () => {
-  const f = setup({
-    active: true,
-    snapshot: {
-      ...snapshot,
-      captions: ["one", "two", "three", "agent still talking"].map(
-        (text, index) => ({
-          id: `caption-${index}`,
-          speaker: index % 2 ? ("assistant" as const) : ("user" as const),
-          text,
-          sealed: index < 2,
-          complete: index < 2,
-        }),
-      ),
-    },
-  });
-  const text = f.text();
-  assert.doesNotMatch(text, /\bone\b|\btwo\b/);
-  assert.match(text, /three/);
-  assert.doesNotMatch(text, /Show all|Show latest/);
-  f.harness.unmount();
-});
-
-test("a call without tasks shows no tasks tray", () => {
-  const f = setup({ active: true });
-  assert.doesNotMatch(f.text(), /Agent tasks/);
-  f.harness.unmount();
-});
-
-test("voice is a composer with the animated bubble on top, not a page over the chat", async () => {
-  const idle = setup();
-  assert.equal(
-    idle.all().some((row) => row.type === "Modal" && row.props.visible),
-    false,
-  );
-  const frame = idle.all().find((row) => row.type === "ComposerFrame")!;
-  assert.ok(frame, "it takes the message composer's place");
-  assert.ok(
-    idle.all().some((row) => row.type === "VoiceAura"),
-    "the aura around the composer",
-  );
-  assert.match(idle.text(), /我的助手/);
-  assert.equal(idle.events[0]?.[0], "start");
-  idle.harness.unmount();
-  // While options load, the centre control says it is connecting.
-  const loading = setup({ settingsPending: true });
-  assert.equal(loading.button("Connecting voice").props.disabled, true);
-  assert.equal(loading.starts().length, 0);
-  loading.harness.unmount();
-  // Hands-free: the microphone in the middle, End on the right.
-  const f = setup({ active: true });
-  f.button("Mute microphone").props.onPress();
-  f.button("End voice and close").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["mute", true], ["end"], ["close"]]);
-  f.harness.unmount();
-});
-
-test("the call switches between Hands-free and Hold to talk in place and remembers it", async () => {
-  const f = setup({ active: true });
-  assert.equal(
-    f.button("Hands-free mode").props.accessibilityState.selected,
-    true,
-  );
-  f.button("Hold to talk mode").props.onPress();
-  f.harness.render();
-  await f.harness.settle();
-  assert.deepEqual(f.events.slice(0, 2), [
-    ["mode", "push_to_talk"],
-    ["save", "push_to_talk"],
-  ]);
-  // Hold to talk is now the centre control and the toggle reflects it.
-  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
-  f.harness.unmount();
-  // Before a call the choice is only saved, for the call about to start.
-  const idle = setup();
-  idle.button("Hold to talk mode").props.onPress();
-  await idle.harness.settle();
-  assert.deepEqual(
-    idle.events.map((e) => e[0]),
-    ["start", "save", "settingsRefetch"],
-  );
-  assert.deepEqual(
-    idle.events.find((e) => e[0] === "save"),
-    ["save", "push_to_talk"],
-  );
-  idle.harness.unmount();
-});
-
-test("Grok keeps Hold to talk and offers no mode toggle", () => {
-  const f = setup({
-    active: true,
-    source: {
-      ...source,
-      voice: {
-        ...source.voice,
-        protocol: "xai_realtime",
-        usage_source: "server_measured",
-      },
-    },
-  });
-  assert.equal(
-    f.all().some((row) => row.props.accessibilityLabel === "Hands-free mode"),
-    false,
-  );
-  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
-  f.harness.unmount();
-});
-
-test("entering voice auto-starts once and never silently retries a failed or ended call", () => {
-  const f = setup();
-  assert.equal(f.events.filter((e) => e[0] === "start").length, 1);
-  f.harness.render();
-  f.harness.render();
-  assert.equal(f.events.filter((e) => e[0] === "start").length, 1);
-  f.voice.error = "Microphone denied";
-  f.harness.render();
-  assert.equal(f.events.filter((e) => e[0] === "start").length, 1);
-  f.button("Try again").props.onPress();
-  assert.equal(f.events.filter((e) => e[0] === "start").length, 2);
-  f.harness.unmount();
-});
-
-test("connecting displays a placeholder and the active call starts at 00:00 regardless of creation time", () => {
-  const f = setup();
-  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
-  f.voice.starting = true;
-  f.harness.render();
-  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
-  f.voice.starting = false;
-  f.voice.connected = true;
-  f.voice.connectedAt = Date.now();
-  f.voice.snapshot = snapshot;
-  f.harness.render();
-  assert.ok(
-    f.all().some((n) => n.props.accessibilityLabel === "Call time 00:00"),
-  );
-  f.harness.unmount();
-});
-
-test("voice is speech-only in both sizes, and row expansion preserves the media and session", () => {
-  const f = setup({ active: true });
-  const media = f.media();
-  assert.equal(
-    f.all().some((n) => n.type === "TextInput"),
-    false,
-  );
-  assert.ok(f.all().some((n) => n.type === "DictationWaveform"));
-  f.props.minimized = true;
-  f.harness.render();
-  assert.equal(f.media().key, media.key);
-  assert.equal(f.media().props.media, media.props.media);
-  assert.equal(f.events.length, 0);
-  assert.equal(
-    f.all().some((n) => n.type === "TextInput"),
-    false,
-  );
-  assert.ok(f.all().some((n) => n.type === "DictationWaveform"));
-  assert.ok(f.button("Expand voice composer").props.style.minWidth >= 44);
-  assert.ok(f.button("Expand voice composer").props.style.minHeight >= 44);
-  f.button("Expand voice composer").props.onPress();
-  assert.deepEqual(f.events, [["expand"]]);
-  f.props.minimized = false;
-  f.harness.render();
-  assert.equal(f.media().key, media.key);
-  assert.equal(
-    f.events.some((e) => e[0] === "end" || e[0] === "start"),
-    false,
-  );
-  f.harness.unmount();
-});
-
-for (const state of [
-  "connecting",
-  "connected",
-  "idle",
-  "options",
-  "minimized",
-]) {
-  test(`pricing is absent in ${state} voice`, () => {
-    const f = setup({
-      active:
-        state === "connected" || state === "options" || state === "minimized",
-      source: {
-        ...source,
-        pricing: {
-          metric: "voice_seconds",
-          credits_per_unit: "0.025",
-          sync_status: "synced",
-          components: [],
-        } as any,
-      },
-    });
-    if (state === "connecting") {
-      f.voice.starting = true;
-      f.harness.render();
-    }
-    if (state === "options") f.button("Voice help").props.onPress();
-    if (state === "minimized") {
-      f.props.minimized = true;
-      f.harness.render();
-    }
-    f.harness.flush();
-    assert.doesNotMatch(f.text(), /credits|tariff|0\.025|per second/i);
-    assert.equal(
-      f.all().some((n) => n.props.accessibilityLabel === "Voice tariff"),
-      false,
-    );
-    f.harness.unmount();
-  });
-}
-
-for (const viewport of [
-  { width: 375, height: 667, fontScale: 1 },
-  { width: 440, height: 956, fontScale: 1 },
-  { width: 834, height: 1194, fontScale: 1 },
-  { width: 375, height: 834, fontScale: 2.5 },
-]) {
-  test(`minimized voice shares normal composer insets and single-line geometry at ${viewport.width}pt/${viewport.fontScale} text scale`, () => {
-    const f = setup({ active: true, viewport });
-    f.props.minimized = true;
-    f.harness.render();
-    const row = f.all().find((n) => n.props.testID === "voice-compact-row")!;
-    assert.equal(
-      row.props.style[1].minHeight,
-      composerVoiceMinHeight(viewport.fontScale),
-    );
-    const frame = f.all().find((n) => n.type === "ComposerFrame")!;
-    assert.equal(frame.props.style.paddingHorizontal, 4);
-    assert.equal(frame.props.style.paddingVertical, 4);
-    const end = f.button("End voice and close");
-    assert.ok(end.props.style({ pressed: false })[0].width >= 44);
-    assert.equal(row.props.style[0].alignItems, "center");
-    f.harness.unmount();
-  });
-}
-
-for (const minimized of [false, true]) {
-  for (const reducedMotion of [false, true]) {
-    test(`hold to talk transmits on press/release in ${minimized ? "minimized" : "expanded"} voice with Reduce Motion ${reducedMotion}`, () => {
-      const f = setup({
-        active: true,
-        reducedMotion,
-        saved: { ...saved, input_mode: "push_to_talk" },
-      });
-      f.props.minimized = minimized;
-      f.harness.render();
-      const button = f.button("Hold to talk");
-      assert.equal(button.props.disabled, false);
-      assert.equal(f.aura().phase, "resting");
-      assert.match(f.text(), /Hold to talk/);
-      assert.ok(f.all().some((n) => n.props.testID === "voice-hold-halo"));
-      button.props.onPressIn();
-      f.harness.render();
-      assert.equal(
-        f.voice.holding,
-        true,
-        "compact PTT must not be cancelled by the minimized effect",
-      );
-      assert.equal(f.aura().phase, "listening");
-      assert.equal(
-        f.button("Hold to talk").props.accessibilityState.selected,
-        true,
-      );
-      assert.equal(
-        f.button("Hold to talk").props.accessibilityHint,
-        "Release to send",
-      );
-      assert.match(f.text(), /Release to send/);
-      f.button("Hold to talk").props.onPressOut();
-      f.harness.render();
-      assert.equal(f.voice.holding, false);
-      assert.equal(f.aura().phase, "resting");
-      assert.deepEqual(f.events, [
-        ["hold", true],
-        ["hold", false],
-      ]);
-      assert.equal(
-        f.all().some((n) => n.type === "TextInput"),
-        false,
-      );
-      f.harness.unmount();
-    });
-  }
-}
-
-test("changing size releases an existing hold and retains the listening mode", () => {
-  const f = setup({ active: true });
-  f.button("Hold to talk mode").props.onPress();
-  f.harness.render();
-  f.button("Hold to talk").props.onPressIn();
-  f.harness.render();
-  f.props.minimized = true;
-  f.harness.render();
-  assert.equal(f.voice.holding, false);
-  f.button("Hold to talk").props.onPressIn();
-  f.harness.render();
-  assert.equal(f.voice.holding, true);
-  f.button("Hold to talk").props.onPressOut();
-  f.button("Expand voice composer").props.onPress();
-  f.props.minimized = false;
-  f.harness.render();
-  assert.equal(
-    f.button("Hold to talk mode").props.accessibilityState.selected,
-    true,
-  );
-  f.button("Hands-free mode").props.onPress();
-  f.harness.render();
-  assert.ok(f.button("Mute microphone"));
-  assert.equal(
-    f.all().some((n) => n.props.accessibilityLabel === "Hold to talk"),
-    false,
-  );
-  f.harness.unmount();
-});
-
-for (const mode of ["automatic", "push_to_talk"] as const) {
-  test(`the compact voice help popover explains ${mode}, dismisses and resumes audio without pricing`, async () => {
-    const f = setup({ active: true, saved: { ...saved, input_mode: mode } });
-    assert.equal(
-      f.all().some((n) => n.props.accessibilityLabel === "Call options"),
-      false,
-    );
-    const help = f.button("Voice help");
-    assert.ok(help.props.style({ pressed: false })[0].width >= 44);
-    help.props.onPress();
-    f.harness.render();
-    assert.equal(f.modal().visible, true);
-    assert.match(
-      f.text(),
-      mode === "automatic" ? /answers when you pause/ : /Release to send/,
-    );
-    assert.match(f.text(), /headphones if you hear echo/);
-    assert.doesNotMatch(f.text(), /tariff|credits per|0\.025/i);
-    f.button("Close voice help").props.onPress();
-    f.harness.render();
-    assert.equal(
-      f.all().some((n) => n.type === "Modal"),
-      false,
-    );
-    f.button("Voice help").props.onPress();
-    f.harness.render();
-    f.button("Dismiss voice help").props.onPress();
-    f.harness.render();
-    assert.equal(
-      f.all().some((n) => n.type === "Modal"),
-      false,
-    );
-    f.button("Voice help").props.onPress();
-    f.harness.render();
-    f.modal().onRequestClose();
-    f.harness.render();
-    assert.equal(
-      f.all().some((n) => n.type === "Modal"),
-      false,
-    );
-    f.button("Voice help").props.onPress();
-    f.harness.render();
-    await f.button("Resume audio").props.onPress();
-    f.harness.render();
-    assert.deepEqual(f.events, [["resume"]]);
-    assert.equal(
-      f.all().some((n) => n.type === "Modal"),
-      false,
-    );
-    f.button("Voice help").props.onPress();
-    f.harness.render();
-    f.props.minimized = true;
-    f.harness.render();
-    assert.equal(
-      f.all().some((n) => n.type === "Modal"),
-      false,
-    );
-    f.harness.unmount();
-  });
-}
-
-for (const reducedMotion of [false, true]) {
-  test(`changing listening mode animates its header width unless Reduce Motion is ${reducedMotion}`, () => {
-    const f = setup({ active: true, reducedMotion });
-    f.button("Hold to talk mode").props.onPress();
-    f.harness.render();
-    assert.deepEqual(
-      f.layoutAnimations,
-      reducedMotion ? [] : ["easeInEaseOut"],
-    );
-    f.harness.unmount();
-  });
-}
-
-for (const width of [375, 440, 834]) {
-  test(`the ${width}pt header mode toggle labels only its active radio, keeps 44pt targets and saves preferences`, async () => {
-    const f = setup({
-      active: true,
-      viewport: { width, height: 834, fontScale: 2.5 },
-    });
-    const radios = () =>
-      f.all().filter((n) => n.props.accessibilityRole === "radio");
-    assert.equal(radios().length, 2);
-    for (const radio of radios()) {
-      assert.ok(radio.props.style[0].minWidth >= 44);
-      assert.ok(radio.props.style[0].minHeight >= 44);
-    }
-    const children = (label: string) => elements(f.button(label));
-    assert.ok(children("Hands-free mode").some((n) => n.type === "Phone"));
-    assert.ok(children("Hands-free mode").some((n) => n.type === "Text"));
-    assert.ok(children("Hold to talk mode").some((n) => n.type === "Radio"));
-    assert.equal(
-      children("Hold to talk mode").some((n) => n.type === "Text"),
-      false,
-    );
-    f.button("Hold to talk mode").props.onPress();
-    f.harness.render();
+test("offline and focus loss finish local cleanup and return to text without claiming remote termination", async () => {
+  for (const change of ["offline", "blur"] as const) {
+    const f = setup({ active: true });
+    f.setEnd(Promise.resolve(false));
+    if (change === "offline") f.setOnline(false);
+    else f.setFocused(false);
     await f.harness.settle();
-    assert.equal(
-      children("Hands-free mode").some((n) => n.type === "Text"),
-      false,
-    );
-    assert.ok(children("Hold to talk mode").some((n) => n.type === "Text"));
-    assert.deepEqual(f.events.slice(0, 2), [
-      ["mode", "push_to_talk"],
-      ["save", "push_to_talk"],
-    ]);
-    f.voice.starting = true;
-    f.harness.render();
-    assert.ok(radios().every((n) => n.props.disabled));
-    f.harness.unmount();
-  });
-}
-
-// Call lifecycle, recovery and preference behaviour from #2321.
-
-test("the explicit voice entry automatically starts once with the exact saved source", async () => {
-  const f = setup();
-  assert.equal(f.starts().length, 1);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
-  assert.equal(f.starts()[0]?.[2], "openai_live");
-  f.harness.render();
-  f.query.options.data = { options: [...f.query.options.data.options] };
-  f.harness.render();
-  await f.harness.settle();
-  assert.equal(f.starts().length, 1);
-  assert.equal(f.find("Start voice"), undefined);
-  assert.doesNotMatch(f.text(), /Tap to start|Ready to talk/);
-  f.harness.unmount();
-});
-
-test("auto-start waits for both options and saved settings", () => {
-  for (const pending of ["settings", "options"] as const) {
-    const f = setup({
-      settingsPending: pending === "settings",
-      optionsPending: pending === "options",
-    });
-    assert.equal(f.starts().length, 0);
-    f.query.settings.data = { voice: saved };
-    f.query.settings.isSuccess = true;
-    f.query.settings.isPending = false;
-    f.query.options.isSuccess = true;
-    f.query.options.isPending = false;
-    f.harness.render();
-    assert.equal(f.starts().length, 1);
-    assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
+    assert.deepEqual(f.events, [["end"], ["close"]]);
+    assert.equal(f.voice.snapshot?.session.state, "active");
+    assert.equal(f.voice.confirmedEnded, false);
     f.harness.unmount();
   }
 });
 
-test("first-use OpenAI defaults to automatic and a platform default without replacing saved PTT", () => {
-  const first = setup({
-    saved: null,
-    options: [
-      {
-        ...source,
-        default_model: false,
-        key_source: "own",
-        connection_id: sessionId,
-      },
-      source,
-    ],
-  });
-  assert.equal(
-    (first.starts()[0]?.[1] as VoicePreferences).input_mode,
-    "automatic",
+test("reduced motion keeps the small waveform still while retaining live status", () => {
+  const f = setup({ active: true, reducedMotion: true });
+  const bars = f.all().filter((row) => row.type === "WaveBar");
+  assert.equal(bars.length, 5);
+  assert.ok(
+    bars.every((row) => row.props.style.at(-1).transform[0].scaleY === 1),
   );
-  assert.equal(
-    (first.starts()[0]?.[1] as VoicePreferences).key_source,
-    "platform",
-  );
-  first.harness.unmount();
-  const ptt = setup({ saved: { ...saved, input_mode: "push_to_talk" } });
-  assert.equal(
-    (ptt.starts()[0]?.[1] as VoicePreferences).input_mode,
-    "push_to_talk",
-  );
-  ptt.harness.unmount();
-});
-
-test("a saved own source wins over an available platform source", () => {
-  const own = {
-    ...source,
-    key_source: "own" as const,
-    connection_id: sessionId,
-    model: "saved-model",
-    default_model: false,
-  };
-  const preferences = {
-    ...saved,
-    key_source: own.key_source,
-    connection_id: own.connection_id,
-    model: own.model,
-  };
-  const f = setup({ saved: preferences, options: [source, own] });
-  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), preferences);
-  f.harness.unmount();
-});
-
-test("missing sources, unavailable sources and missing saved voices never substitute or start", () => {
-  for (const options of [
-    [],
-    [
-      {
-        ...source,
-        available: false,
-        unavailable_reason: "Reconnect saved provider",
-      },
-    ],
-    [source],
-  ]) {
-    const f = setup({
-      options,
-      saved:
-        options.length && options[0]?.available
-          ? { ...saved, voice: "retired" }
-          : saved,
-    });
-    assert.equal(f.starts().length, 0);
-    assert.equal(f.find("Start voice"), undefined);
-    assert.ok(f.notices().length);
-    assert.deepEqual(f.savedPreferences, []);
-    f.harness.unmount();
-  }
-});
-
-test("an unavailable source is not presented as connecting or as a guessed supplier", () => {
-  const f = setup({ options: [] });
-  assert.match(f.text(), /Voice unavailable/);
-  assert.doesNotMatch(f.text(), /Connecting/);
-  f.openPreferences();
-  assert.match(f.text(), /Voice source unavailable/);
-  assert.doesNotMatch(f.text(), /OpenAI/);
-  f.harness.unmount();
-});
-
-test("Grok stays on its saved supplier and always uses explicit Hold to talk", () => {
-  const grok: VoiceOption = {
-    ...source,
-    voice: {
-      ...source.voice,
-      protocol: "xai_realtime",
-      usage_source: "server_measured",
-    },
-  };
-  const f = setup({ source: grok });
-  assert.equal(f.starts()[0]?.[2], "xai_realtime");
-  assert.equal(
-    (f.starts()[0]?.[1] as VoicePreferences).input_mode,
-    "push_to_talk",
-  );
-  f.openPreferences();
-  assert.equal(f.find("Hands-free mode"), undefined);
-  // The header toggle offers only Hold to talk, locked for this source.
-  assert.equal(f.button("Hold to talk mode").props.disabled, true);
-  assert.equal(
-    f.button("Hold to talk mode").props.accessibilityState.selected,
-    true,
-  );
-  f.harness.unmount();
-});
-
-test("a failed start requires an explicit retry and hides billing diagnostics by default", async () => {
-  const f = setup(creditFailure);
-  assert.equal(f.starts().length, 0);
-  assert.match(f.text(), /Unable to start/);
-  assert.ok(f.notices().includes(creditFailure.recovery.message));
-  assert.equal(f.text().includes(creditFailure.error), false);
-  f.harness.render();
-  assert.equal(f.starts().length, 0);
-  f.button("Show error details").props.onPress();
-  assert.equal(f.text().includes(creditFailure.error), true);
-  await f.button("Try again").props.onPress();
-  assert.equal(f.starts().length, 1);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
-  f.harness.unmount();
-});
-
-test("billing recovery opens the configured Web page and text recovery does not create another call", async () => {
-  const f = setup(creditFailure);
-  await f.button("Review billing on Web").props.onPress();
-  f.button("Continue with text").props.onPress();
-  assert.deepEqual(f.events, [
-    ["billing", "https://nyx.example/billing"],
-    ["close"],
-  ]);
-  f.harness.unmount();
-});
-
-test("billing browser failures keep the recovery error and sanitize platform details", async () => {
-  const f = setup(creditFailure);
-  f.failBrowser();
-  await f.button("Review billing on Web").props.onPress();
-  assert.match(f.notices().join(" "), /Billing could not open/);
-  assert.doesNotMatch(f.notices().join(" "), /private browser error/);
-  assert.match(f.text(), /Unable to start/);
-  f.harness.unmount();
-});
-
-test("snapshots go to the one main timeline and are cleared on unmount", () => {
-  const f = setup({ active: true });
-  assert.equal(f.snapshots.at(-1), snapshot);
-  f.voice.snapshot = {
-    ...snapshot,
-    captions: [
-      {
-        id: "segment",
-        speaker: "assistant",
-        text: "authoritative words",
-        sealed: true,
-        complete: false,
-      },
-    ],
-  };
-  f.harness.render();
-  assert.equal(f.snapshots.at(-1), f.voice.snapshot);
-  assert.doesNotMatch(f.text(), /authoritative words/);
-  f.harness.unmount();
-  assert.equal(f.snapshots.at(-1), undefined);
-});
-
-test("Listening follows actual input permission, Speaking follows playback, and captions do not invent audio activity", () => {
-  const f = setup({
-    active: true,
-    inputEnabled: false,
-    snapshot: {
-      ...snapshot,
-      captions: [
-        {
-          id: "old",
-          speaker: "assistant",
-          text: "old partial",
-          complete: false,
-          sealed: false,
-        },
-      ],
-    },
-  });
-  assert.match(f.text(), /Connected/);
-  assert.doesNotMatch(f.text(), /Listening|Speaking/);
-  f.voice.inputEnabled = true;
-  f.harness.render();
   assert.match(f.text(), /Listening/);
-  f.levels.speaking = true;
-  f.harness.render();
-  assert.match(f.text(), /Speaking/);
-  f.voice.speakerMuted = true;
-  f.harness.render();
-  assert.doesNotMatch(f.text(), /Speaking/);
   f.harness.unmount();
 });
 
-test("a verified quiet-call terminal state shows Close without the stale idle warning", () => {
-  const f = setup({
-    snapshot: {
-      ...snapshot,
-      session: {
-        ...snapshot.session,
-        state: "closed",
-        closed_at: "2026-10-16T04:04:25Z",
-        end_reason: "idle",
-        end_requested: true,
-        idle_warning: true,
-      },
-    },
-  });
-  assert.match(f.text(), /Call ended/);
-  assert.doesNotMatch(f.text(), /Unable to start/);
-  assert.deepEqual(f.notices(), []);
-  assert.ok(f.button("Close voice"));
-  assert.equal(f.find("End voice and close"), undefined);
-  assert.equal(f.starts().length, 0);
-  f.button("Close voice").props.onPress();
-  assert.deepEqual(f.events, [["close"]]);
-  f.harness.unmount();
-});
-
-for (const state of ["closed", "failed"] as const) {
-  test(`a terminal ${state} conflict with end_requested offers Close without starting a replacement`, () => {
+for (const kind of ["options", "settings"] as const) {
+  test(`${kind} query exits Connecting after its deadline and exposes retry`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
     const f = setup({
-      conflict: { ...snapshot.session, state, end_requested: true },
+      settingsPending: kind === "settings",
+      optionsPending: kind === "options",
     });
-    assert.match(f.text(), /Call ended/);
-    assert.doesNotMatch(f.text(), /Confirming|Call already active/);
-    assert.ok(f.button("Close voice"));
-    assert.equal(f.find("Request end again"), undefined);
-    assert.equal(f.find("Check call status"), undefined);
+    const waiting = deferred<any>();
+    const originalOptions = f.environment.api.options;
+    const originalSettings = f.environment.api.settings;
+    let requestSignal: AbortSignal | undefined;
+    if (kind === "options")
+      f.environment.api.options = (_thread, signal) => {
+        requestSignal = signal;
+        return waiting.promise;
+      };
+    else
+      f.environment.api.settings = (signal) => {
+        requestSignal = signal;
+        return waiting.promise;
+      };
+    const controller = new AbortController();
+    const result = f.queryFunctions.get(kind)!({ signal: controller.signal });
+    let failure: Error | undefined;
+    const rejected = assert.rejects(result, (error) => {
+      failure = error as Error;
+      return failure.message === "Voice options could not load.";
+    });
+    context.mock.timers.tick(7_999);
+    assert.equal(requestSignal!.aborted, false);
+    assert.match(f.text(), /Preparing voice|Connecting/);
+    context.mock.timers.tick(1);
+    await rejected;
+    assert.equal(requestSignal!.aborted, true);
+    f.query[kind].error = failure!;
+    f.query[kind].isPending = false;
+    f.harness.render();
+    assert.match(f.text(), /Voice unavailable/);
+    assert.doesNotMatch(f.text(), /Connecting/);
+    f.button("Retry voice options").props.onPress();
+    assert.deepEqual(f.events.slice(-2), [
+      ["optionsRefetch"],
+      ["settingsRefetch"],
+    ]);
+    waiting.resolve({});
+    await f.harness.settle();
+    assert.equal(f.starts().length, 0, "late metadata cannot create a call");
+    assert.equal(f.query[kind].error, failure);
+    f.environment.api.options = originalOptions;
+    f.environment.api.settings = originalSettings;
+    const retried = await f.queryFunctions.get(kind)!({
+      signal: new AbortController().signal,
+    });
+    f.query[kind].data = retried as any;
+    f.query[kind].error = null;
+    f.query[kind].isSuccess = true;
+    f.harness.render();
+    assert.equal(
+      f.starts().length,
+      1,
+      "a successful explicit retry starts once",
+    );
+    f.harness.unmount();
+  });
+
+  test(`${kind} query cancellation aborts an unresponsive transport immediately`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const f = setup({
+      settingsPending: kind === "settings",
+      optionsPending: kind === "options",
+    });
+    let requestSignal: AbortSignal | undefined;
+    if (kind === "options")
+      f.environment.api.options = (_thread, signal) => {
+        requestSignal = signal;
+        return new Promise<never>(() => {});
+      };
+    else
+      f.environment.api.settings = (signal) => {
+        requestSignal = signal;
+        return new Promise<never>(() => {});
+      };
+    const controller = new AbortController();
+    const result = f.queryFunctions.get(kind)!({ signal: controller.signal });
+    const rejected = assert.rejects(result, { name: "AbortError" });
+    controller.abort();
+    await rejected;
+    assert.equal(requestSignal!.aborted, true);
+    context.mock.timers.tick(8_000);
     assert.equal(f.starts().length, 0);
-    f.button("Close voice").props.onPress();
-    assert.deepEqual(f.events, [["close"]]);
     f.harness.unmount();
   });
 }
-
-test("a terminal session supersedes its own pending cleanup without dismissing a different active call", () => {
-  const f = setup({
-    snapshot: {
-      ...snapshot,
-      session: { ...snapshot.session, state: "closed", end_requested: true },
-    },
-    conflict: { ...snapshot.session, state: "closing", end_requested: true },
-  });
-  assert.match(f.text(), /Call ended/);
-  assert.ok(f.button("Close voice"));
-  assert.equal(f.find("Request end again"), undefined);
-  f.voice.conflict = {
-    ...snapshot.session,
-    id: "33333333-3333-4333-8333-333333333333",
-  };
-  f.harness.render();
-  assert.match(f.text(), /Call already active/);
-  assert.ok(f.button("End existing call"));
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("voice changes are saved for next call without changing this call, while the mode toggle switches it in place", async () => {
-  const f = setup({ active: true });
-  f.openPreferences();
-  assert.match(f.text(), /Changes apply to your next call/);
-  await f.button("Hold to talk mode").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(
-    f.savedPreferences.map((row) => row.input_mode),
-    ["push_to_talk"],
-  );
-  // The listening mode applies to the live call too.
-  assert.deepEqual(
-    f.events.filter(([event]) => event === "mode"),
-    [["mode", "push_to_talk"]],
-  );
-  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
-  f.button("Voice").props.onPress();
-  f.voicePicker()!.props.onChange(["marin"]);
-  await f.harness.settle();
-  assert.equal(f.savedPreferences.at(-1)?.voice, "marin");
-  assert.equal(f.savedPreferences.at(-1)?.service_id, saved.service_id);
-  assert.equal(f.savedPreferences.at(-1)?.input_mode, "push_to_talk");
-  assert.equal(f.button("Voice").props.value, "Marin");
-  assert.equal(f.starts().length, 0);
-  assert.equal(
-    f.events.filter(([event]) => event === "end" || event === "mode").length,
-    1,
-    "only the explicit mode switch reached the live call",
-  );
-  f.harness.unmount();
-});
-
-test("voice preferences show one saved-voice row while all server voices stay inside the picker", () => {
-  const voices = [
-    ...source.voice.voices,
-    ...Array.from({ length: 32 }, (_, index) => ({
-      id: `server-voice-${index}`,
-      label: `Server choice ${index + 1}`,
-    })),
-  ];
-  const f = setup({
-    active: true,
-    source: { ...source, voice: { ...source.voice, voices } },
-  });
-  assert.equal(f.find("Voice"), undefined);
-  assert.equal(f.voicePicker(), undefined);
-  f.openPreferences();
-  assert.equal(f.button("Voice").props.value, "Cedar");
-  assert.equal(f.voicePicker(), undefined);
-  assert.equal(f.all().filter((row) => row.type === "SettingsRow").length, 1);
-  for (const row of voices) {
-    assert.equal(f.find(`${row.label} voice`), undefined);
-    assert.equal(f.find(row.label), undefined);
-  }
-  f.button("Voice").props.onPress();
-  const picker = f.voicePicker();
-  assert.ok(picker);
-  assert.equal(picker.props.label, "Voice");
-  assert.equal(picker.props.title, "Choose voice");
-  assert.equal(picker.props.description, "Changes apply to your next call.");
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(picker.props.options)),
-    voices.map((row) => ({ value: row.id, label: row.label })),
-  );
-  assert.equal(picker.props.options.length, 34);
-  assert.deepEqual(JSON.parse(JSON.stringify(picker.props.value)), ["cedar"]);
-  assert.deepEqual(JSON.parse(picker.props.scopeKey), [
-    7,
-    thread,
-    JSON.stringify([source.service_id, null, "platform", source.model]),
-  ]);
-  assert.equal(f.savedPreferences.length, 0);
-  assert.equal(f.voice.connected, true);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("browsing and cancelling the voice picker never saves or changes the current call", async () => {
-  const f = setup({ active: true });
-  f.openPreferences();
-  f.button("Voice").props.onPress();
-  const picker = f.voicePicker();
-  assert.ok(picker);
-  await f.harness.settle();
-  assert.equal(f.savedPreferences.length, 0);
-  assert.deepEqual(f.events, []);
-  picker.props.onClose();
-  f.harness.flush();
-  assert.equal(f.voicePicker(), undefined);
-  assert.equal(f.button("Voice").props.value, "Cedar");
-  assert.deepEqual(f.events, []);
-  assert.equal(f.voice.connected, true);
-  f.harness.unmount();
-});
 
 test("an open voice picker keeps its presentation, choices and selection stable during query refreshes", () => {
   const f = setup({ active: true });
@@ -2240,189 +2199,11 @@ test("verified empty discovery does not dismiss an actionable billing failure", 
   f.harness.unmount();
 });
 
-test("applying a voice persists once and preserves the selected source and live call", async () => {
-  const f = setup({ active: true });
-  f.openPreferences();
-  f.button("Voice").props.onPress();
-  const picker = f.voicePicker();
-  assert.ok(picker);
-  picker.props.onChange(["marin"]);
-  picker.props.onChange(["marin"]);
-  picker.props.onClose();
-  await f.harness.settle();
-  assert.equal(f.voicePicker(), undefined);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.savedPreferences)), [
-    { ...saved, voice: "marin" },
-  ]);
-  assert.equal(f.button("Voice").props.value, "Marin");
-  assert.equal(f.events.filter(([event]) => event === "save").length, 1);
-  assert.equal(
-    f.events.some(([event]) =>
-      ["start", "end", "mode"].includes(String(event)),
-    ),
-    false,
-  );
-  assert.equal(f.voice.connected, true);
-  assert.equal(f.voice.snapshot?.session.id, sessionId);
-  f.harness.unmount();
-});
-
-test("failed voice saves retain the previous selection and show a retryable error", async () => {
-  const f = setup({ active: true });
-  f.failSave();
-  f.openPreferences();
-  f.button("Voice").props.onPress();
-  const picker = f.voicePicker();
-  assert.ok(picker);
-  picker.props.onChange(["marin"]);
-  picker.props.onClose();
-  await f.harness.settle();
-  assert.equal(f.savedPreferences.length, 0);
-  assert.equal(f.button("Voice").props.value, "Cedar");
-  assert.match(f.notices().join(" "), /could not be saved/);
-  f.button("Voice").props.onPress();
-  assert.deepEqual(JSON.parse(JSON.stringify(f.voicePicker()!.props.value)), [
-    "cedar",
-  ]);
-  assert.equal(
-    f.events.some(([event]) =>
-      ["start", "end", "mode"].includes(String(event)),
-    ),
-    false,
-  );
-  assert.equal(f.voice.connected, true);
-  f.harness.unmount();
-});
-
-test("opening the voice picker releases held input without ending the call", () => {
-  const f = setup({
-    active: true,
-    saved: { ...saved, input_mode: "push_to_talk" },
-  });
-  f.openPreferences();
-  f.voice.holding = true;
-  f.voice.inputEnabled = true;
-  f.button("Voice").props.onPress();
-  assert.ok(f.voicePicker());
-  assert.deepEqual(f.events, [["hold", false]]);
-  assert.equal(f.voice.holding, false);
-  assert.equal(f.voice.inputEnabled, false);
-  assert.equal(f.voice.connected, true);
-  f.harness.unmount();
-});
-
-test("dismissed or unfocused voice pickers ignore delayed Apply callbacks", async () => {
-  for (const dismiss of ["picker", "preferences", "focus"] as const) {
-    const f = setup({ active: true });
-    f.openPreferences();
-    f.button("Voice").props.onPress();
-    const picker = f.voicePicker();
-    assert.ok(picker);
-    if (dismiss === "picker") picker.props.onClose();
-    if (dismiss === "preferences") {
-      f.button("Close voice preferences").props.onPress();
-      f.harness.render();
-    }
-    if (dismiss === "focus") f.setFocused(false);
-    f.harness.flush();
-    picker.props.onChange(["marin"]);
-    await f.harness.settle();
-    assert.equal(f.savedPreferences.length, 0, dismiss);
-    assert.equal(f.voicePicker(), undefined, dismiss);
-    assert.equal(f.voice.connected, true, dismiss);
-    f.harness.unmount();
-  }
-});
-
-test("voice picker Apply is fenced to its account epoch, chat, and voice source", async () => {
-  for (const change of ["epoch", "chat", "source"] as const) {
-    const f = setup({ active: true });
-    f.openPreferences();
-    f.button("Voice").props.onPress();
-    const picker = f.voicePicker();
-    assert.ok(picker);
-    if (change === "epoch") f.environment.epoch++;
-    if (change === "chat") f.props.thread = `nyxa-${"b".repeat(32)}`;
-    if (change === "source") {
-      const own = { ...source, connection_id: "another-connection" };
-      f.query.options.data = { options: [own] };
-      f.query.settings.data = {
-        voice: { ...saved, connection_id: own.connection_id },
-      };
-    }
-    f.harness.render();
-    picker.props.onChange(["marin"]);
-    await f.harness.settle();
-    assert.equal(f.savedPreferences.length, 0, change);
-    assert.equal(f.voicePicker(), undefined, change);
-    f.button("Voice").props.onPress();
-    assert.notEqual(f.voicePicker()!.props.scopeKey, picker.props.scopeKey);
-    f.harness.unmount();
-  }
-});
-
-test("preference-save failures stay actionable and never imply the next call changed", async () => {
-  const f = setup({ active: true });
-  f.failSave();
-  f.openPreferences();
-  f.button("Voice").props.onPress();
-  f.voicePicker()!.props.onChange(["marin"]);
-  await f.harness.settle();
-  assert.match(f.notices().join(" "), /could not be saved/);
-  assert.equal(f.button("Voice").props.value, "Cedar");
-  assert.equal(f.savedPreferences.length, 0);
-  assert.equal(
-    f.events.some(([event]) => event === "mode" || event === "end"),
-    false,
-  );
-  f.harness.unmount();
-});
-
-test("End silences input and retains its media owner until bounded cleanup finishes, then returns to text without terminal proof", async () => {
-  const pending = deferred<boolean>();
-  const f = setup({ active: true });
-  const originalSnapshot = structuredClone(f.voice.snapshot);
-  const mediaOwner = f.all().find((row) => row.type === "VoiceMediaBridge")!;
-  f.setEnd(pending.promise);
-  f.voice.holding = true;
-  f.button("End voice and close").props.onPress();
-  f.harness.flush();
-  assert.deepEqual(f.events, [["hold", false], ["end"]]);
-  assert.equal(f.voice.inputEnabled, false);
-  assert.match(f.text(), /Ending/);
-  // The microphone cannot be reopened while End drains the call.
-  assert.equal(f.button("Mute microphone").props.disabled, true);
-  assert.equal(f.find("Try again"), undefined);
-  assert.equal(f.find("Check call status"), undefined);
-  assert.doesNotMatch(
-    f.text(),
-    /previous call is finishing|continue with text/i,
-  );
-  assert.equal(f.button("Return to chat").props.disabled, true);
-  f.button("Return to chat").props.onPress();
-  assert.equal(
-    f.all().find((row) => row.type === "VoiceMediaBridge")?.props.media,
-    mediaOwner.props.media,
-  );
-  assert.equal(
-    f.events.some(([event]) => event === "close"),
-    false,
-  );
-  pending.resolve(false);
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["hold", false], ["end"], ["close"]]);
-  assert.deepEqual(f.voice.snapshot, originalSnapshot);
-  assert.equal(f.voice.confirmedEnded, false);
-  assert.equal(f.find("Request end again"), undefined);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
 test("an End that drains after the call disconnects never shows the pre-call welcome", async () => {
   const pending = deferred<boolean>();
   const f = setup({ active: true });
   f.setEnd(pending.promise);
-  f.button("End voice and close").props.onPress();
+  f.button("End voice").props.onPress();
   // The engine disconnects before the bounded drain settles.
   f.voice.connected = false;
   f.harness.flush();
@@ -2432,255 +2213,6 @@ test("an End that drains after the call disconnects never shows the pre-call wel
   pending.resolve(true);
   await f.harness.settle();
   assert.deepEqual(f.events.at(-1), ["close"]);
-  f.harness.unmount();
-});
-
-test("a verified terminal End also returns to the text composer once", async () => {
-  const f = setup({ active: true });
-  f.setEnd(Promise.resolve(true));
-  f.button("End voice and close").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  f.harness.unmount();
-});
-
-test("a failed remote End returns to text after bounded cleanup without claiming success", async () => {
-  const pending = deferred<boolean>();
-  const f = setup({ active: true });
-  f.setEnd(pending.promise);
-  f.button("End voice and close").props.onPress();
-  f.harness.flush();
-  assert.deepEqual(f.events, [["end"]]);
-  pending.reject(new Error("private transport details"));
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  assert.equal(f.voice.snapshot?.session.state, "active");
-  assert.equal(f.voice.confirmedEnded, false);
-  assert.doesNotMatch(f.text(), /private transport/);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("a late terminal snapshot after returning to text cannot close the surface twice", async () => {
-  const f = setup({ active: true });
-  f.setEnd(Promise.resolve(false));
-  f.button("End voice and close").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  f.voice.connected = false;
-  f.voice.snapshot = {
-    ...snapshot,
-    session: { ...snapshot.session, state: "closed", end_requested: true },
-  };
-  f.harness.render();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("returning after End does not fabricate a terminal snapshot before later empty discovery", async () => {
-  const f = setup({ active: true });
-  f.setEnd(Promise.resolve(false));
-  f.button("End voice and close").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  f.voice.connected = false;
-  f.voice.confirmedEnded = true;
-  f.harness.render();
-  await f.harness.settle();
-  assert.equal(f.voice.snapshot?.session.state, "active");
-  assert.deepEqual(f.events, [["end"], ["close"]]);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("verified empty discovery closes disconnected controls once and preserves the truthful partial snapshot", async () => {
-  const retained: VoiceSnapshot = {
-    ...snapshot,
-    captions: [
-      {
-        id: "partial-caption",
-        speaker: "assistant",
-        text: "A retained partial reply",
-        sealed: false,
-        complete: false,
-      },
-    ],
-  };
-  const original = structuredClone(retained);
-  const f = setup({ snapshot: retained });
-  f.voice.checkingConflict = true;
-  f.voice.confirmedEnded = true;
-  f.harness.render();
-  await f.harness.settle();
-  assert.deepEqual(f.events, []);
-  f.voice.checkingConflict = false;
-  f.harness.render();
-  await f.harness.settle();
-  f.harness.render();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["close"]]);
-  assert.deepEqual(f.voice.snapshot, original);
-  assert.deepEqual(f.snapshots.at(-1), original);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("a confirmed terminal call in another conversation closes recovery without a local snapshot or replacement call", async () => {
-  const f = setup({
-    conflict: { ...snapshot.session, state: "closing", end_requested: true },
-    conflictThread: `nyxa-${"b".repeat(32)}`,
-  });
-  assert.match(f.text(), /Finishing call/);
-  assert.equal(f.voice.snapshot, null);
-  f.voice.conflict = null;
-  f.voice.confirmedEnded = true;
-  f.harness.render();
-  await f.harness.settle();
-  f.harness.render();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["close"]]);
-  assert.equal(f.voice.snapshot, null);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("empty discovery cannot close a connected, starting, unknown, or conflicting call", async () => {
-  for (const guard of [
-    "connected",
-    "starting",
-    "unknown",
-    "conflict",
-  ] as const) {
-    const f = setup({ snapshot });
-    f.voice.confirmedEnded = true;
-    if (guard === "connected") f.voice.connected = true;
-    if (guard === "starting") f.voice.starting = true;
-    if (guard === "unknown") f.voice.conflictUnknown = true;
-    if (guard === "conflict")
-      f.voice.conflict = { ...snapshot.session, id: "another-session" };
-    f.harness.render();
-    await f.harness.settle();
-    assert.deepEqual(f.events, [], guard);
-    assert.equal(f.starts().length, 0, guard);
-    f.harness.unmount();
-  }
-});
-
-test("a disconnected nonterminal snapshot cannot expose a new start while recovery catches up", () => {
-  const f = setup({ snapshot, error: "Voice connection lost" });
-  assert.equal(f.find("Try again"), undefined);
-  assert.ok(f.button("End voice and close"));
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("rapid End taps issue one request and a late completion cannot close another surface", async () => {
-  const pending = deferred<boolean>();
-  const f = setup({ active: true });
-  f.setEnd(pending.promise);
-  const end = f.button("End voice and close");
-  end.props.onPress();
-  end.props.onPress();
-  assert.deepEqual(f.events, [["end"]]);
-  f.harness.unmount();
-  pending.resolve(true);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(f.events, [["end"]]);
-});
-
-test("checking unknown status is read-only and never masquerades as Ending", async () => {
-  const pending = deferred<boolean>();
-  const f = setup({ conflictUnknown: true });
-  f.setCheck(pending.promise);
-  assert.equal(f.find("End voice and close"), undefined);
-  assert.equal(f.button("Return to chat").props.disabled, false);
-  f.button("Check call status").props.onPress();
-  f.harness.flush();
-  assert.match(f.text(), /Checking call status/);
-  assert.doesNotMatch(f.text(), /Ending/);
-  assert.deepEqual(f.events, [["checkConflict"]]);
-  pending.resolve(false);
-  await f.harness.settle();
-  assert.equal(
-    f.events.some(([event]) => event === "close" || event === "end"),
-    false,
-  );
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("unknown or checking recovery can return to text without an End or a replacement call", async () => {
-  for (const state of ["unknown", "checking"] as const) {
-    const f = setup({
-      conflictUnknown: state === "unknown",
-      checkingConflict: state === "checking",
-    });
-    assert.equal(f.button("Return to chat").props.disabled, false, state);
-    f.button("Return to chat").props.onPress();
-    await f.harness.settle();
-    assert.deepEqual(f.events, [["close"]], state);
-    assert.equal(f.voice.conflictUnknown, state === "unknown", state);
-    assert.equal(f.voice.checkingConflict, state === "checking", state);
-    assert.equal(f.voice.snapshot, null, state);
-    f.harness.unmount();
-  }
-});
-
-test("returning during a status read leaves the other chat's call untouched and ignores late completion", async () => {
-  const pending = deferred<boolean>();
-  const f = setup({
-    conflict: snapshot.session,
-    conflictThread: `nyxa-${"b".repeat(32)}`,
-  });
-  const originalConflict = f.voice.conflict;
-  f.setCheck(pending.promise);
-  f.button("Check call status").props.onPress();
-  f.harness.flush();
-  assert.match(f.text(), /Checking call status/);
-  assert.equal(f.button("Return to chat").props.disabled, false);
-  f.button("Return to chat").props.onPress();
-  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
-  assert.equal(f.voice.conflict, originalConflict);
-  f.harness.unmount();
-  pending.resolve(true);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
-});
-
-test("a pending previous End can be checked or left without repeating End or starting another call", async () => {
-  const f = setup({
-    conflict: { ...snapshot.session, state: "closing", end_requested: true },
-  });
-  const originalConflict = f.voice.conflict;
-  assert.match(f.text(), /Finishing call/);
-  assert.equal(f.starts().length, 0);
-  assert.equal(f.find("End existing call"), undefined);
-  assert.equal(f.find("Request end again"), undefined);
-  await f.button("Check call status").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["checkConflict"]]);
-  f.button("Return to chat").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
-  assert.equal(f.voice.conflict, originalConflict);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("another chat's existing call is never taken over or replaced implicitly", async () => {
-  const f = setup({
-    conflict: snapshot.session,
-    conflictThread: `nyxa-${"b".repeat(32)}`,
-  });
-  assert.match(f.text(), /Call already active/);
-  assert.match(f.text(), /open in another chat/);
-  assert.equal(f.starts().length, 0);
-  await f.button("End existing call").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["endConflict"], ["close"]]);
-  assert.equal(f.starts().length, 0);
   f.harness.unmount();
 });
 
@@ -2714,111 +2246,6 @@ test("ending an existing call hides recovery actions until cleanup returns to te
   f.harness.render();
   assert.deepEqual(f.events, [["endConflict"], ["close"]]);
   f.harness.unmount();
-});
-
-test("returning from another chat's active-call conflict does not End that call", async () => {
-  const f = setup({
-    conflict: snapshot.session,
-    conflictThread: `nyxa-${"b".repeat(32)}`,
-  });
-  const originalConflict = f.voice.conflict;
-  assert.ok(f.button("End existing call"));
-  f.button("Return to chat").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events, [["close"]]);
-  assert.equal(f.voice.conflict, originalConflict);
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("leaving or losing network during recovery never ends an unrelated call", async () => {
-  for (const change of ["offline", "blur"] as const) {
-    const f = setup({
-      conflict: snapshot.session,
-      conflictThread: `nyxa-${"b".repeat(32)}`,
-    });
-    if (change === "offline") f.setOnline(false);
-    else f.setFocused(false);
-    await f.harness.settle();
-    assert.deepEqual(f.events, [], change);
-    assert.equal(f.starts().length, 0, change);
-    f.harness.unmount();
-  }
-});
-
-test("clearing a detected conflict does not consume the same entry as a new call", () => {
-  const f = setup({ conflict: snapshot.session });
-  assert.equal(f.starts().length, 0);
-  f.voice.conflict = null;
-  f.voice.conflictUnknown = false;
-  f.harness.render();
-  assert.equal(f.starts().length, 0);
-  f.harness.unmount();
-});
-
-test("PTT uses press, release and cancellation while respecting server input gates", () => {
-  const f = setup({
-    active: true,
-    saved: { ...saved, input_mode: "push_to_talk" },
-    inputEnabled: false,
-  });
-  const hold = f.button("Hold to talk");
-  hold.props.onPressIn();
-  hold.props.onPressOut();
-  hold.props.onResponderTerminate();
-  assert.deepEqual(f.events, [
-    ["hold", true],
-    ["hold", false],
-    ["hold", false],
-  ]);
-  hold.props.onAccessibilityAction({ nativeEvent: { actionName: "activate" } });
-  assert.equal(f.voice.holding, true);
-  f.voice.snapshot = {
-    ...snapshot,
-    session: { ...snapshot.session, input_muted: true },
-  };
-  f.harness.render();
-  assert.equal(f.button("Hold to talk").props.disabled, true);
-  f.harness.unmount();
-});
-
-test("ordinary snapshots keep the media owner and a new attempt remounts only its engine", () => {
-  const f = setup({ active: true });
-  const bridge = () => f.all().find((row) => row.type === "VoiceMediaBridge")!;
-  const original = bridge();
-  f.voice.snapshot = {
-    ...snapshot,
-    captions: [
-      {
-        id: "segment",
-        speaker: "user",
-        text: "你好",
-        sealed: true,
-        complete: true,
-      },
-    ],
-  };
-  f.harness.render();
-  assert.equal(bridge().key, original.key);
-  assert.equal(bridge().props.media, original.props.media);
-  f.voice.mediaAttempt = 2;
-  f.harness.render();
-  assert.notEqual(bridge().key, original.key);
-  f.harness.unmount();
-});
-
-test("offline and focus loss finish local cleanup and return to text without claiming remote termination", async () => {
-  for (const change of ["offline", "blur"] as const) {
-    const f = setup({ active: true });
-    f.setEnd(Promise.resolve(false));
-    if (change === "offline") f.setOnline(false);
-    else f.setFocused(false);
-    await f.harness.settle();
-    assert.deepEqual(f.events, [["end"], ["close"]]);
-    assert.equal(f.voice.snapshot?.session.state, "active");
-    assert.equal(f.voice.confirmedEnded, false);
-    f.harness.unmount();
-  }
 });
 
 test("re-entering this chat during a requested disconnection starts exactly one new call after terminal proof", async () => {
@@ -3102,143 +2529,130 @@ test("a restart rejected by the hook's final guards shows a retry message instea
   f.harness.unmount();
 });
 
-for (const viewport of [
-  { width: 375, height: 812, fontScale: 1 },
-  { width: 834, height: 1194, fontScale: 1 },
-  { width: 375, height: 812, fontScale: 2.5 },
-]) {
-  test(`voice panel fits its content through startup, listening and live captions at ${viewport.width}pt/${viewport.fontScale}`, () => {
-    const f = setup({ viewport });
-    const height = () =>
-      f.all().find((node) => node.props.testID === "voice-expanded-panel")!
-        .props.style.height;
-    const measureBody = (height: number) => {
-      f.all()
-        .find((node) => node.props.testID === "voice-panel-content")!
-        .props.onLayout({ nativeEvent: { layout: { height } } });
-      f.harness.flush();
-    };
-    const initial = height();
-    assert.equal(
-      initial,
-      244,
-      "only header, equalizer, gaps and controls reserve space",
-    );
-    assert.doesNotMatch(
-      f.text(),
-      /Hey, what can I do for you today|Change in Settings/,
-    );
-    f.voice.starting = true;
-    f.harness.render();
-    assert.equal(height(), initial);
-    f.voice.starting = false;
-    f.voice.connected = true;
-    f.voice.snapshot = structuredClone(snapshot);
-    f.harness.render();
-    assert.equal(height(), initial);
-    f.voice.snapshot.captions = [
+test("connecting displays a placeholder and the active call starts at 00:00 regardless of creation time", () => {
+  const f = setup();
+  assert.equal(
+    f
+      .all()
+      .some((n) => String(n.props.accessibilityLabel).startsWith("Call time")),
+    false,
+    "no elapsed clock is shown before a session exists",
+  );
+  f.voice.starting = true;
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, state: "starting" },
+  };
+  f.harness.render();
+  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
+  f.voice.starting = false;
+  f.voice.connected = true;
+  f.voice.connectedAt = Date.now();
+  f.voice.snapshot = snapshot;
+  f.harness.render();
+  assert.ok(
+    f.all().some((n) => n.props.accessibilityLabel === "Call time 00:00"),
+  );
+  f.harness.unmount();
+});
+
+test("continuous input, silence, and playback leave completed captions unchanged", (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const completed: VoiceSnapshot = {
+    ...snapshot,
+    captions: [
       {
-        id: "live",
+        id: "user-complete",
         speaker: "user",
-        text: "A longer spoken request expands the voice surface only as needed",
-        sealed: false,
-        complete: false,
+        text: "What is two plus four?",
+        sealed: true,
+        complete: true,
       },
-    ];
-    f.harness.render();
-    measureBody(160);
-    assert.equal(height(), initial + 94);
-    f.voice.snapshot.captions = [];
-    f.harness.render();
-    measureBody(66);
-    assert.equal(height(), initial);
-    f.harness.unmount();
-  });
-}
-
-for (const reducedMotion of [false, true]) {
-  test(`voice content grows before scrolling, animates its expansion, and shrinks after dismissal with Reduce Motion ${reducedMotion}`, () => {
-    const f = setup({ active: true, reducedMotion });
-    const panel = () =>
-      f.all().find((node) => node.props.testID === "voice-expanded-panel")!;
-    const scroll = () =>
-      f.all().find((node) => node.props.testID === "voice-panel-scroll")!;
-    const content = () =>
-      f.all().find((node) => node.props.testID === "voice-panel-content")!;
-    const measure = (height: number) => {
-      content().props.onLayout({ nativeEvent: { layout: { height } } });
+      {
+        id: "assistant-complete",
+        speaker: "assistant",
+        text: "Six.",
+        sealed: true,
+        complete: true,
+      },
+    ],
+  };
+  const f = setup({ active: true, snapshot: completed });
+  const delivered = [...f.snapshots];
+  for (const level of [
+    { input: 0.8, output: 0 },
+    { input: 0.8, output: 0.3 },
+    { input: 0, output: 0.3 },
+    { input: 0, output: 0 },
+  ]) {
+    for (let sample = 0; sample < 5; sample++) {
+      f.emit({ type: "level", ...level });
+      context.mock.timers.tick(200);
       f.harness.flush();
-    };
-    assert.equal(panel().props.style.height, 244);
-    assert.equal(scroll().props.scrollEnabled, false);
-    f.layoutAnimations.length = 0;
-    f.voice.error = "Voice connection lost";
-    f.harness.render();
-    measure(240);
-    assert.equal(panel().props.style.height, 418);
-    assert.equal(scroll().props.scrollEnabled, false);
-    assert.equal(scroll().props.bounces, false);
-    assert.equal(f.layoutAnimations.length, reducedMotion ? 0 : 1);
-    if (!reducedMotion)
-      assert.equal(
-        (f.layoutAnimations[0] as { duration: number }).duration,
-        220,
-      );
-    f.voice.error = undefined;
-    f.harness.render();
-    measure(66);
-    assert.equal(panel().props.style.height, 244);
-    assert.equal(scroll().props.scrollEnabled, false);
-    assert.equal(f.layoutAnimations.length, reducedMotion ? 0 : 2);
-    f.harness.unmount();
-  });
-}
+    }
+    assert.equal(f.voice.snapshot, completed);
+    assert.deepEqual(f.snapshots, delivered);
+    assert.doesNotMatch(f.text(), /Transcribing/);
+  }
+  f.levels.speaking = true;
+  f.harness.render();
+  assert.match(f.text(), /Assistant is speaking/);
+  assert.deepEqual(f.snapshots, delivered);
+  f.levels.speaking = false;
+  f.harness.render();
+  assert.match(f.text(), /Listening/);
+  assert.deepEqual(f.snapshots, delivered);
+  f.harness.unmount();
+  assert.equal(f.snapshots.at(-1), undefined);
+});
 
-for (const viewport of [
-  { width: 375, height: 667, fontScale: 1 },
-  { width: 402, height: 874, fontScale: 1 },
-  { width: 402, height: 874, fontScale: 2.5 },
-  { width: 320, height: 568, fontScale: 1 },
-]) {
-  test(`voice only scrolls after reaching 60% of the ${viewport.height}pt screen at text scale ${viewport.fontScale}`, () => {
-    const f = setup({ active: true, viewport, preferencesOpen: true });
-    const panel = () =>
-      f.all().find((node) => node.props.testID === "voice-expanded-panel")!;
-    const scroll = () =>
-      f.all().find((node) => node.props.testID === "voice-panel-scroll")!;
-    const measure = (id: string, height: number) => {
-      f.all()
-        .find((node) => node.props.testID === id)!
-        .props.onLayout({
-          nativeEvent: { layout: { height } },
-        });
-      f.harness.flush();
-    };
-    // Simulate native text wrapping, rather than guessing a fixed notice height.
-    measure("voice-panel-header", 80);
-    measure("voice-panel-controls", 86);
-    const cap =
-      Math.min(viewport.height * 0.6, viewport.height - 47 - 34 - 60 - 96) - 24;
-    const bodyAtCap = cap - 80 - 86 - 20;
-    measure("voice-panel-content", Math.floor(bodyAtCap));
-    assert.equal(scroll().props.scrollEnabled, false);
-    measure("voice-panel-content", Math.ceil(bodyAtCap) + 100);
-    assert.equal(panel().props.style.height, cap);
-    assert.equal(scroll().props.scrollEnabled, true);
-    assert.equal(scroll().props.showsVerticalScrollIndicator, true);
-    const descendants = elements(scroll());
-    for (const id of ["voice-panel-header", "voice-panel-controls"])
-      assert.equal(
-        descendants.some((node) => node.props.testID === id),
-        false,
-      );
-    assert.equal(
-      f.all().filter((node) => node.type === "ScrollView").length,
-      1,
-      "preferences, captions and tasks share one scroll area",
-    );
-    measure("voice-panel-content", Math.max(0, Math.floor(bodyAtCap) - 20));
-    assert.equal(scroll().props.scrollEnabled, false);
-    f.harness.unmount();
+test("the newly bounded query error renders through the selected app language", () => {
+  const phrases: string[] = [];
+  const f = setup({
+    optionsPending: true,
+    translate: (phrase) => {
+      phrases.push(phrase);
+      return phrase === "Voice options could not load."
+        ? "无法加载语音选项，请重试。"
+        : phrase;
+    },
   });
-}
+  f.query.options.error = new Error("Voice options could not load.");
+  f.query.options.isPending = false;
+  f.harness.render();
+  assert.ok(phrases.includes("Voice options could not load."));
+  assert.ok(f.notices().includes("无法加载语音选项，请重试。"));
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a generic failed start stays actionable without offering billing operations", () => {
+  const f = setup({ error: "Microphone access is required for voice." });
+  assert.match(f.text(), /Unable to start/);
+  assert.ok(f.notices().includes("Microphone access is required for voice."));
+  assert.equal(f.find("Review billing on Web"), undefined);
+  assert.equal(f.button("Try again").props.disabled, false);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("closing before a voice session is established only returns to chat", () => {
+  const f = setup({ optionsPending: true });
+  f.button("Return to chat").props.onPress();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("offline recovery disables retry without ending or restarting an unestablished call", () => {
+  const f = setup({ error: "Microphone access is required for voice." });
+  f.setOnline(false);
+  assert.ok(
+    f.notices().includes("You’re offline. Reconnect to start a voice call."),
+  );
+  assert.equal(f.button("Try again").props.disabled, true);
+  f.button("Try again").props.onPress();
+  assert.equal(f.starts().length, 0);
+  assert.deepEqual(f.events, []);
+  f.harness.unmount();
+});

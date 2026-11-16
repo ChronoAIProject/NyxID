@@ -104,6 +104,15 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"settled":1,"deadline":1})
                 .build(),
+            IndexModel::builder()
+                .keys(doc! {"reconcile_failed_at":1,"deadline":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("voice_window_reconcile_order".to_owned())
+                        .partial_filter_expression(doc! {"settled":false})
+                        .build(),
+                )
+                .build(),
         ])
         .await?;
     Ok(())
@@ -250,6 +259,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                supplemental_result_claims: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
@@ -428,6 +438,7 @@ pub(crate) async fn publish_result(
                 let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                         execution_task: None,
                         delegated_images: Default::default(),
@@ -681,6 +692,7 @@ pub(crate) async fn result_message(
         return Ok(None);
     }
     Ok(Some(AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -923,6 +935,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),

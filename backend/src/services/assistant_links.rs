@@ -17,6 +17,7 @@ pub enum AssistantPage<'a> {
         group: &'a str,
     },
     Approvals,
+    ApprovalSettings,
     Conversation {
         conversation: &'a str,
     },
@@ -82,6 +83,7 @@ impl AssistantPage<'_> {
                 "/assistant".into()
             }
             Self::Approvals => "/assistant/approvals".into(),
+            Self::ApprovalSettings => "/approvals/settings".into(),
             Self::Conversation { conversation } => {
                 query.append_pair("c", conversation);
                 "/assistant".into()

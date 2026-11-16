@@ -12,7 +12,9 @@ const { buildNativeLinks } = require("./scripts/lib/native-links");
 export default ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = (process.env.APP_ENV ?? "dev") as "dev" | "prod";
   const env = loadEnv();
-  const r = resolveProfile(appEnv, env, { warnOnFrontendUrlFallback: true });
+  const r = resolveProfile(appEnv, env, {
+    warnOnFrontendUrlFallback: true,
+  });
   const ident = appIdentity(env);
 
   // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
@@ -28,7 +30,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
-    apiBaseUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    associatedUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    androidHttpsAppLinks: r.androidHttpsAppLinks,
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,
     scheme: ident.scheme,
@@ -70,15 +73,21 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
         NSMicrophoneUsageDescription:
           "Allow NyxID to use your microphone for dictation and voice conversations.",
+        NSPhotoLibraryAddUsageDescription:
+          "Allow NyxID to save images you choose from chats to your photo library.",
       },
     },
     android: {
       package: r.androidPackage,
       versionCode: Number(r.androidVersionCode),
-      googleServicesFile: "./google-services.json",
+      ...(r.androidGoogleServicesFile
+        ? { googleServicesFile: r.androidGoogleServicesFile }
+        : {}),
       permissions: [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
+        // Chromium WebView requires both audio permissions to expose a microphone.
+        "android.permission.MODIFY_AUDIO_SETTINGS",
       ],
       blockedPermissions: [
         "android.permission.READ_EXTERNAL_STORAGE",
@@ -92,6 +101,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       "./plugins/withVoiceAudio",
+      [
+        "./plugins/withAndroidGoogleServicesValidation",
+        {
+          file: r.androidGoogleServicesFile,
+          androidPackage: r.androidPackage,
+        },
+      ],
       ["expo-screen-orientation", { initialOrientation: "PORTRAIT_UP" }],
       [
         "expo-image-picker",

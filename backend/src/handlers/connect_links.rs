@@ -562,6 +562,7 @@ pub async fn complete_connect_link(
                 Some(&connection_id),
                 Some(&view.link.id),
                 None, // hosted connect links use redirect-path routing, not popup flows
+                None,
             )
             .await?;
             user_api_key_service::mark_provider_connection_pending_by_connection_id(

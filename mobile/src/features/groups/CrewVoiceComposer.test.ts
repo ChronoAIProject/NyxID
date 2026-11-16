@@ -154,6 +154,7 @@ function setup(withNativeRecognition = false) {
     h.mock("expo-speech-recognition", {
       ExpoSpeechRecognitionModule: {
         setAudioSessionActiveIOS: () => events.push("audio-release"),
+        getPermissionsAsync: async () => ({ granted: true }),
         requestPermissionsAsync: async () => ({ granted: true }),
         getSupportedLocales: async () => ({ locales: ["en-US"] }),
         supportsOnDeviceRecognition: () => true,

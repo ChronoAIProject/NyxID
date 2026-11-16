@@ -964,7 +964,7 @@ pub(crate) async fn schedule_disconnect(
         finish_effect(&durable, &effect, false, Some(reason)).await?;
         return Ok(false);
     }
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         let _ = deliver_material(&durable, &effect, material).await;
     });

@@ -2078,13 +2078,17 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         }
     };
 
-    Sse::new(stream)
+    let mut response = Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(30))
                 .text("keepalive"),
         )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::services::shutdown::RecoverableSubscription);
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -7046,7 +7050,7 @@ async fn execute_ssh_command_internal(
 
     // Generate ephemeral SSH credentials (key + cert as strings, no files)
     let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
-        state, ssh_svc, service_id, user_id, principal,
+        state, ssh_svc, service_id, user_id, principal, false,
     )
     .await?;
 

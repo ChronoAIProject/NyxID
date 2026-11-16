@@ -64,8 +64,10 @@ pub(crate) use guest_model::owner_model_route_allowed;
 pub use http::check_http;
 pub use http::{HttpProjection, check_http_projected, verify_resolved, verify_resolved_projected};
 use request_identity::selection_fingerprint;
+pub(crate) use request_identity::{
+    assistant_model_transport, stateless_inference, stateless_model_transport,
+};
 pub use request_identity::{bind_headers, http_operation};
-pub(crate) use request_identity::{stateless_inference, stateless_model_transport};
 pub use resolution::resolve_implicit_for_request;
 #[cfg(test)]
 use selection::owner_selector;

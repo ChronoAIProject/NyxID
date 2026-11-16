@@ -63,7 +63,12 @@ async fn run_inner(exchange: Exchange) -> Result<ManagedResponse, ManagedExecuti
         }
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        tokio::select! { value = bounded => value, value = authority => value }
+        let shutdown = crate::services::shutdown::process();
+        tokio::select! {
+            () = shutdown.stopped() => Err(AppError::ClientDisconnected),
+            value = bounded => value,
+            value = authority => value,
+        }
     })
     .await;
     // The proof lives outside both cancellation boundaries. Neither a timeout

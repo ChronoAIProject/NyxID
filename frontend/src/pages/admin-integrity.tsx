@@ -15,6 +15,7 @@ import {
 } from "@/hooks/use-admin-chain-verification";
 import type {
   ChainVerifyStatus,
+  SecurityEffectDiagnostics,
   StartupDiagnostic,
 } from "@/schemas/admin-chain-verification";
 import { useAuthStore } from "@/stores/auth-store";
@@ -166,6 +167,47 @@ function StartupDiagnostics({
   );
 }
 
+function SecurityEffectQueue({
+  diagnostics,
+}: {
+  readonly diagnostics: SecurityEffectDiagnostics | undefined;
+}) {
+  useUiTranslation();
+  if (!diagnostics) return null;
+  const needsAttention =
+    (diagnostics.oldest_pending_age_seconds ?? 0) >= 3600 ||
+    diagnostics.counts.some(
+      (item) => item.state === "uncertain" || item.state === "failed",
+    );
+  return (
+    <Card className={needsAttention ? "border-destructive/50" : undefined}>
+      <CardHeader>
+        <CardTitle className="text-15">{translateUi("Security effect relay")}</CardTitle>
+        {needsAttention ? (
+          <Badge variant="destructive">{translateUi("Action required")}</Badge>
+        ) : null}
+      </CardHeader>
+      <CardContent className="space-y-2 text-14">
+        <p className="text-muted-foreground">
+          {diagnostics.oldest_pending_at
+            ? translateUi("Oldest outstanding effect: {{value1}}", {
+                value1: `${formatTimestamp(diagnostics.oldest_pending_at)} (${diagnostics.oldest_pending_age_seconds ?? 0}s)`,
+              })
+            : translateUi("No outstanding effects")}
+        </p>
+        {diagnostics.counts.map((item) => (
+          <div key={`${item.kind}:${item.state}`} className="flex justify-between gap-4">
+            <span>{item.kind} / {item.state}</span>
+            <span className="font-mono">
+              {item.count}{item.at_least ? "+" : ""}
+            </span>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AdminIntegrityPage() {
   useUiTranslation();
   const { data, isLoading, error } = useChainVerification();
@@ -217,6 +259,7 @@ export function AdminIntegrityPage() {
       {data ? (
         <StartupDiagnostics diagnostics={data.startup_diagnostics} />
       ) : null}
+      {data ? <SecurityEffectQueue diagnostics={data.security_effects} /> : null}
 
       {error ? (
         <Card>

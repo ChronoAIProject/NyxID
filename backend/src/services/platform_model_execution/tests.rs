@@ -792,17 +792,21 @@ async fn expired_attempt_diagnosed_once_without_releasing_and_known_intent_wins(
 
 #[tokio::test]
 async fn paid_provider_evidence_uses_exact_funding_tax_and_one_durable_settlement() {
-    paid_provider_evidence(false, false).await;
+    paid_provider_evidence(false, false, false).await;
 }
 #[tokio::test]
 async fn paid_image_evidence_uses_exact_funding_tax_ledger_lago_and_recovery() {
-    paid_provider_evidence(true, false).await;
+    paid_provider_evidence(true, false, false).await;
 }
 #[tokio::test]
 async fn paid_family_contract_uses_existing_exact_funding_ledger_lago_and_recovery() {
-    paid_provider_evidence(false, true).await;
+    paid_provider_evidence(false, true, false).await;
 }
-async fn paid_provider_evidence(images: bool, family: bool) {
+#[tokio::test]
+async fn usage_checkpoint_model_executor_death_recovers_exact_vector_and_accounts() {
+    paid_provider_evidence(false, false, true).await;
+}
+async fn paid_provider_evidence(images: bool, family: bool, checkpoint_crash: bool) {
     use crate::models::{
         billing_rate_cache::BillingRateCache,
         billing_target::BillingTargetKind,
@@ -832,9 +836,22 @@ async fn paid_provider_evidence(images: bool, family: bool) {
         )
         .mount(&server)
         .await;
+    let response = if checkpoint_crash {
+        request.streaming = true;
+        request.body["stream"] = json!(true);
+        ResponseTemplate::new(200).set_body_raw(
+            format!(
+                "event: response.completed\ndata: {}\n\n",
+                json!({"type":"response.completed","response":response}),
+            ),
+            "text/event-stream",
+        )
+    } else {
+        ResponseTemplate::new(200).set_body_json(response)
+    };
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .respond_with(response)
         .expect(1)
         .mount(&server)
         .await;
@@ -933,6 +950,7 @@ async fn paid_provider_evidence(images: bool, family: bool) {
     };
     db.collection::<BillingTaxProfile>("billing_tax_profiles")
         .insert_one(BillingTaxProfile {
+            revision: 0,
             id: actor.into(),
             owner_id: actor.into(),
             subscription_id: "subscription".into(),
@@ -979,7 +997,35 @@ async fn paid_provider_evidence(images: bool, family: bool) {
     context.billing = &billing;
     let accepted = dispatch(&context, &plan, &request).await.unwrap();
     let metered = accepted.metered.clone();
-    consume(&context, &plan, accepted, None).await.unwrap();
+    if checkpoint_crash {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+        crate::billing_integration_tests::usage_checkpoints::crash_after_checkpoint(consume(
+            &context,
+            &plan,
+            accepted,
+            Some(&sender),
+        ))
+        .await;
+        assert_eq!(
+            db.collection::<Document>("usage_meter")
+                .count_documents(doc! {"quantity":{"$ne":bson::Bson::Null}})
+                .await
+                .unwrap(),
+            0,
+            "checkpoint is invisible to old final-quantity predicates"
+        );
+        db.collection::<Document>(ATTEMPTS)
+            .update_many(
+                doc! {},
+                doc! {"$set":{"lease_until":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(recover(db).await.unwrap(), 1);
+        assert_eq!(recover(db).await.unwrap(), 0);
+    } else {
+        consume(&context, &plan, accepted, None).await.unwrap();
+    }
     let evidence = adapters::evidence(
         Native::Responses,
         &serde_json::from_str::<Value>(Native::Responses.fixture()).unwrap()["usage"],
@@ -1152,7 +1198,7 @@ async fn paid_provider_evidence(images: bool, family: bool) {
         .update_many(doc! {}, doc! {"$set":{"updated_at":stale}})
         .await
         .unwrap();
-    let failed_stats = reconciler.push_usage_for_test().await.unwrap();
+    let failed_stats = reconciler.push_usage_outage_for_test().await;
     assert!(failed_stats.retried > 0);
     drop(failed);
     Mock::given(method("POST"))
@@ -1250,6 +1296,7 @@ async fn paid_provider_evidence(images: bool, family: bool) {
         1
     );
     server.verify().await;
+    db.drop().await.unwrap();
 }
 
 #[test]

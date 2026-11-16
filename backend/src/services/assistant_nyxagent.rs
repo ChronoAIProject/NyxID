@@ -1199,6 +1199,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::assistant_wake_service::ensure_indexes(db).await?;
     super::collaboration_group_service::ensure_indexes(db).await?;
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
@@ -1345,6 +1346,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
             doc! {"channel_id": 1, "relay_partition": 1, "kind": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"channel_id": 1, "platform_chat_id": 1, "kind": 1, "partition": 1},
             false,
         ),
         (
@@ -2583,6 +2589,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?
     };
+    let (events, preparing) =
+        super::assistant_wake_service::partition_in_session(db, user_id, &id, events, session)
+            .await?;
+    row.pending_events.extend(preparing);
     let events = super::execution_permission_dispatch::tasks::partition_events(
         &mut row.pending_events,
         events,
@@ -2633,6 +2643,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         return Ok(OwnerTurnAdmission::Drained);
     }
+    let mut events = events;
+    super::assistant_wake_service::materialize(db, user_id, &mut events, session).await?;
     let with_nyxbot = start.origin == TurnOrigin::Group
         && !row.shared_agent_thread
         && row.role == AgentRole::Subagent
@@ -2658,11 +2670,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             row.channel = Some(origin.clone());
         }
+        let origin = row.channel.as_ref().unwrap();
+        let conversation =
+            super::org_channel_service::follow_conversation(db, &row, origin, Some(&mut *session))
+                .await?;
         super::channel_thread_follow_service::validate_in_session(
             db,
             user_id,
-            row.channel.as_ref().unwrap(),
-            &id,
+            origin,
+            &conversation,
             true,
             session,
         )
@@ -2850,6 +2866,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: lost.automation_work.clone(),
             execution_task: lost.execution_task.clone(),
             delegated_images: Default::default(),
@@ -3088,6 +3105,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
     };
     row.active_turn = Some(ActiveTurn {
+        group_reply_in_settlement: false,
         platform_model_context: None,
         automation_work: automation_work.clone(),
         artifact_watch_id: None,
@@ -3389,6 +3407,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
         _ => {}
     }
+    super::assistant_wake_service::group::admit(db, &mut row, session).await?;
+    if row.group_id.is_some() {
+        Box::pin(super::assistant_wake_service::publication::bind(
+            db, &mut row, session,
+        ))
+        .await?;
+    }
     row.updated_at = now;
     Box::pin(super::assistant_platform_model::bind_in_session(
         db, session, &mut row,
@@ -3563,6 +3588,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: row
             .active_turn
             .as_ref()
@@ -3761,18 +3787,41 @@ pub async fn begin_turn_with_voice(
                 let start = &start;
                 // MongoDB's retry driver stores and polls this callback through
                 // several frames. Keep the turn/message/upload transaction on the heap.
-                let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
-                    db,
-                    session,
-                    &keys,
-                    user_id,
-                    start,
-                    &ids,
-                    &new_agent,
-                    learning_epoch,
-                    None,
-                    voice_request_id.as_deref(),
-                ))
+                let operation: AppResult<_> = Box::pin(async {
+                    let admission = Box::pin(begin_owner_turn_in_session(
+                        db,
+                        session,
+                        &keys,
+                        user_id,
+                        start,
+                        &ids,
+                        &new_agent,
+                        learning_epoch,
+                        None,
+                        voice_request_id.as_deref(),
+                    ))
+                    .await?;
+                    if start.origin == TurnOrigin::Event
+                        && let OwnerTurnAdmission::Started(claim) = &admission
+                        && claim
+                            .conversation
+                            .active_turn
+                            .as_ref()
+                            .is_some_and(|turn| turn.automation_work.is_none())
+                        && !super::coordination_service::RateWindowStore::admit_in_session(
+                            db,
+                            "assistant_event_turns",
+                            user_id,
+                            super::assistant_team_service::EVENT_TURNS_PER_HOUR,
+                            std::time::Duration::from_secs(3600),
+                            session,
+                        )
+                        .await?
+                    {
+                        return Err(AppError::RateLimited);
+                    }
+                    Ok(admission)
+                })
                 .await;
                 transactions::transaction_result(operation)
             })
@@ -3917,6 +3966,7 @@ pub async fn append_events_in_session(
                     e.source_event_ids.is_empty()
                         && e.automation_work.is_none()
                         && e.invocation_id.is_none()
+                        && e.wake.is_none()
                         && !super::async_service_operation::cma_wake_event(e)
                 })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
@@ -4151,7 +4201,7 @@ pub(crate) async fn request_stop_row_target(
     let db = db.clone();
     let user_id = user_id.to_owned();
     let id = id.to_owned();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         tokio::time::sleep(delay).await;
         if let Err(error) = force_stop(&db, &user_id, &id, &turn_id).await
             && !matches!(error, AppError::NotFound(_))
@@ -4355,6 +4405,12 @@ artifact_recovery_target: None,
                         "user_id": &row.user_id,
                         "active_turn.turn_id": &turn_id,
                     };
+                if result.error.as_ref().is_some_and(|error| error.stage == "shutdown") {
+                    let worker = row.active_turn.as_ref()
+                        .and_then(|turn| turn.worker_instance.as_ref())
+                        .ok_or_else(not_found)?;
+                    active_filter.insert("active_turn.worker_instance.id", &worker.id);
+                }
                 if let Some(expected) = row.active_turn.as_ref().and_then(|turn| turn.platform_origin.as_ref()) {
                     active_filter.insert("active_turn.platform_origin", bson::to_bson(expected).map_err(|_|AppError::AssistantTurnRequired)?);
                 }
@@ -4379,7 +4435,8 @@ artifact_recovery_target: None,
                 {
                     Some(TurnError::internal("cancelled", "stop"))
                 } else {
-                    result.error.clone()
+                    result.error.clone().or_else(|| current.active_turn.as_ref()
+                        .and_then(super::assistant_model_observer::approval_error))
                 };
                 let mut error = error.map(|error| current.active_turn.as_ref().map_or_else(
                     || error.clone(),
@@ -4537,6 +4594,7 @@ artifact_recovery_target: None,
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+                    supplemental_result_claims: Vec::new(),
                     automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
@@ -4598,6 +4656,10 @@ artifact_recovery_target: None,
                     via: None,
                     report_to,
                 };
+                if let Some(error) = error.as_ref().filter(|e| super::assistant_model_observer::is_policy_failure(e.code)) {
+                    if !message.text.is_empty() { message.text.push_str("\n\n"); }
+                    message.text.push_str(&error.message);
+                }
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(write_checkpoint_in_session(
                         &db, session, &current, turn, &message, now,
@@ -4610,6 +4672,9 @@ artifact_recovery_target: None,
                 }
                 if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
+                }
+                if let Some(turn) = settled_turn.as_ref().filter(|turn| turn.group_reply_in_settlement) {
+                    Box::pin(super::assistant_wake_service::publication::publish(&db,&current,turn,&message,session)).await?;
                 }
                 if message.status == "completed" && let Some(origin) = super::org_channel_service::origin(&row) {
                     match Box::pin(super::org_channel_service::validate_in_session(&db,session,origin,&row.user_id,row.agent_id.as_deref().unwrap_or_default(),true)).await {
@@ -4681,6 +4746,43 @@ pub async fn force_stop(db: &Database, user_id: &str, id: &str, turn_id: &str) -
     )
     .await
     .map(|_| true)
+}
+
+/// Shutdown alone can settle a fresh heartbeat, and only for the exact worker
+/// and turn. The transaction retains Stop precedence and the existing format.
+pub async fn settle_shutdown_turn(
+    db: &Database,
+    row: &AssistantConversation,
+    worker_id: &str,
+) -> AppResult<Option<TurnError>> {
+    if row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.worker_instance.as_ref())
+        .is_none_or(|worker| worker.id != worker_id)
+    {
+        return Ok(None);
+    }
+    match finish_turn_inner(
+        db,
+        row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: Some(TurnError::internal("turn_lost", "shutdown")),
+        },
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(error) => Ok(error),
+        Err(AppError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Reclaim only turns whose heartbeat is durably stale. The heartbeat predicate
@@ -7307,6 +7409,18 @@ impl TurnError {
             "billing_provider_unavailable" => (
                 "billing_provider_unavailable",
                 "NyxBot could not verify billing because the billing service is unavailable. Try again shortly; if this continues, contact support.",
+            ),
+            "model_policy_denied" => (
+                "model_policy_denied",
+                "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.",
+            ),
+            "model_org_approval_required" => (
+                "model_org_approval_required",
+                "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.",
+            ),
+            "model_approval_required" => (
+                "model_approval_required",
+                "This model request requires approval that this thread cannot present. Review Approval settings before retrying.",
             ),
             "model_interrupted" => (
                 "model_interrupted",

@@ -246,7 +246,7 @@ const SHARED_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
 
 const ORG_SPECIALIST_CHANNELS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "nyxbot:org-specialist-channels",
-    description: "Organization specialist channels with member identity and budgeted org-paid guests; requires all executing replicas upgraded and old workers drained.",
+    description: "Organization specialist channels with member identity and org-paid guests; requires recorded capability support from every live executing replica.",
     default_enabled: false,
 };
 
@@ -273,7 +273,7 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
 pub const ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY: &str = "assistant:generated-artifacts";
 const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
-    description: "Admit generated Sandbox files for Web user turns only after all API and async workers upgrade and old writers drain.",
+    description: "Admit generated Sandbox files for Web user turns once capability support is recorded and every live API and async worker supports it.",
     default_enabled: false,
 };
 
@@ -1533,7 +1533,7 @@ pub async fn set_platform_override(
     }
 
     if enabled {
-        super::security_readiness_service::require_activation(db, flag_key).await?;
+        super::security_readiness_service::require_flag_enable(db, flag_key).await?;
     }
     let now = bson::DateTime::from_chrono(Utc::now());
     let target_key = match target.key() {
@@ -1626,7 +1626,7 @@ pub async fn set_platform_org_override(
     }
     ensure_org_exists(db, org_user_id).await?;
     if enabled {
-        super::security_readiness_service::require_activation(db, flag_key).await?;
+        super::security_readiness_service::require_flag_enable(db, flag_key).await?;
     }
     upsert_override_row(
         db,

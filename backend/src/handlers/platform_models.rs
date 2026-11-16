@@ -102,7 +102,7 @@ pub struct AdminModel {
 async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminModel> {
     let routing = registry::routing(&state.db, &row).await?;
     // The admin editor uses this projection to enable new model authority.
-    let execution_ready = match registry::require_activation_ready(&state.db).await {
+    let execution_ready = match registry::require_execution_ready(&state.db).await {
         Ok(()) => true,
         Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
         Err(error) => return Err(error),
@@ -125,10 +125,12 @@ async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminMode
         let capability = crate::services::platform_model_execution::certification::READINESS;
         required_readiness.push(capability);
         execution_ready
-            && match crate::services::security_readiness_service::report(&state.db, capability)
-                .await
+            && match crate::services::security_readiness_service::serving_report(
+                &state.db, capability,
+            )
+            .await
             {
-                Ok(report) => report.ready,
+                Ok(report) => report.serving_ready,
                 Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
                 Err(error) => return Err(error),
             }

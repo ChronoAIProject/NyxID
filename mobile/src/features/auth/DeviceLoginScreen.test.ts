@@ -47,6 +47,12 @@ function setup({ inSheet = true, scanner = true, reduced = false } = {}) {
     "./AuthTextInput": { AuthTextInput: "TextInput" },
     "./deviceLoginStyles": { createDeviceLoginStyles: () => ({}) },
     "./AuthSessionContext": { useAuthSession: () => ({ isAuthenticated: true }) },
+    "./loginRequestResolver": { takeLoginRequest: () => null },
+    "./useUncertainLoginPreview": { useUncertainLoginPreview: () => ({ reset() {} }) },
+    "./useLoginRequestResume": { useLoginRequestResume: () => {} },
+    "./useLoginRequestHandoff": { useLoginRequestHandoff: () => () => true },
+    "./useLoginPreviewCooldown": { useLoginPreviewCooldown: () => ({ coolingDown: false }) },
+    "./LoginRequestTerminalView": { LoginRequestTerminalView: "Terminal" },
     "./useMfaStepUp": { useMfaStepUp: () => ({ busy: false, prompt: null }) },
     "./DeviceCodeScanner": { DeviceCodeScanner: "DeviceCodeScanner" },
     "./deviceUserCode": {

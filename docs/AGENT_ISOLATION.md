@@ -77,6 +77,18 @@ graph TD
     AUTH --> SCOPE --> RATE --> BIND --> PROXY --> AUDIT
 ```
 
+## Global approval and assistant thinking
+
+Global approval is Writes only by default, All requests when enabled, and Off
+when disabled. Personal per-service rules override that fallback. Personal
+RequireApproval outcomes never gate an assistant chat key's own stateless model
+call in a live server-admitted turn: catalog inference, POST, no method override
+or pool, and the existing closed model request contract. Deny and org policy
+(including approval) still apply. Account consent, operation scopes, guest/shared
+authority, billing and rate limits are unchanged. Ordinary keys, MCP clients,
+direct human proxy calls, idle chat keys, and stateful/unknown model payloads
+retain their existing approval rules.
+
 ## How It Works
 
 ### Proxy Request Flow

@@ -13,6 +13,9 @@ impl TelegramNewService<'_> {
         let requests = self.db.collection::<TelegramBotRequest>(COLLECTION_NAME);
         let mut claimed = Vec::new();
         for _ in 0..25 {
+            let Some(work) = super::shutdown::process().background() else {
+                break;
+            };
             let Some(request) = requests.find_one_and_update(
                 doc! {
                     "auto_connect": true, "active": true,
@@ -25,11 +28,19 @@ impl TelegramNewService<'_> {
                 },
             ).sort(doc! {"next_connection_attempt_at": 1, "created_at": 1})
                 .return_document(ReturnDocument::After).await? else { break };
-            claimed.push(request);
+            let release = super::shutdown::process().register_release(super::shutdown::Release {
+        safe_after_stop: false,
+                db: self.db.clone(), collection: COLLECTION_NAME,
+                filter: doc! {"_id": &request.id, "connection_generation": request.connection_generation,
+                    "auto_connect": true, "active": true, "status": {"$in": ["ready", "provisioning"]}},
+                update: doc! {"$set": {"next_connection_attempt_at": bson::DateTime::from_millis(0)}},
+            });
+            claimed.push((request, work, release));
         }
-        stream::iter(claimed).for_each_concurrent(8, |request| {
+        stream::iter(claimed).for_each_concurrent(8, |(request, work, release)| {
             let requests = &requests;
             async move {
+            let _work = work;
             let Some(bot_id) = request.telegram_bot_id else { return };
             if let Err(error) = self.connect_claimed(&request, bot_id).await {
                 let delay = 2_i64.pow(request.connection_attempts.min(5));
@@ -49,6 +60,7 @@ impl TelegramNewService<'_> {
                     "Telegram creation connection will retry"
                 );
             }
+            release.completed();
             }
         }).await;
         Ok(())

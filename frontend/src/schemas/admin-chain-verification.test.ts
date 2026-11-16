@@ -105,3 +105,14 @@ it("adds account verification without changing the cached client's chain enum", 
     chainVerificationResponseSchema.parse({ chains: [response.accounts] }),
   ).toThrow();
 });
+
+
+it("preserves bounded relay health and accepts an older replica without it", () => {
+  expect(chainVerificationResponseSchema.parse({ chains: [] }).security_effects).toBeUndefined();
+  const health = {
+    counts: [{ kind: "audit", state: "pending", count: 1000, at_least: true }, { kind: "cae", state: "uncertain", count: 1, at_least: false }],
+    oldest_pending_at: "2026-11-15T10:00:00Z",
+    oldest_pending_age_seconds: 7200,
+  };
+  expect(chainVerificationResponseSchema.parse({ chains: [], security_effects: health }).security_effects).toEqual(health);
+});

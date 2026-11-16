@@ -121,6 +121,18 @@ This behavior is reflected in:
 
 ## Catalog Endpoint Discovery
 
+Remote spec sync binds its endpoint transaction to the service's captured
+`openapi_spec_url` and `updated_at`. If the parent changes during a fetch, the
+same call reloads it and retries at most twice, using the existing 60-second
+fetch cache. It stops if the URL is gone, the service is inactive or otherwise
+ineligible, or a legacy service now has endpoint rows. Three consecutive parent
+changes leave no stale writes and log a warning; a later create/update trigger
+or process startup can try again. Legacy zero-row discovery also checks rows
+inside the commit transaction, preserving concurrent curation. Embedded startup
+overlays use ordinary additive reconciliation: they are compiled into the binary
+and are not invalidated by unrelated parent timestamps. Hosted overlays and Tool
+sync remain additive by name; unrelated administrator operations are retained.
+
 `GET /api/v1/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints` under `/api/v1` accept general and scoped agent API keys via `X-API-Key` or Bearer without proxy scope. Scheduled-invocation keys, service accounts, and relay tokens are rejected; delegated access retains the exact `account:read` GET exception. Catalog metadata uses template values and live platform grants, without instance connection flags or overrides. Private instance-backed access and mounted-spec fallback obey the effective key allowlist and Member/Admin org scopes. Discovery performs no auto-provisioning or pending-OAuth reconciliation. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; credential-free auto-connected templates remain suppressed for all callers. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability.
 
 The catalog API exposes parsed OpenAPI endpoint metadata for any service that has an `openapi_spec_url`:

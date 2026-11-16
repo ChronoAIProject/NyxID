@@ -1003,7 +1003,7 @@ test("ending while socket setup is pending closes the late socket and ignores it
   const waiting = deferred<VoiceControlSocket>();
   e.responses.socket = () => waiting.promise;
   const starting = e.client.start(preferences);
-  for (let step = 0; step < 8 && !e.paths.length; step++)
+  for (let step = 0; step < 32 && !e.paths.length; step++)
     await Promise.resolve();
   assert.equal(e.paths.length, 1);
   await e.client.end();
@@ -1012,6 +1012,144 @@ test("ending while socket setup is pending closes the late socket and ignores it
   assert.equal(e.socket.closed, 1);
   assert.equal(e.socket.onmessage, null);
   assert.equal(e.count().closed, 1);
+});
+
+for (const phase of ["microphone", "server", "webrtc", "transport"] as const) {
+  test(`a noncooperative ${phase} startup has a bounded deadline and disposes late resources`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup();
+    const offer = deferred<string>();
+    const post = deferred<unknown>();
+    const answer = deferred<void>();
+    const socket = deferred<VoiceControlSocket>();
+    if (phase === "microphone") e.media.prepareResult = offer.promise;
+    if (phase === "server") e.responses.start = () => post.promise;
+    if (phase === "webrtc") e.media.answerResult = answer.promise;
+    if (phase === "transport") e.responses.socket = () => socket.promise;
+    const starting = e.client.start(preferences);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    const timeout =
+      phase === "server" ? 30_000 : phase === "transport" ? 15_000 : 40_000;
+    context.mock.timers.tick(timeout - 1);
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    assert.equal(e.client.isClosed, false);
+    context.mock.timers.tick(1);
+    await starting;
+
+    const expected = {
+      microphone: "Microphone could not be opened",
+      server:
+        "Voice server could not be reached. Check the active call before trying again.",
+      webrtc: "WebRTC negotiation failed",
+      transport: "Voice control connection could not open",
+    };
+    assert.deepEqual(e.errors, [expected[phase]]);
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.client.pendingStart, false);
+    assert.equal(e.count().closed, 1);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.starts.length, phase === "microphone" ? 0 : 1);
+    assert.equal(e.count().activeCalls, phase === "server" ? 1 : 0);
+    if (phase === "server") assert.equal(e.starts[0]!.signal!.aborted, true);
+    assert.equal(e.media.inputs.includes(true), false);
+    if (phase === "server") {
+      assert.deepEqual(e.controls, []);
+      // A valid owned identity is enough to clean up even a malformed late SDP.
+      post.resolve({ session: session(), sdp_answer: 7 });
+    } else if (phase === "microphone") offer.resolve("late offer");
+    else if (phase === "webrtc") answer.resolve();
+    else socket.resolve(e.socket);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    await e.client.start(preferences);
+    assert.equal(e.starts.length, phase === "microphone" ? 0 : 1);
+    assert.deepEqual(
+      e.controls.map((value) => value.input.action),
+      phase === "microphone" ? [] : ["end"],
+    );
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.socket.closed, phase === "transport" ? 1 : 0);
+    assert.equal(e.socket.onmessage, null);
+    assert.equal(e.clock.timeouts.size, 0);
+    context.mock.timers.tick(120_000);
+    assert.equal(e.count().closed, 1);
+    assert.deepEqual(e.errors, [expected[phase]]);
+  });
+
+  test(`End settles a noncooperative ${phase} startup immediately without waiting for its deadline`, async () => {
+    const e = setup();
+    const offer = deferred<string>();
+    const post = deferred<unknown>();
+    const answer = deferred<void>();
+    const socket = deferred<VoiceControlSocket>();
+    if (phase === "microphone") e.media.prepareResult = offer.promise;
+    if (phase === "server") e.responses.start = () => post.promise;
+    if (phase === "webrtc") e.media.answerResult = answer.promise;
+    if (phase === "transport") e.responses.socket = () => socket.promise;
+    const starting = e.client.start(preferences);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    await e.client.end();
+    await starting;
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.client.pendingStart, false);
+    assert.equal(e.count().closed, 1);
+    assert.deepEqual(e.errors, []);
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.starts.length, phase === "microphone" ? 0 : 1);
+    assert.equal(e.clock.timeouts.size, 0);
+    offer.resolve("late offer");
+    post.resolve({ session: session(), sdp_answer: "late answer" });
+    answer.resolve();
+    socket.resolve(e.socket);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    assert.deepEqual(
+      e.controls.map((value) => value.input.action),
+      phase === "microphone" ? [] : ["end"],
+    );
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.socket.closed, phase === "transport" ? 1 : 0);
+  });
+}
+
+test("an owned late POST cleanup cannot be overwritten by its older uncertain-start lookup", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup();
+  const post = deferred<unknown>();
+  const discovery = deferred<unknown>();
+  let discoveryStarted = false;
+  e.responses.start = () => post.promise;
+  e.api.accountActive = async () => {
+    discoveryStarted = true;
+    return discovery.promise;
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 32 && !e.starts.length; step++)
+    await Promise.resolve();
+  context.mock.timers.tick(30_000);
+  for (let step = 0; step < 32 && !discoveryStarted; step++)
+    await Promise.resolve();
+  assert.equal(discoveryStarted, true);
+  assert.equal(e.client.isClosed, true);
+  post.resolve({ session: session(), sdp_answer: "late answer" });
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.equal(e.cleanup.at(-1)?.unknown, false);
+  const cleanup = e.cleanup.length;
+  discovery.resolve({
+    session: session({ id: requestId }),
+    conversation_id: `nyxa-${"b".repeat(32)}`,
+  });
+  await starting;
+  assert.equal(e.cleanup.length, cleanup);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(
+    e.controls.map((value) => value.id),
+    [sessionId],
+  );
+  assert.deepEqual(e.conflicts, [null]);
+  assert.deepEqual(e.media.answers, []);
+  assert.deepEqual(e.paths, []);
 });
 
 test("an invalid SDP response with a valid owned session still sends durable End", async () => {

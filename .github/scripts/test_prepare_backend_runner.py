@@ -38,13 +38,17 @@ sudo() {
     [[ "$TEST_FAIL" != activation ]] || return 1
     printf '%s\n' "$TEST_RESULT_KIB" > "$RUNNER_TEMP/swap-state"
   fi
+  if [[ "$1" == swapoff ]]; then
+    [[ "$TEST_FAIL" != release ]] || return 1
+    [[ -f "$2" ]] || return 2
+  fi
 }
 ''')
 
-    def invoke(self, initial=3 * 1024**2, disk=80 * 1024**2, fail="", result=RESERVE_KIB):
+    def invoke(self, initial=3 * 1024**2, disk=80 * 1024**2, fail="", result=RESERVE_KIB, args=()):
         (self.root / "swap-state").write_text(str(initial))
         return subprocess.run(
-            ["bash", str(SCRIPT)], env={**os.environ, "BASH_ENV": str(self.harness),
+            ["bash", str(SCRIPT), *args], env={**os.environ, "BASH_ENV": str(self.harness),
                 "RUNNER_TEMP": str(self.root), "TEST_DISK_KIB": str(disk),
                 "TEST_FAIL": fail, "TEST_RESULT_KIB": str(result)},
             capture_output=True, text=True, timeout=10,
@@ -70,6 +74,11 @@ sudo() {
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "calls").exists())
 
+    def test_existing_swap_still_needs_build_disk_headroom(self):
+        result = self.invoke(initial=RESERVE_KIB, disk=35 * 1024**2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "calls").exists())
+
     def test_failed_preparation_removes_only_unactivated_file(self):
         for failure in ("allocation", "activation"):
             with self.subTest(failure=failure):
@@ -82,6 +91,43 @@ sudo() {
         self.assertNotEqual(result.returncode, 0)
         # Do not remove a potentially active file after a verification failure.
         self.assertEqual(len(list(self.root.glob("nyxid-ci-swap.*"))), 1)
+
+
+    def test_release_disables_owned_swap_before_removing_it(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        record = self.root / "nyxid-ci-swap-path"
+        allocated = Path(record.read_text().strip())
+        unrelated = self.root / "runner-swap"
+        unrelated.write_text("do not remove")
+        released = self.invoke(args=("--release",))
+        self.assertEqual(released.returncode, 0, released.stderr)
+        self.assertIn(f"swapoff {allocated}", (self.root / "calls").read_text())
+        self.assertFalse(allocated.exists())
+        self.assertFalse(record.exists())
+        self.assertEqual(unrelated.read_text(), "do not remove")
+        self.assertEqual(self.invoke(args=("--release",)).returncode, 0)
+
+    def test_failed_swapoff_keeps_active_file_and_record(self):
+        self.assertEqual(self.invoke().returncode, 0)
+        record = self.root / "nyxid-ci-swap-path"
+        allocated = Path(record.read_text().strip())
+        self.assertNotEqual(self.invoke(args=("--release",), fail="release").returncode, 0)
+        self.assertTrue(allocated.exists())
+        self.assertTrue(record.exists())
+
+    def test_release_without_owned_reserve_does_nothing(self):
+        self.assertEqual(self.invoke(initial=RESERVE_KIB).returncode, 0)
+        self.assertEqual(self.invoke(args=("--release",)).returncode, 0)
+        self.assertFalse((self.root / "calls").exists())
+
+    def test_invalid_release_record_does_not_invoke_swapoff(self):
+        unrelated = self.root / "runner-swap"
+        unrelated.write_text("keep")
+        record = self.root / "nyxid-ci-swap-path"
+        record.write_text(str(unrelated))
+        self.assertNotEqual(self.invoke(args=("--release",)).returncode, 0)
+        self.assertTrue(unrelated.exists())
+        self.assertFalse((self.root / "calls").exists())
 
 
 if __name__ == "__main__":

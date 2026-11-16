@@ -165,6 +165,7 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
   const historyState = options.history ?? "loaded";
   const props = {
     mode: options.mode,
+    disabled: false,
     visible: true,
     current,
     unread: options.unread,
@@ -362,6 +363,10 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     harness,
     setCurrent: (value: WorkspaceChatTarget) => {
       props.current = value;
+      harness.render();
+    },
+    disable: (next: boolean) => {
+      props.disabled = next;
       harness.render();
     },
     selections,
@@ -1518,4 +1523,82 @@ test("thread, crew and channel-bot rows show the unread counts the notification 
   const plain = setup(current, { chats: [...own, ...channels] });
   assert.equal(plain.all().some((row) => row.props.testID === "sidebar-unread-count"), false, "without markers no row shows a pill");
   plain.harness.unmount();
+});
+
+
+test("critical writes disable chat, crew, agent and create rows with muted text and restore them in place", () => {
+  const env = setup({
+    kind: "agent",
+    agentId: "nyxbot",
+    conversationId: conversationId(1),
+  });
+  env.press("Expand crews");
+  env.disable(true);
+  const controls = [
+    ...env.agentRows(),
+    ...env.chatRows(),
+    ...env.groupRows(),
+    env.label("New agent"),
+    env.label("New crew"),
+    env.label("New chat with NyxBot"),
+  ];
+  assert.ok(env.chatRows().length > 0);
+  assert.ok(env.groupRows().length > 0);
+  for (const control of controls) {
+    assert.equal(
+      control.props.disabled,
+      true,
+      control.props.accessibilityLabel,
+    );
+    assert.equal(control.props.accessibilityState.disabled, true);
+    const style = Object.assign(
+      {},
+      ...[
+        typeof control.props.style === "function"
+          ? control.props.style({ pressed: false })
+          : control.props.style,
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
+    );
+    assert.ok((style.minHeight ?? style.height) >= 44);
+    assert.equal(style.opacity, undefined);
+    for (const text of elements(control).filter(
+      (node) => node.type === "Text",
+    )) {
+      const textStyle = Object.assign(
+        {},
+        ...[text.props.style].flat(Infinity).filter(Boolean),
+      );
+      assert.equal(textStyle.color, lightColors.textMuted);
+      assert.equal(textStyle.opacity, undefined);
+    }
+  }
+  env.disable(false);
+  assert.ok(
+    [...env.agentRows(), ...env.chatRows(), ...env.groupRows()].every(
+      (node) => node.props.disabled === false,
+    ),
+  );
+  env.chatRows()[0]!.props.onPress();
+  assert.equal(env.selections.length, 1);
+  env.harness.unmount();
+});
+
+test("an already open chat browser disables its selectable rows and New chat while keeping Close available", () => {
+  const env = setup({ kind: "agent", agentId: "nyxbot" });
+  env.more("View all chats");
+  env.disable(true);
+  const browser = env.browser();
+  for (const item of browser.items) {
+    const row = elements(browser.renderItem(item)).find(
+      (node) => node.type === "Pressable",
+    )!;
+    assert.equal(row.props.disabled, true);
+    assert.equal(row.props.accessibilityState.disabled, true);
+  }
+  assert.equal(browser.primaryAction.disabled, true);
+  browser.onClose();
+  env.harness.flush();
+  env.harness.unmount();
 });

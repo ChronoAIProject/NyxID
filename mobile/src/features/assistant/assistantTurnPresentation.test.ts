@@ -327,3 +327,14 @@ test("Lark attachment diagnostics are closed, visible, and scoped to attachment 
     assert.equal(toolFailureCopy({ kind: "tool_error", reason }, name), "The tool reported an error.");
   }
 });
+
+
+test("model approval guidance remains actionable with saved server URL", () => {
+  const message = messageSchema.parse({ ...failedMessage(), error_code: "model_approval_required",
+    text: "Review Approval settings. https://example.test/approvals/settings",
+    turn_metadata: { attempts: 1, failure_reason: { source: "nyxid", stage: "model_approval", code: "model_approval_required", http_status: 403, nyxid_error_code: 12502 } } });
+  assert.match(storedError(message.error_code), /model request requires approval/);
+  assert.match(storedError(message.error_code), /Review Approval settings/);
+  assert.match(message.text, /https:\/\/example.test\/approvals\/settings/);
+  assert.equal(message.turn_metadata?.failure_reason?.stage, "model_approval");
+});
