@@ -2089,6 +2089,11 @@ History still presents it as completed; it neither blocks later turns nor escape
 conversation deletion or owner erasure. Recap/checkpoint rendering also strips
 legacy connect tokens only for voice-originated rows and threads; ordinary text
 chat recap, checkpoint and last-reply bytes retain their existing behavior.
+Visible threads sanitize each voice history row without rewriting current typed
+input, memory notes or unrelated text rows. Only hidden voice threads sanitize
+whole context text. Checkpoints use the loaded hidden-thread flag; standalone
+reads project that flag by conversation ID and owner, redact on lookup failure,
+and never scan message history or fail a turn because the flag is unavailable.
 Voice token defense removes complete token-bearing URLs before bare tokens,
 so repeated task/context sanitization cannot leave partial placeholders or URLs.
 The published count is read from durable publication metadata into the copied

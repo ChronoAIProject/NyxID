@@ -3010,12 +3010,8 @@ pub(crate) async fn last_reply(
         .sort(doc! {"seq": -1}).await? else { return Ok(None); };
     let mut text = super::voice::links::message_text(&message, &message.text).into_owned();
     if text != super::voice::links::redact_tokens(&text) {
-        let hidden = db
-            .collection::<AssistantConversation>(CONVERSATIONS)
-            .find_one(doc! {"_id": id, "user_id": owner})
-            .await?
-            .is_some_and(|row| row.voice_parent_conversation_id.is_some());
-        text = super::voice::links::thread_text(db, owner, id, hidden, text).await?;
+        let hidden = super::voice::links::hidden_voice_thread(db, owner, id).await;
+        text = super::voice::links::thread_text(hidden, text);
     }
     Ok(Some(ReplySummary {
         seq: message.seq,

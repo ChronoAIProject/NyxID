@@ -2037,15 +2037,18 @@ pub(crate) async fn write_checkpoint_in_session(
     for text in [&mut checkpoint.goal, &mut checkpoint.output]
         .into_iter()
         .flatten()
+        .chain(
+            checkpoint
+                .completed_actions
+                .iter_mut()
+                .chain(&mut checkpoint.failed_actions)
+                .map(|action| &mut action.label),
+        )
     {
         *text = super::voice::links::thread_text(
-            db,
-            &row.user_id,
-            &row.id,
             row.voice_parent_conversation_id.is_some(),
             std::mem::take(text),
-        )
-        .await?;
+        );
     }
     collection
         .replace_one(filter, &checkpoint)
@@ -2057,10 +2060,33 @@ pub(crate) async fn write_checkpoint_in_session(
 
 /// The durable checkpoint of an owned conversation, if any turn has settled
 /// since checkpoints were introduced.
+#[cfg(test)]
 pub async fn checkpoint(
     db: &Database,
     user_id: &str,
     id: &str,
+) -> AppResult<Option<AssistantCheckpoint>> {
+    checkpoint_with_scope(db, user_id, id, None).await
+}
+
+pub(crate) async fn checkpoint_for_conversation(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<Option<AssistantCheckpoint>> {
+    checkpoint_with_scope(
+        db,
+        &row.user_id,
+        &row.id,
+        Some(row.voice_parent_conversation_id.is_some()),
+    )
+    .await
+}
+
+async fn checkpoint_with_scope(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    hidden_voice: Option<bool>,
 ) -> AppResult<Option<AssistantCheckpoint>> {
     let Some(mut checkpoint) = db
         .collection::<AssistantCheckpoint>(CHECKPOINTS)
@@ -2071,11 +2097,11 @@ pub async fn checkpoint(
     };
     let raw = checkpoint_line(&checkpoint, false);
     if raw != super::voice::links::redact_tokens(&raw) {
-        let hidden = get(db, user_id, id)
-            .await?
-            .voice_parent_conversation_id
-            .is_some();
-        if raw != super::voice::links::thread_text(db, user_id, id, hidden, raw.clone()).await? {
+        let hidden = match hidden_voice {
+            Some(hidden) => hidden,
+            None => super::voice::links::hidden_voice_thread(db, user_id, id).await,
+        };
+        if hidden {
             checkpoint.goal = checkpoint
                 .goal
                 .map(|text| super::voice::links::redact_tokens(&text));
@@ -2111,7 +2137,7 @@ pub async fn checkpoint_summary(
 ) -> AppResult<CheckpointSummary> {
     let (conversation, _) = get_authorized(db, user_id, id).await?;
     authorize_thread_read(db, &conversation).await?;
-    let checkpoint = checkpoint(db, user_id, id).await?;
+    let checkpoint = checkpoint_for_conversation(db, &conversation).await?;
     let pending_actions = live_turn(&conversation, Utc::now())
         .map(|turn| {
             turn.activities
@@ -6694,14 +6720,10 @@ pub async fn recap(
         row.guest_turn,
         owner_total,
     );
-    super::voice::links::thread_text(
-        db,
-        &row.user_id,
-        &row.id,
+    Ok(super::voice::links::thread_text(
         row.voice_parent_conversation_id.is_some(),
         recap,
-    )
-    .await
+    ))
 }
 
 struct RenderedRecapLine {
@@ -7114,12 +7136,7 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     if recap.is_empty() && reserved.is_empty() {
         String::new()
     } else {
-        let text = format!("{OPEN}{reserved}{}{CLOSE}", recap.concat());
-        if history.iter().any(super::voice::links::voice_row) {
-            super::voice::links::redact_tokens(&text)
-        } else {
-            text
-        }
+        format!("{OPEN}{reserved}{}{CLOSE}", recap.concat())
     }
 }
 

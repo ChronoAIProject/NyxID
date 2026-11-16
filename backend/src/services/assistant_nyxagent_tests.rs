@@ -8283,10 +8283,12 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
                 .unwrap();
         }
         settle(&db, &state.encryption_keys, &user, &row, text, None).await;
-        let expected = if scope == "text" {
-            text.to_owned()
+        let redacted = super::super::voice::links::redact_tokens(text);
+        let expected_goal = if scope == "text" { text } else { &redacted };
+        let expected_output = if scope == "voice_task" {
+            &redacted
         } else {
-            super::super::voice::links::redact_tokens(text)
+            text
         };
         let stored = db
             .collection::<AssistantCheckpoint>(CHECKPOINTS)
@@ -8294,27 +8296,27 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stored.goal.as_deref(), Some(expected.as_str()), "{scope}");
-        assert_eq!(stored.output.as_deref(), Some(expected.as_str()), "{scope}");
+        assert_eq!(stored.goal.as_deref(), Some(expected_goal), "{scope}");
+        assert_eq!(stored.output.as_deref(), Some(expected_output), "{scope}");
         let saved = checkpoint(&db, &user, &row.id).await.unwrap().unwrap();
-        assert_eq!(saved.goal.as_deref(), Some(expected.as_str()), "{scope}");
-        assert_eq!(saved.output.as_deref(), Some(expected.as_str()), "{scope}");
-        let line = checkpoint_line(&saved, scope != "text");
+        assert_eq!(saved.goal.as_deref(), Some(expected_goal), "{scope}");
+        assert_eq!(saved.output.as_deref(), Some(expected_output), "{scope}");
+        let line = checkpoint_line(&saved, scope == "voice_task");
         assert_eq!(
             line,
             format!(
-                "\nCheckpoint (turn {}, completed; last successful turn {}):\n- goal: {expected}\n- last output: {expected}",
+                "\nCheckpoint (turn {}, completed; last successful turn {}):\n- goal: {expected_goal}\n- last output: {expected_output}",
                 saved.turn_id, saved.turn_id
             )
         );
         let history = messages(&db, &user, &row.id, 20, None).await.unwrap();
         let recap = recap(&db, &row, &history, "other-turn").await.unwrap();
-        assert!(recap.contains(&expected), "{scope}");
+        assert!(recap.contains(expected_output), "{scope}");
         let last = super::super::assistant_team_service::last_reply(&db, &user, &row.id, 1000)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(last.text, expected, "{scope}");
+        assert_eq!(last.text, expected_output, "{scope}");
         if scope == "text" {
             assert_eq!(
                 recap_line(&history[0], false, 4096).unwrap().text,
@@ -8325,9 +8327,159 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
                 format!("\nuser: {text}")
             );
             assert!(bounded_recap(&history).contains(text));
-        } else {
+        } else if scope == "voice_task" {
             assert!(!recap.contains("nyx_bcl_") && !recap.contains("nyx_clk_"));
+        } else {
+            assert_eq!(
+                recap_line(&history[0], false, 4096).unwrap().text,
+                format!("\nuser: {redacted} [error: none]")
+            );
         }
     }
+    db.drop().await.unwrap();
+}
+
+fn token_checkpoint(row: &AssistantConversation) -> AssistantCheckpoint {
+    AssistantCheckpoint {
+        conversation_id: row.id.clone(),
+        user_id: row.user_id.clone(),
+        turn_id: "turn".into(),
+        status: "completed".into(),
+        error_code: None,
+        goal: Some("Keep nyx_clk_checkpoint_goal exactly.".into()),
+        output: Some("Keep nyx_bcl_checkpoint_output exactly.".into()),
+        completed_actions: vec![CheckpointAction {
+            label: "nyx_clk_checkpoint_action".into(),
+            turn_id: "turn".into(),
+        }],
+        failed_actions: vec![],
+        last_successful_turn_id: None,
+        last_successful_at: None,
+        updated_at: DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_voice_scope_reuses_loaded_rows_and_only_projects_unloaded_threads() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "checkpoint_scope_reads",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "find"
+            {
+                observed.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await;
+    for hidden in [false, true] {
+        let mut row = stale_test_row(Utc::now());
+        row.voice_parent_conversation_id = hidden.then(|| "parent".into());
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let original = token_checkpoint(&row);
+        db.collection::<AssistantCheckpoint>(CHECKPOINTS)
+            .insert_one(&original)
+            .await
+            .unwrap();
+        commands.lock().unwrap().clear();
+        let loaded = checkpoint_for_conversation(&db, &row)
+            .await
+            .unwrap()
+            .unwrap();
+        let loaded_commands = commands.lock().unwrap().clone();
+        assert_eq!(
+            loaded_commands.len(),
+            1,
+            "loaded thread adds no scope reads"
+        );
+        assert_eq!(loaded_commands[0].get_str("find").unwrap(), CHECKPOINTS);
+        if hidden {
+            assert!(!checkpoint_line(&loaded, false).contains("nyx_clk_"));
+            assert!(!checkpoint_line(&loaded, false).contains("nyx_bcl_"));
+        } else {
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap(),
+                serde_json::to_value(&original).unwrap(),
+                "visible checkpoint preserves every byte"
+            );
+        }
+        commands.lock().unwrap().clear();
+        let unloaded = checkpoint(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&unloaded).unwrap(),
+            serde_json::to_value(&loaded).unwrap()
+        );
+        let unloaded_commands = commands.lock().unwrap().clone();
+        assert_eq!(unloaded_commands.len(), 2);
+        let scope = &unloaded_commands[1];
+        assert_eq!(scope.get_str("find").unwrap(), CONVERSATIONS);
+        assert_eq!(
+            scope.get_document("filter").unwrap(),
+            &doc! {"_id": &row.id, "user_id": &row.user_id}
+        );
+        assert_eq!(
+            scope.get_document("projection").unwrap(),
+            &doc! {"_id": 0, "voice_parent_conversation_id": 1}
+        );
+        assert!(
+            unloaded_commands
+                .iter()
+                .all(|command| command.get_str("find").unwrap() != MESSAGES)
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_scope_lookup_error_redacts_without_failing_or_scanning_messages() {
+    let db = connect_transaction_test_database("checkpoint_scope_error").await;
+    let row = stale_test_row(Utc::now());
+    db.collection::<bson::Document>("checkpoint_scope_source")
+        .insert_one(doc! {"_id": &row.id, "user_id": &row.user_id, "invalid_scope": "not-a-number"})
+        .await
+        .unwrap();
+    db.run_command(doc! {
+        "create": CONVERSATIONS, "viewOn": "checkpoint_scope_source",
+        "pipeline": [{"$set": {"voice_parent_conversation_id": {"$toInt": "$invalid_scope"}}}],
+    })
+    .await
+    .unwrap();
+    let original = token_checkpoint(&row);
+    db.collection::<AssistantCheckpoint>(CHECKPOINTS)
+        .insert_one(&original)
+        .await
+        .unwrap();
+    assert!(
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id, "user_id": &row.user_id})
+            .projection(doc! {"_id": 0, "voice_parent_conversation_id": 1})
+            .await
+            .is_err(),
+        "the per-test view must fail the scope lookup"
+    );
+    let saved = checkpoint(&db, &row.user_id, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let context = checkpoint_line(&saved, false);
+    assert!(!context.contains("nyx_clk_") && !context.contains("nyx_bcl_"));
+    assert!(context.contains(super::super::voice::links::PLACEHOLDER));
+    assert_eq!(
+        db.collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     db.drop().await.unwrap();
 }

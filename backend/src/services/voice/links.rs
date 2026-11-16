@@ -62,23 +62,25 @@ pub(crate) fn message_text<'a>(
     }
 }
 
-/// Only token-bearing context needs the legacy thread lookup. Ordinary text
-/// contexts add no read and preserve their original bytes.
-pub(crate) async fn thread_text(
-    db: &Database,
-    user: &str,
-    conversation: &str,
-    hidden_voice: bool,
-    text: String,
-) -> AppResult<String> {
-    if !TOKENS.is_match(&text) {
-        return Ok(text);
+/// A loaded thread's scope needs no history or authorization reads.
+pub(crate) fn thread_text(hidden_voice: bool, text: String) -> String {
+    if hidden_voice {
+        redact_tokens(&text)
+    } else {
+        text
     }
-    let voice = hidden_voice || db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
-        .find_one(doc! {"user_id": user, "conversation_id": conversation,
-            "$or": [{"via": "voice"}, {"voice": {"$ne": null}}, {"turn_metadata.voice_link_publication": {"$exists": true}}]})
-        .projection(doc! {"_id": 1}).await?.is_some();
-    Ok(if voice { redact_tokens(&text) } else { text })
+}
+
+/// Callers without a loaded conversation need only its hidden-voice flag.
+/// An unavailable flag must not expose credentials or fail the caller's turn.
+pub(crate) async fn hidden_voice_thread(db: &Database, user: &str, conversation: &str) -> bool {
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id": conversation, "user_id": user})
+        .projection(doc! {"_id": 0, "voice_parent_conversation_id": 1})
+        .await
+        .map_or(true, |row| {
+            row.is_some_and(|row| row.get_str("voice_parent_conversation_id").is_ok())
+        })
 }
 pub(crate) fn publication_row(message: &AssistantMessage) -> bool {
     message
@@ -481,6 +483,7 @@ async fn publish(
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(|| AppError::NotFound("Voice conversation unavailable".into()))?;
             messages.insert_one(AssistantMessage {
+                supplemental_result_claims: Vec::new(),
                 automation_work: None, execution_task: None, delegated_images: Default::default(),
                 media_queue_notice_id: None, media_event_ids: Vec::new(), media_pending: None, media_bound: None,
                 platform_delivery_recovery_queued: false, platform_reply: None, platform_origin: None,
@@ -1398,6 +1401,7 @@ mod publication_tests {
             .unwrap()
             .unwrap();
         assert!(engine::bounded_recap(std::slice::from_ref(&row)).is_empty());
+        assert!(row.supplemental_result_claims.is_empty());
         let mut tx = state.db.client().start_session().await.unwrap();
         tx.start_transaction().await.unwrap();
         engine::write_checkpoint_in_session(

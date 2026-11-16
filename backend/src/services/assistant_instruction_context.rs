@@ -77,8 +77,7 @@ impl Prepared {
                 |binding| binding.fingerprint != fingerprint || binding.guest != row.guest_turn,
             );
         let mut prepared = Self {
-            voice_context: row.voice_parent_conversation_id.is_some()
-                || history.iter().any(super::voice::links::voice_row),
+            voice_context: row.voice_parent_conversation_id.is_some(),
             stable,
             memory: if row.guest_turn {
                 String::new()
@@ -265,6 +264,67 @@ mod tests {
         let instructions = context.instructions_with_recap(text);
         assert!(instructions.ends_with(&expected));
         assert!(!instructions.contains("nyx_bcl_") && !instructions.contains("nyx_clk_"));
+    }
+
+    #[tokio::test]
+    async fn visible_voice_history_preserves_current_input_and_memory_but_hidden_threads_redact() {
+        use crate::{services::assistant_nyxagent as engine, test_utils::*};
+        let db = connect_transaction_test_database("voice_input_memory_scope").await;
+        engine::ensure_indexes(&db).await.unwrap();
+        let state = test_app_state(db.clone());
+        let user = uuid::Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let mut row = engine::begin_turn(
+            &db,
+            &user,
+            &engine::TurnRequest {
+                acknowledgement_id: None,
+                retry_of: None,
+                attachment_ids: Vec::new(),
+                conversation_id: None,
+                agent_id: None,
+                text: "Earlier nyx_clk_voice_history".into(),
+                model: None,
+                access_mode: None,
+            },
+            &state.encryption_keys,
+        )
+        .await
+        .unwrap();
+        let mut history = engine::messages(&db, &user, &row.id, 20, None)
+            .await
+            .unwrap();
+        history[0].via = Some("voice".into());
+        let mut typed_history = history[0].clone();
+        typed_history.id = uuid::Uuid::new_v4().to_string();
+        typed_history.seq += 1;
+        typed_history.via = None;
+        typed_history.text = "Earlier typed nyx_clk_text_history".into();
+        history.push(typed_history);
+        let text = "Use https://nyxid.ai/connect/nyx_clk_typed_input exactly.";
+        let memory = "Remember nyx_clk_memory_note exactly.\n";
+        let notes = "Current notes nyx_clk_current_note.\n";
+        for hidden in [false, true] {
+            row.voice_parent_conversation_id = hidden.then(|| "parent".into());
+            let mut context = Prepared::new(b"key", &row, None, &history).unwrap();
+            context.memory = memory.into();
+            let input = context.input_with_memory(notes, text, true);
+            let recap = context.instructions_with_recap(&engine::bounded_recap(&history));
+            if hidden {
+                assert!(!input.contains("nyx_clk_"));
+                assert!(!recap.contains("nyx_clk_text_history"));
+            } else {
+                assert!(input.ends_with(text));
+                assert!(input.contains(&format!("{memory}{notes}")));
+                assert!(recap.contains("Earlier typed nyx_clk_text_history"));
+            }
+            assert!(!recap.contains("nyx_clk_voice_history"));
+            assert!(recap.contains(super::super::voice::links::PLACEHOLDER));
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

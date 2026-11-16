@@ -1792,7 +1792,7 @@ async fn execute_turn_inner(
     // A recap leads with the durable checkpoint; guest audiences never get it.
     if !row.guest_turn {
         context.set_checkpoint(
-            engine::checkpoint(&state.db, &row.user_id, &row.id)
+            engine::checkpoint_for_conversation(&state.db, row)
                 .await
                 .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
         );
