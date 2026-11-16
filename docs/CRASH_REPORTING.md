@@ -63,6 +63,12 @@ the banner's preference read, at most once per session, and explicit saves updat
 that cache. Without the hint, product telemetry retains its first-time disclosure
 without reading preferences. Mobile reuses the hint from its existing domain
 bootstrap or sign-in public-config response, without an extra discovery request.
+Builds without a second domain set (`EXPO_PUBLIC_NEW_*` unset, for example dev)
+make no launch-time public-config request, as on main. Their hint arrives only
+from an in-app sign-in's existing public-config response, so their review notice
+appears only after a sign-in. Production builds with the new domain set refresh
+the hint every launch. Settings › Privacy always offers review when diagnostics
+are offered and updated permission is needed, independently of the launch hint.
 A missing hint suppresses the mobile review notice. A Cohort non-member on a
 crash-only deployment sees no banner because their preference response does not
 offer diagnostics.
@@ -71,6 +77,44 @@ Web offers the updated consent
 banner and a Privacy review dialog. Mobile offers an account-bound one-time
 Review / Not now alert and a Privacy review row. Not now retains the old choice.
 Local withdrawal remains usable during network failures.
+
+### Default-off footprint
+
+With rollout Off or Killed, no DSN, an absent public hint and no previous policy-2
+device opt-in, clients add no requests beyond main's: the web banner and mobile
+notice skip preference discovery. The export worker issues no database
+commands, and the manifest worker makes no manifest fetch or registry write.
+The remaining work is:
+
+- Startup index creation for `client_error_reports`,
+  `client_error_report_counters` and `client_release_registry`, plus the
+  `crash_enabled_scope` index on the existing `feature_flag_overrides` collection.
+- Per replica, one indexed `feature_flag_overrides` find at startup and every
+  60 seconds for the public hint, and at startup and every 15 minutes for the
+  manifest gate. A large override inventory can require cursor `getMore` commands.
+  The public handler itself reads the hint from process memory.
+- On main's existing analytics preference GET/PUT requests, the
+  `has_enabled_scope` absence check. Only absence is cached, for at most five
+  seconds per replica; a warm absence cache adds no database command.
+
+The limits matter after an earlier rollout: mobile's capture lifecycle still
+reads preferences for a hydrated, enabled policy-2 device on session restoration,
+consent changes and foregrounding, independently of the notice hint. A retained
+true hint can also permit discovery reads until rollout refresh succeeds. If a
+global kill leaves narrower enabled overrides, the absence cache cannot apply;
+preference requests still resolve memberships and the flag overrides before
+returning `not_offered`. Local diagnostics flag writes also trigger the immediate
+hint lookup described above. Personal erasure still checks and removes the
+owner's `client_error_reports`, even while the rollout is off; existing reports
+and counters continue to TTL-expire.
+
+The proving tests are:
+
+- `crash_default_off_footprint_has_no_export_or_network_commands`
+- `crash_worker_without_destinations_returns_without_database_commands`
+- `consent_get_warm_default_off_adds_zero_commands_and_enabled_rollout_is_bounded`
+- `flag-off telemetry-enabled first-time and opted-in users match main across remounts without preference GETs`
+- `public crash hint absent prevents notice preference reads`
 
 ## Closed data contract and boundaries
 
