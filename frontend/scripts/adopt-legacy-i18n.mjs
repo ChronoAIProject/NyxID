@@ -52,11 +52,14 @@ const tryGit = (...args) => { try { return git(...args); } catch { return null; 
  * deleted the monoliths; boundary commits of `rev-list <branch> ^<split>` that
  * still have every monolith are the legacy commits the branch grew from. Main's
  * own pre-split commits are excluded because they are reachable from the split.
+ * Only a split on onto's first-parent line is trusted (see below).
  */
 function legacyForks(branchRef, ontoRef) {
   const monoliths = LANGUAGES.map((language) => `${prefix}/src/i18n/locales/${language}.json`);
   const split = tryGit("log", "-1", "--format=%H", "--diff-filter=D", ontoRef, "--", ...monoliths);
-  if (!split) return [];
+  // This assumes main is linear (squash merges): if the split reached onto through a merge commit, the
+  // boundary could be the split branch's own fork, so only generic guidance is printed.
+  if (!split || !(tryGit("rev-list", "--first-parent", ontoRef) ?? "").split("\n").includes(split)) return [];
   const boundary = (tryGit("rev-list", "--boundary", branchRef, `^${split}`) ?? "").split("\n")
     .filter((line) => line.startsWith("-")).map((line) => line.slice(1));
   const legacy = boundary.filter((commit) => monoliths.every((file) => tryGit("cat-file", "-e", `${commit}:${file}`) !== null));

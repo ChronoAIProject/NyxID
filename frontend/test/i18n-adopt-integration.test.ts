@@ -278,6 +278,31 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     expectNothingReverted(f, (language) => ({ "X key": `x ${language}` }));
   });
 
+  it("prints only generic fork guidance when the split reached onto through a merge commit", () => {
+    const f = fixture();
+    // Main moves past the split branch's fork, a branch forks from there, then main merges the split with a merge commit.
+    f.git("checkout", "-b", "main2", f.base);
+    const common = path.join(f.locales, "common-en.json");
+    f.catalog(common, { ...JSON.parse(fs.readFileSync(common, "utf8")), "Main moved": "Main moved" });
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "main moves past the fork");
+    const laterFork = f.git("rev-parse", "HEAD");
+    f.git("checkout", "-b", "legacy2");
+    for (const language of LANGUAGES) {
+      const monolith = path.join(f.locales, `${language}.json`);
+      f.catalog(monolith, { ...JSON.parse(fs.readFileSync(monolith, "utf8")), "Branch key": `branch ${language}` });
+    }
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "legacy branch from the later fork");
+    const branchTip = f.git("rev-parse", "HEAD");
+    f.git("checkout", "main2");
+    f.git("merge", "--no-ff", "-m", "merge the split", "split");
+    const result = f.adopt("--branch", branchTip, "--base", f.onto, "--onto", "main2");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Pass the branch's legacy fork (the newest pre-split commit it is based on) as --base:");
+    expect(result.stderr).toContain(`  npm run adopt:i18n -- --branch ${branchTip} --base <legacy-fork> --onto main2`);
+    // The split branch's fork would be the wrong base for a branch that forked from a later main.
+    expect(result.stderr).not.toContain(`--base ${f.base}`);
+    expect(result.stderr).not.toContain(`--base ${laterFork}`);
+  });
 
   it("refuses a split-only branch against a legacy-only base", () => {
     const f = fixture();

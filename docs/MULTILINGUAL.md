@@ -311,6 +311,11 @@ npm run adopt:i18n -- --branch <branch> --base <legacy-fork> --onto <onto>
 During a later merge of `main` into such a branch this is
 `--branch HEAD --base <legacy-fork> --onto MERGE_HEAD`.
 
+Finding the fork assumes `main` is linear, as this repository's squash merges
+keep it. If the split reached `--onto` through a merge commit (the split is not
+on onto's first-parent line), the tool prints `<legacy-fork>` for you to fill in
+rather than guessing.
+
 The initial migration is the same deterministic operation with an empty base:
 
 ```sh
