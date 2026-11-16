@@ -3817,6 +3817,20 @@ mod tests {
             for item in entries.flatten() {
                 let p = item.path();
                 if p.is_dir() {
+                    // Test-only directories (named `tests`, `*_tests` or `test_*`) are
+                    // compiled only through #[cfg(test)] modules or test-only files, so
+                    // they hold no production collection calls. Match these exact shapes
+                    // rather than any name containing "test", which would also hide
+                    // production names such as "attestation".
+                    let test_only_directory = p
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name == "tests" || name.ends_with("_tests") || name.starts_with("test_")
+                        });
+                    if test_only_directory {
+                        continue;
+                    }
                     gather(&p, registry, files);
                     continue;
                 }
