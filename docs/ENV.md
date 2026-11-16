@@ -918,8 +918,8 @@ settings and readiness required before activation. All diagnostics defaults off.
 | --- | --- | --- |
 | `CRASH_REPORTS_SENTRY_DSN_WEB` | empty | Optional HTTPS Sentry web project DSN; invalid values fail startup. |
 | `CRASH_REPORTS_SENTRY_DSN_MOBILE` | empty | Optional separate mobile project DSN; no vendor SDK on clients. |
-| `CRASH_REPORTS_RETENTION_DAYS` | `30` | Local retention, integer 1–30. |
-| `CRASH_REPORTS_EXPORT_INTERVAL_SECS` | `10` | Export batch cadence, 0 disables worker, maximum 86400. |
+| `CRASH_REPORTS_RETENTION_DAYS` | `30` | Local retention, integer 1–30; empty or whitespace uses the default. |
+| `CRASH_REPORTS_EXPORT_INTERVAL_SECS` | `10` | Export batch cadence, 0 disables worker, maximum 86400; empty or whitespace uses the default. |
 | `CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN` | empty | Build-only symbol upload token; never VITE-prefixed or in runtime image. |
 | `CRASH_ARTIFACTS_SENTRY_ORG` | empty | Build-only Sentry organization. |
 | `CRASH_ARTIFACTS_SENTRY_PROJECT_WEB` | empty | Build-only web artifact project. |

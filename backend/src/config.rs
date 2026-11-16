@@ -78,6 +78,7 @@ impl CrashReportingConfig {
         mut read: impl FnMut(&str) -> Result<String, env::VarError>,
     ) -> Result<Self, &'static str> {
         let mut value = |key| match read(key) {
+            Ok(v) if v.trim().is_empty() => Ok(None),
             Ok(v) => Ok(Some(v)),
             Err(env::VarError::NotPresent) => Ok(None),
             Err(_) => Err("Invalid crash configuration"),
@@ -2151,6 +2152,17 @@ mod tests {
             )))
             .is_err()
         );
+    }
+
+    #[test]
+    fn crash_configuration_empty_and_whitespace_values_use_defaults() {
+        for blank in ["", " ", "\t\n"] {
+            let config = CrashReportingConfig::load(|_| Ok(blank.into())).unwrap();
+            assert_eq!(config.retention_days, 30);
+            assert_eq!(config.export_interval_secs, 10);
+            assert!(config.web.is_none());
+            assert!(config.mobile.is_none());
+        }
     }
 
     #[test]
