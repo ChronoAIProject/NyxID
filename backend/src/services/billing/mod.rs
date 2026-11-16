@@ -22,6 +22,7 @@ pub mod provisioning;
 pub(crate) mod rate_cache;
 pub(crate) mod realtime_usage;
 pub mod reconcile;
+mod reconcile_status;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
@@ -199,6 +200,7 @@ pub async fn startup_diagnostics(
             detected_at:diagnostic.updated_at,
         });
     }
+    items.extend(reconcile_status::diagnostics(db).await);
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
     items.extend(hold_conservation::diagnostics(db).await?);
     items.extend(stuck_requests::diagnostics(db).await?);
