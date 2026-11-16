@@ -958,6 +958,7 @@ pub(super) fn reserved_row(
                 })
         }),
         org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
+        stuck_request_exit: None,
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,

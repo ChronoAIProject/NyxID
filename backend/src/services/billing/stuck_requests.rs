@@ -1,4 +1,5 @@
 //! Classify uncompleted ordinary requests without inferring death from age alone.
+pub(super) mod holdless;
 mod inventory;
 mod ownership;
 mod selection;
@@ -37,6 +38,14 @@ fn classified(label: &'static str) -> Classification {
 }
 
 pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult<Classification> {
+    classify_for(row, registry, false)
+}
+
+fn classify_for(
+    row: &Document,
+    registry: Option<&Registry>,
+    holdless: bool,
+) -> AppResult<Classification> {
     if let Ok(siblings) = row.get_array("request_rows") {
         let siblings: Vec<Document> = siblings
             .iter()
@@ -74,6 +83,9 @@ pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult
         return Ok(classified("excluded_runtime"));
     }
     let voice_request = voice::is_voice(row);
+    if holdless && voice_request {
+        return Ok(classified("excluded_voice"));
+    }
     if voice_request && voice::identity(request).is_none() {
         return Ok(classified("excluded_voice_unknown_shape"));
     }
@@ -116,7 +128,7 @@ pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult
     {
         return Err(unavailable());
     }
-    if row.get_str("wallet_id").ok().is_none_or(str::is_empty) {
+    if !holdless && row.get_str("wallet_id").ok().is_none_or(str::is_empty) {
         return Ok(classified("excluded_metering_only"));
     }
     if let Some(f) = &hold.funding {
@@ -147,10 +159,11 @@ pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult
         {
             return Err(unavailable());
         }
-        if f.settled
-            || f.settlement_claim_id.is_some()
-            || !f.grant_consumptions.is_empty()
-            || !f.allowance_consumptions.is_empty()
+        if !holdless
+            && (f.settled
+                || f.settlement_claim_id.is_some()
+                || !f.grant_consumptions.is_empty()
+                || !f.allowance_consumptions.is_empty())
         {
             return Ok(classified("money_protocol_in_progress"));
         }
@@ -230,9 +243,16 @@ mod tests;
 mod policy;
 mod recovery;
 mod terminal;
-pub(crate) use recovery::recover;
+pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<()> {
+    let mut failures = super::recovery_batch::Failures::default();
+    failures.absorb(recovery::recover(db).await)?;
+    failures.absorb(holdless::recover(db).await)?;
+    failures.finish(())
+}
 const STATE: &str = "billing_stuck_request_recovery";
 const STATE_ID: &str = "ordinary";
+#[cfg(test)]
+mod holdless_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]

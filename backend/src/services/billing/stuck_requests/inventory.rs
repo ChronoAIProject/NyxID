@@ -387,10 +387,21 @@ pub(crate) async fn diagnostics(
                 .as_ref()
                 .and_then(|s| s.get_i64("ended_rows").ok())
                 .unwrap_or(0);
-            if !present && ended == 0 {
+            let holdless_ended = state
+                .as_ref()
+                .and_then(|s| s.get_i64("holdless_ended_requests").ok())
+                .unwrap_or(0);
+            let holdless_rows = state
+                .as_ref()
+                .and_then(|s| s.get_i64("holdless_ended_rows").ok())
+                .unwrap_or(0);
+            if !present && ended == 0 && holdless_ended == 0 {
                 return Ok(vec![]);
             }
             detail.push_str(&format!("\nended_requests={ended} ended_rows={ended_rows}; remaining rows and requests are classified above"));
+            detail.push_str(&format!(
+                "\nholdless_ended_requests={holdless_ended} holdless_ended_rows={holdless_rows}"
+            ));
         }
         Ok(Err(error)) => detail.push_str(&format!(
             "\nended totals unavailable; {}",

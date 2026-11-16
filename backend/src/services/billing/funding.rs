@@ -1996,6 +1996,7 @@ mod tests {
         let row = UsageMeterRow {
             model_tariff: None,
             org_channel_guest: None,
+            stuck_request_exit: None,
             rollup_pending: true,
             id: row_id.to_string(),
             transaction_id: "funding-tx-1".to_string(),

@@ -127,10 +127,28 @@ existing terminal status; rollback needs no data conversion or operator step.
 
 The sweep rotates wallet, grant and allowance candidate indexes, at most 100 rows
 and 50 requests in five seconds per pass, with a durable cursor per source.
-It leaves entirely hold-less requests unfinished; ending them is a separate
-housekeeping decision. Once a held request is selected, its existing terminal
-transaction closes all unfinished siblings, including zero-hold coordinators,
-so a resumed finalizer cannot publish new usage through them.
+Once a held request is selected, its existing terminal transaction closes all
+unfinished siblings, including zero-hold coordinators, so a resumed finalizer
+cannot publish new usage through them. A separate housekeeping lane follows the
+money lane, reading at most 100 candidates from the existing forwarded/unreleased
+index within its own one-second budget and retaining a durable cursor. It uses
+the same process-death proof, excludes dedicated execution protocols, and only
+ends whole requests (at most 128 siblings) with no remaining holds or recorded
+final evidence. Its terminal transaction records zero usage and
+`stuck_request_exit.policy=waive_unknown_consumption`, `lane=holdless`, and a
+summary pass ID; it changes no wallet, benefit, tax, ledger or carry resource.
+The marked row's release write also acknowledges the zero and sets a 30-day
+expiry, touching only usage metadata; shared usage push and acknowledgement are
+unchanged and never select it. Waived metering-only rows therefore expire while
+ordinary measured metering-only rows still have no expiry. Rollups count a
+zero-usage request on its original day and survive source-row expiry; raw billing
+history no longer includes expired rows. Each nonempty pass writes
+one chained `billing_holdless_requests_ended` summary with layer/metric counts
+and age bounds, without person IDs; interrupted summaries resume durably.
+Integrity retains separate `holdless_ended_requests` and `holdless_ended_rows`
+counters. Completely finished rows are already terminal, released and
+acknowledged, so older replicas select no settlement or push work for them.
+No rollout step or environment setting is required.
 
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced

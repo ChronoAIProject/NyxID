@@ -653,6 +653,9 @@ pub async fn claim_released_and_settle(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<bool> {
+    if super::stuck_requests::holdless::marked(row) {
+        return super::stuck_requests::holdless::release(db, row).await;
+    }
     if row.wallet_id.is_some() {
         super::exact_migration::require_ready(db).await?;
     }

@@ -209,6 +209,7 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 
 #[derive(Default)]
 pub(crate) struct FakeLago {
+    pub(crate) recorded_events: AtomicUsize,
     tax_rate: Option<String>,
     tax_unavailable: bool,
     tax_delay: Option<std::time::Duration>,
@@ -322,12 +323,15 @@ impl LagoApi for FakeLago {
     }
 
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+        self.recorded_events.fetch_add(1, Ordering::SeqCst);
         Ok(LagoAck {
             transaction_id: event.transaction_id.clone(),
         })
     }
 
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
+        self.recorded_events
+            .fetch_add(events.len(), Ordering::SeqCst);
         Ok(events
             .iter()
             .map(|event| LagoAck {

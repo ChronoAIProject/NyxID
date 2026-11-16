@@ -11,6 +11,7 @@ pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     UsageMeterRow {
         model_tariff: None,
         org_channel_guest: None,
+        stuck_request_exit: None,
         rollup_pending: true,
         id: id.clone(),
         transaction_id: id.clone(),

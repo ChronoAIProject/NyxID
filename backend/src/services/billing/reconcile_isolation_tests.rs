@@ -180,7 +180,11 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         "BILLING_PASS_CLEAN commands={} names={commands:?}",
         commands.len()
     );
-    assert_eq!(commands.len(), 44, "clean pass must add no commands");
+    assert_eq!(
+        commands.len(),
+        46,
+        "clean pass includes the holdless state and registry reads"
+    );
     assert_eq!(
         commands.iter().filter(|c| c.as_str() == "delete").count(),
         1
@@ -199,8 +203,8 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     assert!(error.contains("schedules:") && error.contains("grant_expiry:"));
     assert_eq!(
         seen.lock().unwrap().len(),
-        44,
-        "failure publication adds no command"
+        46,
+        "failure publication adds no extra command beyond the holdless reads"
     );
     let count = |command: &str| {
         seen.lock()
@@ -227,7 +231,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     r.run_once().await.unwrap();
     assert_eq!(
         seen.lock().unwrap().len(),
-        44,
+        46,
         "clearing status adds no command"
     );
     assert_eq!(count("update"), 0);
@@ -237,7 +241,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         "clearing status is the normal lease release delete"
     );
     println!(
-        "BILLING_PASS_STATUS failure_commands=44 clear_commands=44 failed_updates=1 clear_deletes=1 added_commands=0"
+        "BILLING_PASS_STATUS failure_commands=46 clear_commands=46 failed_updates=1 clear_deletes=1 added_commands=0"
     );
     db.drop().await.unwrap();
 }

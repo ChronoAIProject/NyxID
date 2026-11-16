@@ -37,6 +37,15 @@ pub(crate) fn continue_reconcile() -> bool {
 }
 
 #[cfg(test)]
+pub(crate) async fn with_drain_for_test<T>(future: impl std::future::Future<Output = T>) -> T {
+    CONTINUE_RECONCILE.scope(Cell::new(true), future).await
+}
+#[cfg(test)]
+pub(crate) fn drain_for_test() {
+    CONTINUE_RECONCILE.with(|running| running.set(false));
+}
+
+#[cfg(test)]
 tokio::task_local! {
     static LEASE_LOSS_OBSERVED: std::sync::Arc<tokio::sync::Notify>;
 }
@@ -1220,6 +1229,7 @@ mod tests {
         UsageMeterRow {
             model_tariff: None,
             org_channel_guest: None,
+            stuck_request_exit: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: transaction_id.to_string(),

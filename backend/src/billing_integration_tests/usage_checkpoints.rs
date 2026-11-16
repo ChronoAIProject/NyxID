@@ -79,15 +79,28 @@ pub(crate) struct Fixture {
     pub(crate) service: BillingService,
     pub(crate) owner: String,
     pub(crate) commands: Arc<Mutex<Vec<String>>>,
+    pub(crate) writes: Arc<Mutex<Vec<(String, String)>>>,
 }
 impl Fixture {
     pub(crate) async fn new() -> Self {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let recorded = commands.clone();
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let recorded_writes = writes.clone();
         let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
             "usage_checkpoints",
             mongodb::event::EventHandler::callback(move |event| {
                 if let mongodb::event::command::CommandEvent::Started(event) = event {
+                    if matches!(
+                        event.command_name.as_str(),
+                        "update" | "findAndModify" | "insert" | "delete"
+                    ) && let Ok(collection) = event.command.get_str(&event.command_name)
+                    {
+                        recorded_writes
+                            .lock()
+                            .unwrap()
+                            .push((event.command_name.clone(), collection.to_owned()));
+                    }
                     recorded.lock().unwrap().push(event.command_name);
                 }
             }),
@@ -131,6 +144,7 @@ impl Fixture {
             service,
             owner,
             commands,
+            writes,
         }
     }
     pub(crate) async fn open(&self, funded: bool) -> crate::services::billing::MeteredProxyContext {
