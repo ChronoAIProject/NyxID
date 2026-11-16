@@ -351,6 +351,27 @@ pub async fn initiate_password_reset(
     db: &mongodb::Database,
     email: &str,
 ) -> AppResult<Option<String>> {
+    let Some(reset) = prepare_password_reset(db, email).await? else {
+        return Ok(None);
+    };
+    db.collection::<User>(USERS)
+        .update_one(doc! { "_id": &reset.user_id }, reset.update)
+        .await?;
+    Ok(Some(reset.token))
+}
+
+// No Debug: the prepared token is credential material and is never audited.
+pub(crate) struct PreparedPasswordReset {
+    pub user_id: String,
+    pub token: String,
+    pub update: bson::Document,
+}
+
+/// Shared preparation; callers choose their existing write/transaction boundary.
+pub(crate) async fn prepare_password_reset(
+    db: &mongodb::Database,
+    email: &str,
+) -> AppResult<Option<PreparedPasswordReset>> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! {
@@ -375,18 +396,15 @@ pub async fn initiate_password_reset(
     let expires_at = Utc::now() + chrono::Duration::hours(1);
     let now = Utc::now();
 
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user.id },
-            doc! { "$set": {
-                "password_reset_token": &reset_token_hash,
-                "password_reset_expires_at": bson::DateTime::from_chrono(expires_at),
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    Ok(Some(reset_token))
+    Ok(Some(PreparedPasswordReset {
+        user_id: user.id,
+        token: reset_token,
+        update: doc! { "$set": {
+            "password_reset_token": &reset_token_hash,
+            "password_reset_expires_at": bson::DateTime::from_chrono(expires_at),
+            "updated_at": bson::DateTime::from_chrono(now),
+        }},
+    }))
 }
 
 /// Bind a password already verified by authenticate_user to the live credential

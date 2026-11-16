@@ -389,6 +389,7 @@ pub async fn create_user(
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<CreateUserResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     // Validate email format
     let email = body.email.trim().to_string();
@@ -410,26 +411,17 @@ pub async fn create_user(
         ));
     }
 
-    let user = admin_user_service::create_user(
+    let user = admin_user_service::create_user_as(
         &state.db,
         &email,
         &body.password,
         body.display_name.as_deref(),
         &body.role,
+        &actor,
     )
     .await?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.created",
-        Some(serde_json::json!({
-            "target_user_id": &user.id,
-            "target_email": &user.email,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -557,30 +549,17 @@ pub async fn update_user(
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserItem>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    let updated = admin_user_service::update_user(
+    let updated = admin_user_service::update_user_as(
         &state.db,
         &user_id,
         body.display_name.as_deref(),
         body.email.as_deref(),
         body.avatar_url.as_deref(),
+        &actor,
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.updated",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "target_email": &updated.email,
-            "changes": {
-                "display_name": body.display_name,
-                "email": body.email,
-                "avatar_url": body.avatar_url,
-            }
-        })),
-    );
 
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
     Ok(Json(user_to_admin_item(updated, platform_role)))
@@ -597,6 +576,7 @@ pub async fn set_user_role(
     Json(body): Json<SetRoleRequest>,
 ) -> AppResult<Json<RoleUpdateResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     let admin_id = auth_user.user_id.to_string();
 
@@ -616,18 +596,9 @@ pub async fn set_user_role(
     };
 
     let updated =
-        admin_user_service::set_platform_role(&state.db, &admin_id, &user_id, &role).await?;
+        admin_user_service::set_platform_role_as(&state.db, &admin_id, &user_id, &role, &actor)
+            .await?;
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.role_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -654,20 +625,12 @@ pub async fn set_user_status(
     Json(body): Json<SetStatusRequest>,
 ) -> AppResult<Json<StatusUpdateResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.status_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "is_active": body.is_active,
-        })),
-    );
+    admin_user_service::set_user_active_as(&state.db, &admin_id, &user_id, body.is_active, &actor)
+        .await?;
 
     // `is_active=false` is the suspend path; `is_active=true` is unsuspend.
     // There is no dedicated suspend/unsuspend route — this single endpoint
@@ -703,15 +666,9 @@ pub async fn force_password_reset(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    let _token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.password_reset",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    let _token = admin_user_service::force_password_reset_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(AdminActionResponse {
         message: "Password reset initiated".to_string(),
@@ -1093,15 +1050,9 @@ pub async fn verify_user_email(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    admin_user_service::verify_email(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.email_verified",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    admin_user_service::verify_email_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(VerifyEmailResponse {
         id: user_id,
@@ -1152,6 +1103,7 @@ pub async fn revoke_user_sessions(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<RevokeSessionsResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     // Verify user exists
     let _target = state
@@ -1161,17 +1113,8 @@ pub async fn revoke_user_sessions(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let revoked_count = admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.sessions_revoked",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "revoked_count": revoked_count,
-        })),
-    );
+    let revoked_count =
+        admin_user_service::revoke_all_user_sessions_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(RevokeSessionsResponse {
         revoked_count,
