@@ -135,19 +135,23 @@ The app portions currently own these paths and key counts:
 | `assistant-agents` | assistant agent, skill, and group files; CMA agent/sandbox pages | 560 |
 | `assistant-account` | assistant account/settings/profile/workspace files | 90 |
 | `assistant-approvals` | assistant approval/action/decision files | 275 |
-| `assistant` | remaining assistant components and assistant libraries | 1,049 |
+| `assistant` | remaining assistant components and assistant libraries | 1,045 |
 | `auth` | sign-in, registration, OAuth, consent, and auth helpers | 419 |
+| `automations` | automation pages and assistant automation files | 113 |
 | `billing` | billing and usage pages/components/hooks | 437 |
-| `channels` | channel, Telegram, and channel hooks/helpers | 494 |
+| `channels` | channel, Telegram, and channel hooks/helpers | 506 |
+| `cli-pair` | CLI pairing pages, wizard components, and wizard entry | 258 |
 | `credentials` | keys, API keys, credential dashboard files | 461 |
-| `dashboard` | dashboard, navigation, layout, tools, and trigger files | 1,058 |
+| `dashboard` | dashboard, navigation, layout, tools, and trigger files | 1,074 |
+| `docs` | documentation manifest and UI | 61 |
 | `machines` | machine pages/components/hooks | 606 |
 | `nodes` | node, device, SSH pages/components/hooks | 148 |
 | `organizations` | organization pages/components/hooks | 131 |
-| `services` | services, providers, service accounts, and catalog helpers | 588 |
+| `platform` | platform models, onboarding, setup, and platform helpers | 412 |
+| `services` | services, providers, service accounts, developer apps, and catalog helpers | 597 |
 | `settings` | settings and notification settings | 189 |
-| `shared` | keys referenced from multiple mapped areas plus shared libraries/components | 2,343 |
-| `unattributed` | keys with no literal source reference | 2,055 |
+| `shared` | keys referenced from multiple mapped areas plus shared libraries/components | 2,422 |
+| `unattributed` | keys with no literal source reference | 1,099 |
 
 Keys used by two or more mapped areas always belong to `shared`; keys with no
 literal reference remain in `unattributed` so the split never deletes copy.
@@ -184,14 +188,20 @@ cargo test -p nyxid-cli --test wizard_bundle_freshness
 
 Use the committed adoption tool for a branch created before the portion split.
 It reads all snapshots with `git show`, applies a three-way delta to app,
-common, error, and wizard catalogs, places additions using the ordered usage
-map, and writes nothing if any value diverges on both sides.
+common, error, and wizard catalogs, places additions using literal references in the committed branch and
+onto snapshots and the ordered usage map, and writes nothing if any value diverges
+on both sides. Existing onto placements are preserved. An already-applied delta
+is a no-op.
 
-During a merge, run this after the merge has produced `MERGE_HEAD`:
+For an old-layout feature branch, merge the split branch into it. Run this
+after the merge has produced `MERGE_HEAD`:
 
 ```sh
+git merge refactor/i18n-catalog-portions
 cd frontend
 npm run adopt:i18n
+git add -A src/i18n/locales
+git commit
 ```
 
 The automatic merge form is equivalent to:
@@ -200,7 +210,17 @@ The automatic merge form is equivalent to:
 npm run adopt:i18n -- --branch HEAD --base "$(git merge-base HEAD MERGE_HEAD)" --onto MERGE_HEAD
 ```
 
-During a rebase, run the same command while `REBASE_HEAD` is present. It uses
+For a rebase, use these commands at each catalog conflict:
+
+```sh
+git rebase refactor/i18n-catalog-portions
+cd frontend
+npm run adopt:i18n
+git add -A src/i18n/locales
+git rebase --continue
+```
+
+The tool uses
 `REBASE_HEAD` as the old branch, `REBASE_HEAD^` as its base, and `HEAD` as the
 new portion-layout commit. Explicit refs are also accepted:
 

@@ -91,13 +91,10 @@ export function analyzePortions(portions) {
   const pluralOwners = new Map();
   for (const [key, owners] of locations) {
     const base = stripPluralSuffix(key);
-    const group = pluralOwners.get(base) ?? { keys: [], owners: new Set() };
-    group.keys.push(key);
-    for (const owner of owners) group.owners.add(owner);
-    pluralOwners.set(base, group);
-  }
-  for (const [base, group] of pluralOwners) {
-    if (group.keys.length > 1 && group.owners.size > 1) issues.push(`app plural siblings are not co-located: ${base} (${[...group.owners].join(", ")})`);
+    const ownerSet = [...owners].sort(codeUnitCompare).join(", ");
+    const previous = pluralOwners.get(base);
+    if (previous !== undefined && previous !== ownerSet) issues.push(`app plural siblings are not co-located: ${base} (${previous}; ${ownerSet})`);
+    pluralOwners.set(base, ownerSet);
   }
   return { merged, locations, duplicates, issues };
 }
@@ -183,12 +180,12 @@ export function placeCatalogs(merged, sources, existing = {}) {
   const keys = [...new Set(LANGUAGES.flatMap((language) => Object.keys(merged[language])))];
   const placement = scanUsage(sources, keys);
   const existingOwners = analyzePortions(existing).locations;
+  const siblingOwners = new Map([...existingOwners].map(([key, owners]) => [stripPluralSuffix(key), owners]));
   for (const language of LANGUAGES) {
     for (const catalogs of Object.values(result)) catalogs[language] = {};
     for (const key of keys) {
       if (!Object.hasOwn(merged[language], key)) continue;
-      const siblingOwner = [...existingOwners].find(([sibling]) => stripPluralSuffix(sibling) === stripPluralSuffix(key))?.[1];
-      const owner = existingOwners.get(key) ?? siblingOwner;
+      const owner = existingOwners.get(key) ?? siblingOwners.get(stripPluralSuffix(key));
       const portion = owner?.size === 1 ? [...owner][0] : placement.get(stripPluralSuffix(key));
       result[portion] ??= emptyLanguages();
       result[portion][language][key] = merged[language][key];
@@ -215,11 +212,12 @@ export function writePortions(locales, portions) {
 /** Resolve relative, @/ and src/ imports independently of the current machine. */
 export function catalogImportIssue(file, specifier) {
   if (isTestSource(file)) return null;
-  const resolved = specifier.startsWith("@/") ? `src/${specifier.slice(2)}` :
-    specifier.startsWith(".") ? path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)) : specifier;
+  const cleanSpecifier = specifier.split(/[?#]/)[0];
+  const resolved = path.posix.normalize(cleanSpecifier.startsWith("@/") ? `src/${cleanSpecifier.slice(2)}` :
+    cleanSpecifier.startsWith(".") ? path.posix.join(path.posix.dirname(file), cleanSpecifier) : cleanSpecifier.replace(/^\/src\//, "src/"));
   if (!resolved.startsWith("src/i18n/locales/")) return null;
   const isBarrel = /^src\/i18n\/locales\/app\/(?:en-full|zh-CN|zh-TW)\.ts$/.test(file);
-  if (/\/en-full(?:\.ts)?$/.test(resolved)) return "full English catalog is test-only";
+  if (/\/en-full(?:\.[cm]?[jt]s)?$/.test(resolved)) return "full English catalog is test-only";
   if (/^src\/i18n\/locales\/app\/[^/]+\/(?:en|zh-CN|zh-TW)\.json$/.test(resolved) && !isBarrel) return "portion JSON imports are restricted to the catalog barrels and tests";
   if (!["src/i18n/index.ts", "src/i18n/instance.ts", "src/i18n/wizard.ts"].includes(file) && !isBarrel) return "catalog imports are restricted to sanctioned i18n modules and tests";
   return null;
