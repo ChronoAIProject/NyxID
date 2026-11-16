@@ -1076,7 +1076,11 @@ fn parse_android_fingerprints(raw: Option<&str>) -> Result<Vec<String>, &'static
         return Ok(Vec::new());
     };
     let mut result = Vec::new();
-    for value in raw.split(',').map(str::trim) {
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let bytes: Vec<_> = value.split(':').collect();
         if bytes.len() != 32
             || !bytes
@@ -2690,10 +2694,20 @@ mod android_app_link_tests {
                 .unwrap();
         assert_eq!(fingerprints, vec![lower.to_ascii_uppercase()]);
         assert!(parse_android_fingerprints(None).unwrap().is_empty());
+        for value in [
+            format!("{lower},"),
+            format!(",{lower}"),
+            format!(", {lower}, ,{},", lower.to_ascii_uppercase()),
+        ] {
+            assert_eq!(
+                parse_android_fingerprints(Some(&value)).unwrap(),
+                vec![lower.to_ascii_uppercase()]
+            );
+        }
+        assert!(parse_android_fingerprints(Some(", ,,")).unwrap().is_empty());
         for invalid in [
             "AA:BB",
             "aa".repeat(32).as_str(),
-            &format!("{lower},"),
             &format!("{}:GG", ["AA"; 31].join(":")),
         ] {
             assert!(parse_android_fingerprints(Some(invalid)).is_err());
