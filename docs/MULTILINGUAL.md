@@ -472,7 +472,7 @@ Chinese catalogs use the same structure as the web app catalogs:
 
 - `mobile/src/i18n/locales/<area>/{zh-CN,zh-TW}.json`: flat JSON, code-unit
   sorted, one directory per area. Each `src/features/<name>` directory has its
-  own area, `app` covers the navigation shell in `src/app`, `shared` holds keys
+  own area, `navigation` covers the navigation shell in `src/app`, `shared` holds keys
   used by several areas plus shared components, hooks and libraries, and
   `unattributed` holds phrases with no literal source reference. The ordered
   map is `mobile/scripts/lib/i18n-portions.mjs`.
