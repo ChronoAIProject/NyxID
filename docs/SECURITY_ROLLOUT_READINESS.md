@@ -402,6 +402,8 @@ silently regenerate legacy authority to make rollback permissive.
 This is the authoritative exhaustive list of operations requiring a clean roster:
 
 - Platform feature-flag override enables and clear-that-enables, for every scope.
+- Platform-admin recipient credit-schedule creation (`billing:recipient-schedules-v1`);
+  its allocation-overview capability also uses strict activation readiness.
 - Platform-admin model activation/enable, active route publication, model tariff
   creation, model-only catalog credential configuration, and model-evidence
   allowance authoring. The admin model enable-switch projection remains strict.

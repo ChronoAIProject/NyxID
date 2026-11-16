@@ -214,7 +214,7 @@ pub async fn create_schedule(
         super::billing_credits::require_allocation_capability(&state)?;
     }
     if body.timing == ScheduleTiming::Recipient {
-        crate::services::security_readiness_service::require(
+        crate::services::security_readiness_service::require_activation(
             &state.db,
             billing::schedules::recipients::READINESS,
         )

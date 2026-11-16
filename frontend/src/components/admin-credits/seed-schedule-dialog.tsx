@@ -1,5 +1,4 @@
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateErrorMessage } from "@/lib/error-messages";
 import { useRef } from "react";
 import { toast } from "sonner";
 import { useSeedCreditSchedule } from "@/hooks/use-billing-credits";
@@ -62,7 +61,7 @@ export function SeedScheduleDialog({
       onClose();
     } catch (error) {
       toast.error(
-        translateErrorMessage(
+        translateUi(
           error instanceof ApiError && error.status === 409
             ? "The schedule or period changed. Close this dialog and review the refreshed schedule before trying again."
             : "Granting missing credits did not finish. Retry safely; users already granted are skipped.",

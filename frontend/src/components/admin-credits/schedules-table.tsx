@@ -78,7 +78,7 @@ export function SchedulesTable({
               </TableCell>
               <TableCell className="capitalize">
                 {schedule.recurrence}
-                <p className="text-11 normal-case text-muted-foreground">
+                <p className="text-12 normal-case text-muted-foreground">
                   {schedule.timing === "recipient"
                     ? translateUi("From recipient start date")
                     : translateUi("Calendar periods (UTC)")}

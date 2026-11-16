@@ -453,3 +453,64 @@ async fn selected_seed_obeys_frozen_targets_and_rejects_invalid_cursors_and_expi
         Err(AppError::Conflict(_))
     ));
 }
+
+#[tokio::test]
+async fn failed_seed_journal_reports_pending_and_reconciliation_activates_once() {
+    let (db, schedule, now) = setup().await;
+    missed_user(&db, "a-pending", now).await;
+    let ledger = crate::models::billing_ledger::COLLECTION_NAME;
+    db.run_command(doc! { "collMod": ledger,
+    "validator": { "reject_test_writes": true } })
+        .await
+        .unwrap();
+    let seeded = seed_missing(&db, &schedule.id, SeedScheduleInput::default(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            seeded.created_count,
+            seeded.existing_count,
+            seeded.pending_activation_count
+        ),
+        (1, 1, 1)
+    );
+    let id = grant_id(
+        &schedule.id,
+        schedule_period(schedule.recurrence, now).start,
+        "a-pending",
+    );
+    let pending = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": &id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending.issued_ledgered_at.is_none());
+    db.run_command(doc! { "collMod": ledger, "validator": {} })
+        .await
+        .unwrap();
+    assert_eq!(
+        super::super::super::grants::recover_unledgered_events(&db, now)
+            .await
+            .unwrap(),
+        1
+    );
+    let retry = seed_missing(&db, &schedule.id, SeedScheduleInput::default(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            retry.created_count,
+            retry.existing_count,
+            retry.pending_activation_count
+        ),
+        (0, 2, 0)
+    );
+    assert_eq!(
+        db.collection::<Document>(ledger)
+            .count_documents(doc! { "dedupe_key": format!("grant-issued:{id}") })
+            .await
+            .unwrap(),
+        1
+    );
+}

@@ -570,3 +570,69 @@ async fn daily_and_weekly_recipient_grants_renew_once_and_skip_elapsed_windows()
             == Some(grant.schedule_origin.as_ref().unwrap().period_start + Duration::days(days))));
     }
 }
+
+#[tokio::test]
+async fn pending_recipient_issuance_recovers_without_a_period_row_or_refilling() {
+    let (db, schedule, now) = setup().await;
+    join(&db, "pending-person", now).await;
+    let ledger = crate::models::billing_ledger::COLLECTION_NAME;
+    // Simulate a durable grant followed by a rejected journal append.
+    db.create_collection(ledger)
+        .validator(doc! { "reject_test_writes": true })
+        .await
+        .unwrap();
+    assert_eq!(tick(&db, now).await.grants_created, 1);
+    let id = grant_id(&schedule.id, now, "pending-person");
+    let pending = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": &id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending.issued_ledgered_at.is_none());
+    assert_eq!(
+        db.collection::<Document>(CREDIT_SCHEDULE_PERIODS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    let recipient = db
+        .collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .find_one(recipient_filter(&schedule.id, "pending-person"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(recipient.next_due_at > now);
+    db.run_command(doc! { "collMod": ledger, "validator": {} })
+        .await
+        .unwrap();
+    assert_eq!(
+        super::super::super::grants::recover_unledgered_events(&db, now)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        super::super::super::grants::recover_unledgered_events(&db, now)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(tick(&db, now).await.grants_created, 0);
+    let recovered = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": &id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(recovered.issued_ledgered_at.is_some());
+    assert_eq!(recovered.remaining, Credits::from_whole(100));
+    assert_eq!(
+        db.collection::<Document>(ledger)
+            .count_documents(doc! { "dedupe_key": format!("grant-issued:{id}") })
+            .await
+            .unwrap(),
+        1
+    );
+}
