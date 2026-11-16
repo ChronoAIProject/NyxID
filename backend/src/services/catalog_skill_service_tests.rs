@@ -727,7 +727,7 @@ async fn curation_revoke_after_transaction_reads_fences_token_and_grant() {
                     .await
                     .unwrap();
             } else {
-                super::super::curation_grant_service::revoke(&db, &sa.id)
+                super::super::curation_grant_service::revoke(&db, &sa.id, None)
                     .await
                     .unwrap();
             }
