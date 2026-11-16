@@ -17,6 +17,7 @@ import {
   type AssistantMessage,
 } from "./assistantTypes";
 import { voiceSnapshotSchema } from "./voice/voiceContracts";
+import voiceGroupFixtures from "../../../../shared/voice-message-groups.json";
 import { VOICE_RECOVERY_TIMEOUT_MS } from "./voice/voiceRequestDeadline";
 
 // Exercise the screen's real handlers and render conditions. Native UI, network,
@@ -656,6 +657,196 @@ function liveVoice(text: string, sealed = false) {
     tasks: [],
   });
 }
+
+test("a shielded voice link publication renders as completed without pending UI", () => {
+  const x = setup(A, false);
+  const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
+  const message = messageSchema.parse({
+    id: "published-link",
+    seq: 3,
+    turn_id: "hidden-turn",
+    role: "assistant",
+    text: `<${link}>`,
+    status: "completed",
+    execution_pending: true,
+    via: "voice",
+    error_code: null,
+    created_at: "2026-11-14T01:00:00Z",
+    activities: [],
+    attachments: [],
+  });
+  // The API field is ignored by the schema; even a retained field must not
+  // turn an assistant publication into pending execution UI.
+  Object.assign(message, { execution_pending: true });
+  x.assistant.history!.messages = [message];
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  assert.equal(list.props.data.length, 1);
+  const rendered = elements(
+    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+  );
+  const footer = rendered.find((node) => node.type === "AssistantMessageFooter");
+  assert.equal(footer?.props.text, `<${link}>`);
+  assert.equal(footer?.props.report.messageId, message.id);
+  assert.equal(
+    rendered.some((node) =>
+      ["ActivityIndicator", "AssistantTurnStatus"].includes(String(node.type)),
+    ),
+    false,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(rendered),
+    /Queued|Waiting for|Thinking|Speaking/,
+  );
+  x.harness.unmount();
+});
+
+test("persisted voice segments render one Copy/date footer and Report targets the latest feedback anchor", () => {
+  for (const savedFeedback of [false, true]) {
+    const x = setup(A);
+    const fixture = voiceGroupFixtures[0]!;
+    x.assistant.history!.messages = fixture.rows.map((row, index) =>
+      messageSchema.parse({
+        ...row,
+        seq: index + 6,
+        role: "assistant",
+        status: "completed",
+        error_code: null,
+        created_at: `2026-11-09T01:00:0${index}Z`,
+        via: "voice",
+        ...(savedFeedback && index === 1 ? { feedback: { vote: "down" } } : {}),
+      }),
+    );
+    x.harness.render();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    const footers = rendered.filter(
+      (node) => node.type === "AssistantMessageFooter",
+    );
+    assert.equal(footers.length, 1);
+    assert.equal(footers[0]!.props.text, fixture.copy![0]);
+    assert.equal(footers[0]!.props.timestamp, "2026-11-09T01:00:00Z");
+    assert.equal(footers[0]!.props.report.messageId, savedFeedback ? "7" : "8");
+    assert.equal(footers[0]!.props.report.id, x.assistant.conversationId);
+    assert.equal(x.assistant.history!.messages.length, 3);
+    x.harness.unmount();
+  }
+});
+
+test("appending voice parts keeps the mobile row key stable and Report follows its anchor", () => {
+  const x = setup(A);
+  const rows = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: `2026-11-09T01:00:0${index}Z`,
+      via: "voice",
+    }),
+  );
+  x.assistant.history!.messages = rows.slice(0, 1);
+  x.harness.render();
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const key = list().props.keyExtractor(list().props.data[0]);
+  x.assistant.history!.messages = rows;
+  x.harness.render();
+  assert.equal(list().props.keyExtractor(list().props.data[0]), key);
+  const rendered = elements(
+    expand(list().props.renderItem({ item: list().props.data[0], index: 0 })),
+  );
+  assert.equal(
+    rendered.find((node) => node.type === "AssistantMessageFooter")!.props
+      .report.messageId,
+    "8",
+  );
+  x.harness.unmount();
+});
+test("a navigation target for a middle voice segment reveals its stable group row", () => {
+  const x = setup(A);
+  x.assistant.history!.messages = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: "2026-11-09T01:00:00Z",
+      via: "voice",
+    }),
+  );
+  x.props.route.params.messageId = "7";
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  const scrolls: { index: number }[] = [];
+  list.props.ref.current = {
+    scrollToIndex: (target: { index: number }) => scrolls.push(target),
+  };
+  x.harness.render();
+  assert.equal(list.props.data[0].id, "6");
+  assert.deepEqual(scrolls.map((target) => target.index), [0]);
+  x.harness.render();
+  assert.equal(scrolls.length, 1);
+  x.harness.unmount();
+});
+test("voice footers hide live continuations and keep sealed disconnect partial groups", async () => {
+  for (const [sealed, state, interrupted, visible] of [
+    [false, "active", false, false],
+    [true, "active", false, false],
+    [true, "closed", false, true],
+    [true, "failed", false, true],
+    [true, "active", true, true],
+  ] as const) {
+    const x = setup(A);
+    x.assistant.history!.messages = voiceGroupFixtures[0]!.rows
+      .slice(0, 2)
+      .map((row, index) =>
+        messageSchema.parse({
+          ...row,
+          seq: index + 6,
+          role: "assistant",
+          status: "completed",
+          error_code: null,
+          created_at: `2026-11-09T01:00:0${index}Z`,
+          via: "voice",
+          voice: {
+            ...row.voice,
+            sealed: index === 0 || sealed,
+            complete: index === 0,
+            interrupted: index !== 0 && interrupted,
+          },
+        }),
+      );
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    const snapshot = liveVoice("");
+    snapshot.session.id = x.assistant.history!.messages[0]!.voice!.session_id;
+    snapshot.session.state = state;
+    snapshot.captions = [];
+    x.voice()!.props.onSnapshot(snapshot);
+    x.harness.flush();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    assert.equal(
+      rendered.filter((node) => node.type === "AssistantMessageFooter").length,
+      visible ? 1 : 0,
+    );
+    if (visible) {
+      const footer = rendered.find((node) => node.type === "AssistantMessageFooter")!;
+      assert.equal(footer.props.text, list.props.data[0].text);
+      assert.equal(footer.props.timestamp, "2026-11-09T01:00:00Z");
+      assert.equal(footer.props.report.messageId, "7");
+    }
+    x.harness.unmount();
+  }
+});
 
 test("live speech grows in the main chat and sealed history replaces it once", async () => {
   const x = setup(A);

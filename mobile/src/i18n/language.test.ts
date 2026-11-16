@@ -65,9 +65,8 @@ function setup(
       jsx: (type: unknown, props: Element["props"]) => ({ type, props }),
     },
     "react-native": {
-      NativeModules: {
-        SettingsManager: { settings: { AppleLanguages: locales } },
-      },
+      Platform: { OS: "ios" },
+      Settings: { get: () => locales },
     },
     "@react-native-async-storage/async-storage": {
       getItem: (key: string) => {

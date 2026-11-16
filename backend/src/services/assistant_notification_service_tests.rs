@@ -1318,6 +1318,7 @@ async fn automatic_pause_records_one_problem_with_the_notice_identity_and_no_sec
 fn chat_authority(row: &AssistantConversation, agent_id: &str) -> acks::ChatAuthority {
     let turn = row.active_turn.as_ref().expect("live turn");
     acks::ChatAuthority {
+        voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,

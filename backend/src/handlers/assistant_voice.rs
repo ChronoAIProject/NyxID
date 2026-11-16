@@ -130,7 +130,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         assistant_voice::REQUESTS,
     };
-    voice::publish_completed_results(&state.db).await?;
+    voice::publish_completed_results(state).await?;
     voice::recover(&state.db).await?;
     let rows = voice::queued(&state.db).await?;
     for request in rows {
@@ -163,7 +163,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
             .await?;
             let message = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
                 "_id":&request.message_id,"user_id":&request.user_id,"conversation_id":&request.conversation_id,
-                "turn_id":&request.turn_id,"execution_pending":true,
+                "turn_id":&request.turn_id,"execution_pending":true,"role":"user","via":"voice",
             }).await?.ok_or_else(|| AppError::NotFound("Voice input unavailable".into()))?;
             let mut start = engine::TurnStart::from(&engine::TurnRequest {
             acknowledgement_id: None,
@@ -224,7 +224,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         }
         // Pool/active-turn/temporary database errors leave the durable queue intact.
     }
-    voice::publish_completed_results(&state.db).await?;
+    voice::publish_completed_results(state).await?;
     Ok(())
 }
 

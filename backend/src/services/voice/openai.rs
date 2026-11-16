@@ -247,7 +247,7 @@ pub fn start_payload(
     delegation_model: Option<&str>,
     delegation_instructions: Option<&str>,
 ) -> Value {
-    json!({"session":{"model":model,"store":false,"instructions":instructions,
+    json!({"session":{"model":model,"store":false,"instructions":format!("{instructions}\n{}", super::links::INSTRUCTIONS),
         "delegation":delegation_model.map(|model| super::responses::configuration(model, delegation_instructions)).unwrap_or_else(|| json!({"type":"client"})),"audio":{"output":{"voice":voice}},
         "client":{"data_channel":{"allowed_client_events":[],"allowed_server_events":[
             {"type":"session.started"},{"type":"session.closed"},{"type":"error"}

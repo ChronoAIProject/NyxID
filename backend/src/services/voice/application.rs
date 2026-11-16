@@ -183,6 +183,8 @@ async fn start_for_caller(
 
 #[derive(Serialize)]
 pub struct SessionResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_request_id: Option<String>,
     pub(crate) created_at: chrono::DateTime<chrono::Utc>,
     pub(crate) closed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) id: String,
@@ -210,6 +212,7 @@ impl From<crate::models::assistant_voice_session::VoiceSession> for SessionRespo
                 >= crate::models::assistant_voice::IDLE_SECONDS
                     - crate::models::assistant_voice::IDLE_WARNING_SECONDS;
         Self {
+            client_request_id: None,
             id: row.id,
             generation: row.generation,
             created_at: row.created_at,
@@ -231,6 +234,15 @@ impl From<crate::models::assistant_voice_session::VoiceSession> for SessionRespo
                 && row.live_slot,
         }
     }
+}
+
+fn active_session_response(
+    call: crate::models::assistant_voice_session::VoiceSession,
+) -> SessionResponse {
+    let request = call.client_request_id.clone();
+    let mut response: SessionResponse = call.into();
+    response.client_request_id = Some(request);
+    response
 }
 
 #[derive(Serialize)]
@@ -263,7 +275,7 @@ pub async fn active_session(
         session = None;
     }
     Ok(ActiveSessionResponse {
-        session: session.map(Into::into),
+        session: session.map(active_session_response),
     })
 }
 #[derive(Serialize)]
@@ -284,7 +296,7 @@ pub async fn account_active_session(
     let call = crate::services::voice::session::active_for_user(&state.db, &user).await?;
     Ok(AccountActiveSessionResponse {
         conversation_id: call.as_ref().map(|row| row.conversation_id.clone()),
-        session: call.map(Into::into),
+        session: call.map(active_session_response),
     })
 }
 
@@ -600,4 +612,18 @@ pub async fn service_start(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod active_response_tests {
+    use super::*;
+    #[tokio::test]
+    async fn active_dto_exposes_request_identity_only_on_owner_active_reads() {
+        let (state, _, call) = super::super::tests::setup("voice_active_request_identity").await;
+        let owner = serde_json::to_value(active_session_response(call.clone())).unwrap();
+        assert_eq!(owner["client_request_id"], call.client_request_id);
+        let ordinary = serde_json::to_value(SessionResponse::from(call)).unwrap();
+        assert!(ordinary.get("client_request_id").is_none());
+        state.db.drop().await.unwrap();
+    }
 }

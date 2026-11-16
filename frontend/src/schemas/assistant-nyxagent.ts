@@ -179,6 +179,13 @@ export const nyxAgentActionOutcomeSchema = z.object({
   retry_warning: z.string().nullish(),
 });
 export const nyxAgentMessageSchema = z.object({
+  voice: z.object({
+    session_id: z.string(),
+    segment_id: z.string(),
+    sealed: z.boolean(),
+    complete: z.boolean(),
+    interrupted: z.boolean().optional(),
+  }).nullish(),
   artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean(),rejected: z.array(z.object({index: z.number().int().nonnegative(), filename: z.string(), reason: z.string()})).default([])}).nullable().optional(),
   action_outcome: nyxAgentActionOutcomeSchema.nullish(),
   platform_origin: platformTurnOriginSchema.nullish(),

@@ -29,6 +29,30 @@ use std::sync::{
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
 
 #[test]
+fn voice_history_dto_preserves_interrupted_boundary_and_omits_false() {
+    for interrupted in [false, true] {
+        let message: AssistantMessage = mongodb::bson::from_document(doc! {
+            "_id": "voice-message", "conversation_id": "conversation", "user_id": OWNER,
+            "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "Speech",
+            "status": "completed", "created_at": mongodb::bson::DateTime::now(),
+            "via": "voice", "voice": {
+                "session_id": "call", "segment_id": "segment", "start_ms": 0_i64,
+                "end_ms": 1000_i64, "sealed": true, "complete": false,
+                "interrupted": interrupted, "delivery": "generated",
+            },
+        })
+        .unwrap();
+        let response = serde_json::to_value(MessageResponse::from(message)).unwrap();
+        assert_eq!(response["voice"]["segment_id"], "segment");
+        if interrupted {
+            assert_eq!(response["voice"]["interrupted"], true);
+        } else {
+            assert!(response["voice"].get("interrupted").is_none());
+        }
+    }
+}
+
+#[test]
 fn upstream_request_id_is_bounded_and_validated() {
     assert_eq!(
         sanitize_upstream_request_id("req_123:abc"),

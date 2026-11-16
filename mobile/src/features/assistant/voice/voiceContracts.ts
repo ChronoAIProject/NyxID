@@ -150,6 +150,7 @@ export const voiceOptionsSchema = z.object({
 });
 
 export const voiceSessionSchema = z.object({
+  client_request_id: z.string().optional(),
   created_at: z.string().datetime({ offset: true }),
   closed_at: z.string().datetime({ offset: true }).nullable(),
   id: z.string().uuid(),
@@ -217,6 +218,7 @@ export const voiceSnapshotSchema = z.object({
       text: z.string(),
       sealed: z.boolean(),
       complete: z.boolean(),
+      interrupted: z.boolean().optional(),
     }),
   ),
   tasks: z.array(voiceTaskSchema),

@@ -1003,6 +1003,14 @@ pub(crate) async fn run_owner_turn(
     result.text = result
         .text
         .replace(credential.raw_key.as_str(), "[redacted]");
+    // A voice task's model-authored reply cannot reconstruct private URLs.
+    // Sanitize before checkpoint/settlement as well as at visible publication.
+    if row.voice_parent_conversation_id.is_some() {
+        result.text = super::voice::links::redact_task_reply(
+            &result.text,
+            &super::voice::links::frontend_origins(&state.config),
+        );
+    }
     let settled = complete_turn(
         &state.db,
         &row,
@@ -1784,7 +1792,7 @@ async fn execute_turn_inner(
     // A recap leads with the durable checkpoint; guest audiences never get it.
     if !row.guest_turn {
         context.set_checkpoint(
-            engine::checkpoint(&state.db, &row.user_id, &row.id)
+            engine::checkpoint_for_conversation(&state.db, row)
                 .await
                 .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
         );

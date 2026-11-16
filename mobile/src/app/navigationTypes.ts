@@ -17,6 +17,8 @@ export type AssistantParams = {
   /** Local identity of an unsent compose session; never sent to the server. */
   draftId?: string;
   conversationId?: string;
+  /** Resolve any persisted segment ID to its displayed transcript row. */
+  messageId?: string;
   acknowledgementId?: string;
   agentId?: string;
   draft?: boolean;

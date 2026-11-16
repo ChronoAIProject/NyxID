@@ -1,0 +1,252 @@
+[
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example。",
+    "suffix": "。",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example，",
+    "suffix": "，",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example、",
+    "suffix": "、",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example！",
+    "suffix": "！",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example？",
+    "suffix": "？",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example；",
+    "suffix": "；",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example：",
+    "suffix": "：",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example）",
+    "suffix": "）",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example」",
+    "suffix": "」",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example』",
+    "suffix": "』",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example】",
+    "suffix": "】",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example》",
+    "suffix": "》",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example”",
+    "suffix": "”",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example，然后继续。",
+    "suffix": "，然后继续。",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example…",
+    "suffix": "…",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example・",
+    "suffix": "・",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "https://nyxid.ai/connect/bot/nyx_bcl_example！",
+    "suffix": "！",
+    "hrefs": ["https://nyxid.ai/connect/bot/nyx_bcl_example"]
+  },
+  {
+    "text": "（https://x.y/z）",
+    "suffix": "）",
+    "hrefs": ["https://x.y/z"]
+  },
+  {
+    "text": "www.example.com/path。然后",
+    "suffix": "。然后",
+    "hrefs": []
+  },
+  {
+    "text": "https://x.y/z.",
+    "suffix": ".",
+    "hrefs": ["https://x.y/z"]
+  },
+  {
+    "text": "(https://x.y/z)",
+    "suffix": ")",
+    "hrefs": ["https://x.y/z"]
+  },
+  {
+    "text": "https://x.y/z?q=1&a=b。",
+    "suffix": "。",
+    "hrefs": ["https://x.y/z?q=1&a=b"]
+  },
+  {
+    "text": "生产环境链接示例：https://nyxid.ai/connect/bot/nyx_bcl_example。另一个：https://nyxid.ai/connect/nyx_clk_example，然后继续。括号（https://x.y/z）结束。",
+    "hrefs": [
+      "https://nyxid.ai/connect/bot/nyx_bcl_example",
+      "https://nyxid.ai/connect/nyx_clk_example",
+      "https://x.y/z%EF%BC%89%E7%BB%93%E6%9D%9F"
+    ]
+  },
+  {
+    "text": "https://x.y/one，https://x.y/two，然后继续。",
+    "hrefs": [
+      "https://x.y/one",
+      "https://x.y/two%EF%BC%8C%E7%84%B6%E5%90%8E%E7%BB%A7%E7%BB%AD"
+    ]
+  },
+  {
+    "text": "https://x.y/one。http://example.com/unsafe，然后https://x.y/two。",
+    "hrefs": ["https://x.y/one", "https://x.y/two"]
+  },
+  {
+    "text": "https://x.y/one。https://x.y/two?q=1&a=b.",
+    "hrefs": ["https://x.y/one", "https://x.y/two?q=1&a=b"]
+  },
+  {
+    "text": "https://zh.wikipedia.org/wiki/中文（消歧义）",
+    "hrefs": [
+      "https://zh.wikipedia.org/wiki/%E4%B8%AD%E6%96%87%EF%BC%88%E6%B6%88%E6%AD%A7%E4%B9%89%EF%BC%89"
+    ]
+  },
+  {
+    "text": "https://example.com/s?q=你好，世界&x=1",
+    "hrefs": [
+      "https://example.com/s?q=%E4%BD%A0%E5%A5%BD%EF%BC%8C%E4%B8%96%E7%95%8C&x=1"
+    ]
+  },
+  {
+    "text": "https://example.com/（balanced）",
+    "hrefs": ["https://example.com/%EF%BC%88balanced%EF%BC%89"]
+  },
+  {
+    "text": "www.example.com/a",
+    "hrefs": []
+  },
+  {
+    "text": "www.example.com/a。",
+    "hrefs": []
+  },
+  {
+    "text": "www.example.com/a，",
+    "hrefs": []
+  },
+  {
+    "text": "www.example.com/a！",
+    "hrefs": []
+  },
+  {
+    "text": "www.example.com/a）",
+    "hrefs": []
+  },
+  {
+    "text": "nyxid.ai/connect/x",
+    "hrefs": []
+  },
+  {
+    "text": "nyxid.ai/connect/x。",
+    "hrefs": []
+  },
+  {
+    "text": "nyxid.ai/connect/x，",
+    "hrefs": []
+  },
+  {
+    "text": "nyxid.ai/connect/x！",
+    "hrefs": []
+  },
+  {
+    "text": "nyxid.ai/connect/x）",
+    "hrefs": []
+  },
+  {
+    "text": "https://example.com/s?next=https://example.org/a&x=1",
+    "suffix": "",
+    "hrefs": ["https://example.com/s?next=https://example.org/a&x=1"]
+  },
+  {
+    "text": "https://example.com/a'",
+    "hrefs": ["https://example.com/a"],
+    "mobileHrefs": ["https://example.com/a"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://example.com/a\"",
+    "hrefs": ["https://example.com/a"],
+    "mobileHrefs": ["https://example.com/a"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://example.com/a_",
+    "hrefs": ["https://example.com/a"],
+    "mobileHrefs": ["https://example.com/a_"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://example.com/a*",
+    "hrefs": ["https://example.com/a"],
+    "mobileHrefs": ["https://example.com/a*"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://example.com/a~",
+    "hrefs": ["https://example.com/a"],
+    "mobileHrefs": ["https://example.com/a~"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://example.com/a)",
+    "hrefs": ["https://example.com/a"],
+    "mobileHrefs": ["https://example.com/a"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://example.com/a(x)",
+    "hrefs": ["https://example.com/a(x)"],
+    "mobileHrefs": ["https://example.com/a(x)"],
+    "golden": "origin/main GFM/linkify ASCII literal"
+  },
+  {
+    "text": "https://en.wikipedia.org/wiki/Ender’s_Game",
+    "hrefs": ["https://en.wikipedia.org/wiki/Ender%E2%80%99s_Game"]
+  },
+  {
+    "text": "https://example.com/a”b",
+    "hrefs": ["https://example.com/a%E2%80%9Db"]
+  },
+  {
+    "text": "https://example.com/a)b",
+    "hrefs": ["https://example.com/a)b"],
+    "mobileHrefs": ["https://example.com/a"],
+    "golden": "origin/main parser extent; shared boundary does not trim the interior closer"
+  }
+]
