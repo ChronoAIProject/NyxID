@@ -479,6 +479,10 @@ Chinese catalogs use the same structure as the web app catalogs:
   its own area automatically; it must not be named `navigation`, `shared` or
   `unattributed` (the tools fail with a clear error). The map is
   `mobile/scripts/lib/i18n-portions.mjs`.
+- Placement scans only React Native sources under `mobile/src`. Native Swift
+  or Kotlin targets (such as an Apple Watch app under `mobile/ios`) do not read
+  these catalogs; localize them with their platform's own string files. A key
+  referenced only outside `mobile/src` lands in `unattributed`, never dropped.
 - `mobile/src/i18n/locales/zh-CN.ts` and `zh-TW.ts`: generated barrels that
   import every area JSON explicitly, in sorted order, and merge them. Metro,
   jest and `node:test` need no glob support. Import catalogs only through these
