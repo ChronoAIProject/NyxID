@@ -44,7 +44,7 @@ After deployment, verify `https://<each-host>/.well-known/assetlinks.json` has r
 
 The auth session requests ephemeral isolation on iOS (no Safari cookie sharing), matching the previous in-app browser; Android ignores this option.
 
-On Android, process death during authorization can leave expo-web-browser's proxy task behind. The next cold start removes that stale task, so Continue or Retry opens a fresh authorization page.
+On Android, process death or a force stop during authorization can leave expo-web-browser's proxy task behind. The next cold start removes that stale task, so Continue or Retry opens a fresh authorization page.
 
 Register `{BASE_URL}/api/v1/providers/callback` in each provider application's redirect allowlist. During domain migration register the corresponding callback on **both** API origins before enabling the mobile domain flag. The callback goes to NyxID first; do not register `nyxid://services/oauth-return` with the provider. NyxID validates and persists only the exact `<scheme>://services/oauth-return` app destination and appends only `status=success|error` and a fixed normalized error `code`. It never returns credentials, state, nonce or provider text. `nyxid` is always allowed. Builds with a custom `APP_SCHEME` require the same lowercase scheme in backend `MOBILE_APP_RETURN_SCHEMES` on every replica; without that configuration, initiate falls back to the server-state flow after a 400 and no automatic app return is expected. `exp://` is never accepted for service OAuth. The service validator is separate from social-login's unchanged `nyxid://` / `exp://` predicate. `app_return_uri` is incompatible with `redirect_path` and completion-page flows `cc`/`wz`.
 

@@ -18,8 +18,11 @@ const METHODS = `  private fun cleanupStaleAuthBrowserTasks() {
 
     getSystemService(ActivityManager::class.java)?.appTasks?.forEach { appTask ->
       try {
+        val taskInfo = appTask.taskInfo
         if (
-          appTask.taskInfo.baseActivity?.className ==
+          taskInfo.baseIntent?.component?.className ==
+            "expo.modules.webbrowser.BrowserProxyActivity" ||
+          taskInfo.baseActivity?.className ==
             "expo.modules.webbrowser.BrowserProxyActivity"
         ) {
           appTask.finishAndRemoveTask()

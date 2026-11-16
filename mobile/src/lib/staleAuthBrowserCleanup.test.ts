@@ -42,8 +42,11 @@ const methods = `  private fun cleanupStaleAuthBrowserTasks() {
 
     getSystemService(ActivityManager::class.java)?.appTasks?.forEach { appTask ->
       try {
+        val taskInfo = appTask.taskInfo
         if (
-          appTask.taskInfo.baseActivity?.className ==
+          taskInfo.baseIntent?.component?.className ==
+            "expo.modules.webbrowser.BrowserProxyActivity" ||
+          taskInfo.baseActivity?.className ==
             "expo.modules.webbrowser.BrowserProxyActivity"
         ) {
           appTask.finishAndRemoveTask()
@@ -92,6 +95,8 @@ test("patches the generated Kotlin activity before super.onCreate and is idempot
   assert.match(patched, /if \(staleAuthBrowserCleanupDone\) return/);
   assert.match(patched, /staleAuthBrowserCleanupDone = true/);
   assert.match(patched, /getSystemService\(ActivityManager::class\.java\)\?\.appTasks/);
+  assert.match(patched, /taskInfo\.baseIntent\?\.component\?\.className/);
+  assert.match(patched, /taskInfo\.baseActivity\?\.className/);
   assert.match(patched, /appTask\.finishAndRemoveTask\(\)/);
   assert.match(patched, /catch \(_:\s*IllegalArgumentException\)/);
 });
@@ -120,7 +125,12 @@ test("keeps the cleanup target bound to expo-web-browser's current proxy activit
   assert.equal(fullyQualifiedName, "expo.modules.webbrowser.BrowserProxyActivity");
   const patched = configureStaleAuthBrowserCleanup(mainActivity);
   assert.equal(
-    patched.match(/appTask\.taskInfo\.baseActivity\?\.className ==\s*"([^"]+)"/)?.[1],
+    patched.match(/taskInfo\.baseIntent\?\.component\?\.className ==\s*"([^"]+)"/)?.[1],
     fullyQualifiedName,
   );
+  assert.equal(
+    patched.match(/taskInfo\.baseActivity\?\.className ==\s*"([^"]+)"/)?.[1],
+    fullyQualifiedName,
+  );
+  assert.doesNotMatch(patched, /realActivity/);
 });
