@@ -6,7 +6,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, test } from "node:test";
 import { canonicalText } from "../../shared/i18n/catalog-core.mjs";
-import { LANGUAGES, auditCatalogs, barrelText } from "./lib/i18n-catalogs.mjs";
+import ts from "typescript";
+import { LANGUAGES, auditCatalogs, barrelIdentifiers, barrelText } from "./lib/i18n-catalogs.mjs";
 import { portionForPath } from "./lib/i18n-portions.mjs";
 
 const mobile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,6 +44,40 @@ describe("mobile area map", () => {
     for (const name of ["shared", "unattributed", "navigation"]) {
       assert.throws(() => portionForPath(`src/features/${name}/Screen.tsx`), new RegExp(`src/features/${name} collides with the reserved catalog area "${name}"`));
     }
+  });
+});
+
+describe("mobile barrel identifiers", () => {
+  const areas = ["account", "foo-bar", "fooBar", "foo_bar", "delete", "default", "new", "2fa", "3-d", "---", "catalog", "Account"];
+
+  test("are valid, collision-free names for hyphenated, reserved-word, digit-leading and colliding areas", () => {
+    const names = barrelIdentifiers(areas);
+    assert.deepEqual(Object.fromEntries(names), {
+      "---": "areaCatalog",
+      "2fa": "area2faCatalog",
+      "3-d": "area3DCatalog",
+      Account: "accountCatalog",
+      account: "accountCatalog2",
+      catalog: "catalogCatalog",
+      default: "defaultCatalog",
+      delete: "deleteCatalog",
+      "foo-bar": "fooBarCatalog",
+      fooBar: "fooBarCatalog2",
+      foo_bar: "fooBarCatalog3",
+      new: "newCatalog",
+    });
+    assert.equal(new Set(names.values()).size, areas.length);
+    for (const name of names.values()) assert.match(name, /^[A-Za-z][A-Za-z0-9]*$/);
+  });
+
+  test("produce a barrel that parses and imports every area exactly once", () => {
+    const text = barrelText(areas, "zh-TW");
+    const { diagnostics } = ts.transpileModule(text, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.ESNext } });
+    assert.deepEqual(diagnostics, []);
+    const imports = [...text.matchAll(/^import (\w+) from "\.\/(.+)\/zh-TW\.json";$/gm)];
+    assert.deepEqual(imports.map((match) => match[2]).sort(), [...areas].sort());
+    assert.equal(new Set(imports.map((match) => match[1])).size, areas.length);
+    for (const [, name] of imports) assert.match(text, new RegExp(`^  \\.\\.\\.${name},$`, "m"));
   });
 });
 
