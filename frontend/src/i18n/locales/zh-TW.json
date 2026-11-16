@@ -12142,6 +12142,8 @@
   "Drafted by {{name}}": "由 {{name}} 起草",
   "System skill": "系統技能",
   "System skill for {{service}}": "{{service}} 的系統技能",
+  "Collapse all": "全部折疊",
+  "Expand all": "全部展開",
   "Pin chat": "置頂對話",
   "Unpin chat": "取消置頂",
   "Pinned chat": "已置頂對話",
