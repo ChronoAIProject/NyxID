@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { channelDetail } from "./channelPresentation";
 import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
@@ -751,16 +753,18 @@ export function AgentsScreen({
             )}
             {!!agent.channels.length && (
               <SettingsGroup inset={false} title="Connected channels">
-                {agent.channels.map((channel) => agent.owner_kind === "org" ? (
+                {agent.channels.map((channel) => {
+                  const detail = channelDetail(channel);
+                  return agent.owner_kind === "org" ? (
                   <OrgGuestChannel key={`${getAuthEpoch()}:${channel.id}`} agent={agent} channel={channel} />
                 ) : (
                   <SettingsRow
                     key={channel.id}
                     label={channel.bot_label}
-                    detail={channel.platform}
+                    detail={detail.kind === "message" ? t(detail.value) : detail.value}
                     value={channel.status}
                   />
-                ))}
+                ); })}
               </SettingsGroup>
             )}
             <SettingsGroup inset={false} title="Recent threads">

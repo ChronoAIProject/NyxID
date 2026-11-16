@@ -12174,5 +12174,6 @@
   "Saved guest access stays on. Private chats stay restricted to verified organization members. Guests can talk in groups that allow everyone; the organization pays for their messages and tool use. Existing guest service limits apply. Guests can use only the services listed below; an empty list means model-only chat.": "Saved guest access stays on. Private chats stay restricted to verified organization members. Guests can talk in groups that allow everyone; the organization pays for their messages and tool use. Existing guest service limits apply. Guests can use only the services listed below; an empty list means model-only chat.",
   "Oldest outstanding effect: {{value1}}": "Oldest outstanding effect: {{value1}}",
   "No outstanding effects": "No outstanding effects",
-  "Security effect relay": "Security effect relay"
+  "Security effect relay": "Security effect relay",
+  "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."
 }

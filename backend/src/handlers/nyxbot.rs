@@ -1417,7 +1417,7 @@ async fn connect_gateway(
     let mut row = row.clone();
     row.gateway_source = crate::services::nyxbot_gateway_source::select(state, &row, bot)
         .await
-        .map_err(|_| "gateway_native_unavailable")?;
+        .map_err(crate::services::nyxbot_gateway_source::selection_error_code)?;
     if row.gateway_source.is_some() {
         state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"pending"},
             doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|"storage_unavailable")?,"gateway_native_phase":"preparing","gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null}}).await.map_err(|_|"storage_unavailable")?;
@@ -1925,7 +1925,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     }
     let source = crate::services::nyxbot_gateway_source::select(state, row, &bot)
         .await
-        .map_err(|_| "gateway_native_unavailable")?;
+        .map_err(crate::services::nyxbot_gateway_source::selection_error_code)?;
     // Mentions of the bot are recognised exactly by its own user ID when
     // NyxID can look it up (without it the gateway counts any mention).
     let bot_id = if let Some(id) =

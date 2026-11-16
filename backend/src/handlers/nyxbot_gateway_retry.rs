@@ -9,7 +9,10 @@ pub(super) fn fallback_reason(row: &NyxbotChannel) -> Option<String> {
         return None;
     }
     let code = row.gateway_native_activation.as_deref()?;
-    if matches!(code, "relay_ready" | "relay_draining") {
+    if matches!(
+        code,
+        "relay_ready" | "relay_draining" | "gateway_native_draining"
+    ) {
         return None;
     }
     let status = "NyxID relay selected; check channel health for delivery status.";

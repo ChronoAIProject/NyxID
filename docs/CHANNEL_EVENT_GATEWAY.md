@@ -1212,8 +1212,15 @@ by claim, revision, state and lease. Recovery reads `/channel-records/{record_id
 and validates owner, provider, binding and the captured relay or native source. It never creates a record
 or replaces the captured deletion version with an observed version. Destination
 drift, version changes, malformed identity and live-reference conflicts require
-review. An uncertain POST that remains unobserved for 24 hours requires review:
-that deadline is not proof that creation never happened.
+review. Discord reviews are automatically re-observed on the existing sweep
+with leased, bounded backoff (30 seconds to one hour). Original matching proof
+can requeue exact cleanup; acknowledged absence can settle. Explicit preservation
+permits only read-only absence checks, never deletion. An uncertain POST that
+remains unobserved for 24 hours retains its review state and continues being
+checked: that deadline and repeated 404s are not proof that creation never
+happened. Unknown creation requires a recoverable exact record or a gateway
+contract that positively fences late creation; current record-lookup 404 alone
+cannot safely release it.
 
 Administrators use the [release review API](API.md#nyxbot-gateway-release-review)
 to inspect a sanitized observation and resolve its exact revision. `retry_original`
@@ -1231,7 +1238,12 @@ Filter audit events by `nyxbot_gateway_release_queued`,
 `nyxbot_gateway_release_settled`, `nyxbot_gateway_release_review_required`,
 `nyxbot_gateway_release_reviewed`, `nyxbot_channel_continuity_restored` and
 `nyxbot_gateway_release_reconcile_pass_completed`. These metadata events commit
-with their transitions. Retries do not add audit events. Review transition logs
+with their transitions. `nyxbot_gateway_release_failed` records failed attempts
+and automatic review observations, with closed stored/current reason and gateway
+answer codes, obligation/channel/channel-bot IDs, attempt counts and retry times.
+The event is emitted when the `(state, code, gateway_answer)` tuple changes,
+otherwise at most once per 24 hours per obligation, in the state transaction.
+Overdue non-adopted native guards follow the same daily diagnostic bound. Review transition logs
 contain only obligation ID, local channel ID and a stable reason.
 
 An hourly, resumable keyset scan processes at most 100 retained-identity retired
@@ -1586,3 +1598,24 @@ uploads belong to the guest's channel conversation and only the current guest
 turn can supply them to the model. Org-specialist guest media is deferred. Native
 Discord/WhatsApp still waits for CMA#1402; this flag does not enable native reads.
 See [guest uploads](chat/10-uploads.md#personal-channel-guest-media).
+
+Recovery claims at most ten additional Discord reviews sequentially per sweep,
+stopping on the first empty claim. The release index beginning with `platform`,
+`native_drain_for`, `state`, and `resolution` excludes unrelated platforms,
+native drain guards, and successfully settled history before checking retry/lease
+times. The original closed `review_reason` survives later observations;
+`last_gateway_answer` and `failure_audit` are optional diagnostic fields, ignored
+by old replicas and never used as cleanup or session authority. Legacy optional
+timestamps deserialize as absent. An administrator-preserved preparation may
+detach its own stale pending references without revoking its keys or routes:
+the preserved record may still use them, and observation uses creator authority.
+
+Health identifies authority, destination, owner, identity/version and explicit
+preservation decisions and names the administrator who must act. Retryable
+cleanup describes automatic checks. Unacknowledged creation with a not-found
+answer explicitly explains that the gateway cannot yet confirm it was never
+created. The existing warning action remains for old clients. Web and mobile
+channel summaries explain the local `gateway_native_draining` fence; web hides
+native activation retry only for `gateway_native_draining`, alongside the existing
+intake evidence; the previous `relay_draining` text and retry action are unchanged. None of these
+observations relaxes exclusive ingress or the persisted 90-second drain.

@@ -402,7 +402,7 @@ export function ChannelBotsManager({
                       })()}
                     />
                   ) : null}
-                  {canManage && row.platform === "discord" && row.transport === "direct" && row.status === "active" && row.gateway_native_activation ? (
+                  {canManage && row.platform === "discord" && row.transport === "direct" && row.status === "active" && row.gateway_native_activation && !nativeReleasePending(row) ? (
                     <GroupedRow
                       asChild
                       interactive
@@ -647,11 +647,16 @@ function OwnerLink({
   );
 }
 
+function nativeReleasePending(row: NyxAgentChannelAgent) {
+  return row.transport === "direct" && row.gateway_native_activation === "gateway_native_draining";
+}
+
 function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
   useUiTranslation();
   if (row.discord_intake) {
     const intake = row.discord_intake;
     return <div className="space-y-1 type-secondary text-muted-foreground">
+      {row.gateway_native_activation === "gateway_native_draining" ? <p>{translateUi("Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.")}</p> : null}
       <p>{translateUi("Receiving side: ")}{intake.receiving_side === "native_gateway" ? translateUi("Agent Event Gateway") : intake.receiving_side === "interactions_only" ? translateUi("Discord interactions") : translateUi("NyxID relay")}{translateUi(". Intake: ")}{intake.state}.</p>
       <p>{translateUi("Last confirmed inbound: ")}{intake.last_inbound_at ? formatDateTime(intake.last_inbound_at) : translateUi("not observed")}.</p>
       {intake.handed_over_at ? <p>{translateUi("Handed over: ")}{formatDateTime(intake.handed_over_at)}.</p> : null}
@@ -669,6 +674,9 @@ function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
   }
   if (!row.gateway_native_activation) return null;
   const draining = row.gateway_native_activation === "relay_draining";
+  if (row.gateway_native_activation === "gateway_native_draining") {
+    return <p className="text-13 text-muted-foreground">{translateUi("Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.")}</p>;
+  }
   return <div className="space-y-1 text-13 text-muted-foreground">
     <p>{draining ? translateUi("Waiting for the native gateway to release Discord before the relay can resume.") : row.status === "active" && row.delivery_status === "ok" ? translateUi("Working on NyxID relay.") : translateUi("NyxID relay selected. Check channel health for delivery status.")}</p>
     {row.gateway_native_activation !== "relay_ready" && !draining ? <>

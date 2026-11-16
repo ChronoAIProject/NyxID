@@ -1,3 +1,4 @@
+import { translate } from "../../i18n/translate";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
@@ -19,8 +20,9 @@ const agent = agentSchema.parse({
   org_role: "admin",
   can_maintain: true,
 });
-function setup(legacy = false) {
+function setup(legacy = false, language: "en" | "zh-CN" | "zh-TW" = "en") {
   const writes: unknown[] = [];
+  const translations: string[] = [];
   let alertButtons: any[] = [];
   const review = {
     ready: true,
@@ -63,6 +65,7 @@ function setup(legacy = false) {
     run: async (action: () => Promise<unknown>) => action(),
   };
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ t: (phrase: string) => { translations.push(phrase); return translate(language, phrase); } }) },
     "react/jsx-runtime": {
       jsx: (type: any, props: any) => ({ type, props }),
       jsxs: (type: any, props: any) => ({ type, props }),
@@ -111,6 +114,7 @@ function setup(legacy = false) {
     harness,
     module,
     writes,
+    translations,
     query,
     session,
     review,
@@ -223,4 +227,33 @@ test("native member settings tolerate omitted money, explain read-only access an
   control.props.onValueChange(true);
   await e.harness.settle();
   assert.deepEqual(e.writes,[]);
+});
+
+test("org channel row renders localized draining status without an activation retry", () => {
+  for (const language of ["en", "zh-CN", "zh-TW"] as const) {
+    const e = setup(false, language);
+    e.harness.mount(() => e.module.OrgGuestChannel({ agent, channel: {
+      id: "discord", bot_label: "Office helper", platform: "discord", status: "active",
+      gateway_native_activation: "gateway_native_draining",
+    } }));
+    const rows = elements(e.harness.flush());
+    const row = rows.find((r) => r.props.label === "Office helper");
+    assert.ok(row);
+    const phrase = "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.";
+    assert.equal(row.props.detail, translate(language, phrase));
+    assert.ok(!rows.some((r) => /Retry native/.test(r.props.label ?? "")));
+  }
+});
+
+
+test("organization channel slugs bypass translation", () => {
+  for (const platform of ["x", "lark", "discord"]) {
+    const e = setup(false, "zh-CN");
+    e.harness.mount(() => e.module.OrgGuestChannel({ agent, channel: {
+      id: platform, bot_label: "Plain slug", platform, status: "active",
+    } }));
+    const rows = elements(e.harness.flush());
+    assert.equal(rows.find((r) => r.props.label === "Plain slug")?.props.detail, platform);
+    assert.ok(!e.translations.includes(platform));
+  }
 });

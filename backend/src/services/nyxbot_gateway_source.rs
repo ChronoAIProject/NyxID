@@ -125,6 +125,15 @@ pub async fn select(
         bot_id: bot.platform_bot_id.clone(),
     }))
 }
+/// Local release fencing is not a refusal from the native gateway.
+pub(crate) fn selection_error_code(error: AppError) -> &'static str {
+    if matches!(error, AppError::Conflict(ref code) if code == "gateway_native_draining") {
+        "gateway_native_draining"
+    } else {
+        "gateway_native_unavailable"
+    }
+}
+
 pub fn discord_capable(caps: &Value) -> bool {
     let caps = &caps["relay_authoring"];
     caps["native_discord_writes_enabled"] == true

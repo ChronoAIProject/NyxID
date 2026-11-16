@@ -32,7 +32,7 @@ fn unresolved_release(bot: &str) -> Document {
     // Local transport=direct alone is insufficient after a failed remote DELETE.
     doc! {"channel_bot_id":bot,"$or":[
         {"state":{"$ne":"settled"}},
-        {"resolution":{"$nin":["released","missing","cancelled","not_created","confirmed_missing"]}}
+        {"resolution":{"$nin":crate::services::nyxbot_gateway_release_service::accepted_resolutions_bson()}}
     ]}
 }
 

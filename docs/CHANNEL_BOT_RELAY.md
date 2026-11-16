@@ -2807,8 +2807,10 @@ folds it into the existing bot fence write.
 - `discord_relay_blocked`: setup/release fencing prevents a socket. `setup_pending`,
   `native_draining`, `release_unresolved` and `gateway_owned` distinguish the
   retained obligation; `readiness_unavailable` means the relay flag is on but
-  the fleet cannot safely run it. Administrators review unresolved releases through the
-  existing release-review API; never force a second IDENTIFY.
+  the fleet cannot safely run it. NyxID rechecks retained Discord releases
+  automatically and resumes only with original cleanup proof plus the drain;
+  never force a second IDENTIFY. The existing release-review API remains available
+  for inspecting authority or identity conflicts.
 - `discord_relay_unconfirmed`: the session is unknown, waiting, connecting,
   disabled or disconnected, or its `connected` report has no live ingress lease.
 - `discord_native_intake_unconfirmed`: native intake owns the bot, but NyxID has
@@ -2821,7 +2823,7 @@ per pass, rotating by its last repair check. It cleans only failed attempt keys
 and references, including legacy rows without the pending-agent marker. It does
 not resolve unknown creation/deletion, override operator review, switch existing
 native bots back to relay, or shorten the persisted 90-second post-delete drain.
-A missing release proof remains blocked for review. No message contents, tokens
+A missing release proof remains blocked while automatic rechecks continue. No message contents, tokens
 or upstream prose are added to health or repair metadata.
 
 ### Recovering late assistant answers
@@ -2841,3 +2843,35 @@ ownership observation (bot, platform installation and profile reservation) and
 one loaded scheduled destination. This does not cache authority across effects:
 each attachment upload, text part and subsequent provider effect reads it again.
 A confirmed prefix never authorizes its suffix.
+
+### Retrying a retained Discord release (#2323)
+
+The release sweep rechecks parked Discord obligations (`platform: "discord"`)
+automatically, with a
+leased backoff from 30 seconds to one hour, including legacy review rows. A
+matching original identity can resume exact-version cleanup; acknowledged remote
+absence settles cleanup. The existing 90-second post-confirmation drain remains
+mandatory. Explicitly preserved records are only observed for absence, never
+automatically deleted. Unknown creation, changed versions, refused authority and
+uncertain deletion continue blocking a second IDENTIFY. `release_unresolved`
+health explains the automatic checks instead of requiring an owner reconnect.
+The normal relay discovery restarts eligible sessions once every fence clears.
+
+`gateway_native_draining` is a local release check before any gateway capability
+request; it must not be interpreted as a CMA native-activation refusal. Preflight
+capability failures create no release and leave the relay eligible. A definitive
+create refusal keeps the working direct route and resolves its retained drain;
+an ambiguous create still needs remote proof. `nyxbot_gateway_release_failed`
+records changed outcomes and a daily reminder for unchanged outcomes, including
+closed original/current reason and gateway-answer codes, attempts and next retry.
+Preserved, destination, owner and authority/identity conflicts name the required
+administrator action in health; transient cleanup states describe automatic
+checks. Unacknowledged creates report the missing authoritative absence proof.
+Native retry is hidden for `gateway_native_draining`; the existing
+`relay_draining` text and retry action remain unchanged. No
+upstream body, Discord token or message is recorded.
+
+Parked releases for other platforms are not claimed by this re-observation
+worker. Their existing platform-specific release and administrator-review
+flows remain authoritative; this worker does not change their retry or
+cleanup behavior.
