@@ -267,7 +267,10 @@ git rebase --continue
 
 The tool uses
 `REBASE_HEAD` as the old branch, `REBASE_HEAD^` as its base, and `HEAD` as the
-new portion-layout commit. Explicit refs are also accepted:
+new portion-layout commit; a conflicted `git cherry-pick` of an old-layout
+commit works the same way with `CHERRY_PICK_HEAD`. `git am` patches carry no
+commit to read, so the tool asks for explicit refs instead. Explicit refs are
+also accepted:
 
 ```sh
 npm run adopt:i18n -- --branch <old-layout-ref> --base <base-ref> --onto <portion-layout-ref>

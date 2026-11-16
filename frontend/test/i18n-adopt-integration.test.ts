@@ -116,6 +116,46 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     expect(f.git("status", "--porcelain", "--", "frontend/src")).toBe("?? frontend/src/pages/late.test.ts");
   });
 
+  it("adopts a conflicted cherry-pick of a legacy commit", () => {
+    const f = fixture();
+    f.git("checkout", "split");
+    expect(spawnSync("git", ["cherry-pick", f.branch], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+    const adopted = f.adopt();
+    expect(adopted.status, adopted.stderr).toBe(0);
+    expect(adopted.stdout).toContain(`i18n: adopted CHERRY_PICK_HEAD (base CHERRY_PICK_HEAD^) onto HEAD`);
+    f.verify();
+  });
+
+  it("explains git am instead of failing on a missing REBASE_HEAD", () => {
+    const f = fixture();
+    const patch = path.join(f.repo, "legacy.patch");
+    fs.writeFileSync(patch, f.git("format-patch", "-1", "--stdout", f.branch));
+    f.git("checkout", "split");
+    expect(spawnSync("git", ["am", "-3", patch], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+    const result = f.adopt();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("git am is in progress; a mailbox patch has no commit to read the old catalogs from");
+    expect(result.stderr).toContain("usage: npm run adopt:i18n -- --branch <ref> --base <ref|empty> --onto <ref>");
+    expect(result.stderr).not.toContain("bad revision");
+  });
+
+  it("asks for explicit refs when a rebase has no usable REBASE_HEAD", () => {
+    const f = fixture();
+    expect(spawnSync("git", ["rebase", "split"], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+    fs.rmSync(path.join(f.repo, ".git/REBASE_HEAD"));
+    const result = f.adopt();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("a rebase is in progress but REBASE_HEAD does not resolve");
+    expect(result.stderr).toContain("usage: npm run adopt:i18n -- --branch <ref> --base <ref|empty> --onto <ref>");
+  });
+
+  it("reports when no merge, rebase or cherry-pick is in progress", () => {
+    const f = fixture();
+    const result = f.adopt();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("no merge, rebase or cherry-pick detected; provide --branch, --base and --onto.");
+  });
+
   /** Merge split into legacy, keep the legacy monoliths (and legacy families), and commit. */
   const commitMergeKeepingMonoliths = (f: ReturnType<typeof fixture>) => {
     f.git("checkout", "legacy");

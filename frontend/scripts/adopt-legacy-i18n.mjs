@@ -16,10 +16,12 @@ const prefix = path.relative(repoRoot, root).split(path.sep).join("/");
 const locales = path.join(root, "src/i18n/locales");
 const args = process.argv.slice(2);
 
+const USAGE = "usage: npm run adopt:i18n -- --branch <ref> --base <ref|empty> --onto <ref> | --imports-only";
+
 function resolveRefs() {
   const refs = {};
   for (let i = 0; i < args.length; i += 2) {
-    if (!["--branch", "--base", "--onto"].includes(args[i]) || !args[i + 1]) throw new Error("usage: npm run adopt:i18n -- --branch <ref> --base <ref|empty> --onto <ref> | --imports-only");
+    if (!["--branch", "--base", "--onto"].includes(args[i]) || !args[i + 1]) throw new Error(USAGE);
     refs[args[i].slice(2)] = args[i + 1];
   }
   if (Object.keys(refs).length) {
@@ -27,9 +29,19 @@ function resolveRefs() {
     return refs;
   }
   const exists = (name) => fs.existsSync(path.resolve(repoRoot, git("rev-parse", "--git-path", name)));
-  if (exists("rebase-merge") || exists("rebase-apply")) return { branch: "REBASE_HEAD", base: "REBASE_HEAD^", onto: "HEAD" };
+  const resolves = (ref) => {
+    try { git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`); return true; } catch { return false; }
+  };
+  if (exists("rebase-apply/applying")) {
+    throw new Error(`git am is in progress; a mailbox patch has no commit to read the old catalogs from. Pass the legacy commit explicitly (npm run adopt:i18n -- --branch <legacy-commit> --base <legacy-commit>^ --onto HEAD), or run git am --abort and merge, rebase or cherry-pick the branch instead.\n${USAGE}`);
+  }
+  if (exists("rebase-merge") || exists("rebase-apply")) {
+    if (resolves("REBASE_HEAD")) return { branch: "REBASE_HEAD", base: "REBASE_HEAD^", onto: "HEAD" };
+    throw new Error(`a rebase is in progress but REBASE_HEAD does not resolve to the commit being applied; pass the refs explicitly (--branch <commit-being-applied> --base <its-parent> --onto HEAD).\n${USAGE}`);
+  }
+  if (resolves("CHERRY_PICK_HEAD")) return { branch: "CHERRY_PICK_HEAD", base: "CHERRY_PICK_HEAD^", onto: "HEAD" };
   if (exists("MERGE_HEAD")) return { branch: "HEAD", onto: "MERGE_HEAD", base: git("merge-base", "HEAD", "MERGE_HEAD") };
-  throw new Error("no merge or rebase detected; provide --branch, --base and --onto");
+  throw new Error(`no merge, rebase or cherry-pick detected; provide --branch, --base and --onto.\n${USAGE}`);
 }
 
 /** Read many blobs from one ref with a single `git cat-file --batch` process. */
