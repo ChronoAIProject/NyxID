@@ -137,6 +137,28 @@ impl BillingReconciler {
         Ok(stats)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn push_usage_outage_for_test(&self) -> ReconcileStats {
+        let mut stats = ReconcileStats::default();
+        let error = self
+            .push_unacked(
+                self.lago.as_ref().expect("test Lago client").as_ref(),
+                &mut stats,
+            )
+            .await
+            .expect_err("injected provider outage must fail the step");
+        let AppError::BillingRecoveryFailed {
+            failed_units,
+            source,
+        } = error
+        else {
+            panic!("unexpected step error: {error}");
+        };
+        assert!(matches!(*source, AppError::BillingProviderUnavailable(_)));
+        assert_eq!(failed_units, stats.retried);
+        stats
+    }
+
     pub fn new(
         db: mongodb::Database,
         lago: Option<Arc<dyn LagoApi>>,
