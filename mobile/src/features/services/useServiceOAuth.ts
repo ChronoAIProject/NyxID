@@ -227,6 +227,7 @@ export function useServiceOAuth(
       const result = await WebBrowser.openAuthSessionAsync(
         authorizationUrl,
         serviceOAuthReturnUri(),
+        { preferEphemeralSession: true },
       );
       if (!current()) return;
       if (result.type === "success") {

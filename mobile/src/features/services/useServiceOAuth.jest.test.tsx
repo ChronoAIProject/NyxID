@@ -124,6 +124,7 @@ test.each(["cancel", "dismiss"] as const)(
     expect(WebBrowser.openAuthSessionAsync).toHaveBeenCalledWith(
       "https://provider.example/authorize",
       "nyxid://services/oauth-return",
+      { preferEphemeralSession: true },
     );
     await unmount();
   },
@@ -255,6 +256,7 @@ test("a return-destination 400 retries once without the app parameter", async ()
   expect(WebBrowser.openAuthSessionAsync).toHaveBeenCalledWith(
     "https://provider.example/authorize",
     "nyxid://services/oauth-return",
+    { preferEphemeralSession: true },
   );
   expect(result.current.banner?.outcome).toBe("pending");
   await unmount();
