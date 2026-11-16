@@ -28,6 +28,99 @@ async fn enable_manifest_rollout(db: &Database, actor: &str, target: FlagTarget)
 }
 
 #[tokio::test]
+async fn crash_default_off_footprint_has_no_export_or_network_commands() {
+    use crate::{
+        models::feature_flag_override::{
+            COLLECTION_NAME as OVERRIDES, FeatureFlagOverride, FlagTargetKind,
+        },
+        services::{crash_report_export, shutdown::Runtime},
+        test_utils::connect_test_database_with_command_handler,
+    };
+    for killed in [false, true] {
+        let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = commands.clone();
+        let db = connect_test_database_with_command_handler(
+            "crash_default_off_footprint",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    observed
+                        .lock()
+                        .unwrap()
+                        .push((event.command_name, event.command));
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        super::super::ensure_indexes(&db).await.unwrap();
+        if killed {
+            let now = Utc::now();
+            db.collection::<FeatureFlagOverride>(OVERRIDES)
+                .insert_one(FeatureFlagOverride {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    org_user_id: None,
+                    definition_id: None,
+                    flag_key: FLAG.into(),
+                    target_kind: FlagTargetKind::Global,
+                    target_key: None,
+                    enabled: false,
+                    created_at: now,
+                    updated_at: now,
+                    updated_by: uuid::Uuid::new_v4().to_string(),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            admin::rollout(&db).await.unwrap(),
+            if killed {
+                admin::Rollout::Killed
+            } else {
+                admin::Rollout::Off
+            }
+        );
+        let server = MockServer::builder().start().await;
+        Mock::given(method("GET"))
+            .and(path("/crash-build.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(manifest(&identity())))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let mut config = crate::test_utils::test_app_state(db.clone()).config;
+        config.environment = "development".into();
+        config.frontend_url = server.uri();
+        config.domain_aliases.frontend_urls.clear();
+        let runtime = Runtime::default();
+
+        commands.lock().unwrap().clear();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            crash_report_export::worker::run(
+                db.clone(),
+                Arc::new(crash_report_export::CrashConfig::default()),
+                runtime.clone(),
+            ),
+        )
+        .await
+        .expect("an unconfigured exporter returns before claiming work");
+        assert!(commands.lock().unwrap().is_empty(), "killed={killed}");
+
+        refresh_live_manifests(&db, &config, &runtime).await;
+        let seen = commands.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "killed={killed}: {seen:?}");
+        assert_eq!(seen[0].0, "find");
+        assert_eq!(seen[0].1.get_str("find"), Ok(OVERRIDES));
+        assert_eq!(
+            seen[0].1.get_document("filter"),
+            Ok(&doc! {"flag_key": FLAG, "definition_id": null})
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        server.verify().await;
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn distinct_unknown_artifacts_share_one_fetch_per_origin_and_cached_positive_manifest() {
     let (db, _, _) = super::super::tests::account("crash_origin_cache").await;
     let primary = MockServer::builder().start().await;

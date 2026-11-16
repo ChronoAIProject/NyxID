@@ -11,7 +11,7 @@ use mongodb::{
 };
 
 pub async fn run(db: Database, config: Arc<CrashConfig>, shutdown: Runtime) {
-    if config.interval.is_zero() {
+    if config.interval.is_zero() || (config.web.is_none() && config.mobile.is_none()) {
         return;
     }
     let mut interval = tokio::time::interval(config.interval);
@@ -268,6 +268,36 @@ mod tests {
         security_readiness_service as readiness,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn crash_worker_without_destinations_returns_without_database_commands() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        let commands = Arc::new(AtomicUsize::new(0));
+        let observed = commands.clone();
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "crash_no_destinations",
+            EventHandler::callback(move |event| {
+                if matches!(event, CommandEvent::Started(_)) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        commands.store(0, Ordering::SeqCst);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run(
+                db.clone(),
+                Arc::new(CrashConfig::default()),
+                Runtime::default(),
+            ),
+        )
+        .await
+        .expect("an unconfigured worker returns before its first tick");
+        assert_eq!(commands.load(Ordering::SeqCst), 0);
+        db.drop().await.unwrap();
+    }
 
     async fn tick(db: &Database, config: &CrashConfig) -> AppResult<()> {
         let shutdown = Runtime::default();
