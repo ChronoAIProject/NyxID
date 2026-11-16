@@ -166,7 +166,9 @@ pub async fn record_usage_settled(
     if append_and_confirm_dedupe(db, entry).await {
         Ok(())
     } else {
-        Err(AppError::Internal("usage ledger append is pending".into()))
+        Err(super::recovery_batch::waiting(AppError::Internal(
+            "usage ledger append is pending".into(),
+        )))
     }
 }
 

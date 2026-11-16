@@ -1,3 +1,4 @@
+use super::recovery_batch::{self, Failures};
 mod dead_letters;
 
 use crate::models::credits::Credits;
@@ -399,9 +400,9 @@ async fn ensure_wallet_settlement_lock(
         complete_wallet_settlement_lock(db, wallet_id, owner_id, &active).await?;
     }
 
-    Err(AppError::Internal(format!(
+    Err(super::recovery_batch::waiting(AppError::Internal(format!(
         "billing wallet settlement lock busy for wallet {wallet_id}"
-    )))
+    ))))
 }
 
 /// Finish only the admission owner's durable wallet operation. Call outside
@@ -826,7 +827,7 @@ pub async fn abandon_stale_unforwarded(
     cutoff: chrono::DateTime<Utc>,
 ) -> AppResult<u64> {
     let mut cursor = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+        .collection::<Document>(USAGE_METER)
         .find(doc! {
             "status": "reserved",
             "forwarded": false,
@@ -842,15 +843,23 @@ pub async fn abandon_stale_unforwarded(
     }
 
     let mut released_count = 0;
-    for row in rows {
+    let mut failures = Failures::default();
+    for raw in rows {
         if !super::reconcile::continue_reconcile() {
             break;
         }
-        if release_one_unforwarded_row(db, &row, UsageStatus::Abandoned, None).await? {
-            released_count += 1;
+        let result: AppResult<bool> = recovery_batch::work(async {
+            let row = recovery_batch::decode(&raw)?;
+            release_one_unforwarded_row(db, &row, UsageStatus::Abandoned, None).await
+        })
+        .await;
+        match result {
+            Ok(true) => released_count += 1,
+            Ok(false) => {}
+            Err(error) => failures.note(error),
         }
     }
-    Ok(released_count)
+    failures.finish(released_count)
 }
 
 pub async fn recover_retryable_settlements(
@@ -863,53 +872,64 @@ pub(crate) async fn recover_retryable_settlements_at(
     db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<SettlementRecoveryStats> {
-    super::realtime_usage::recover_stale(db).await?;
-    super::usage_checkpoint::recover_stale(db, now).await?;
-    super::meter::recover_pending_resale_intents(db).await?;
+    let mut failures = Failures::default();
+    failures.absorb(super::realtime_usage::recover_stale(db).await)?;
+    failures.absorb(super::usage_checkpoint::recover_stale(db, now).await)?;
+    failures.absorb(super::meter::recover_pending_resale_intents(db).await)?;
 
     let due = settlement_due_filter(now);
     let mut query = due.clone();
     query.insert("released", false);
     query.insert("quantity", doc! { "$ne": Bson::Null });
-    let rows: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    let rows: Vec<Document> = db
+        .collection::<Document>(USAGE_METER)
         .find(query)
-        .sort(doc! {
-            "settlement_next_retry_at": 1,
-            "finalized_at": 1,
-        })
-        .limit(RECOVERY_BATCH_SIZE)
+        .sort(doc! {"settlement_next_retry_at":1,"finalized_at":1})
+        .limit(recovery_batch::limit(RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
 
-    let mut stats = dead_letters::recover_dead_letters(db).await?;
-    for row in rows {
+    let mut stats = failures
+        .absorb(dead_letters::recover_dead_letters(db).await)?
+        .unwrap_or_default();
+    for raw in rows {
         if !super::reconcile::continue_reconcile() {
             break;
         }
-        if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
-            if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
-                stats.dead_lettered += 1;
+        let result: AppResult<()> = recovery_batch::work(async {
+            let row: UsageMeterRow = recovery_batch::decode(&raw)?;
+            if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
+                if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
+                    stats.dead_lettered += 1;
+                }
+                return Ok(());
             }
-            continue;
-        }
 
-        let Some(claimed) = claim_due_settlement(db, &row, now, due.clone()).await? else {
-            continue;
-        };
-        match claim_released_and_settle(db, &claimed).await {
-            Ok(true) => stats.recovered += 1,
-            Ok(false) => {}
-            Err(_error) => match record_settlement_failure(db, &claimed, now).await? {
-                SettlementFailureDisposition::RetryScheduled(_) => stats.retried += 1,
-                SettlementFailureDisposition::DeadLettered(_) => stats.dead_lettered += 1,
-                SettlementFailureDisposition::Unchanged => {}
-            },
+            let Some(claimed) = claim_due_settlement(db, &row, now, due.clone()).await? else {
+                return Ok(());
+            };
+            match claim_released_and_settle(db, &claimed).await {
+                Ok(true) => stats.recovered += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    match record_settlement_failure(db, &claimed, now).await? {
+                        SettlementFailureDisposition::RetryScheduled(_) => stats.retried += 1,
+                        SettlementFailureDisposition::DeadLettered(_) => stats.dead_lettered += 1,
+                        SettlementFailureDisposition::Unchanged => {}
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = result {
+            failures.note(error);
         }
     }
-    super::stuck_requests::recover(db).await?;
-    Ok(stats)
+    failures.absorb(super::stuck_requests::recover(db).await)?;
+    failures.finish(stats)
 }
 
 fn settlement_due_filter(now: chrono::DateTime<Utc>) -> Document {

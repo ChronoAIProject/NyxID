@@ -23,6 +23,7 @@ pub(crate) mod rate_cache;
 pub(crate) mod realtime_usage;
 pub mod reconcile;
 mod reconcile_status;
+pub(crate) mod recovery_batch;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;

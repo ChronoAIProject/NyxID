@@ -1,29 +1,46 @@
 use super::*;
 use crate::models::usage_meter::UsageStatus;
+use crate::services::billing::recovery_batch::{self, Failures};
 use futures::TryStreamExt;
 
 pub(crate) async fn recover_stale(db: &mongodb::Database) -> AppResult<u64> {
-    let rows: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(METERS)
+    let rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(METERS)
         .find(doc! {
             "status":"forwarded", "released":false, "realtime_session.closed":false,
             "$expr":{"$lte":["$realtime_session.recover_after","$$NOW"]},
         })
         .sort(doc! {"realtime_session.recover_after":1,"_id":1})
-        .limit(100)
+        .limit(recovery_batch::limit(100))
         .await?
         .try_collect()
         .await?;
     let mut count = 0;
-    for row in rows {
+    let mut failures = Failures::default();
+    let mut seen = std::collections::BTreeSet::new();
+    for raw in rows {
         if !super::super::reconcile::continue_reconcile() {
             break;
         }
-        let rows = publish(db, &row.billing_request_id, None).await?;
-        count += rows.len() as u64;
-        meter::settle_persisted(db, rows).await?;
+        if let Some(request) = raw.get_str("billing_request_id").ok()
+            && !seen.insert(request.to_owned())
+        {
+            continue;
+        }
+        if let Some(n) = failures
+            .unit(async {
+                let row: UsageMeterRow = recovery_batch::decode(&raw)?;
+                let rows = publish(db, &row.billing_request_id, None).await?;
+                let n = rows.len() as u64;
+                meter::settle_persisted(db, rows).await?;
+                Ok(n)
+            })
+            .await
+        {
+            count += n;
+        }
     }
-    Ok(count)
+    failures.finish(count)
 }
 
 pub(super) async fn publish(

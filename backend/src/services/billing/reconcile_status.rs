@@ -69,6 +69,8 @@ struct Failure {
     first_failed_at: bson::DateTime,
     last_failed_at: bson::DateTime,
     error_code: u32,
+    #[serde(default)]
+    failing_units: Option<u64>,
 }
 
 fn unreadable_code() -> u32 {
@@ -102,7 +104,12 @@ fn decode(value: Option<Bson>) -> Checkpoint {
         let Ok(failure) = bson::from_bson::<Failure>(entry.clone()) else {
             return Checkpoint::Malformed;
         };
-        if failure.consecutive_passes <= 0 || failure.error_code == 0 {
+        if failure.consecutive_passes <= 0
+            || failure.error_code == 0
+            || failure
+                .failing_units
+                .is_some_and(|n| n == 0 || n > i64::MAX as u64)
+        {
             return Checkpoint::Malformed;
         }
         // Step names can come from a newer binary using this same schema.
@@ -115,7 +122,7 @@ pub(super) struct Pass {
     previous: Checkpoint,
     // Only attempted steps appear. Drain/config skips cannot clear a failure or
     // count as another failure; a successful attempt resets its streak.
-    outcomes: BTreeMap<&'static str, Option<u32>>,
+    outcomes: BTreeMap<&'static str, Option<(u32, Option<u64>)>>,
 }
 
 impl Pass {
@@ -131,8 +138,20 @@ impl Pass {
         // Leaf batches return Ok(partial_stats) at a cooperative stop. That
         // does not prove that previously failing work in their tail succeeded.
         if result.is_err() || super::reconcile::continue_reconcile() {
-            self.outcomes
-                .insert(step, result.as_ref().err().map(AppError::error_code));
+            self.outcomes.insert(
+                step,
+                result.as_ref().err().map(|error| {
+                    (
+                        error.error_code(),
+                        match error {
+                            AppError::BillingRecoveryFailed { failed_units, .. } => {
+                                Some(*failed_units)
+                            }
+                            _ => None,
+                        },
+                    )
+                }),
+            );
         }
         result
     }
@@ -146,8 +165,11 @@ impl Pass {
             .outcomes
             .iter()
             .filter_map(|(step, code)| {
-                code.map(|code| {
+                code.map(|(code, units)| {
                     let mut label = format!("{step}:{code}");
+                    if let Some(units) = units {
+                        label.push_str(&format!(" failing_units={units}"));
+                    }
                     if *step == "voice_recovery" {
                         label.push_str(" (billing_voice_window_recovery_failed)");
                     }
@@ -192,7 +214,7 @@ impl Pass {
         // Work from the complete prior map, so unrecognized names and additive
         // entry fields survive even when this holder clears its own failures.
         for (step, outcome) in &self.outcomes {
-            if let Some(code) = outcome {
+            if let Some((code, units)) = outcome {
                 let before = previous.and_then(|state| state.failures.get(*step));
                 let mut entry = failures.get_document(*step).cloned().unwrap_or_default();
                 entry.insert(
@@ -200,6 +222,11 @@ impl Pass {
                     before.map_or(1, |f| f.consecutive_passes.saturating_add(1)),
                 );
                 entry.insert("error_code", i64::from(*code));
+                if let Some(units) = units {
+                    entry.insert("failing_units", i64::try_from(*units).unwrap_or(i64::MAX));
+                } else {
+                    entry.remove("failing_units");
+                }
                 if before.is_none() {
                     clocks.insert(
                         format!("checkpoint.failures.{step}.first_failed_at"),
@@ -269,9 +296,10 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
                     return Vec::new();
                 }
                 let detail = state.failures.iter().map(|(step, f)| format!(
-                    "step={step} consecutive_passes={} first_failed_at={} last_failed_at={} error_code={}",
+                    "step={step} consecutive_passes={} first_failed_at={} last_failed_at={} error_code={}{}",
                     f.consecutive_passes, f.first_failed_at.to_chrono().to_rfc3339(),
                     f.last_failed_at.to_chrono().to_rfc3339(), f.error_code,
+                    f.failing_units.map_or(String::new(), |n| format!(" failing_units={n}")),
                 )).collect::<Vec<_>>().join("; ");
                 let first = state
                     .failures
