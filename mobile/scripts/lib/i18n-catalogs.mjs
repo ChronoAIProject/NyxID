@@ -45,7 +45,7 @@ function stringLiterals(file, source) {
 }
 const scan = { isSource: isPlacementSource, areaForPath: portionForPath, literals: stringLiterals };
 export const scanUsage = (sources, keys) => core.scanUsage(sources, keys, scan);
-export const placeCatalogs = (merged, sources, existing = {}) => tools.placeCatalogs(merged, sources, existing, scan);
+export const placeCatalogs = (merged, sources, existing = {}, preferred = new Map()) => tools.placeCatalogs(merged, sources, existing, scan, preferred);
 
 /**
  * Barrel import names: `${camelCase}Catalog`, built from the area's ASCII

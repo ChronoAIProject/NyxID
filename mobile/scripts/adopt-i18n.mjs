@@ -48,7 +48,12 @@ try {
   const { result, conflicts } = mergeDeltas(base.catalogs, branch.catalogs, onto.catalogs, ["mobile"], emptyBase, followUps);
   if (conflicts.length) throw new Error(`No files written. Resolve these catalog divergences explicitly:\n${conflicts.join("\n")}`);
   const sources = emptyBase ? branch.sources : [...onto.sources, ...branch.sources];
-  const portions = consolidateDuplicates(placeCatalogs(result.mobile, sources, emptyBase ? {} : onto.portions));
+  // Keys a mixed branch added or changed only in its split areas keep the branch's area when onto has no owner.
+  const branchOwners = analyzePortions(branch.portions).locations;
+  const preferred = new Map(chosen.areaDelta ? LANGUAGES.flatMap((language) => Object.keys({ ...chosen.areaDelta.base[language], ...chosen.areaDelta.branch[language] })
+    .filter((key) => chosen.areaDelta.base[language][key] !== chosen.areaDelta.branch[language][key] && branchOwners.get(key)?.size === 1)
+    .map((key) => [key, [...branchOwners.get(key)][0]])) : []);
+  const portions = consolidateDuplicates(placeCatalogs(result.mobile, sources, emptyBase ? {} : onto.portions, preferred));
   const analysis = analyzePortions(portions);
   if (analysis.issues.length) throw new Error(`No files written. ${analysis.issues.join("\n")}`);
   writeCatalogs(portions);
