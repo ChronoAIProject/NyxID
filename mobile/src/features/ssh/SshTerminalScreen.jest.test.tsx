@@ -13,6 +13,16 @@ const mockNavigation = {
   push: jest.fn(),
 };
 const mockAppHandlers: ((value: AppStateStatus) => void)[] = [];
+// Keep the keyboard wrapper's props observable; the native implementation
+// consumes `enabled` and `behavior` before passing the remaining props to View.
+jest.mock("react-native/Libraries/Components/Keyboard/KeyboardAvoidingView", () => {
+  const React = require("react");
+  const KeyboardAvoidingView = React.forwardRef((props: any, ref: any) => {
+    const { View } = require("react-native");
+    return <View {...props} ref={ref} testID="terminal-keyboard-avoiding-view" />;
+  });
+  return { default: KeyboardAvoidingView };
+});
 jest.mock("@react-navigation/native", () => ({
   useIsFocused: () => mockFocused,
   useNavigation: () => mockNavigation,
@@ -220,6 +230,34 @@ test.each(["ios", "android"] as const)(
     const value = screen.getByTestId("terminal-webview").props.dataDetectorTypes;
     expect(Array.isArray(value)).toBe(true);
     expect(value).toEqual(["none"]);
+    await screen.unmount();
+  },
+);
+
+test.each(["ios", "android"] as const)(
+  "%s uses the correct keyboard avoidance owner for the terminal",
+  async (platform) => {
+    jest.replaceProperty(Platform, "OS", platform);
+    const screen = await renderTerminal(
+      <SshTerminalScreen
+        route={{
+          params: {
+            serviceId: "catalog",
+            connectionId: "connection",
+            autoConnect: true,
+          },
+        }}
+      />,
+    );
+    const keyboard = screen.getByTestId("terminal-keyboard-avoiding-view");
+    if (platform === "android") {
+      // KeyboardViewport already corrects Android Fabric's IME coordinates;
+      // the terminal must not apply a second adjustment.
+      expect(keyboard.props.enabled).toBe(false);
+    } else {
+      expect(keyboard.props.enabled).toBe(true);
+      expect(keyboard.props.behavior).toBe("padding");
+    }
     await screen.unmount();
   },
 );

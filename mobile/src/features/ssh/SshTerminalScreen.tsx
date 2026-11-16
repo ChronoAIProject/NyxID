@@ -688,6 +688,8 @@ export function SshTerminalScreen({
         <KeyboardAvoidingView
           style={styles.keyboardAvoiding}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
+          // Android's shared page-level KeyboardViewport owns IME overlap correction.
+          enabled={Platform.OS === "ios"}
         >
           <View style={styles.statusBar}>
             {principals.length > 1 || invalidPrincipal ? (
