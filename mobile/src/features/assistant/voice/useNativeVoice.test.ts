@@ -67,6 +67,7 @@ function setup(context: TestContext, platform: "ios" | "android" = "ios") {
   let permissionCalls = 0;
   let permissionChecks = 0;
   let refreshCalls = 0;
+  let settingsCalls = 0;
   const signals: AbortSignal[] = [];
   const controls: { thread: string; id: string; action: string }[] = [];
   const controlSignals: (AbortSignal | undefined)[] = [];
@@ -107,6 +108,7 @@ function setup(context: TestContext, platform: "ios" | "android" = "ios") {
     cancel: async (): Promise<void> => {},
     resume: async (_client: Client): Promise<void> => {},
     hold: (pressed: boolean) => pressed,
+    openSettings: async () => {},
   };
   const api = {
     options: async (_thread: string, signal: AbortSignal) => {
@@ -156,6 +158,7 @@ function setup(context: TestContext, platform: "ios" | "android" = "ios") {
   const clients: Client[] = [];
   const media: Media[] = [];
   class Media {
+    usesNativeMedia = false;
     id = String(media.length + 1);
     closed = 0;
     constructor() {
@@ -212,7 +215,16 @@ function setup(context: TestContext, platform: "ios" | "android" = "ios") {
   }
   let environment = { epoch, api, createSocket: async () => undefined };
   const harness = hookHarness<VoiceHook>({
-    "react-native": { AppState: native, Platform: { OS: platform } },
+    "react-native": {
+      AppState: native,
+      Platform: { OS: platform },
+      Linking: {
+        openSettings: async () => {
+          settingsCalls++;
+          await responses.openSettings();
+        },
+      },
+    },
     "expo-camera": {
       Camera: {
         getMicrophonePermissionsAsync: async () => {
@@ -277,6 +289,7 @@ function setup(context: TestContext, platform: "ios" | "android" = "ios") {
       savedCalls,
       permissionCalls,
       permissionChecks,
+      settingsCalls,
       refreshCalls,
       listeners: appListeners.size,
     }),
@@ -576,6 +589,78 @@ test("permission denial keeps text usable and never constructs a provider client
   assert.equal(e.media.length, 0);
   assert.equal(state.starting, false);
   assert.match(state.error!, /Microphone access is off/);
+  assert.equal(state.microphonePermission?.canAskAgain, true);
+});
+
+test("permanent first denial exposes Settings and repeated launch never requests the blocked prompt", async (context) => {
+  const e = setup(context);
+  e.responses.permission = async () => ({ granted: false, canAskAgain: false });
+  await e.start();
+  assert.equal(e.harness.value().microphonePermission?.canAskAgain, false);
+  await e.harness.value().openMicrophoneSettings();
+  assert.equal(e.counts().settingsCalls, 1);
+  e.responses.currentPermission = async () => ({
+    granted: false,
+    canAskAgain: false,
+  });
+  await e.start();
+  assert.equal(e.counts().permissionCalls, 1);
+  assert.equal(e.clients.length, 0);
+});
+
+test("granting the microphone in Settings clears the stale error without starting a second call", async (context) => {
+  const e = setup(context);
+  e.responses.permission = async () => ({ granted: false, canAskAgain: false });
+  await e.start();
+  e.appState("background");
+  e.responses.currentPermission = async () => ({ granted: true });
+  e.appState("active");
+  await e.harness.settle();
+  assert.equal(e.harness.value().microphonePermission, undefined);
+  assert.equal(e.harness.value().error, undefined);
+  assert.equal(e.clients.length, 0);
+  await e.connect();
+  assert.equal(e.clients.length, 1);
+  assert.equal(e.harness.value().connected, true);
+});
+
+for (const platform of ["ios", "android"] as const) {
+  test(`${platform} Settings failure gives the exact manual microphone path`, async (context) => {
+    const e = setup(context, platform);
+    e.responses.currentPermission = async () => ({
+      granted: false,
+      canAskAgain: false,
+    });
+    e.responses.openSettings = async () => {
+      throw new Error("private OS error");
+    };
+    await e.start();
+    await e.harness.value().openMicrophoneSettings();
+    const state = e.harness.flush();
+    assert.match(state.error!, /Settings › Apps › NyxID/);
+    assert.equal(state.error!.includes("Permissions"), platform === "android");
+    assert.doesNotMatch(state.error!, /private OS error/);
+    assert.equal(state.microphonePermission?.canAskAgain, false);
+  });
+}
+
+test("a late Settings permission read cannot clear a newer startup error", async (context) => {
+  const e = setup(context);
+  e.responses.currentPermission = async () => ({
+    granted: false,
+    canAskAgain: false,
+  });
+  await e.start();
+  const permission = deferred<{ granted: boolean }>();
+  e.responses.currentPermission = () => permission.promise;
+  e.appState("active");
+  e.responses.options = async () => {
+    throw new Error("New startup failed");
+  };
+  await e.start();
+  permission.resolve({ granted: true });
+  await e.harness.settle();
+  assert.equal(e.harness.value().error, "New startup failed");
 });
 
 test("already granted Android microphone access is checked without requesting system permission again", async (context) => {
@@ -1029,7 +1114,7 @@ test("a terminal cleanup does not clear an unrelated failed-start diagnostic", a
   assert.deepEqual(state.recovery, creditRecovery);
 });
 
-test("backgrounding an active call ends media and cannot restart through late callbacks", async (context) => {
+test("backgrounding a WebView call ends media and cannot restart through late callbacks", async (context) => {
   const e = setup(context);
   await e.connect();
   const client = e.clients[0]!;
@@ -1039,14 +1124,47 @@ test("backgrounding an active call ends media and cannot restart through late ca
   assert.equal(client.ends, 1);
   assert.equal(state.connected, false);
   assert.equal(state.holding, false);
-  assert.equal(
-    state.error,
-    undefined,
-    "normal app backgrounding is not a voice failure",
-  );
+  assert.match(state.error!, /cannot continue in the background/);
   client.options.onSnapshot(snapshot({ generation: 2 }));
   assert.equal(e.harness.flush().connected, false);
   assert.equal(e.clients.length, 1);
+});
+
+test("an active iOS native call survives background and foreground with the same session and timer", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  e.media[0]!.usesNativeMedia = true;
+  client.options.onInputChanged?.(true);
+  e.harness.flush();
+  const connectedAt = e.harness.value().connectedAt;
+  e.harness.value().hold(true);
+  for (const state of ["inactive", "background", "active"]) {
+    const value = e.appState(state);
+    assert.equal(value.connected, true);
+    assert.equal(value.connectedAt, connectedAt);
+    assert.equal(value.snapshot?.session.id, firstId);
+    assert.equal(value.holding, false);
+    assert.equal(value.error, undefined);
+    assert.equal(client.ends, 0);
+    assert.equal(e.clients.length, 1);
+  }
+  client.options.onSnapshot(snapshot({ observed_seconds: 20 }));
+  assert.equal(e.harness.flush().snapshot?.session.observed_seconds, 20);
+  assert.equal(await e.harness.value().end(), true);
+  await e.connect();
+  assert.equal(e.clients.length, 2);
+  assert.equal(e.harness.value().conflict, null);
+  assert.equal(e.harness.value().connected, true);
+});
+
+test("Android does not gain unsupported background capture from a native media marker", async (context) => {
+  const e = setup(context, "android");
+  await e.connect();
+  e.media[0]!.usesNativeMedia = true;
+  e.appState("background");
+  assert.equal(e.clients[0]!.ends, 1);
+  assert.equal(e.harness.value().connected, false);
 });
 
 test("reopening voice automatically verifies retained active metadata and releases a finished call", async (context) => {

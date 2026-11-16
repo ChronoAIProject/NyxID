@@ -1082,6 +1082,14 @@ function VoiceConversation({
         ) : voice.error ? (
           <Notice message={voice.error} tone="error" />
         ) : null}
+        {voice.microphonePermission ? (
+          <ActionButton
+            label={t("Open Settings")}
+            variant="secondary"
+            compact
+            onPress={() => void voice.openMicrophoneSettings()}
+          />
+        ) : null}
         {restartNotice ? <Notice message={restartNotice} /> : null}
         {billingOpenError ? (
           <Notice
@@ -1151,7 +1159,9 @@ function VoiceConversation({
             ) : null}
           </>
         ) : null}
-        {needsRetry && showPreCall ? (
+        {needsRetry &&
+        showPreCall &&
+        voice.microphonePermission?.canAskAgain !== false ? (
           <ActionButton
             label="Try again"
             variant="secondary"

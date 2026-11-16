@@ -14,6 +14,26 @@ const appDelegate = readFileSync(
   "utf8",
 );
 
+test("iOS native audio background mode survives Expo regeneration", () => {
+  const nativePlist = readFileSync(
+    new URL("../../../../ios/NyxIDMobile/Info.plist", import.meta.url),
+    "utf8",
+  );
+  const config = readFileSync(
+    new URL("../../../../app.config.ts", import.meta.url),
+    "utf8",
+  );
+  const plist = require("@expo/plist").default;
+  const modes = plist.parse(nativePlist).UIBackgroundModes;
+  assert.ok(modes.includes("audio"));
+  assert.ok(modes.includes("fetch"));
+  assert.ok(modes.includes("remote-notification"));
+  assert.match(
+    config,
+    /UIBackgroundModes:\s*\["fetch", "remote-notification", "audio"\]/,
+  );
+});
+
 test("Expo regeneration retains speaker defaults before WebRTC creates its audio device", () => {
   const fresh = appDelegate
     .replace(/^import WebRTC\n/m, "")

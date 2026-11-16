@@ -6,6 +6,10 @@ import traditional from "./locales/zh-TW.json";
 
 // These permission and offline states must never fall back to English in a Chinese UI.
 const runtimeCopy = [
+  "Settings could not open. Go to Settings › Apps › NyxID › Microphone and allow access.",
+  "Settings could not open. Go to Settings › Apps › NyxID › Permissions › Microphone and allow access.",
+  "Voice stopped because this audio connection cannot continue in the background. Return to the app and start a new call.",
+
   "Added skills unavailable offline",
   "Allow microphone access in Settings to dictate. You can keep typing.",
   "Allow microphone and speech recognition access in Settings to dictate. You can keep typing.",

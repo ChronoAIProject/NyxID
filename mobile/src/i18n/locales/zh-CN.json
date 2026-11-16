@@ -253,5 +253,8 @@
   "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您保存的声音（{{voice}}）已不可用。请选择声音以继续。",
   "{{name}}, {{count}} pending": "{{name}}，{{count}} 项待处理",
   "Unable to open link": "无法打开链接",
-  "Try again, or open the link outside NyxID.": "请重试，或在 NyxID 之外打开此链接。"
+  "Try again, or open the link outside NyxID.": "请重试，或在 NyxID 之外打开此链接。",
+  "Settings could not open. Go to Settings › Apps › NyxID › Microphone and allow access.": "无法打开设置。请前往“设置 › App › NyxID › 麦克风”允许访问。",
+  "Settings could not open. Go to Settings › Apps › NyxID › Permissions › Microphone and allow access.": "无法打开设置。请前往“设置 › 应用 › NyxID › 权限 › 麦克风”允许访问。",
+  "Voice stopped because this audio connection cannot continue in the background. Return to the app and start a new call.": "当前音频连接无法在后台继续，语音已停止。请返回应用并开始新通话。"
 }

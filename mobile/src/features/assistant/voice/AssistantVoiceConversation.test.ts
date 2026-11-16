@@ -111,6 +111,7 @@ function setup(
     optionsPending?: boolean;
     snapshot?: VoiceSnapshot;
     error?: string;
+    microphonePermission?: { canAskAgain: boolean };
     recovery?: VoiceStartRecovery;
     reducedMotion?: boolean;
     conflict?: VoiceSession;
@@ -189,6 +190,10 @@ function setup(
     speakerMuted: false,
     snapshot: input.snapshot ?? (input.active ? snapshot : null),
     error: input.error,
+    microphonePermission: input.microphonePermission,
+    openMicrophoneSettings: async () => {
+      events.push(["openMicrophoneSettings"]);
+    },
     recovery: input.recovery,
     conflict: input.conflict ?? (null as VoiceSession | null),
     conflictThread: input.conflictThread,
@@ -2635,6 +2640,20 @@ test("a generic failed start stays actionable without offering billing operation
   assert.equal(f.starts().length, 0);
   f.harness.unmount();
 });
+
+for (const canAskAgain of [true, false]) {
+  test(`microphone denial offers Settings and only meaningful retry (canAskAgain=${canAskAgain})`, async () => {
+    const f = setup({
+      error: "Microphone access is off.",
+      microphonePermission: { canAskAgain },
+    });
+    await f.button("Open Settings").props.onPress();
+    assert.deepEqual(f.events, [["openMicrophoneSettings"]]);
+    assert.equal(!!f.find("Try again"), canAskAgain);
+    assert.equal(f.starts().length, 0);
+    f.harness.unmount();
+  });
+}
 
 test("closing before a voice session is established only returns to chat", () => {
   const f = setup({ optionsPending: true });

@@ -1,7 +1,7 @@
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { waitForVoiceForeground } from "./voicePermission";
 import { useEffect, useRef, useState } from "react";
-import { AppState, Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import { Camera } from "expo-camera";
 import * as Crypto from "expo-crypto";
 import { getAuthEpoch } from "../../../lib/auth/authEpoch";
@@ -62,6 +62,17 @@ export function useNativeVoice(
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
   const [error, setError] = useState<string>();
   const [recovery, setRecovery] = useState<VoiceStartRecovery>();
+  const [microphonePermission, setMicrophonePermission] = useState<{
+    canAskAgain: boolean;
+  }>();
+  const deniedMicrophone = useRef(false);
+  const backgroundCall = useRef<
+    | {
+        client: AssistantVoiceClient;
+        media: NativeVoiceMedia;
+      }
+    | undefined
+  >(undefined);
   const [conflict, setConflict] = useState<VoiceSession | null>(null);
   const [conflictThread, setConflictThread] = useState<string>();
   const [conflictUnknown, setConflictUnknown] = useState(false);
@@ -95,9 +106,9 @@ export function useNativeVoice(
   const permissionAttempt = useRef<PermissionAttempt | undefined>(undefined);
   const pending = useRef<AbortController | undefined>(undefined);
   const update = useRef(onUpdate);
-  const errorOrigin = useRef<"call" | "status" | "playback" | undefined>(
-    undefined,
-  );
+  const errorOrigin = useRef<
+    "call" | "status" | "playback" | "permission" | undefined
+  >(undefined);
   update.current = onUpdate;
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -123,7 +134,7 @@ export function useNativeVoice(
   function reportError(
     message?: string,
     nextRecovery?: VoiceStartRecovery,
-    origin: "call" | "status" | "playback" = "call",
+    origin: "call" | "status" | "playback" | "permission" = "call",
   ) {
     errorOrigin.current = message || nextRecovery ? origin : undefined;
     setError(message);
@@ -131,7 +142,8 @@ export function useNativeVoice(
   }
 
   function reportStatusError(message?: string) {
-    if (errorOrigin.current === "call") return;
+    if (errorOrigin.current === "call" || errorOrigin.current === "permission")
+      return;
     reportError(message, undefined, "status");
   }
 
@@ -168,6 +180,7 @@ export function useNativeVoice(
   }
 
   function stopLocal() {
+    backgroundCall.current = undefined;
     ticket.current++;
     pending.current?.abort();
     for (const controller of taskCancellations.current.values())
@@ -248,6 +261,8 @@ export function useNativeVoice(
     recoveryListeners.add(restoreRecovery);
     conflictChecks.current = 0;
     reportError();
+    deniedMicrophone.current = false;
+    setMicrophonePermission(undefined);
     setConnected(false);
     setInputEnabled(false);
     setStarting(false);
@@ -264,8 +279,51 @@ export function useNativeVoice(
           permission.androidBackgroundAllowed = false;
           permission.androidBackgrounded = false;
         }
-        // Foreground resumes bounded recovery checks, never an audio call.
-        if (sameScope()) setConflictCheckAttempt((attempt) => attempt + 1);
+        // Recheck a denied permission after Settings without opening the mic or
+        // silently starting a provider session.
+        if (sameScope()) {
+          setConflictCheckAttempt((attempt) => attempt + 1);
+          if (deniedMicrophone.current) {
+            const generation = ticket.current;
+            void Camera.getMicrophonePermissionsAsync()
+              .then((permission) => {
+                if (
+                  !sameScope() ||
+                  ticket.current !== generation ||
+                  AppState.currentState !== "active"
+                )
+                  return;
+                if (permission.granted) {
+                  deniedMicrophone.current = false;
+                  setMicrophonePermission(undefined);
+                  if (errorOrigin.current === "permission") reportError();
+                } else {
+                  setMicrophonePermission({
+                    canAskAgain: permission.canAskAgain !== false,
+                  });
+                }
+              })
+              .catch(() => {});
+          }
+        }
+        return;
+      }
+      const call = backgroundCall.current;
+      // Only iOS native WebRTC has background audio support. Keep the exact
+      // client, media and session alive; a released PTT gesture must not remain
+      // latched when the touch surface disappears.
+      if (
+        (state === "inactive" || state === "background") &&
+        Platform.OS === "ios" &&
+        sameScope() &&
+        call &&
+        current.current === call.client &&
+        !call.client.isClosed &&
+        call.media.usesNativeMedia &&
+        latestSnapshot.current?.session.state === "active"
+      ) {
+        call.client.hold(false);
+        setHolding(false);
         return;
       }
       // Android's permission activity reports background before capture starts.
@@ -280,9 +338,16 @@ export function useNativeVoice(
         return;
       }
       if (!(state === "inactive" && awaitingPermission)) {
-        const hadVoiceWork = busy.current || current.current !== null;
+        const hadVoiceWork =
+          (busy.current || current.current !== null) &&
+          !current.current?.pendingEnd;
         stopRef.current();
-        if (hadVoiceWork) reportError();
+        if (hadVoiceWork)
+          reportError(
+            translate.current(
+              "Voice stopped because this audio connection cannot continue in the background. Return to the app and start a new call.",
+            ),
+          );
       }
     });
     return () => {
@@ -412,6 +477,23 @@ export function useNativeVoice(
         Camera.getMicrophonePermissionsAsync(),
       );
       if (!valid()) return;
+      const denyPermission = () => {
+        deniedMicrophone.current = true;
+        setMicrophonePermission({
+          canAskAgain: permission.canAskAgain !== false,
+        });
+        reportError(
+          translate.current(
+            "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
+          ),
+          undefined,
+          "permission",
+        );
+      };
+      if (!permission.granted && permission.canAskAgain === false) {
+        denyPermission();
+        return false;
+      }
       if (!permission.granted) {
         const attempt: PermissionAttempt = {
           generation,
@@ -435,12 +517,10 @@ export function useNativeVoice(
           clearTimeout(attempt.requestTimer);
           attempt.requestTimer = undefined;
           if (!valid()) return;
-          if (!permission.granted)
-            throw new Error(
-              translate.current(
-                "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
-              ),
-            );
+          if (!permission.granted) {
+            denyPermission();
+            return false;
+          }
           await waitForVoiceForeground(AppState, controller.signal, valid, {
             allowInitialBackground: attempt.androidBackgroundAllowed,
           });
@@ -452,6 +532,8 @@ export function useNativeVoice(
         }
       }
       if (!valid()) return;
+      deniedMicrophone.current = false;
+      setMicrophonePermission(undefined);
       if (AppState.currentState !== "active")
         throw new Error(
           translate.current("Keep NyxID open to start a voice call."),
@@ -498,6 +580,7 @@ export function useNativeVoice(
         onReady: () => {
           if (!valid() || current.current !== next) return;
           connectedOnce = true;
+          backgroundCall.current = { client: next, media: nextMedia };
           // The call clock starts when the provider is truly ready, not at Start.
           setConnectedAt((previous) => previous ?? Date.now());
           setStarting(false);
@@ -539,6 +622,8 @@ export function useNativeVoice(
         },
         onClosed: () => {
           if (!valid()) return;
+          if (backgroundCall.current?.client === next)
+            backgroundCall.current = undefined;
           if (current.current === next) current.current = null;
           if (next.pendingEnd) {
             remember(
@@ -895,6 +980,30 @@ export function useNativeVoice(
     speakerMuted,
     error,
     recovery,
+    microphonePermission,
+    async openMicrophoneSettings() {
+      if (!sameScope() || !deniedMicrophone.current) return;
+      const generation = ticket.current;
+      try {
+        await Linking.openSettings();
+      } catch {
+        if (
+          !sameScope() ||
+          generation !== ticket.current ||
+          !deniedMicrophone.current
+        )
+          return;
+        reportError(
+          translate.current(
+            Platform.OS === "ios"
+              ? "Settings could not open. Go to Settings › Apps › NyxID › Microphone and allow access."
+              : "Settings could not open. Go to Settings › Apps › NyxID › Permissions › Microphone and allow access.",
+          ),
+          undefined,
+          "permission",
+        );
+      }
+    },
     conflict,
     conflictThread,
     conflictUnknown,
