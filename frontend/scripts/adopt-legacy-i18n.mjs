@@ -36,11 +36,21 @@ function resolveRefs() {
     throw new Error(`git am is in progress; a mailbox patch has no commit to read the old catalogs from. Pass the legacy commit explicitly (npm run adopt:i18n -- --branch <legacy-commit> --base <legacy-commit>^ --onto HEAD), or run git am --abort and merge, rebase or cherry-pick the branch instead.\n${USAGE}`);
   }
   if (exists("rebase-merge") || exists("rebase-apply")) {
-    if (resolves("REBASE_HEAD")) return { branch: "REBASE_HEAD", base: "REBASE_HEAD^", onto: "HEAD" };
-    throw new Error(`a rebase is in progress but REBASE_HEAD does not resolve to the commit being applied; pass the refs explicitly (--branch <commit-being-applied> --base <its-parent> --onto HEAD).\n${USAGE}`);
+    if (!resolves("REBASE_HEAD")) throw new Error(`a rebase is in progress but REBASE_HEAD does not resolve to the commit being applied; pass the refs explicitly (--branch <commit-being-applied> --base <its-parent> --onto HEAD).\n${USAGE}`);
+    refuseRebaseThroughMerges(exists("rebase-merge") ? "rebase-merge" : "rebase-apply");
+    return { branch: "REBASE_HEAD", base: "REBASE_HEAD^", onto: "HEAD" };
   }
-  if (resolves("CHERRY_PICK_HEAD")) return { branch: "CHERRY_PICK_HEAD", base: "CHERRY_PICK_HEAD^", onto: "HEAD" };
-  if (exists("MERGE_HEAD")) return { branch: "HEAD", onto: "MERGE_HEAD", base: git("merge-base", "HEAD", "MERGE_HEAD") };
+  if (resolves("CHERRY_PICK_HEAD")) {
+    if (parentsOf("CHERRY_PICK_HEAD").length > 1) {
+      throw new Error(`No files written. CHERRY_PICK_HEAD (${git("rev-parse", "--short", "CHERRY_PICK_HEAD")}) is a merge commit (cherry-pick -m): its changes are relative to the mainline parent you chose, which adoption cannot see. Run git cherry-pick --abort, then cherry-pick the commits the merge brought in, or merge the branch instead.`);
+    }
+    return { branch: "CHERRY_PICK_HEAD", base: "CHERRY_PICK_HEAD^", onto: "HEAD" };
+  }
+  if (exists("MERGE_HEAD")) {
+    const heads = fs.readFileSync(path.resolve(repoRoot, git("rev-parse", "--git-path", "MERGE_HEAD")), "utf8").split("\n").filter(Boolean);
+    if (heads.length > 1) throw new Error(`No files written. MERGE_HEAD names ${heads.length} heads (an octopus merge), but adoption reads one branch and one onto at a time; merge one branch at a time and run npm run adopt:i18n after each.`);
+    return { branch: "HEAD", onto: "MERGE_HEAD", base: git("merge-base", "HEAD", "MERGE_HEAD") };
+  }
   throw new Error(`no merge, rebase or cherry-pick detected; provide --branch, --base and --onto.\n${USAGE}`);
 }
 
@@ -71,6 +81,54 @@ function legacyForks(branchRef, ontoRef) {
     .filter((line) => line.startsWith("-")).map((line) => line.slice(1));
   const legacy = boundary.filter((commit) => monoliths.every((file) => tryGit("cat-file", "-e", `${commit}:${file}`) !== null));
   return legacy.length ? git("merge-base", "--independent", ...legacy).split("\n").filter(Boolean) : [];
+}
+
+const parentsOf = (ref) => git("rev-list", "--parents", "-n", "1", ref).split(" ").slice(1);
+
+/**
+ * A rebase that drops merge commits loses their own changes (including how they were resolved),
+ * and one that replays a merge (--rebase-merges) applies a merge's resolution, which adoption
+ * cannot model; both are refused. The replayed range starts after the first replayed commit's
+ * original parent; merges between it and the original head that onto does not contain are dropped.
+ */
+function refuseRebaseThroughMerges(dir) {
+  const file = (name) => path.resolve(repoRoot, git("rev-parse", "--git-path", `${dir}/${name}`));
+  const read = (name) => fs.existsSync(file(name)) ? fs.readFileSync(file(name), "utf8").trim() : "";
+  const guidance = "Run git rebase --abort, then merge main instead (git merge origin/main) and run npm run adopt:i18n, or rebase only the commits after the branch's last merge (git rebase --onto origin/main <last merge>).";
+  const replaysMerges = dir === "rebase-merge" && /^merge /m.test(`${read("git-rebase-todo")}\n${read("done")}`);
+  if (parentsOf("REBASE_HEAD").length > 1 || replaysMerges) {
+    throw new Error(`No files written. The rebase replays merge commits (--rebase-merges); adoption cannot replay a merge's own resolution. ${guidance}`);
+  }
+  let first;
+  if (dir === "rebase-merge") {
+    first = read("done").split("\n").map((line) => line.trim().split(/\s+/)[1]).find((sha) => sha && tryGit("rev-parse", "--verify", "--quiet", `${sha}^{commit}`) !== null);
+  } else {
+    const patch = fs.existsSync(file("")) ? fs.readdirSync(file("")).filter((name) => /^\d{4}$/.test(name)).sort()[0] : undefined;
+    first = patch ? fs.readFileSync(path.join(file(""), patch), "utf8").match(/^From ([0-9a-f]{40}) /)?.[1] : undefined;
+  }
+  const boundary = parentsOf(first ?? "REBASE_HEAD")[0];
+  const origHead = read("orig-head"), ontoCommit = read("onto");
+  if (!origHead || !ontoCommit) return;
+  const dropped = (tryGit("rev-list", "--merges", origHead, ...(boundary ? [`^${boundary}`] : []), `^${ontoCommit}`) ?? "").split("\n").filter(Boolean);
+  if (dropped.length) {
+    throw new Error(`No files written. This rebase drops merge commit${dropped.length > 1 ? "s" : ""} ${dropped.map((sha) => sha.slice(0, 9)).join(", ")} from the branch's history, and with ${dropped.length > 1 ? "them" : "it"} its own changes and how it was resolved; adoption cannot recover those. ${guidance}`);
+  }
+}
+
+/**
+ * Merges in the branch's own history (not in onto) that joined split areas on both sides whose
+ * merge-base had none: the branch had made its own split areas instead of merging them from main.
+ */
+function baseLessAreaMerges(branchRef, ontoRef) {
+  const hasAreas = (ref) => (tryGit("ls-tree", "-r", "--name-only", ref, "--", `${prefix}/src/i18n/locales/app`) ?? "").split("\n")
+    .some((file) => /\/app\/[^/]+\/[^/]+\.json$/.test(file));
+  return (tryGit("rev-list", "--merges", "--parents", branchRef, `^${ontoRef}`) ?? "").split("\n").filter(Boolean).map((line) => line.split(" "))
+    .filter(([, ...parents]) => {
+      if (!parents.every(hasAreas)) return false;
+      const mergeBase = tryGit("merge-base", ...parents);
+      return !mergeBase || !hasAreas(mergeBase);
+    })
+    .map(([sha]) => sha.slice(0, 9));
 }
 
 /** Read many blobs from one ref with a single `git cat-file --batch` process. */
@@ -152,6 +210,12 @@ try {
   const base = snapshot(refs.base, { sources: false });
   const branch = snapshot(refs.branch, { sources: true });
   const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
+  const commitLocal = refs.base !== "empty" && parentsOf(refs.branch).includes(git("rev-parse", `${refs.base}^{commit}`));
+  // A legacy merge commit adopted against one of its parents would read the other side's history
+  // (main's changes it merged) as the branch's own edits; a mixed one is refused by chooseCatalogViews.
+  if (commitLocal && !branch.areas && parentsOf(refs.branch).length > 1) {
+    throw new Error(`No files written. ${refs.branch} (--branch) is a merge commit and ${refs.base} (--base) is one of its parents, so the other side's history would be read as the branch's own edits; adopt the merged branch's own commits, or the branch tip against its legacy fork.`);
+  }
   // Each branch layout is diffed against that layout at the newer of --base and merge-base(branch, onto).
   const emptyBase = refs.base === "empty";
   const mergeBaseRef = emptyBase ? null : tryGit("merge-base", refs.branch, refs.onto);
@@ -159,6 +223,8 @@ try {
   const order = !mergeBaseRef ? "base" : referenceOrder(refs.base, mergeBaseRef);
   const app = chooseCatalogViews({ base, branch, onto }, refs, {
     languages: LANGUAGES, adopt: "npm run adopt:i18n --", mergeBase, order, legacyFork: () => legacyForks(refs.branch, refs.onto),
+    commitLocal,
+    baseLessAreaMerges: () => baseLessAreaMerges(refs.branch, refs.onto),
   });
   const familyBase = Object.fromEntries(FAMILIES.map((family) => {
     if (emptyBase) return [family, emptyLanguages()];
@@ -194,9 +260,19 @@ try {
   const preferred = new Map(app.areaDelta ? LANGUAGES.flatMap((language) => Object.keys({ ...app.areaDelta.base[language], ...app.areaDelta.branch[language] })
     .filter((key) => app.areaDelta.base[language][key] !== app.areaDelta.branch[language][key] && branchOwners.get(key)?.size === 1)
     .map((key) => [key, [...branchOwners.get(key)][0]])) : []);
-  const portions = consolidateDuplicates(placeCatalogs(merged, sources, refs.base === "empty" ? {} : onto.portions, preferred));
+  const refuseIssues = (issues) => {
+    const parity = issues.some((issue) => issue.includes("key parity differs"))
+      ? "\nEvery app key needs a value in each of en, zh-CN and zh-TW: add or remove the key in every language on the branch, then rerun." : "";
+    throw new Error(`No files written. ${issues.join("\n")}${parity}`);
+  };
+  let portions;
+  try {
+    portions = consolidateDuplicates(placeCatalogs(merged, sources, refs.base === "empty" ? {} : onto.portions, preferred));
+  } catch (error) {
+    refuseIssues([error.message]);
+  }
   const analysis = analyzePortions(portions);
-  if (analysis.issues.length) throw new Error(`No files written. ${analysis.issues.join("\n")}`);
+  if (analysis.issues.length) refuseIssues(analysis.issues);
   writePortions(locales, portions);
   for (const family of FAMILIES) for (const language of LANGUAGES) writeJson(path.join(locales, `${family}-${language}.json`), families[family][language]);
   writeJson(path.join(locales, "app/en-overrides.json"), englishOverrides(merged.en));

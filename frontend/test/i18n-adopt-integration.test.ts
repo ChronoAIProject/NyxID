@@ -292,23 +292,31 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
       f.catalog(monolith, { ...JSON.parse(fs.readFileSync(monolith, "utf8")), "Branch key": `branch ${language}` });
     }
     f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "legacy branch from the later fork");
-    const branchTip = f.git("rev-parse", "HEAD");
     f.git("checkout", "main2");
     f.git("merge", "--no-ff", "-m", "merge the split", "split");
-    const result = f.adopt("--branch", branchTip, "--base", f.onto, "--onto", "main2");
+    // The branch merges that main keeping its monoliths, so the split commit is on its history.
+    f.git("checkout", "legacy2");
+    spawnSync("git", ["merge", "--no-commit", "-X", "no-renames", "main2"], { cwd: f.repo, encoding: "utf8" });
+    const conflicted = f.git("diff", "--name-only", "--diff-filter=U").split("\n").filter(Boolean);
+    if (conflicted.length) f.git("checkout", "--ours", "--", ...conflicted);
+    f.git("checkout", "legacy2@{0}", "--", ...LANGUAGES.map((language) => `frontend/src/i18n/locales/${language}.json`));
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "merge main2, keeping the monoliths");
+    const mixed = f.git("rev-parse", "HEAD");
+    const result = f.adopt("--branch", mixed, "--base", f.onto, "--onto", "main2");
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("Pass the branch's legacy fork (the newest pre-split commit it is based on) as --base:");
-    expect(result.stderr).toContain(`  npm run adopt:i18n -- --branch ${branchTip} --base <legacy-fork> --onto main2`);
+    expect(result.stderr).toContain(`  npm run adopt:i18n -- --branch ${mixed} --base <legacy-fork> --onto main2`);
     // The split branch's fork would be the wrong base for a branch that forked from a later main.
     expect(result.stderr).not.toContain(`--base ${f.base}`);
     expect(result.stderr).not.toContain(`--base ${laterFork}`);
   });
 
+
   it("refuses a split-only branch against a legacy-only base", () => {
     const f = fixture();
     const result = f.adopt("--branch", f.onto, "--base", f.base, "--onto", f.onto);
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain(`No files written. ${f.base} (--base) has only the legacy monoliths, but ${f.onto} (--branch) has only the split areas`);
+    expect(result.stderr).toContain(`No files written. ${f.onto} (--branch) has no legacy monoliths, so it is not a branch from before the split and there is nothing to adopt`);
   });
 
   it("adopts edits a mixed branch made to the split areas it inherited", () => {
@@ -353,5 +361,177 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     expect(result.stderr).toContain("No files written");
     expect(result.stderr).toContain("app/zh-TW: changed key diverged: Change me");
     expect(f.git("status", "--porcelain")).toBe(before);
+  });
+
+  /** Apply `edit` to every monolith (or to one language's) and commit. */
+  const editMonoliths = (f: ReturnType<typeof fixture>, message: string, edit: (catalog: Record<string, string>, language: string) => void, only?: string) => {
+    for (const language of only ? [only] : LANGUAGES) {
+      const file = path.join(f.locales, `${language}.json`);
+      const catalog = JSON.parse(fs.readFileSync(file, "utf8"));
+      edit(catalog, language);
+      f.catalog(file, catalog);
+    }
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", message);
+    return f.git("rev-parse", "HEAD");
+  };
+  /** A legacy branch merge commit: a side branch from the legacy tip edits the monoliths, legacy merges it with --no-ff. */
+  const legacyMergeCommit = (f: ReturnType<typeof fixture>) => {
+    f.git("checkout", "-q", "-b", "side", "legacy");
+    editMonoliths(f, "side edits the monoliths", (catalog, language) => { catalog["Side key"] = `side ${language}`; });
+    f.git("checkout", "-q", "legacy");
+    fs.writeFileSync(path.join(f.root, "src/pages/legacy-only.ts"), "export const x = 1;\n");
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "legacy moves on");
+    f.git("merge", "--no-ff", "-m", "merge side", "side");
+    return f.git("rev-parse", "HEAD");
+  };
+  /** Assert a refusal that writes nothing and prints no command to run instead. */
+  const expectRefused = (f: ReturnType<typeof fixture>, result: ReturnType<typeof spawnSync>, before: string, message: string | RegExp) => {
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("No files written.");
+    if (typeof message === "string") expect(result.stderr).toContain(message);
+    else expect(result.stderr).toMatch(message);
+    expect(result.stderr).not.toContain("  npm run adopt:i18n -- --branch");
+    expect(f.git("status", "--porcelain")).toBe(before);
+  };
+  const merged = (f: ReturnType<typeof fixture>) => {
+    const { merged: catalogs, issues } = analyzePortions(loadPortions(f.locales));
+    expect(issues).toEqual([]);
+    for (const language of LANGUAGES) expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(false);
+    return catalogs;
+  };
+
+  describe("history shapes adoption refuses as a whole", () => {
+    it.each([
+      ["a rebase that drops a merge commit", [], "This rebase drops merge commit"],
+      ["a rebase that replays merge commits", ["--rebase-merges"], "The rebase replays merge commits (--rebase-merges)"],
+    ])("refuses %s", (_name, flags, message) => {
+      const f = fixture();
+      legacyMergeCommit(f);
+      expect(spawnSync("git", ["rebase", ...flags, "split"], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+      const before = f.git("status", "--porcelain");
+      const result = f.adopt();
+      expectRefused(f, result, before, message);
+      expect(result.stderr).toContain("git rebase --abort");
+    });
+
+    it("refuses cherry-picking a merge commit (cherry-pick -m)", () => {
+      const f = fixture();
+      const merge = legacyMergeCommit(f);
+      f.git("checkout", "-q", "split");
+      expect(spawnSync("git", ["cherry-pick", "-m", "1", merge], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+      const before = f.git("status", "--porcelain");
+      expectRefused(f, f.adopt(), before, "is a merge commit (cherry-pick -m)");
+    });
+
+    it("refuses an octopus merge", () => {
+      const f = fixture();
+      for (const name of ["one", "two"]) {
+        f.git("checkout", "-q", "-b", name, "legacy");
+        fs.writeFileSync(path.join(f.root, `src/pages/${name}.ts`), "export const x = 1;\n");
+        f.git("add", "-A", "frontend/src"); f.git("commit", "-m", name);
+      }
+      f.git("checkout", "-q", "legacy");
+      f.git("merge", "--no-commit", "one", "two");
+      const before = f.git("status", "--porcelain");
+      expectRefused(f, f.adopt(), before, "MERGE_HEAD names 2 heads (an octopus merge)");
+    });
+
+    it("refuses a branch that merged main's split areas into areas it had made itself", () => {
+      const f = fixture();
+      f.git("checkout", "-q", "legacy");
+      for (const language of LANGUAGES) f.catalog(path.join(f.locales, `app/unattributed/${language}.json`), { "Own area": `own ${language}` });
+      f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "the branch makes its own split areas");
+      commitMergeKeepingMonoliths(f);
+      const before = f.git("status", "--porcelain");
+      const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
+      expectRefused(f, result, before, "merged split areas into split areas it had made itself");
+      expect(result.stderr).toContain("This history cannot be adopted automatically.");
+    });
+
+    it("refuses an --onto that still has the monoliths, or has no split areas", () => {
+      const f = fixture();
+      const mixed = commitMergeKeepingMonoliths(f);
+      const before = f.git("status", "--porcelain");
+      expectRefused(f, f.adopt("--branch", f.branch, "--base", f.base, "--onto", mixed), before, `${mixed} (--onto) still has legacy monoliths beside its split areas`);
+      expectRefused(f, f.adopt("--branch", f.branch, "--base", f.base, "--onto", f.base), before, `${f.base} (--onto) still has legacy monoliths;`);
+      f.git("checkout", "-q", "-b", "no-catalogs", "split");
+      f.git("rm", "-q", "-r", "frontend/src/i18n/locales/app");
+      f.git("commit", "-q", "-m", "no split areas");
+      const bare = f.git("rev-parse", "HEAD");
+      f.git("checkout", "-q", "legacy");
+      expectRefused(f, f.adopt("--branch", f.branch, "--base", f.base, "--onto", bare), before, `${bare} (--onto) has no split catalogs to adopt onto`);
+    });
+
+    it("refuses a legacy merge commit adopted against one of its parents", () => {
+      const f = fixture();
+      const merge = legacyMergeCommit(f);
+      const before = f.git("status", "--porcelain");
+      expectRefused(f, f.adopt("--branch", merge, "--base", `${merge}^1`, "--onto", f.onto), before, "is a merge commit and");
+    });
+
+    it("refuses a mixed branch whose --base and merge-base diverge", () => {
+      const f = fixture();
+      f.git("checkout", "-q", "-b", "side", f.base);
+      const side = editMonoliths(f, "side", (catalog, language) => { catalog["Side key"] = `side ${language}`; });
+      f.git("checkout", "-q", "legacy");
+      f.git("merge", "--no-ff", "-X", "theirs", "-m", "merge side", "side");
+      commitMergeKeepingMonoliths(f);
+      const before = f.git("status", "--porcelain");
+      expectRefused(f, f.adopt("--branch", "HEAD", "--base", side, "--onto", f.onto), before, "do not contain one another, so the reference for the branch's split areas is ambiguous");
+    });
+
+    it("refuses a family whose edits have no reference", () => {
+      const f = fixture();
+      f.git("checkout", "-q", "--orphan", "nofamily", f.base);
+      f.git("rm", "-q", "-f", ...FAMILIES.flatMap((family) => LANGUAGES.map((language) => `frontend/src/i18n/locales/${family}-${language}.json`)));
+      f.git("commit", "-q", "-m", "monoliths without families");
+      const start = f.git("rev-parse", "HEAD");
+      f.git("checkout", "-q", f.base, "--", "frontend/src/i18n/locales");
+      f.git("add", "-A", "frontend/src"); f.git("commit", "-q", "-m", "families appear");
+      const before = f.git("status", "--porcelain");
+      expectRefused(f, f.adopt("--branch", "HEAD", "--base", start, "--onto", f.onto), before, `Neither ${start} (--base) nor the merge-base of HEAD and ${f.onto} has the ${FAMILIES[0]} catalogs`);
+    });
+
+    it.each(["add", "remove"])("refuses a key the branch changed in one language only (%s): every area keeps key parity", (kind) => {
+      const f = fixture();
+      f.git("checkout", "-q", "legacy");
+      editMonoliths(f, `one-language ${kind}`, (catalog) => { if (kind === "add") catalog["Only en"] = "only en"; else delete catalog.Kept; }, "en");
+      const before = f.git("status", "--porcelain");
+      const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
+      expectRefused(f, result, before, `: key parity differs across en/zh-CN/zh-TW`);
+      expect(result.stderr).toContain("add or remove the key in every language on the branch");
+    });
+  });
+
+  describe("shapes adoption models", () => {
+    it("places a new key by the branch's source file, after the key's area on onto (N11)", () => {
+      const f = fixture();
+      commitMergeKeepingMonoliths(f);
+      fs.writeFileSync(path.join(f.root, "src/pages/settings.ts"), 'export const copy = ["Settings key", "Change me"];\n');
+      editMonoliths(f, "settings copy", (catalog, language) => { catalog["Settings key"] = `settings ${language}`; catalog["Change me"] = `settings change ${language}`; });
+      const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
+      expect(result.status, result.stderr).toBe(0);
+      for (const language of LANGUAGES) {
+        const portions = loadPortions(f.locales);
+        expect(portions.settings?.[language]).toEqual({ "Settings key": `settings ${language}` });
+        expect(portions.unattributed?.[language]?.["Change me"]).toBe(`settings change ${language}`);
+      }
+      merged(f);
+    });
+
+    it("cherry-picks a commit that deleted every split area file: its monolith edits land and main keeps every key", () => {
+      const f = fixture();
+      commitMergeKeepingMonoliths(f);
+      f.git("rm", "-q", ...fs.readdirSync(path.join(f.locales, "app"), { withFileTypes: true }).filter((entry) => entry.isDirectory())
+        .flatMap((entry) => LANGUAGES.map((language) => `frontend/src/i18n/locales/app/${entry.name}/${language}.json`)));
+      const deleted = editMonoliths(f, "delete the split areas and change Kept", (catalog, language) => { catalog.Kept = `kept deleted ${language}`; });
+      f.git("checkout", "-q", "split");
+      expect(spawnSync("git", ["cherry-pick", deleted], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+      const result = f.adopt();
+      expect(result.status, result.stderr).toBe(0);
+      const catalogs = merged(f);
+      for (const language of LANGUAGES) expect(catalogs[language]).toEqual({ "Change me": `old ${language}`, "Remove me": `removed ${language}`, Kept: `kept deleted ${language}` });
+    });
+
   });
 });

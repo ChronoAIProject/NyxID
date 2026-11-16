@@ -376,9 +376,13 @@ export function layoutReference(layout, { base, mergeBase, order }) {
  * Each branch layout is diffed against its `layoutReference` (`options.mergeBase`, `options.order`).
  * A mixed branch (monoliths beside split areas) also returns `areaDelta` (reference -> branch
  * areas) for applyMixedDelta. A missing reference is refused, never treated as empty.
- * `options.legacyFork()` returns the fork candidates (git-derived) for the refusal guidance.
+ * `options.legacyFork()` returns the fork candidates (git-derived) for the refusal guidance;
+ * `options.commitLocal` says --base is a parent of --branch (a rebased or cherry-picked commit);
+ * `options.baseLessAreaMerges()` lists branch merges that joined split areas without a common one.
+ * Shapes it does not model are refused: a branch without monoliths or an onto that is not plain
+ * split (unless --base is empty), and a mixed branch whose areas were joined by such a merge.
  */
-export function chooseCatalogViews(snapshots, refs, { languages, adopt, mergeBase = null, order = "base", legacyFork = () => [] }) {
+export function chooseCatalogViews(snapshots, refs, { languages, adopt, mergeBase = null, order = "base", legacyFork = () => [], commitLocal = false, baseLessAreaMerges = () => [] }) {
   const fail = (lines) => { throw new Error(`No files written. ${[lines].flat().join("\n")}`); };
   /** The one route that adopts everything a monolith branch changed: its monoliths against its legacy fork. */
   const forkGuidance = () => {
@@ -408,11 +412,27 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt, mergeBas
   const baseHasCatalogs = Boolean(base.monolith || base.areas);
   const reference = (layout) => layoutReference(layout, { base, mergeBase, order });
   const inheritedNote = `${refs.branch} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths (and any later edits to those areas).`;
-  if (!branchView && baseHasCatalogs) {
-    fail(`${refs.branch} (--branch) has no app catalogs, so every key of ${refs.base} (--base) would be removed; pass the commit that holds the branch's catalogs as --branch.`);
+  const emptyBase = refs.base === "empty";
+  // Shapes the adoption does not model are refused before any delta is computed.
+  if (!emptyBase && !branch.monolith) {
+    fail(`${refs.branch} (--branch) has no legacy monoliths, so it is not a branch from before the split and there is nothing to adopt; resolve split-catalog conflicts with git, then run the sync script. (--base empty is the only way to regenerate a split commit's placement.)`);
+  }
+  if (!emptyBase && (onto.monolith || !onto.areas)) {
+    fail(onto.monolith
+      ? `${refs.onto} (--onto) still has legacy monoliths${onto.areas ? " beside its split areas" : ""}; adopt only onto a commit that has just the split catalogs (adopt that branch first, or use --base empty for the initial split).`
+      : `${refs.onto} (--onto) has no split catalogs to adopt onto; pass the split main (or a commit on it) as --onto.`);
   }
   if (mixed && !baseHasCatalogs) {
     fail([`${inheritedNote} It cannot be adopted from an empty base.`, ...forkGuidance()]);
+  }
+  if (mixed && !commitLocal) {
+    const merges = baseLessAreaMerges();
+    if (merges.length) {
+      fail([
+        `${refs.branch} (--branch) merged split areas into split areas it had made itself (merge ${merges.join(", ")}: both sides had areas but their merge-base had none), so its own area edits cannot be told apart from main's and a resolution that kept its copy would revert main.`,
+        "This history cannot be adopted automatically. Port the branch's catalog changes onto a fresh branch from main by hand (its monolith edits can still be adopted from a commit before it made its own areas, with --branch <that commit> --base <its legacy fork>).",
+      ]);
+    }
   }
   if (mixed && order === "diverged") {
     fail(`${refs.base} (--base) and the merge-base of ${refs.branch} and ${refs.onto} do not contain one another, so the reference for the branch's split areas is ambiguous; pass a --base on the branch's own history (its legacy fork, or the parent of the commit being adopted).`);
@@ -431,26 +451,12 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt, mergeBas
       ...forkGuidance(),
     ]);
   }
-  if (branchView === "areas" && baseHasCatalogs && !base.areas) {
-    fail(`${refs.base} (--base) has only the legacy monoliths, but ${refs.branch} (--branch) has only the split areas; pass a split-layout --base (the split commit the branch is based on), or adopt the branch's legacy commits first.`);
-  }
   const empty = () => Object.fromEntries(languages.map((language) => [language, {}]));
   const chosen = {
     base: (baseHasCatalogs && branchView ? reference(branchView) : null) ?? empty(),
     branch: (branch.monolith ?? branch.areas) ?? empty(),
     onto: (onto.areas ?? onto.monolith) ?? empty(),
   };
-  if (onto.areas && onto.monolith) {
-    const lost = languages.flatMap((language) => Object.entries(onto.monolith[language])
-      .filter(([key, value]) => !Object.values(chosen).some((catalog) => catalog[language][key] === value))
-      .map(([key]) => `${language} ${JSON.stringify(key)}`));
-    if (lost.length) {
-      fail([
-        `${refs.onto} (--onto) holds both the legacy monoliths and the split areas, and ${lost.length} value(s) exist only in its legacy monoliths (${lost.slice(0, 3).join(", ")}${lost.length > 3 ? ", ..." : ""}); adopting would lose them.`,
-        "Move those values into the split areas, commit, and rerun.",
-      ]);
-    }
-  }
   return { ...chosen, areaDelta: mixed ? { base: reference("areas"), branch: branch.areas } : null };
 }
 
