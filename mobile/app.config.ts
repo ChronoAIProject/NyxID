@@ -122,6 +122,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       "expo-secure-store",
+      // withMainActivity mods run in reverse registration order; this runs after splash markers.
+      "./plugins/withStaleAuthBrowserCleanup",
       [
         "expo-splash-screen",
         {
