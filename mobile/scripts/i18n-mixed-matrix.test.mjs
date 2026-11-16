@@ -9,6 +9,8 @@
  * run with bounded concurrency (I18N_MATRIX_CONCURRENCY, else the available cores).
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
@@ -133,3 +135,29 @@ for (const plan of plans) {
     });
   });
 }
+
+describe("mobile invariants without the model", () => {
+  test("flag a cherry-pick that also applies edits from commits it did not pick (the N8 class, injected)", { timeout: 120_000 }, async () => {
+    // Inject N8 into the shared core: measure the picked commit from the older merge-base instead of its parent.
+    const corePath = path.join(mobile, "../shared/i18n/catalog-core.mjs");
+    const core = fs.readFileSync(corePath, "utf8");
+    const anchor = 'order: mergeBaseRef ? referenceOrder(refs.base, mergeBaseRef) : "base"';
+    assert.ok(core.includes(anchor));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-mobile-i18n-n8-"));
+    try {
+      const mutated = path.join(dir, "catalog-core.mjs");
+      fs.writeFileSync(mutated, core.replace(anchor, 'order: mergeBaseRef ? "mergeBase" : "base"'));
+      // A cherry-pick whose earlier, unpicked commits edited keys the picked commit leaves alone.
+      const history = randomHistory(32);
+      assert.equal(history.route, "cherryPick");
+      const { clean } = randomCases(history, ["app"], LANGUAGES, { clean: 30, conflicts: 0, ...options });
+      const run = await rehearse(history, clean, { ...pkg, copy: pkg.copy.map(([from, to]) => [to === "shared/i18n/catalog-core.mjs" ? mutated : from, to]) });
+      assert.equal(run.final?.status, 0, run.final?.stderr);
+      const violations = [];
+      for (const testCase of clean) violations.push(...await invariantViolations(history, testCase, run, LANGUAGES));
+      assert.ok(violations.some((violation) => / is neither main's latest .* nor a branch value| removed by main but reappeared /.test(violation)), violations.join("\n"));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
