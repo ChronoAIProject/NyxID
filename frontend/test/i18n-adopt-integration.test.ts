@@ -36,6 +36,7 @@ function fixture() {
     catalog(path.join(locales, `${language}.json`), { "Change me": `old ${language}`, "Remove me": `removed ${language}`, Kept: `kept ${language}` });
     for (const family of FAMILIES) catalog(path.join(locales, `${family}-${language}.json`), { Kept: `kept ${language}`, "Change me": `old ${language}`, "Remove me": `removed ${language}` });
   }
+  catalog(path.join(locales, "en-overrides.json"), { "Change me": "old en" });
   write(path.join(root, "src/pages/billing.ts"), 'const copy = "Kept";\n');
   git("add", "frontend/scripts", "frontend/package.json", "frontend/src");
   git("commit", "-m", "base old layout");
@@ -44,6 +45,8 @@ function fixture() {
   git("checkout", "-b", "split");
   const initial = adopt("--branch", base, "--base", "empty", "--onto", base);
   expect(initial.status, initial.stderr).toBe(0);
+  expect(fs.existsSync(path.join(locales, "en-overrides.json"))).toBe(false);
+  expect(fs.existsSync(path.join(locales, "app/en-overrides.json"))).toBe(true);
   git("add", "frontend/src"); git("commit", "-m", "split layout");
   const onto = git("rev-parse", "HEAD");
   git("checkout", "legacy");
@@ -64,6 +67,7 @@ function fixture() {
       for (const family of FAMILIES) expect(JSON.parse(fs.readFileSync(path.join(locales, `${family}-${language}.json`), "utf8"))).toEqual(expected);
       expect(fs.existsSync(path.join(locales, `${language}.json`))).toBe(false);
     }
+    expect(fs.existsSync(path.join(locales, "en-overrides.json"))).toBe(false);
   };
   return { repo, root, locales, git, adopt, base, branch, onto, verify, catalog };
 }

@@ -30,8 +30,10 @@ for (const file of allCatalogFiles(locales)) {
     issues.push(`${path.relative(root, file)}: invalid catalog (${error.message})`);
   }
 }
+const adoptHint = "run npm run adopt:i18n (see docs/MULTILINGUAL.md for explicit --branch/--base/--onto)";
+if (fs.existsSync(path.join(locales, "en-overrides.json"))) issues.push(`legacy file en-overrides.json is present; ${adoptHint}`);
 for (const language of LANGUAGES) {
-  if (fs.existsSync(path.join(locales, `${language}.json`))) issues.push(`legacy monolith ${language}.json is present; run npm run adopt:i18n (see docs/MULTILINGUAL.md for explicit --branch/--base/--onto)`);
+  if (fs.existsSync(path.join(locales, `${language}.json`))) issues.push(`legacy monolith ${language}.json is present; ${adoptHint}`);
   for (const portion of Object.keys(portions)) {
     if (!fs.existsSync(path.join(locales, "app", portion, `${language}.json`))) issues.push(`app/${portion}: missing ${language}.json`);
   }

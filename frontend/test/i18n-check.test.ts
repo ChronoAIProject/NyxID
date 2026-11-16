@@ -60,4 +60,11 @@ describe("check-i18n", () => {
     ]);
   });
 
+  it("flags the pre-split en-overrides.json as a legacy file", () => {
+    const f = fixture();
+    f.write("src/i18n/locales/en-overrides.json", "{}\n");
+    const result = f.check();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("legacy file en-overrides.json is present; run npm run adopt:i18n");
+  });
 });
