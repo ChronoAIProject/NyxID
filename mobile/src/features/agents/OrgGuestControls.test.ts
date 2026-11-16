@@ -207,3 +207,20 @@ test("native handoff needs explicit confirmation and rejects a stale account cal
   await Promise.resolve();
   assert.deepEqual(e.writes, [["agent", "bound"]]);
 });
+
+test("native member settings tolerate omitted money, explain read-only access and never write", async () => {
+  const e = setup();
+  e.query.data.can_manage = false;
+  delete e.query.data.spent_today_credits;
+  delete e.query.data.reserved_today_credits;
+  e.harness.mount(() => e.module.OrgGuestChannel({ agent, channel: { id:"bot",bot_label:"Office helper",platform:"lark",status:"active" } }));
+  elements(e.harness.flush()).find((r) => r.props.label === "Office helper")!.props.onPress();
+  const rows = elements(e.harness.flush());
+  assert.ok(rows.some((r) => r.props.message === "An organization admin can change these settings."));
+  assert.ok(!rows.some((r) => r.props.label === "Organization spend today"));
+  const control = rows.find((r) => r.props.label === "Allow guests")!.props.accessory;
+  assert.equal(control.props.disabled,true);
+  control.props.onValueChange(true);
+  await e.harness.settle();
+  assert.deepEqual(e.writes,[]);
+});

@@ -1753,12 +1753,26 @@ pub async fn list_bots(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<C
 /// The actor and every organization they administer: the owners whose
 /// channel bots and routes the actor manages.
 pub async fn managed_owner_ids(db: &mongodb::Database, actor: &str) -> AppResult<Vec<String>> {
+    bot_owner_ids(db, actor, false).await
+}
+
+async fn bot_owner_ids(
+    db: &mongodb::Database,
+    actor: &str,
+    members: bool,
+) -> AppResult<Vec<String>> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
 
     let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
     let org_ids: Vec<_> = memberships
         .into_iter()
-        .filter(|membership| membership.role.can_admin())
+        .filter(|membership| {
+            if members {
+                membership.role.can_proxy()
+            } else {
+                membership.role.can_admin()
+            }
+        })
         .map(|membership| membership.org_user_id)
         .collect();
     let mut owner_ids = vec![actor.to_string()];
@@ -1782,6 +1796,21 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
         .collection::<ChannelBot>(COLLECTION_NAME)
         .find(doc! { "user_id": { "$in": owner_ids }, "is_active": true })
         .sort(doc! { "created_at": -1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await?)
+}
+
+/// Human settings inventory; internal tool inventory retains administered owners.
+pub(crate) async fn list_accessible_bots(
+    db: &mongodb::Database,
+    actor: &str,
+) -> AppResult<Vec<ChannelBot>> {
+    let owners = bot_owner_ids(db, actor, true).await?;
+    Ok(db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .find(doc! {"user_id":{"$in":owners},"is_active":true})
+        .sort(doc! {"created_at":-1,"_id":1})
         .await?
         .try_collect()
         .await?)
@@ -2200,6 +2229,8 @@ async fn delete_bot_inner(
             "Channel bot changed during deletion; retry with its current state".into(),
         ));
     }
+
+    super::org_channel_service::defaults::erase(db, doc! {"channel_bot_id":bot_id}).await?;
 
     // Deactivate all conversations tied to this bot
     db.collection::<mongodb::bson::Document>(CONVERSATIONS)

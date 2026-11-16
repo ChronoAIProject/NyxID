@@ -253,5 +253,7 @@
   "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您儲存的聲音（{{voice}}）已無法使用。請選擇聲音以繼續。",
   "{{name}}, {{count}} pending": "{{name}}，{{count}} 項待處理",
   "Unable to open link": "無法開啟連結",
-  "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。"
+  "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。",
+  "An organization admin can change these settings.": "組織管理員可以變更這些設定。",
+  "Set up organization billing to serve guests.": "設定組織帳單以服務訪客。"
 }

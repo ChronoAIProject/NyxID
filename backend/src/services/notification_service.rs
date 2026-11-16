@@ -293,6 +293,7 @@ pub struct ChannelBotFailedNotificationContext {
 pub enum ChannelBotNoticeKind {
     Failure,
     Restored,
+    GuestDefaults,
 }
 
 /// Send a channel-bot failure notice through the recipient's enabled
@@ -1135,6 +1136,7 @@ fn render_channel_bot_failed_notification(
         match context.notice_kind {
             ChannelBotNoticeKind::Failure => "channel_bot_failed",
             ChannelBotNoticeKind::Restored => "channel_bot_restored",
+            ChannelBotNoticeKind::GuestDefaults => "channel_bot_guest_defaults",
         }
         .to_string(),
     );
@@ -2087,6 +2089,27 @@ mod tests {
             rendered.data.get("locked_until").map(String::as_str),
             Some("2026-05-14T12:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn org_guest_defaults_notice_explains_exposure_and_off_action() {
+        let context = ChannelBotFailedNotificationContext {
+            notice_kind: ChannelBotNoticeKind::GuestDefaults,
+            notice_title: Some("Organization bot guest access".into()),
+            notice_body: Some("Support: Guest access is now on by default for this bot. Turn Allow guests off in Who can talk to this bot.".into()),
+            bot_id:"bot".into(),bot_label:"Support".into(),platform_name:"Lark".into(),
+            recommended_action:"review_guest_access".into(),
+            recommended_action_text:"Guest access is now on by default for this bot. Turn Allow guests off in Who can talk to this bot.".into(),
+        };
+        let rendered =
+            render_channel_bot_failed_notification(&crate::test_utils::test_app_config(), &context);
+        assert_eq!(rendered.title, "Organization bot guest access");
+        assert!(rendered.body.contains("Support"));
+        assert!(rendered.body.contains("Guest access is now on by default"));
+        assert!(rendered.body.contains("Turn Allow guests off"));
+        assert!(!rendered.body.contains("stopped working"));
+        assert_eq!(rendered.data["type"], "channel_bot_guest_defaults");
+        assert!(rendered.data["url"].contains("bot"));
     }
 
     #[test]

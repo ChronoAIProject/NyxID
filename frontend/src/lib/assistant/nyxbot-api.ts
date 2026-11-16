@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { orgChannelPreviewSchema } from "@/schemas/org-specialist-channel";
 import { publicModelListSchema } from "@/schemas/platform-models";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
@@ -151,6 +152,11 @@ export const nyxBotApi = {
    * Connects a channel bot to an agent (NyxBot by default), or issues a fresh
    * owner link and relinks when it is already connected.
    */
+  async previewChannel(botId: string, agentId: string, channelId?: string) {
+    return orgChannelPreviewSchema.parse(await assistantJson(`${ROOT}/channels/preview`, {
+      method: "POST", body: { bot_id: botId, agent_id: agentId, ...(channelId ? { channel_id: channelId } : {}) },
+    }));
+  },
   async connectChannel(botId: string, agentId?: string) {
     return nyxAgentChannelConnectSchema.parse(
       await assistantJson(`${ROOT}/channels`, {

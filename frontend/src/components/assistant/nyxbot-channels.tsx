@@ -1,3 +1,6 @@
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { OrgChannelDisclosure } from "./org-channel-preview";
+import type { OrgChannelPreview } from "@/schemas/org-specialist-channel";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
@@ -30,6 +33,7 @@ import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   nyxBotOf,
+  usePreviewOrgChannel,
   useConnectNyxBotChannel,
   useDisconnectNyxBotChannel,
   useLinkNyxBotChannel,
@@ -132,6 +136,8 @@ export function ChannelBotsManager({
   };
   const currentUserId = useAuthStore((state) => state.user?.id);
   const connect = useConnectNyxBotChannel();
+  const preview = usePreviewOrgChannel();
+  const [review, setReview] = useState<{ facts: OrgChannelPreview; channelId?: string }>();
   const link = useLinkNyxBotChannel();
   const disconnect = useDisconnectNyxBotChannel();
   const retryGateway = useRetryNyxBotChannelGateway();
@@ -168,12 +174,14 @@ export function ChannelBotsManager({
   const available = (bots.data ?? []).filter(
     (bot) =>
       !connectedBotIds.has(bot.id) &&
+      !orgs.data?.some((org) => org.id === bot.user_id && org.your_role !== "admin") &&
       (agent?.owner_kind !== "org" ||
         (orgChannels &&
           bot.user_id === agent.owner_id &&
           adminOf(agent.owner_id))),
   );
   const busy =
+    preview.isPending ||
     connect.isPending ||
     disconnect.isPending ||
     link.isPending ||
@@ -188,11 +196,15 @@ export function ChannelBotsManager({
     }
   }
 
-  async function requestLink(botId: string, agentId: string | undefined) {
+  async function requestLink(botId: string, agentId: string | undefined, reviewed = false) {
     if (connectedBotIds.has(botId) && drafts && !await drafts.confirmDiscard()) return;
     setError(undefined);
     setConnectedOrg(undefined);
     try {
+      if (!reviewed && agentId && agents.find((a) => a.id === agentId)?.owner_kind === "org") {
+        setReview({ facts: await preview.mutateAsync({ botId, agentId }) });
+        return;
+      }
       const result = await connect.mutateAsync({ botId, agentId });
       if (result.channel_agent.org_specialist) {
         setOwnerLink(undefined);
@@ -220,6 +232,10 @@ export function ChannelBotsManager({
     if (drafts && !await drafts.confirmDiscard()) return;
     setError(undefined);
     try {
+      if (row.org_specialist) {
+        setReview({ facts: await preview.mutateAsync({ botId: row.channel_bot_id, agentId, channelId: row.id }), channelId: row.id });
+        return;
+      }
       await link.mutateAsync({ channelAgentId: row.id, agentId });
     } catch (cause) {
       setError(
@@ -254,6 +270,24 @@ export function ChannelBotsManager({
   })));
   return (
     <div className="space-y-6">
+      <Dialog open={Boolean(review)} onOpenChange={(open) => { if (!open) setReview(undefined); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{translateUi("Connect organization bot")}</DialogTitle></DialogHeader>
+          {review ? <OrgChannelDisclosure preview={review.facts} /> : null}
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setReview(undefined)}>{translateUi("Cancel")}</Button>
+            <Button disabled={busy || !review || !adminOf(review.facts.org_id)} onClick={async () => {
+              if (!review) return;
+              const pending = review;
+              setReview(undefined);
+              if (pending.channelId) {
+                try { await link.mutateAsync({ channelAgentId: pending.channelId, agentId: pending.facts.agent_id }); }
+                catch (cause) { setError(errorMessage(cause, "Could not move this bot to that agent. Try again.")); }
+              } else { await requestLink(pending.facts.bot_id, pending.facts.agent_id, true); }
+            }}>{translateUi("Confirm connection")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {channels.error || (error && !availableOpen) ? (
         <GroupedList
           title={translateUi("Connection status")}
@@ -278,7 +312,7 @@ export function ChannelBotsManager({
             const target = targets.find((candidate) => candidate.id === agentOf(row));
             const live = row.status === "pending" || row.status === "active";
             const canManage =
-              !row.org_specialist || adminOf(row.org_specialist.org_id);
+              !row.org_specialist || (row.can_manage === true && adminOf(row.org_specialist.org_id));
             const rowTargets = targets.filter((a) =>
               row.org_specialist
                 ? a.owner_kind === "org" &&
@@ -357,8 +391,9 @@ export function ChannelBotsManager({
                       />
                     }
                   />
-                  {live && canManage ? (
+                  {live ? (
                     <ChannelChats
+                      readOnly={!canManage}
                       channel={row}
                       agents={rowTargets}
                       botAgentName={(() => {

@@ -1429,11 +1429,22 @@ pub(super) fn thread_reply_headers(
 
 async fn org_member_group_dm_group(linking_admin: bool) {
     use crate::services::org_channel_service as org;
-    let f = Box::pin(Fixture::with_org(
+    let mut f = Box::pin(Fixture::with_org(
         &format!("org_group_dm_group_{linking_admin}"),
         true,
     ))
     .await;
+    org::management::update(
+        &f.state.db,
+        OWNER,
+        &f.row,
+        serde_json::from_value(json!({"enabled":false})).unwrap(),
+    )
+    .await
+    .unwrap();
+    f.row = org::management::load(&f.state.db, OWNER, &f.row.id, true)
+        .await
+        .unwrap();
     assert!(!f.row.org_specialist.as_ref().unwrap().guests.enabled);
     let actor = if linking_admin {
         OWNER.to_owned()
