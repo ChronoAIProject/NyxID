@@ -3,15 +3,17 @@
  * histories, case enumeration, and the model the expected outcomes come from): the exhaustive
  * enumeration of three fixed mixed-branch histories, plus seeded random histories covering legacy
  * and keep-monolith merges in any number and order, merge/cherry-pick/rebase routes, intermediate
- * resolutions, per-language edits, plural families, placement and unreferenced split areas. Test
- * names carry the seed and case. I18N_MATRIX_SEEDS=<n> runs seeds 1..n.
+ * resolutions, per-language edits, plural families, placement, re-landed commits and the history
+ * shapes adoption refuses as a whole. Each clean case is also checked against model-independent
+ * invariants. Test names carry the seed and case. I18N_MATRIX_SEEDS=<n> runs seeds 1..n; repositories
+ * run with bounded concurrency (I18N_MATRIX_CONCURRENCY, else the available cores).
  */
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import {
-  HISTORIES, NOTHING_IN_PROGRESS, REFUSALS, buildCases, historyFacts, inParallel, keyName, mergeRoles, randomCases, randomHistory, rehearse,
+  HISTORIES, NOTHING_IN_PROGRESS, REFUSALS, buildCases, cleanupAll, historyFacts, inParallel, invariantViolations, keyName, mergeRoles, randomCases, randomHistory, rehearse,
 } from "../../shared/i18n/testing/mixed-matrix-engine.mjs";
 import { LANGUAGES, auditCatalogs } from "./lib/i18n-catalogs.mjs";
 
@@ -42,15 +44,22 @@ const plans = [
 ];
 
 before(async () => {
+  const started = Date.now();
   await inParallel(plans.map((plan) => async () => {
     const [clean, conflicts] = await Promise.all([
       rehearse(plan.history, plan.clean, pkg),
-      plan.conflicts.length ? rehearse(plan.history, [...plan.conflicts, ...plan.extra], pkg) : Promise.resolve(null),
+      plan.conflicts.length && !historyFacts(plan.history).refusal ? rehearse(plan.history, [...plan.conflicts, ...plan.extra], pkg) : Promise.resolve(null),
     ]);
     plan.runs = { clean, conflicts };
+    if (!historyFacts(plan.history).refusal && clean.final?.status === 0) {
+      // One case at a time per history: the histories already run in parallel up to the concurrency bound.
+      plan.violations = new Map();
+      for (const testCase of plan.clean) plan.violations.set(testCase, await invariantViolations(plan.history, testCase, clean, LANGUAGES));
+    }
   }));
-});
-after(() => { for (const plan of plans) { plan.runs?.clean.cleanup(); plan.runs?.conflicts?.cleanup(); } });
+  process.stderr.write(`i18n adoption matrix (mobile): ${plans.length} histories rehearsed in ${((Date.now() - started) / 1000).toFixed(1)} s\n`);
+}, { timeout: 600_000 });
+after(() => cleanupAll());
 
 for (const plan of plans) {
   const facts = historyFacts(plan.history);
@@ -60,7 +69,10 @@ for (const plan of plans) {
         const run = plan.runs.clean;
         assert.notEqual(run.final?.status, 0);
         if (run.nothingInProgress) assert.match(run.final.stderr, NOTHING_IN_PROGRESS);
-        else assert.match(run.final.stderr, REFUSALS[facts.refusal]);
+        else {
+          assert.match(run.final.stderr, REFUSALS[facts.refusal]);
+          assert.ok(run.final.stderr.includes("No files written."), run.final.stderr);
+        }
         assert.equal(run.command, undefined);
         assert.deepEqual(run.after, run.state);
       });
@@ -91,6 +103,7 @@ for (const plan of plans) {
             for (const language of LANGUAGES) assert.equal(run.lookup("app", language)[key], testCase.model.values[language][key], `${key} ${language}`);
             if (testCase.model.values[LANGUAGES[0]][key] !== undefined) assert.equal(run.ownerOf(key), testCase.model.owners[key], `${key} area`);
           }
+          assert.deepEqual(plan.violations?.get(testCase), [], "model-independent invariants");
         });
       }
     });
