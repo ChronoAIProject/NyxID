@@ -30,9 +30,15 @@ describe("legacy i18n delta adoption", () => {
     // Main changed K before the merge; the branch removed K in both layouts: the area edit (made against main's value) wins.
     expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: {}, areaBase: { K: "main" }, areas: {}, onto: { K: "main" }, labels }))
       .toEqual({ result: {}, conflicts: [] });
-    // The monoliths removed K while the areas re-added it: the branch contradicts itself.
-    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: {}, areaBase: {}, areas: { K: "again" }, onto: {}, labels }).conflicts)
+    // The monoliths removed K while the areas (whose reference still has K) changed it: the branch contradicts itself.
+    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: {}, areaBase: { K: "init" }, areas: { K: "again" }, onto: { K: "init" }, labels }).conflicts)
       .toEqual(["app split areas/en: monoliths and split areas changed differently: K"]);
+    // N14: the monolith change equals the areas reference (main made the same change before the merge),
+    // so it is not a branch edit and the later area edit wins.
+    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: { K: "same" }, areaBase: { K: "same" }, areas: { K: "area" }, onto: { K: "same" }, labels }))
+      .toEqual({ result: { K: "area" }, conflicts: [] });
+    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: {}, areaBase: {}, areas: { K: "again" }, onto: {}, labels }))
+      .toEqual({ result: { K: "again" }, conflicts: [] });
     // Monolith-only edits still use the legacy fork as their base.
     expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: { K: "branch" }, areaBase: { K: "init" }, areas: { K: "init" }, onto: { K: "init", N: "main" }, labels }))
       .toEqual({ result: { K: "branch", N: "main" }, conflicts: [] });

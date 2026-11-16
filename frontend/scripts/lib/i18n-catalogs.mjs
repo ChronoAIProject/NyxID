@@ -333,14 +333,19 @@ export const mayImportLegacyCatalog = (source, legacy) =>
  * fork) and its inherited split areas changed from `areaBase` (the last main it merged). Where the
  * areas changed a key, that edit was made against the newer main and takes precedence: the
  * monolith delta skips the key, and a monolith change to a different result is a contradiction.
- * Everything else goes through the ordinary three-way rules.
+ * A monolith change equal to the areas reference is main's own change (the same change on both
+ * sides) and is not a branch edit. Everything else goes through the ordinary three-way rules.
  */
 export function applyMixedDelta({ monolithBase, monolith, areaBase, areas, onto, labels }) {
   const areaKeys = new Set([...Object.keys(areaBase), ...Object.keys(areas)].filter((key) => areaBase[key] !== areas[key]));
+  // A monolith change that matches the areas reference is one main already made (and the areas
+  // inherited at the merge): it is the same change on both sides, so it is not a branch edit.
+  const monolithChanged = (key) => monolithBase[key] !== monolith[key] && monolith[key] !== areaBase[key];
   const contradictions = [...areaKeys]
-    .filter((key) => monolithBase[key] !== monolith[key] && monolith[key] !== areas[key])
+    .filter((key) => monolithChanged(key) && monolith[key] !== areas[key])
     .map((key) => `${labels.areas}: monoliths and split areas changed differently: ${key}`);
-  const withoutAreaKeys = (catalog) => Object.fromEntries(Object.entries(catalog).filter(([key]) => !areaKeys.has(key)));
+  const skipped = new Set([...new Set([...Object.keys(monolithBase), ...Object.keys(monolith)])].filter((key) => areaKeys.has(key) || !monolithChanged(key)));
+  const withoutAreaKeys = (catalog) => Object.fromEntries(Object.entries(catalog).filter(([key]) => !skipped.has(key)));
   const first = applyDelta(withoutAreaKeys(monolithBase), withoutAreaKeys(monolith), onto, labels.monolith);
   const second = applyDelta(areaBase, areas, first.result, labels.areas);
   return { result: second.result, conflicts: [...first.conflicts, ...contradictions, ...second.conflicts] };

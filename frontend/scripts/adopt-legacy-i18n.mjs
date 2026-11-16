@@ -218,7 +218,14 @@ try {
   }
   // Each branch layout is diffed against that layout at the newer of --base and merge-base(branch, onto).
   const emptyBase = refs.base === "empty";
-  const mergeBaseRef = emptyBase ? null : tryGit("merge-base", refs.branch, refs.onto);
+  // --base must be on the branch's own history (true for every merge, rebase, cherry-pick and guided route).
+  if (!emptyBase && tryGit("merge-base", "--is-ancestor", refs.base, refs.branch) === null) {
+    throw new Error(`No files written. ${refs.base} (--base) is not an ancestor of ${refs.branch} (--branch), so the branch's edits cannot be measured from it (main's values would read as reverted); pass the branch's legacy fork, or the parent of the commit being adopted.`);
+  }
+  // A branch already contained in onto (e.g. a commit re-landed with cherry-pick after a revert) has
+  // itself as merge-base; that says nothing about where its edits begin, so only --base counts.
+  const sharedBase = emptyBase ? null : tryGit("merge-base", refs.branch, refs.onto);
+  const mergeBaseRef = sharedBase && sharedBase !== git("rev-parse", `${refs.branch}^{commit}`) ? sharedBase : null;
   const mergeBase = mergeBaseRef ? snapshot(mergeBaseRef, { sources: false }) : null;
   const order = !mergeBaseRef ? "base" : referenceOrder(refs.base, mergeBaseRef);
   const app = chooseCatalogViews({ base, branch, onto }, refs, {

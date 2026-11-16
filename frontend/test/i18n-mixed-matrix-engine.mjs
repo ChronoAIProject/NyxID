@@ -213,7 +213,9 @@ export function simulateCase(history, testCase, languages) {
         let outcome;
         if (!app) outcome = threeWay(ref.family[language][key], branch.family[language][key], onto[language][key]);
         else {
-          const monolithChanged = ref.monolith[language][key] !== branch.monolith[language][key];
+          // N14: a monolith change equal to the area reference is main's own change, not a branch edit.
+          const monolithChanged = ref.monolith[language][key] !== branch.monolith[language][key]
+            && !(branch.hasAreas && branch.monolith[language][key] === ref.areas[language][key]);
           const areasChanged = branch.hasAreas && ref.areas[language][key] !== branch.areas[language][key];
           if (areasChanged) areaChanged.add(key);
           outcome = monolithChanged && areasChanged && branch.monolith[language][key] !== branch.areas[language][key] ? { conflict: true }
