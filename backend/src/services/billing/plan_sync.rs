@@ -185,7 +185,7 @@ pub(super) async fn begin(
     .await?;
     if !owned {
         lost.store(true, Ordering::SeqCst);
-        return Err(unavailable());
+        return Err(super::recovery_batch::waiting(unavailable()));
     }
     Ok(attempt)
 }
@@ -263,7 +263,7 @@ pub(super) async fn completed(db: &Database, plan: &str, attempt: &str) -> AppRe
     if !matches!(renewal, Ok(true)) {
         PLAN_LEASE.with(|context| context.lost.store(true, Ordering::SeqCst));
         renewal?;
-        return Err(unavailable());
+        return Err(super::recovery_batch::waiting(unavailable()));
     }
     PLAN_LEASE.with(|context| context.dispatching.store(false, Ordering::SeqCst));
     Ok(())

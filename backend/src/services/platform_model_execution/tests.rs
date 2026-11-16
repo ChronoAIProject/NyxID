@@ -1198,7 +1198,7 @@ async fn paid_provider_evidence(images: bool, family: bool, checkpoint_crash: bo
         .update_many(doc! {}, doc! {"$set":{"updated_at":stale}})
         .await
         .unwrap();
-    let failed_stats = reconciler.push_usage_for_test().await.unwrap();
+    let failed_stats = reconciler.push_usage_outage_for_test().await;
     assert!(failed_stats.retried > 0);
     drop(failed);
     Mock::given(method("POST"))

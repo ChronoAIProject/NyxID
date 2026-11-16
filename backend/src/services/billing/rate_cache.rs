@@ -164,6 +164,47 @@ pub(super) async fn publish_chunk(
         Err(error) => Err(error),
     }
 }
+// Only definite per-row write rejections are isolated. Shared epoch,
+// diagnostics, cursor/transport and indeterminate-commit failures still stop
+// this publication; no newer epoch is read to rescue a stale response.
+#[derive(Debug)]
+struct RejectedPublication {
+    id: String,
+    source: mongodb::error::Error,
+}
+
+pub(super) async fn publish_isolated(
+    db: &Database,
+    chunk: Chunk<'_>,
+    failures: &mut super::recovery_batch::Failures,
+) -> AppResult<Option<(i64, u64)>> {
+    let mut rows = chunk.rows.to_vec();
+    loop {
+        let attempt = Chunk {
+            captured: chunk.captured,
+            plan: chunk.plan,
+            diagnostics: chunk.diagnostics,
+            rejected: chunk.rejected,
+            rows: &rows,
+        };
+        match publish_chunk(db, attempt).await {
+            Err(AppError::DatabaseError(error)) => {
+                let Some(rejected) = error.get_custom::<RejectedPublication>() else {
+                    return Err(error.into());
+                };
+                failures.note(rejected.source.clone().into());
+                rows.retain(|row| row.id != rejected.id);
+                if !super::reconcile::continue_reconcile() {
+                    return Ok(None);
+                }
+                // The rejected transaction was aborted before COMMIT, including
+                // its epoch advance. Retry the remainder against that same epoch.
+            }
+            result => return result,
+        }
+    }
+}
+
 async fn publish_in_session(
     db: &Database,
     session: &mut ClientSession,
@@ -199,7 +240,15 @@ async fn publish_in_session(
         // the complete historical row; only an explicit sync may revive it.
         let result = rates.update_one(doc! {"_id":&row.id}, vec![doc! {"$replaceWith":{"$cond":[
             {"$ne":[{"$ifNull":["$retired_at",null]},null]}, "$$ROOT", {"$literal":replacement},
-        ]}}]).upsert(true).session(&mut *session).await?;
+        ]}}]).upsert(true).session(&mut *session).await.map_err(|error| {
+            if super::recovery_batch::document_rejected(&error)
+                || super::ledger::is_duplicate_key_error(&error)
+            {
+                AppError::DatabaseError(mongodb::error::Error::custom(RejectedPublication {
+                    id: row.id.clone(), source: error,
+                }))
+            } else { error.into() }
+        })?;
         written += result.modified_count + u64::from(result.upserted_id.is_some());
     }
     Ok((next, written))

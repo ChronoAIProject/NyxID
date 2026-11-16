@@ -1727,7 +1727,13 @@ async fn runtime_price_retry_is_leased_bounded_and_retains_historical_versions()
         .await
         .unwrap();
     f.lago.available.store(false, Ordering::SeqCst);
-    assert_eq!(f.billing.retry_machine_runtime_rates(1).await.unwrap(), 0);
+    assert!(matches!(
+        f.billing.retry_machine_runtime_rates(1).await,
+        Err(AppError::BillingRecoveryFailed {
+            failed_units: 1,
+            ..
+        })
+    ));
     let first =
         f.db.collection::<Document>(RATE_COLLECTION)
             .find_one(doc! {"_id":&pending.id})

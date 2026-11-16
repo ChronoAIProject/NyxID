@@ -213,7 +213,7 @@ pub async fn refresh(
     }
     refresh_captured(db, lago, wallet, ttl, captured, None)
         .await?
-        .ok_or_else(unavailable)
+        .ok_or_else(|| super::recovery_batch::waiting(unavailable()))
 }
 
 fn refresh_timeout() -> AppError {
@@ -450,7 +450,12 @@ pub async fn sync_charge(
     invalidate_plan(db, plan).await?;
     let result = lago.sync_standard_charge(plan, input).await;
     invalidate_plan(db, plan).await?;
-    result?;
+    // The provider's typed conflict is a successful write whose readback is
+    // not yet the desired plan. Database/invalidation errors above are failures.
+    result.map_err(|error| match error {
+        AppError::Conflict(_) => super::recovery_batch::waiting(error),
+        error => error,
+    })?;
     super::plan_sync::completed(db, plan, &attempt).await
 }
 pub async fn remove_charge(
@@ -463,7 +468,12 @@ pub async fn remove_charge(
     invalidate_plan(db, plan).await?;
     let result = lago.remove_standard_charge(plan, code).await;
     invalidate_plan(db, plan).await?;
-    result?;
+    // The provider's typed conflict is a successful write whose readback is
+    // not yet the desired plan. Database/invalidation errors above are failures.
+    result.map_err(|error| match error {
+        AppError::Conflict(_) => super::recovery_batch::waiting(error),
+        error => error,
+    })?;
     super::plan_sync::completed(db, plan, &attempt).await
 }
 pub async fn invalidate_plan(db: &Database, plan: &str) -> AppResult<()> {
@@ -503,32 +513,39 @@ pub async fn reconcile(db: &Database, lago: &dyn LagoApi, ttl: u64) -> AppResult
     let total = rows.len();
     let mut attempted = 0;
     let mut completed = 0;
+    let mut failures = super::recovery_batch::Failures::default();
     let refresh_batch = async {
         for row in rows {
             if !super::reconcile::continue_reconcile() {
                 break;
             }
             attempted += 1;
-            let wallet: BillingWallet =
-                bson::from_document(row).map_err(|e| AppError::Internal(e.to_string()))?;
-            // Forced refresh bypasses the inline negative-cache backoff.
-            if let Err(error) = refresh(db, lago, &wallet, ttl).await {
-                tracing::warn!(owner_id = %wallet.owner_id, %error, "Lago tax profile refresh failed");
-            }
+            failures.unit(async {
+                let wallet: BillingWallet = super::recovery_batch::decode(&row)?;
+                // Forced refresh bypasses the inline negative-cache backoff.
+                if let Err(error) = refresh(db, lago, &wallet, ttl).await {
+                    tracing::warn!(owner_id = %wallet.owner_id, %error, "Lago tax profile refresh failed");
+                    return Err(error);
+                }
+                Ok(())
+            }).await;
             completed += 1;
         }
-        AppResult::Ok(())
     };
-    match tokio::time::timeout(std::time::Duration::from_secs(20), refresh_batch).await {
-        Ok(result) => result?,
-        Err(_) => tracing::warn!(
+    if tokio::time::timeout(std::time::Duration::from_secs(20), refresh_batch)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
             attempted,
             completed,
             total,
             "Lago tax refresh batch timed out"
-        ),
+        );
+        // Only the interrupted unit failed; unattempted wallets are not counted.
+        failures.note(refresh_timeout());
     }
-    Ok(())
+    failures.finish(())
 }
 
 #[cfg(test)]

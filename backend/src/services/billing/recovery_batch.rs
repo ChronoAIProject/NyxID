@@ -9,11 +9,19 @@ pub(crate) fn decode<T: DeserializeOwned>(raw: &Document) -> AppResult<T> {
 
 // Scope the error annotation to maintenance. No request error contract changes,
 // no string classification, and a later unrelated failure stays a failure.
-tokio::task_local! {static RECOVERY_UNIT: ();}
+tokio::task_local! {static RECOVERY_UNIT: std::cell::RefCell<Option<AppError>>;}
 pub(crate) async fn work<T>(
     future: impl std::future::Future<Output = AppResult<T>>,
 ) -> AppResult<T> {
-    RECOVERY_UNIT.scope((), future).await
+    RECOVERY_UNIT
+        .scope(std::cell::RefCell::new(None), async {
+            let result = future.await;
+            match RECOVERY_UNIT.with(|error| error.borrow_mut().take()) {
+                Some(error) => Err(error),
+                None => result,
+            }
+        })
+        .await
 }
 pub(crate) fn waiting(source: AppError) -> AppError {
     if RECOVERY_UNIT.try_with(|_| ()).is_ok() {
@@ -24,6 +32,19 @@ pub(crate) fn waiting(source: AppError) -> AppError {
         source
     }
 }
+/// Preserve a request caller's existing scheduled-retry result, while making
+/// that same processing error visible to a maintenance unit after durable retry.
+pub(crate) fn retry_outcome<T>(value: T, error: AppError) -> AppResult<T> {
+    // Existing callers continue other charges after saving this charge's retry
+    // state. Report the first failure when the whole selected unit finishes.
+    let _ = RECOVERY_UNIT.try_with(|slot| {
+        if !is_wait(&error) && slot.borrow().is_none() {
+            *slot.borrow_mut() = Some(error);
+        }
+    });
+    Ok(value)
+}
+
 pub(crate) fn is_wait(error: &AppError) -> bool {
     matches!(error, AppError::BillingRecoveryWaiting { .. })
 }
