@@ -255,6 +255,12 @@ The automatic merge form is equivalent to:
 npm run adopt:i18n -- --branch HEAD --base "$(git merge-base HEAD MERGE_HEAD)" --onto MERGE_HEAD
 ```
 
+Merging the other way round (a split branch checked out, `git merge` of a
+legacy branch) works the same: when only `MERGE_HEAD` has the legacy monoliths,
+the tool says so and adopts it onto `HEAD`
+(`--branch MERGE_HEAD --base "$(git merge-base HEAD MERGE_HEAD)" --onto HEAD`),
+since the three-way result is the same either way round.
+
 To update by rebasing, fetch and rebase onto `main`, then run the tool at each
 catalog conflict:
 
@@ -273,7 +279,12 @@ git rebase --continue
 
 Rebase this way only a branch without merge commits, or only the commits after
 its last merge (`git rebase --onto origin/main <last merge>`); a rebase that
-drops or replays merge commits is refused (see the table below). The tool uses
+drops or replays merge commits is refused (see the table below). A merge below
+the first replayed commit cannot be told apart from one you rebased past on
+purpose (git also skips the commits around it when they are already upstream),
+so the tool adopts the commit and prints a notice naming that merge: its
+catalog resolutions are not carried over. If that was not intended, abort and
+merge `main` instead. The tool uses
 `REBASE_HEAD` as the old branch, `REBASE_HEAD^` as its base, and `HEAD` as the
 new portion-layout commit; a conflicted `git cherry-pick` of an old-layout
 commit works the same way with `CHERRY_PICK_HEAD`. `git am` patches carry no
