@@ -201,6 +201,31 @@ Existing onto placements are preserved. An already-applied delta is a no-op.
 The tool needs the frontend dependencies, so run `npm ci` in `frontend/` first
 if they are not installed.
 
+The tool also rewrites imports of the pre-split catalog files in every
+`frontend/src` `.ts`/`.tsx` file in the working tree, tests included. Static
+imports, `import type`, dynamic `import()`, `require()` and `vi.mock`-style
+calls are rewritten, and each specifier keeps its prefix style (`@/…` or
+relative). Each rewrite is printed as `file:line old -> new`, followed by the
+`git add` command for the rewritten files:
+
+| Legacy import | Rewritten to |
+| --- | --- |
+| `…/i18n/locales/zh-CN.json` | `…/i18n/locales/app/zh-CN` |
+| `…/i18n/locales/zh-TW.json` | `…/i18n/locales/app/zh-TW` |
+| `…/i18n/locales/en.json` | `…/i18n/locales/app/en-full` |
+| `…/i18n/locales/en-overrides.json` | `…/i18n/locales/app/en-overrides.json` |
+
+The barrels are typed `Record<string, string>` instead of the old literal JSON
+type, so indexing one with a literal key can become `string | undefined`.
+Run `npx tsc -b` afterwards and fix any such error by hand (for example with
+`?? phrase`). A branch that only adds such an import, with no catalog
+conflict, can run `npm run adopt:i18n -- --imports-only`; `npm run check:i18n`
+reports any remaining legacy import with its replacement.
+
+If the merge or rebase also conflicts in `cli/src/wizard/` (a branch that
+rebuilt the CLI wizard bundle before the sorted `common`, `errors` and
+`wizard` catalogs landed), rebuild the bundle after adopting and stage it.
+
 To update an old-layout feature branch by merging, fetch and merge `main`.
 Run the tool after the merge has stopped with `MERGE_HEAD` set:
 
@@ -210,7 +235,10 @@ git merge origin/main
 cd frontend
 npm ci
 npm run adopt:i18n
-git add -A src/i18n/locales
+npm run build:wizard        # only if cli/src/wizard/ conflicted
+git add -A src/i18n/locales # plus the rewritten files the tool lists
+git add -A ../cli/src/wizard # only if you rebuilt the wizard bundle
+npx tsc -b
 git commit
 ```
 
@@ -229,7 +257,10 @@ git rebase origin/main
 cd frontend
 npm ci
 npm run adopt:i18n
-git add -A src/i18n/locales
+npm run build:wizard        # only if cli/src/wizard/ conflicted
+git add -A src/i18n/locales # plus the rewritten files the tool lists
+git add -A ../cli/src/wizard # only if you rebuilt the wizard bundle
+npx tsc -b
 git rebase --continue
 ```
 
@@ -249,8 +280,8 @@ npm run adopt:i18n -- --branch <pre-split-main-ref> --base empty --onto HEAD
 
 `npm run check:i18n` fails while any pre-split file remains (the
 `src/i18n/locales/{en,zh-CN,zh-TW}.json` monoliths or
-`src/i18n/locales/en-overrides.json`) and points to `npm run adopt:i18n`; the
-tool deletes them.
+`src/i18n/locales/en-overrides.json`) or any source imports one, and points
+to `npm run adopt:i18n`; the tool deletes the files and rewrites the imports.
 
 Translate app-owned copy only. Keep user data, resource names, URLs, credentials,
 request values, enum values, keyboard key names, and protocol identifiers intact.
