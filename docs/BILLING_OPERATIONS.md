@@ -203,6 +203,24 @@ unit may finish after expiry. Existing row claims, financial locks and dedupe
 remain necessary. This supervisor does not serialize request-time plan writers,
 wallet/rate/tax snapshots, or purchased-credit expiry against other entry points.
 
+After exact-accounting readiness, a failed maintenance step records its stable
+error code and the pass continues with independent later steps. The caller still
+receives one failed-pass result listing failed steps. Integrity's
+`billing_reconcile_steps` diagnostic shows each step's consecutive failed passes
+and database-time first/last failure; a successful attempt clears that step,
+while a drain/configuration skip preserves it. Status uses the existing
+`billing:reconcile` lease checkpoint and is published once with its fenced release;
+a clean pass adds no database commands. Old lease holders ignore and retain the
+checkpoint and keep their earlier stop-on-error behavior, so counts cover passes
+observed by upgraded holders. No rolling-update action is required. A hard abort
+or lost lease cannot publish a completed pass; leaf recovery markers remain the
+authority for unfinished work. Per-document failures already handled inside a
+step retain their existing retry and diagnostic behavior. Same-schema failure
+entries with unknown step names are preserved and displayed. A newer checkpoint
+version is retained as `status_newer_version` without failing an otherwise healthy
+pass. Malformed or older formats are replaced with fresh status on release and
+reported once in that pass's aggregate log; they do not fail subsequent passes.
+
 Automatic and manual chain verification discard losing `Ok` scans, always log a local
 `Broken` at error level and retry its publication up to three times (on conflict,
 keeping the stored break at an earlier or equal sequence, or returning an error on

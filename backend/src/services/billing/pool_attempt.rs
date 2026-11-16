@@ -226,7 +226,11 @@ pub async fn record_recovery_error(
     error: &AppError,
 ) {
     use crate::models::pool_recovery_diagnostic::{COLLECTION_NAME, PoolRecoveryFailure};
-    tracing::error!(request_id, error = %error, "Pool recovery failed; reservation retained and sweep continues");
+    // Request failures retain their own log; the supervisor includes a batch
+    // failure (None) in its single aggregate pass log after later steps finish.
+    if request_id.is_some() {
+        tracing::error!(request_id, error = %error, "Pool recovery failed; reservation retained and sweep continues");
+    }
     let failure = PoolRecoveryFailure {
         request_id: request_id.map(str::to_owned),
         detail: "Release failed; the existing reservation was retained".into(),

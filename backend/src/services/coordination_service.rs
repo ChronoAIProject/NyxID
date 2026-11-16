@@ -260,6 +260,19 @@ impl LeaseStore {
         holder: &CoordinationHolder,
         ttl: Duration,
     ) -> AppResult<Option<LeaseToken>> {
+        Ok(Self::acquire_with_checkpoint(db, name, holder, ttl)
+            .await?
+            .map(|(token, _)| token))
+    }
+
+    /// Return the checkpoint from the acquisition's existing post-image. A
+    /// supervisor can resume durable status without another database read.
+    pub(crate) async fn acquire_with_checkpoint(
+        db: &mongodb::Database,
+        name: &str,
+        holder: &CoordinationHolder,
+        ttl: Duration,
+    ) -> AppResult<Option<(LeaseToken, Option<Bson>)>> {
         let ttl_ms = duration_millis(ttl, "lease TTL")?;
         let lease_id = uuid::Uuid::new_v4().to_string();
         let holder_bson = bson::to_bson(holder).map_err(|error| {
@@ -306,11 +319,14 @@ impl LeaseStore {
             .await;
 
         match result {
-            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some(LeaseToken {
-                name: name.to_string(),
-                holder: holder.clone(),
-                lease_id,
-            })),
+            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some((
+                LeaseToken {
+                    name: name.to_string(),
+                    holder: holder.clone(),
+                    lease_id,
+                },
+                record.checkpoint,
+            ))),
             Ok(Some(_)) => Ok(None),
             Ok(None) => Err(AppError::Internal(
                 "Lease acquisition returned no record".to_string(),

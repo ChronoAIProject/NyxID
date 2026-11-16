@@ -228,14 +228,15 @@ async fn assert_sync_pass(mode: u8, reject_sync_marker: bool) {
             .await
             .unwrap();
     }
-    let stats = f
-        .reconciler
-        .run_once()
-        .await
-        .expect("CMA sync cannot abort ordinary billing");
+    let result = f.reconciler.run_once().await;
     let success = mode == SUCCESS && !reject_sync_marker;
-    assert_eq!(stats.service_price_syncs, u64::from(success));
-    assert_eq!(stats.pushed, 1);
+    if reject_sync_marker || mode == TIMEOUT {
+        assert!(result.unwrap_err().to_string().contains("sandbox_prices"));
+    } else {
+        let stats = result.expect("handled provider failures remain retry work");
+        assert_eq!(stats.service_price_syncs, u64::from(success));
+        assert_eq!(stats.pushed, 1);
+    }
     f.assert_emitted().await;
     {
         let calls = f.provider.calls.lock().unwrap();
@@ -1002,3 +1003,6 @@ async fn shutdown_reconcile_expiry_finishes_current_operation_and_preserves_mark
     );
     f.db.drop().await.unwrap();
 }
+
+#[path = "reconcile_isolation_tests.rs"]
+mod isolation_tests;
