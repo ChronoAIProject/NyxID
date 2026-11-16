@@ -201,9 +201,11 @@ describe(`mixed-branch adoption matrix: ${conflicts.length} genuine conflicts`, 
     expect(run.command).toBe(`  npm run adopt:i18n -- --branch HEAD --base ${run.fork} --onto MERGE_HEAD`);
     expect(run.guided?.status).not.toBe(0);
     expect(run.guided?.stderr).toContain("No files written. Resolve these catalog divergences explicitly:");
-    const reported = run.guided!.stderr.split("\n").filter((line) => line.includes("key diverged"));
+    const reported = run.guided!.stderr.split("\n").filter((line) => line.includes("key diverged") || line.includes("changed differently"));
     const expectedLines = conflicts.flatMap((testCase) => LANGUAGES.map((language) => {
       const label = testCase.catalog === "app" && testCase.ops.some((op) => op.point === "branchAreas") ? `app split areas/${language}` : `${testCase.catalog}/${language}`;
+      // The branch's monoliths and areas changing one key differently is reported as a contradiction.
+      if (testCase.ops.some((op) => op.point === "branchX") && testCase.ops.some((op) => op.point === "branchAreas")) return `${label}: monoliths and split areas changed differently: ${testCase.key}`;
       return `${label}: ${testCase.conflict} key diverged: ${testCase.key}`;
     }));
     expect([...reported].sort()).toEqual([...expectedLines].sort());
@@ -211,6 +213,6 @@ describe(`mixed-branch adoption matrix: ${conflicts.length} genuine conflicts`, 
   });
 
   it.each(conflicts)("$name", (testCase) => {
-    expect(run.guided?.stderr).toContain(`: ${testCase.conflict} key diverged: ${testCase.key}`);
+    expect(run.guided?.stderr).toMatch(new RegExp(`: (?:${testCase.conflict} key diverged|monoliths and split areas changed differently): ${testCase.key}\n`));
   });
 });

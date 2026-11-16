@@ -294,9 +294,10 @@ or reverted by the branch. The tool refuses, writing nothing, when the base and
 branch layouts differ, when only some monoliths exist, or when a value would
 be lost. A mixed branch's split areas already contain `main` up to the last
 `main` it merged (its merge-base with `--onto`), so they are compared with that
-commit: any addition, change or removal the branch made to its areas is adopted
-after its monolith edits, and a contradiction between the two is reported as a
-conflict. Its unsplit `common`, `errors` and `wizard` files contain that `main`
+commit: any addition, change or removal the branch made to its areas is adopted.
+That edit was made against the newer `main`, so it takes precedence over the
+monoliths for that key; if the monoliths changed the same key to something
+else, the branch contradicts itself and the key is reported. Its unsplit `common`, `errors` and `wizard` files contain that `main`
 too, so they get an ordinary three-way merge against the same commit.
 
 When it refuses a branch that keeps the monoliths, it finds the branch's

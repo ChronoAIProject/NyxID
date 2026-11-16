@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta, chooseCatalogViews,
+  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta, applyMixedDelta, chooseCatalogViews,
   consolidateDuplicates, emptyLanguages, englishOverrides, isPlacementSource, mayImportLegacyCatalog,
   moduleSpecifiers, placeCatalogs, rewriteLegacyImports, walkFiles, writeJson, writePortions,
 } from "./lib/i18n-catalogs.mjs";
@@ -158,15 +158,15 @@ try {
   const merged = emptyLanguages();
   const families = Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()]));
   for (const language of LANGUAGES) {
-    const delta = applyDelta(app.base[language], app.branch[language], refs.base === "empty" ? {} : app.onto[language], `app/${language}`);
+    // A mixed branch's own edits to its inherited split areas take precedence over its monolith edits.
+    const delta = app.areaDelta
+      ? applyMixedDelta({
+        monolithBase: app.base[language], monolith: app.branch[language], areaBase: app.areaDelta.base[language], areas: app.areaDelta.branch[language],
+        onto: app.onto[language], labels: { monolith: `app/${language}`, areas: `app split areas/${language}` },
+      })
+      : applyDelta(app.base[language], app.branch[language], refs.base === "empty" ? {} : app.onto[language], `app/${language}`);
     merged[language] = delta.result;
     conflicts.push(...delta.conflicts);
-    if (app.areaDelta) {
-      // Then the branch's own edits to the split areas it inherited (mirrored edits are no-ops).
-      const areaDelta = applyDelta(app.areaDelta.base[language], app.areaDelta.branch[language], merged[language], `app split areas/${language}`);
-      merged[language] = areaDelta.result;
-      conflicts.push(...areaDelta.conflicts);
-    }
     for (const family of FAMILIES) {
       const delta = applyDelta(familyBase[family][language], branch.families[family][language], refs.base === "empty" ? {} : onto.families[family][language], `${family}/${language}`);
       families[family][language] = delta.result;

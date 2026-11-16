@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, legacyImportReplacement, moduleSpecifiers, rewriteLegacyImports,
-  analyzePortions, applyDelta, canonicalText, catalogImportIssue,
+  analyzePortions, applyDelta, applyMixedDelta, canonicalText, catalogImportIssue,
   consolidateDuplicates, emptyLanguages, isPlacementSource, loadPortions, placeCatalogs, scanUsage, stripPluralSuffix, writePortions,
 } from "../scripts/lib/i18n-catalogs.mjs";
 
@@ -23,6 +23,19 @@ describe("legacy i18n delta adoption", () => {
     const result = applyDelta({ Key: "base" }, { Key: "branch" }, { Key: "onto" }, "en");
     expect(result.result).toEqual({ Key: "onto" });
     expect(result.conflicts).toEqual(["en: changed key diverged: Key"]);
+  });
+
+  it("lets a mixed branch's area edits take precedence and reports monolith/area contradictions", () => {
+    const labels = { monolith: "app/en", areas: "app split areas/en" };
+    // Main changed K before the merge; the branch removed K in both layouts: the area edit (made against main's value) wins.
+    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: {}, areaBase: { K: "main" }, areas: {}, onto: { K: "main" }, labels }))
+      .toEqual({ result: {}, conflicts: [] });
+    // The monoliths removed K while the areas re-added it: the branch contradicts itself.
+    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: {}, areaBase: {}, areas: { K: "again" }, onto: {}, labels }).conflicts)
+      .toEqual(["app split areas/en: monoliths and split areas changed differently: K"]);
+    // Monolith-only edits still use the legacy fork as their base.
+    expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: { K: "branch" }, areaBase: { K: "init" }, areas: { K: "init" }, onto: { K: "init", N: "main" }, labels }))
+      .toEqual({ result: { K: "branch", N: "main" }, conflicts: [] });
   });
 
   it("is idempotent when onto already contains the requested result", () => {

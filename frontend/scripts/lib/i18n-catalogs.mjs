@@ -317,6 +317,24 @@ export const mayImportLegacyCatalog = (source, legacy) =>
   Object.keys(legacy).some((file) => source.includes(path.posix.basename(file)));
 
 /**
+ * Apply a mixed branch's edits to `onto`. Its monoliths changed from `monolithBase` (the legacy
+ * fork) and its inherited split areas changed from `areaBase` (the last main it merged). Where the
+ * areas changed a key, that edit was made against the newer main and takes precedence: the
+ * monolith delta skips the key, and a monolith change to a different result is a contradiction.
+ * Everything else goes through the ordinary three-way rules.
+ */
+export function applyMixedDelta({ monolithBase, monolith, areaBase, areas, onto, labels }) {
+  const areaKeys = new Set([...Object.keys(areaBase), ...Object.keys(areas)].filter((key) => areaBase[key] !== areas[key]));
+  const contradictions = [...areaKeys]
+    .filter((key) => monolithBase[key] !== monolith[key] && monolith[key] !== areas[key])
+    .map((key) => `${labels.areas}: monoliths and split areas changed differently: ${key}`);
+  const withoutAreaKeys = (catalog) => Object.fromEntries(Object.entries(catalog).filter(([key]) => !areaKeys.has(key)));
+  const first = applyDelta(withoutAreaKeys(monolithBase), withoutAreaKeys(monolith), onto, labels.monolith);
+  const second = applyDelta(areaBase, areas, first.result, labels.areas);
+  return { result: second.result, conflicts: [...first.conflicts, ...contradictions, ...second.conflicts] };
+}
+
+/**
  * Pick the app catalog of each adoption snapshot without losing data. A
  * snapshot may hold the split areas (`areas`, merged), the legacy monoliths
  * (`monolith`, with `monolithLanguages` present), or both, e.g. when a merge
