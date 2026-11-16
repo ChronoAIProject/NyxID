@@ -39,6 +39,24 @@ export function hookHarness<T>(
       return options === undefined ? open(url) : open(url, options);
     },
     inAppBrowserOptions: async <T>(extra?: T) => extra,
+    openAuthSessionInAppBrowser: (
+      url: string,
+      returnUrl: string,
+      options?: unknown,
+    ) => {
+      const webBrowserMock = (mocks["expo-web-browser"] ?? {}) as {
+        openAuthSessionAsync?: (
+          url: string,
+          returnUrl: string,
+          options?: unknown,
+        ) => unknown;
+      };
+      const open = webBrowserMock.openAuthSessionAsync;
+      if (typeof open !== "function") return Promise.resolve();
+      return options === undefined
+        ? open(url, returnUrl)
+        : open(url, returnUrl, options);
+    },
   };
   const slots: unknown[] = [];
   const effects = new Map<number, Effect>();

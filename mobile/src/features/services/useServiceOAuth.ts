@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
-import * as WebBrowser from "expo-web-browser";
-import { inAppBrowserOptions } from "../../lib/inAppBrowser";
+import {
+  inAppBrowserOptions,
+  openAuthSessionInAppBrowser,
+} from "../../lib/inAppBrowser";
 import {
   getAuthAccountId,
   subscribeAuthAccount,
@@ -227,12 +229,12 @@ export function useServiceOAuth(
       const browserOptions = await inAppBrowserOptions({ preferEphemeralSession: true });
       if (!current()) return;
       browserStarted = true;
-      const result = await WebBrowser.openAuthSessionAsync(
+      const result = await openAuthSessionInAppBrowser(
         authorizationUrl,
         serviceOAuthReturnUri(),
         browserOptions,
       );
-      if (!current()) return;
+      if (!result || !current()) return;
       if (result.type === "success") {
         const returnUri = serviceOAuthReturnUri();
         const hint = parseServiceOAuthReturn(

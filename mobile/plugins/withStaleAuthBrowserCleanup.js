@@ -16,20 +16,24 @@ const METHODS = `  private fun cleanupStaleAuthBrowserTasks() {
     if (staleAuthBrowserCleanupDone) return
     staleAuthBrowserCleanupDone = true
 
-    getSystemService(ActivityManager::class.java)?.appTasks?.forEach { appTask ->
-      try {
-        val taskInfo = appTask.taskInfo
-        if (
-          taskInfo.baseIntent?.component?.className ==
-            "expo.modules.webbrowser.BrowserProxyActivity" ||
-          taskInfo.baseActivity?.className ==
-            "expo.modules.webbrowser.BrowserProxyActivity"
-        ) {
-          appTask.finishAndRemoveTask()
+    try {
+      getSystemService(ActivityManager::class.java)?.appTasks?.forEach { appTask ->
+        try {
+          val taskInfo = appTask.taskInfo
+          if (
+            taskInfo.baseIntent?.component?.className ==
+              "expo.modules.webbrowser.BrowserProxyActivity" ||
+            taskInfo.baseActivity?.className ==
+              "expo.modules.webbrowser.BrowserProxyActivity"
+          ) {
+            appTask.finishAndRemoveTask()
+          }
+        } catch (_: IllegalArgumentException) {
+          // The task can disappear while the list is being enumerated.
         }
-      } catch (_: IllegalArgumentException) {
-        // The task can disappear while the list is being enumerated.
       }
+    } catch (_: RuntimeException) {
+      // Best-effort cleanup must never prevent app startup.
     }
   }
 

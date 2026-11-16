@@ -40,20 +40,24 @@ const methods = `  private fun cleanupStaleAuthBrowserTasks() {
     if (staleAuthBrowserCleanupDone) return
     staleAuthBrowserCleanupDone = true
 
-    getSystemService(ActivityManager::class.java)?.appTasks?.forEach { appTask ->
-      try {
-        val taskInfo = appTask.taskInfo
-        if (
-          taskInfo.baseIntent?.component?.className ==
-            "expo.modules.webbrowser.BrowserProxyActivity" ||
-          taskInfo.baseActivity?.className ==
-            "expo.modules.webbrowser.BrowserProxyActivity"
-        ) {
-          appTask.finishAndRemoveTask()
+    try {
+      getSystemService(ActivityManager::class.java)?.appTasks?.forEach { appTask ->
+        try {
+          val taskInfo = appTask.taskInfo
+          if (
+            taskInfo.baseIntent?.component?.className ==
+              "expo.modules.webbrowser.BrowserProxyActivity" ||
+            taskInfo.baseActivity?.className ==
+              "expo.modules.webbrowser.BrowserProxyActivity"
+          ) {
+            appTask.finishAndRemoveTask()
+          }
+        } catch (_: IllegalArgumentException) {
+          // The task can disappear while the list is being enumerated.
         }
-      } catch (_: IllegalArgumentException) {
-        // The task can disappear while the list is being enumerated.
       }
+    } catch (_: RuntimeException) {
+      // Best-effort cleanup must never prevent app startup.
     }
   }
 
@@ -99,6 +103,11 @@ test("patches the generated Kotlin activity before super.onCreate and is idempot
   assert.match(patched, /taskInfo\.baseActivity\?\.className/);
   assert.match(patched, /appTask\.finishAndRemoveTask\(\)/);
   assert.match(patched, /catch \(_:\s*IllegalArgumentException\)/);
+  assert.match(patched, /catch \(_:\s*RuntimeException\)/);
+  assert.match(
+    patched,
+    /staleAuthBrowserCleanupDone = true\n\n    try \{\n      getSystemService\(ActivityManager::class\.java\)\?\.appTasks/,
+  );
 });
 
 for (const [anchor, error] of [
