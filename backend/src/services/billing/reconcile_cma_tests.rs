@@ -27,6 +27,7 @@ const TIMEOUT: u8 = 2;
 
 #[derive(Default)]
 struct Provider {
+    charges: std::sync::Mutex<std::collections::BTreeMap<(String, String), String>>,
     mode: AtomicU8,
     calls: Mutex<Vec<&'static str>>,
     pause_push: std::sync::atomic::AtomicBool,
@@ -54,7 +55,7 @@ impl LagoApi for Provider {
         panic!("reconciliation must not provision subscriptions")
     }
 
-    async fn sync_standard_charge(&self, _: &str, _: &ServicePriceSync) -> AppResult<()> {
+    async fn sync_standard_charge(&self, plan: &str, input: &ServicePriceSync) -> AppResult<()> {
         self.calls.lock().unwrap().push("sync");
         if self.pause_sync.swap(false, Ordering::SeqCst) {
             self.sync_entered.notify_one();
@@ -63,10 +64,21 @@ impl LagoApi for Provider {
         match self.mode.load(Ordering::SeqCst) {
             FAILURE => Err(AppError::BillingProviderUnavailable("test failure".into())),
             TIMEOUT => std::future::pending().await,
-            _ => Ok(()),
+            _ => {
+                self.charges.lock().unwrap().insert(
+                    (plan.into(), input.metric_code.clone()),
+                    input.credits_per_unit.clone(),
+                );
+                Ok(())
+            }
         }
     }
 
+    async fn plan_charges(&self, plan: &str) -> AppResult<Vec<serde_json::Value>> {
+        Ok(self.charges.lock().unwrap().iter().filter(|((p, _), _)| p == plan).map(|((_, code), amount)| serde_json::json!({
+            "billable_metric_code": code, "charge_model":"standard", "properties":{"amount":amount}
+        })).collect())
+    }
     async fn tax_config(&self, _: &str, _: &str) -> AppResult<LagoTaxConfig> {
         self.calls.lock().unwrap().push("tax");
         Ok(taxes::zero_config())

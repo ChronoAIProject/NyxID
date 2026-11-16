@@ -123,13 +123,17 @@ async fn repair_owned(
     audit: Audit,
 ) -> AppResult<()> {
     let mut failed = BTreeSet::new();
+    let mut processing_error = None;
     let mut attempted = BTreeSet::new();
     if completion_pending(&audit.state) {
         super::super::taxes::invalidate_plan(db, plan).await?;
     }
     for (code, input) in &audit.desired.charges {
         if !super::super::reconcile::continue_reconcile() {
-            return Ok(());
+            return match processing_error {
+                Some(error) => super::super::recovery_batch::retry_outcome((), error),
+                None => Ok(()),
+            };
         }
         if audit.matches(code, input.as_ref()) || !audit.due(code) {
             continue;
@@ -151,7 +155,13 @@ async fn repair_owned(
                 }
             })
             .await;
-        if result.is_err() {
+        if let Err(error) = result {
+            if !matches!(error, AppError::Conflict(_))
+                && !super::super::recovery_batch::is_wait(&error)
+                && processing_error.is_none()
+            {
+                processing_error = Some(error);
+            }
             record_failure(db, plan, &audit.desired, code, "provider_repair_unverified").await?;
             failed.insert(code.clone());
         }
@@ -178,7 +188,7 @@ async fn repair_owned(
     }
     let token = PLAN_LEASE.with(|context| context.token.clone());
     if !LeaseStore::renew(db, &token, cluster_lease_runtime().ttl).await? {
-        return Err(unavailable());
+        return Err(super::super::recovery_batch::waiting(unavailable()));
     }
     let mut recovered = BTreeSet::new();
     // Attempted but unpublished source prices still belong to their normal
@@ -188,7 +198,10 @@ async fn repair_owned(
     });
     for (code, input) in &audit.desired.charges {
         if !super::super::reconcile::continue_reconcile() {
-            return Ok(());
+            return match processing_error {
+                Some(error) => super::super::recovery_batch::retry_outcome((), error),
+                None => Ok(()),
+            };
         }
         if failed.contains(code) {
             complete = false;
@@ -208,9 +221,12 @@ async fn repair_owned(
         }
         if (pending || audit.reason(code).is_some())
             && audit.desired.cache_codes.contains(code)
-            && restore_cache(db, code, input.as_ref()).await.is_err()
+            && let Err(error) = restore_cache(db, code, input.as_ref()).await
         {
             record_failure(db, plan, &audit.desired, code, "cache_write_failed").await?;
+            if processing_error.is_none() {
+                processing_error = Some(error);
+            }
             complete = false;
             continue;
         }
@@ -241,7 +257,11 @@ async fn repair_owned(
             ))
         },
     )
-    .await
+    .await?;
+    if let Some(error) = processing_error {
+        return super::super::recovery_batch::retry_outcome((), error);
+    }
+    Ok(())
 }
 
 async fn finish_in_session(
@@ -254,7 +274,7 @@ async fn finish_in_session(
     recovered: &BTreeSet<String>,
 ) -> AppResult<()> {
     if !fence_in_session(session, db, token).await? {
-        return Err(unavailable());
+        return Err(super::super::recovery_batch::waiting(unavailable()));
     }
     let mut set = doc! {"completion_generation":generation,"dirty":!complete};
     let mut update = Document::new();
@@ -269,7 +289,7 @@ async fn finish_in_session(
         .session(&mut *session)
         .await?;
     if result.matched_count != 1 {
-        return Err(unavailable());
+        return Err(super::super::recovery_batch::waiting(unavailable()));
     }
     if !recovered.is_empty() {
         db.collection::<Document>(CHARGE_COLLECTION)
@@ -334,7 +354,7 @@ async fn failure_in_session(
     id: &str,
 ) -> AppResult<bool> {
     if !fence_in_session(session, db, token).await? {
-        return Err(unavailable());
+        return Err(super::super::recovery_batch::waiting(unavailable()));
     }
     let plan = fields.get_str("plan_code").map_err(|_| unavailable())?;
     let code = fields.get_str("metric_code").map_err(|_| unavailable())?;

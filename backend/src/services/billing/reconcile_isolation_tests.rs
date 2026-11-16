@@ -267,7 +267,10 @@ async fn billing_pass_isolation_drain_preserves_unattempted_failure() {
         .await
         .unwrap();
     f.db.collection::<Document>(USAGE)
-        .update_one(doc! {"_id":&f.row.id}, doc! {"$set":{"lago_acked":false}})
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"lago_acked":false,"updated_at":bson::DateTime::from_millis(0)}},
+        )
         .await
         .unwrap();
     f.db.collection::<Document>(USAGE)

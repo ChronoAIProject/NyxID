@@ -234,6 +234,14 @@ outages and malformed documents are failures. Old replicas ignore the additive s
 count and retain their existing batch behavior; rolling updates and rollback need no
 operator action. No amount, financial fence, receipt or evidence rule changes.
 
+Provider maintenance uses the same per-unit isolation for tax profiles, service and
+machine prices, usage emission/comparison, wallet balances and rate-cache publication.
+Provider outages fail their units after existing retry state is saved; plan contention,
+readback still pending, event rate limits and stale snapshot publication are waits.
+Rate publication retries a definitively rejected row's remaining chunk against the
+same captured epoch, never a freshly read epoch. The clean command paths and existing
+selection bounds are unchanged; no new durable marker or index is introduced.
+
 Automatic and manual chain verification discard losing `Ok` scans, always log a local
 `Broken` at error level and retry its publication up to three times (on conflict,
 keeping the stored break at an earlier or equal sequence, or returning an error on
