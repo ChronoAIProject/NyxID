@@ -2320,37 +2320,35 @@ async fn send_post_planned_impl(
     }
     .url(&state.config.frontend_url);
     let key = post_key(target, request);
-    let notice = match journal::load(&state.db, &key).await? {
-        Some(existing) => existing.notice,
-        None => notice,
-    };
-    let mut text = outbound.text.clone().unwrap_or_default();
-    if let Some(context) = &notice {
-        text.push_str(&render_notice(context));
-    }
-    let mut parts = plan::assistant_parts(&text, &target.bot.platform, &url);
-    for part in &mut parts {
-        target.adapter.reply_context(
-            crate::services::channel_image_audience::chat_thread(&target.thread),
-            target.thread.created_at,
-            &mut part.metadata,
-        );
-    }
-    let fingerprint = crate::services::mcp_service::canonical_sha256(json!({
-        "parts":plan::fingerprint(&parts),"bot":target.bot.id,"platform":target.bot.platform,
-        "chat":target.thread.platform_chat_id,"thread":target.thread.platform_thread_id,
-        "topic":target.thread.telegram_topic,"generation":target.thread.follow.binding_generation,
-        "route":target.channel.route_id,"route_key":target.channel.route_api_key_id,
-        "transport":target.channel.transport,"gateway_version":target.channel.gateway_version,
-    }));
-    let delivery = journal::begin_with_notice(
+    let (delivery, parts) = journal::assistant_plan(
         &state.db,
         &key,
         &target.channel.user_id,
         request,
-        &fingerprint,
-        parts.len(),
+        &target.bot.platform,
         notice,
+        |version, notice| {
+            let mut text = outbound.text.clone().unwrap_or_default();
+            if let Some(context) = notice {
+                text.push_str(&render_notice(context));
+            }
+            let mut parts = plan::recorded_assistant_parts(&text, &target.bot.platform, &url, version)?;
+            for part in &mut parts {
+                target.adapter.reply_context(
+                    crate::services::channel_image_audience::chat_thread(&target.thread),
+                    target.thread.created_at,
+                    &mut part.metadata,
+                );
+            }
+            let fingerprint = crate::services::mcp_service::canonical_sha256(json!({
+                "parts":plan::fingerprint(&parts),"bot":target.bot.id,"platform":target.bot.platform,
+                "chat":target.thread.platform_chat_id,"thread":target.thread.platform_thread_id,
+                "topic":target.thread.telegram_topic,"generation":target.thread.follow.binding_generation,
+                "route":target.channel.route_id,"route_key":target.channel.route_api_key_id,
+                "transport":target.channel.transport,"gateway_version":target.channel.gateway_version,
+            }));
+            Ok((parts, fingerprint))
+        },
     )
     .await?;
     let mut last = None;

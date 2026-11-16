@@ -1845,14 +1845,18 @@ async fn send_claimed(
             Err(error) => return Err(error),
         }
     }
-    let parts = super::channel_reply_plan::assistant_parts(&rendered, chat.platform(), &url);
-    let plan = journal::begin(
+    let (plan, parts) = journal::assistant_plan(
         &state.db,
         &multipart_key(row),
         owner,
         source,
-        &super::channel_reply_plan::fingerprint(&parts),
-        parts.len(),
+        chat.platform(),
+        None,
+        |version, _| {
+            let parts = super::channel_reply_plan::recorded_assistant_parts(&rendered, chat.platform(), &url, version)?;
+            let fingerprint = super::channel_reply_plan::fingerprint(&parts);
+            Ok((parts, fingerprint))
+        },
     )
     .await?;
     let mut telegram_ids = Vec::new();
