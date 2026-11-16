@@ -918,6 +918,101 @@ test("a connection load failure has an unavailable state without terminal chrome
   await screen.unmount();
 });
 
+test("a connection lookup timeout shows unavailable with Retry and aborts the lookup", async () => {
+  jest.useFakeTimers();
+  let signal!: AbortSignal;
+  jest.mocked(servicesApi.connection).mockImplementationOnce((_id, providedSignal) => {
+    signal = providedSignal!;
+    return new Promise(() => {});
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20_000);
+  });
+  expect(signal.aborted).toBe(true);
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  expect(screen.getByText("Retry")).toBeTruthy();
+  expect(screen.queryByTestId("terminal-webview")).toBeNull();
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("Retry starts a new connection lookup and reaches pre-connect", async () => {
+  jest.useFakeTimers();
+  jest.mocked(servicesApi.connection).mockClear();
+  jest
+    .mocked(servicesApi.connection)
+    .mockImplementationOnce(() => new Promise(() => {}))
+    .mockResolvedValueOnce(connection);
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20_000);
+  });
+  await fireEvent.press(screen.getByText("Retry"));
+  await waitFor(() => {
+    expect(servicesApi.connection).toHaveBeenCalledTimes(2);
+    // The test language mock leaves interpolation placeholders untouched.
+    expect(
+      screen.getByText("Connect to {{connection}} as {{principal}}?"),
+    ).toBeTruthy();
+  });
+  expect(screen.queryByText("This SSH connection could not be loaded.")).toBeNull();
+  expect(Socket.instances).toHaveLength(0);
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("a late connection lookup result after timeout is ignored", async () => {
+  jest.useFakeTimers();
+  jest.mocked(servicesApi.connection).mockClear();
+  let resolveFirst!: (value: any) => void;
+  jest.mocked(servicesApi.connection).mockImplementationOnce(
+    () => new Promise((resolve) => { resolveFirst = resolve; }),
+  );
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20_000);
+  });
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  await act(async () => {
+    resolveFirst(connection);
+    await Promise.resolve();
+  });
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  expect(screen.queryByText("Connect to SSH as ops?")).toBeNull();
+  expect(servicesApi.connection).toHaveBeenCalledTimes(1);
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("unmount aborts an in-flight connection lookup", async () => {
+  let signal!: AbortSignal;
+  jest.mocked(servicesApi.connection).mockImplementationOnce((_id, providedSignal) => {
+    signal = providedSignal!;
+    return new Promise(() => {});
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  expect(signal.aborted).toBe(false);
+  await screen.unmount();
+  expect(signal.aborted).toBe(true);
+});
+
 test("a disallowed deep-link principal shows the picker instead of hanging", async () => {
   jest.mocked(servicesApi.connections).mockResolvedValue([
     { ...connection, ssh_allowed_principals: ["ops", "dev"] },

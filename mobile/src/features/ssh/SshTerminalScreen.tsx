@@ -65,6 +65,7 @@ const serverMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("closed"), reason: z.string().optional() }),
 ]);
 const TERMINAL_BACKGROUND_GRACE_MS = 15_000;
+const TERMINAL_CONNECTION_LOOKUP_TIMEOUT_MS = 20_000;
 export function SshTerminalScreen({
   route,
 }: {
@@ -176,16 +177,28 @@ export function SshTerminalScreen({
   }, [navigation, t]);
   useEffect(() => {
     let current = true;
+    let timedOut = false;
     const account = getAuthAccountId();
+    const controller = new AbortController();
     setConnection(undefined);
     setNotConnected(false);
     setLoadUnavailable(false);
     setError(undefined);
     setState("Connecting…");
+    const lookupTimer = setTimeout(() => {
+      if (!current) return;
+      timedOut = true;
+      current = false;
+      controller.abort();
+      if (account !== getAuthAccountId()) return;
+      setLoadUnavailable(true);
+      setState("Unavailable");
+      setError(undefined);
+    }, TERMINAL_CONNECTION_LOOKUP_TIMEOUT_MS);
     const load = connectionId
-      ? servicesApi.connection(connectionId)
+      ? servicesApi.connection(connectionId, controller.signal)
       : servicesApi
-          .connections()
+          .connections(controller.signal)
           .then((values) =>
             values.find(
               (value) =>
@@ -197,7 +210,8 @@ export function SshTerminalScreen({
           );
     void load
       .then((value) => {
-        if (!current || account !== getAuthAccountId()) return;
+        if (!current || timedOut || account !== getAuthAccountId()) return;
+        clearTimeout(lookupTimer);
         if (!value) {
           setNotConnected(true);
           return;
@@ -226,14 +240,16 @@ export function SshTerminalScreen({
         setPrincipalPickerOpen(!nextPrincipal && allowedPrincipals.length > 0);
       })
       .catch(() => {
-        if (current) {
-          setLoadUnavailable(true);
-          setState("Unavailable");
-          setError(undefined);
-        }
+        if (!current || timedOut || account !== getAuthAccountId()) return;
+        clearTimeout(lookupTimer);
+        setLoadUnavailable(true);
+        setState("Unavailable");
+        setError(undefined);
       });
     return () => {
       current = false;
+      clearTimeout(lookupTimer);
+      controller.abort();
     };
   }, [serviceId, connectionId, attempt, route.params.principal]);
 
@@ -616,6 +632,17 @@ export function SshTerminalScreen({
               : "This SSH service is not connected to your account. Open Services to connect it first.",
           )}
         >
+          {loadUnavailable ? (
+            <SettingsRow
+              label={t("Retry")}
+              tone="action"
+              onPress={() => {
+                setLoadUnavailable(false);
+                setState("Connecting…");
+                setAttempt((value) => value + 1);
+              }}
+            />
+          ) : null}
           <SettingsRow
             label={t("Open Services")}
             tone="action"
