@@ -126,35 +126,41 @@ safe to consolidate and are reported by `check:i18n`; differing values are a
 failure that must be resolved before syncing. Production builds run only the
 override regeneration step, so builds never rewrite source catalogs.
 
-The app portions currently own these paths and key counts:
+The app portions are listed below. The ordered path patterns in
+`frontend/scripts/lib/i18n-portions.mjs` are the source of truth for which
+files each portion owns; this table only summarizes them.
 
-| Portion | Owned paths | Keys |
-| --- | --- | ---: |
-| `admin` | `pages/admin*`, `components/admin*`, admin hooks and helpers | 1,031 |
-| `assistant-chat` | assistant chat/composer/message/attachment files | 242 |
-| `assistant-agents` | assistant agent, skill, and group files; CMA agent/sandbox pages | 560 |
-| `assistant-account` | assistant account/settings/profile/workspace files | 90 |
-| `assistant-approvals` | assistant approval/action/decision files | 275 |
-| `assistant` | remaining assistant components and assistant libraries | 1,045 |
-| `auth` | sign-in, registration, OAuth, consent, and auth helpers | 419 |
-| `automations` | automation pages and assistant automation files | 113 |
-| `billing` | billing and usage pages/components/hooks | 437 |
-| `channels` | channel, Telegram, and channel hooks/helpers | 506 |
-| `cli-pair` | CLI pairing pages, wizard components, and wizard entry | 258 |
-| `credentials` | keys, API keys, credential dashboard files | 461 |
-| `dashboard` | dashboard, navigation, layout, tools, and trigger files | 1,074 |
-| `docs` | documentation manifest and UI | 61 |
-| `machines` | machine pages/components/hooks | 606 |
-| `nodes` | node, device, SSH pages/components/hooks | 148 |
-| `organizations` | organization pages/components/hooks | 131 |
-| `platform` | platform models, onboarding, setup, and platform helpers | 412 |
-| `services` | services, providers, service accounts, developer apps, and catalog helpers | 597 |
-| `settings` | settings and notification settings | 189 |
-| `shared` | keys referenced from multiple mapped areas plus shared libraries/components | 2,422 |
-| `unattributed` | keys with no literal source reference | 1,099 |
+| Portion | Covers |
+| --- | --- |
+| `admin` | Admin pages, components, hooks, and helpers |
+| `assistant-chat` | Assistant chat, composer, message, and attachment files |
+| `assistant-agents` | Assistant agent, skill, and group files; CMA agent/sandbox pages |
+| `assistant-account` | Assistant account, settings, profile, and workspace files |
+| `assistant-approvals` | Assistant approval, action, and decision files |
+| `assistant` | Remaining assistant components and libraries |
+| `auth` | Sign-in, registration, OAuth, consent, and auth helpers |
+| `automations` | Automation pages and assistant automation files |
+| `billing` | Billing and usage pages, components, and hooks |
+| `channels` | Channel and Telegram pages, components, and helpers |
+| `cli-pair` | CLI pairing pages, wizard components, and wizard entry |
+| `credentials` | Keys, API keys, and credential dashboard files |
+| `dashboard` | Dashboard, navigation, layout, tools, and trigger files |
+| `docs` | Documentation manifest and UI |
+| `machines` | Machine pages, components, and hooks |
+| `nodes` | Node, device, and SSH pages, components, and hooks |
+| `organizations` | Organization pages, components, and hooks |
+| `platform` | Platform models, onboarding, setup, and helpers |
+| `services` | Services, providers, service accounts, developer apps, and catalog helpers |
+| `settings` | Settings and notification settings |
+| `shared` | Keys referenced from several areas, plus shared libraries and components |
+| `unattributed` | Keys with no literal source reference |
 
 Keys used by two or more mapped areas always belong to `shared`; keys with no
 literal reference remain in `unattributed` so the split never deletes copy.
+Placement counts only sources that use the app catalog (`isPlacementSource` in
+`frontend/scripts/lib/i18n-catalogs.mjs`): tests, `src/test-setup.ts`,
+`src/test-utils/`, `src/dev/`, fixture and mock files, the landing and NyxBot
+onboarding features, and locale files are ignored.
 
 For a helper called during rendering or an event, import `translate` from
 `@/i18n`. Do not evaluate it once at module initialization: that would freeze a
@@ -187,18 +193,22 @@ cargo test -p nyxid-cli --test wizard_bundle_freshness
 ### In-flight branches from before the split
 
 Use the committed adoption tool for a branch created before the portion split.
-It reads all snapshots with `git show`, applies a three-way delta to app,
-common, error, and wizard catalogs, places additions using literal references in the committed branch and
-onto snapshots and the ordered usage map, and writes nothing if any value diverges
-on both sides. Existing onto placements are preserved. An already-applied delta
-is a no-op.
+It reads each snapshot with one `git cat-file --batch` process, applies a
+three-way delta to app, common, error, and wizard catalogs, places additions
+using literal references in the committed branch and onto snapshots and the
+ordered usage map, and writes nothing if any value diverges on both sides.
+Existing onto placements are preserved. An already-applied delta is a no-op.
+The tool needs the frontend dependencies, so run `npm ci` in `frontend/` first
+if they are not installed.
 
-For an old-layout feature branch, merge the split branch into it. Run this
-after the merge has produced `MERGE_HEAD`:
+To update an old-layout feature branch by merging, fetch and merge `main`.
+Run the tool after the merge has stopped with `MERGE_HEAD` set:
 
 ```sh
-git merge refactor/i18n-catalog-portions
+git fetch origin
+git merge origin/main
 cd frontend
+npm ci
 npm run adopt:i18n
 git add -A src/i18n/locales
 git commit
@@ -210,11 +220,14 @@ The automatic merge form is equivalent to:
 npm run adopt:i18n -- --branch HEAD --base "$(git merge-base HEAD MERGE_HEAD)" --onto MERGE_HEAD
 ```
 
-For a rebase, use these commands at each catalog conflict:
+To update by rebasing, fetch and rebase onto `main`, then run the tool at each
+catalog conflict:
 
 ```sh
-git rebase refactor/i18n-catalog-portions
+git fetch origin
+git rebase origin/main
 cd frontend
+npm ci
 npm run adopt:i18n
 git add -A src/i18n/locales
 git rebase --continue
@@ -233,6 +246,11 @@ The initial migration is the same deterministic operation with an empty base:
 ```sh
 npm run adopt:i18n -- --branch <pre-split-main-ref> --base empty --onto HEAD
 ```
+
+`npm run check:i18n` fails while any pre-split file remains (the
+`src/i18n/locales/{en,zh-CN,zh-TW}.json` monoliths or
+`src/i18n/locales/en-overrides.json`) and points to `npm run adopt:i18n`; the
+tool deletes them.
 
 Translate app-owned copy only. Keep user data, resource names, URLs, credentials,
 request values, enum values, keyboard key names, and protocol identifiers intact.
