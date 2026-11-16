@@ -164,6 +164,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         });
     }

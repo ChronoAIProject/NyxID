@@ -317,75 +317,87 @@ async fn attachment_identity(
 ) -> AppResult<AttachmentIdentity> {
     let id = source.get_str("_id").map_err(|_| invalid())?.to_owned();
     let owner = source.get_str("user_id").map_err(|_| invalid())?.to_owned();
-    let (field, path, expected_size, text_content_type, preview) =
-        if source.contains_key("parent_attachment_id") {
-            let root_id = source
-                .get_str("parent_attachment_id")
-                .map_err(|_| invalid())?;
-            let index = source.get_i64("chunk_index").map_err(|_| invalid())?;
-            let root = db
-                .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
-                .find_one(bson::doc! {"_id":root_id,"user_id":&owner,"origin":"user_upload"})
-                .await?
-                .ok_or_else(invalid)?;
-            let root: crate::models::assistant_upload::AssistantUpload =
-                bson::from_document(root).map_err(|_| invalid())?;
-            let size = usize::try_from(root.size).map_err(|_| invalid())?;
-            const CHUNK: usize = 4 * 1024 * 1024;
-            if size == 0
-                || size > crate::services::attachment_extraction::MAX_BYTES
-                || root.chunks != size.div_ceil(CHUNK)
-                || index < 0
-                || index as usize >= root.chunks
-                || source.get_str("conversation_id").ok() != Some(root.conversation_id.as_str())
-                || source.get("group_id")
-                    != Some(&bson::to_bson(&root.group_id).map_err(|_| invalid())?)
-            {
-                return Err(invalid());
-            }
-            let expected_size = (size - (index as usize) * CHUNK).min(CHUNK);
-            (
-                "data_encrypted",
-                vec![
-                    "data_encrypted".into(),
-                    "parent_attachment_id".into(),
-                    root.id,
-                    "chunk_index".into(),
-                    index.to_string(),
-                ],
-                Some(expected_size),
-                None,
-                false,
-            )
-        } else if source.get_str("origin").ok() == Some("user_upload") {
-            let row: crate::models::assistant_upload::AssistantUpload =
-                bson::from_document(source.clone()).map_err(|_| invalid())?;
-            (
-                "text_encrypted",
-                vec!["text_encrypted".into()],
-                None,
-                Some(row.content_type),
-                false,
-            )
-        } else {
-            let row: AssistantAttachment =
-                bson::from_document(source.clone()).map_err(|_| invalid())?;
-            if !matches!(
-                row.origin.as_str(),
-                "tool" | "machine_preview" | "generated_artifact"
-            ) {
-                return Err(invalid());
-            }
-            let size = usize::try_from(row.size).map_err(|_| invalid())?;
-            let path = image_path(&row).iter().map(|s| (*s).to_owned()).collect();
-            (
-                "data_encrypted",
-                path,
-                Some(size),
-                None,
-                row.origin == "machine_preview",
-            )
-        };
+    let (field, path, expected_size, text_content_type, preview) = if source.get_str("origin").ok()
+        == Some(super::assistant_upload_service::pdf_vision::ORIGIN)
+    {
+        let page: crate::models::assistant_upload::PdfPage =
+            bson::from_document(source.clone()).map_err(|_| invalid())?;
+        super::assistant_upload_service::pdf_vision::validate_parent(db, &page).await?;
+        (
+            "data_encrypted",
+            super::assistant_upload_service::pdf_vision::path(&page),
+            Some(page.size as usize),
+            None,
+            false,
+        )
+    } else if source.contains_key("parent_attachment_id") {
+        let root_id = source
+            .get_str("parent_attachment_id")
+            .map_err(|_| invalid())?;
+        let index = source.get_i64("chunk_index").map_err(|_| invalid())?;
+        let root = db
+            .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+            .find_one(bson::doc! {"_id":root_id,"user_id":&owner,"origin":"user_upload"})
+            .await?
+            .ok_or_else(invalid)?;
+        let root: crate::models::assistant_upload::AssistantUpload =
+            bson::from_document(root).map_err(|_| invalid())?;
+        let size = usize::try_from(root.size).map_err(|_| invalid())?;
+        const CHUNK: usize = 4 * 1024 * 1024;
+        if size == 0
+            || size > crate::services::attachment_extraction::MAX_BYTES
+            || root.chunks != size.div_ceil(CHUNK)
+            || index < 0
+            || index as usize >= root.chunks
+            || source.get_str("conversation_id").ok() != Some(root.conversation_id.as_str())
+            || source.get("group_id")
+                != Some(&bson::to_bson(&root.group_id).map_err(|_| invalid())?)
+        {
+            return Err(invalid());
+        }
+        let expected_size = (size - (index as usize) * CHUNK).min(CHUNK);
+        (
+            "data_encrypted",
+            vec![
+                "data_encrypted".into(),
+                "parent_attachment_id".into(),
+                root.id,
+                "chunk_index".into(),
+                index.to_string(),
+            ],
+            Some(expected_size),
+            None,
+            false,
+        )
+    } else if source.get_str("origin").ok() == Some("user_upload") {
+        let row: crate::models::assistant_upload::AssistantUpload =
+            bson::from_document(source.clone()).map_err(|_| invalid())?;
+        (
+            "text_encrypted",
+            vec!["text_encrypted".into()],
+            None,
+            Some(row.content_type),
+            false,
+        )
+    } else {
+        let row: AssistantAttachment =
+            bson::from_document(source.clone()).map_err(|_| invalid())?;
+        if !matches!(
+            row.origin.as_str(),
+            "tool" | "machine_preview" | "generated_artifact"
+        ) {
+            return Err(invalid());
+        }
+        let size = usize::try_from(row.size).map_err(|_| invalid())?;
+        let path = image_path(&row).iter().map(|s| (*s).to_owned()).collect();
+        (
+            "data_encrypted",
+            path,
+            Some(size),
+            None,
+            row.origin == "machine_preview",
+        )
+    };
     let versions = fields::stored_versions(source)?;
     if versions
         .iter()

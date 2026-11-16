@@ -384,6 +384,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
             chat_delivery: Some(true),
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
             pages: None,
         });

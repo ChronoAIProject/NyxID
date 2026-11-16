@@ -1,5 +1,7 @@
 //! Message-bound, envelope-encrypted uploads. Every read rechecks live scope.
 pub mod byte_budget;
+mod pdf_renderer;
+pub(crate) mod pdf_vision;
 use super::{
     assistant_acknowledgement_service::ChatAuthority,
     assistant_nyxagent as engine,
@@ -61,6 +63,7 @@ pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
         chat_delivery: None,
         image_input: None,
         image_input_reason: None,
+        pdf: row.pdf.clone(),
         image_inspection: None,
         id: row.id.clone(),
         label: row.label.clone(),
@@ -214,6 +217,7 @@ async fn store_authorized(
         attachment_extraction::extract(bytes.clone(), extension).await?
     };
     let mut row = AssistantUpload {
+        pdf: extracted.pdf.clone(),
         source,
         content_sha256,
         secret_context_versions: Default::default(),
@@ -368,6 +372,7 @@ async fn extract_channel_original(
             // Preserve the original encrypted file even when this parser cannot
             // interpret it. Unvalidated images never enter image-model input.
             Err(AppError::BadRequest(_)) => Extracted {
+                pdf: None,
                 content_type: mime_hint
                     .filter(|m| {
                         m.len() <= 100
@@ -400,6 +405,7 @@ pub(crate) async fn prepare_channel_upload(
     let extracted = extract_channel_original(bytes.clone(), extension, mime_hint).await?;
     use sha2::{Digest, Sha256};
     let mut row = AssistantUpload {
+        pdf: extracted.pdf.clone(),
         source: None,
         content_sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
         secret_context_versions: Default::default(),
@@ -613,7 +619,15 @@ async fn payload(
         row.group_id.as_deref().unwrap_or(&row.conversation_id),
     );
     filter.insert("_id", &row.id);
-    let mut bytes = Vec::new();
+    let size = usize::try_from(row.size)
+        .ok()
+        .filter(|n| *n > 0 && *n <= attachment_extraction::MAX_BYTES)
+        .ok_or_else(missing)?;
+    // Bound database work while retaining older uploads split into smaller chunks.
+    if row.chunks == 0 || row.chunks > attachment_extraction::MAX_BYTES.div_ceil(CHUNK) {
+        return Err(missing());
+    }
+    let mut bytes = Vec::with_capacity(size);
     for index in 0..row.chunks {
         let chunk = db
             .collection::<bson::Document>(COLLECTION_NAME)
@@ -637,21 +651,20 @@ async fn payload(
         )?;
         let chunk_id = chunk.get_str("_id").map_err(|_| missing())?;
         let versions = super::record_field_service::stored_versions(&chunk)?;
-        bytes.extend_from_slice(
-            &super::assistant_record_service::decrypt_chunk(
-                keys,
-                chunk_id,
-                &row.user_id,
-                &row.id,
-                index as i64,
-                versions.get("data_encrypted").copied(),
-                &encrypted,
-            )
-            .await?,
-        );
-        if bytes.len() > attachment_extraction::MAX_BYTES {
+        let chunk = super::assistant_record_service::decrypt_chunk(
+            keys,
+            chunk_id,
+            &row.user_id,
+            &row.id,
+            index as i64,
+            versions.get("data_encrypted").copied(),
+            &encrypted,
+        )
+        .await?;
+        if chunk.len() > size.saturating_sub(bytes.len()) {
             return Err(missing());
         }
+        bytes.extend_from_slice(&chunk);
     }
     if bytes.len() as i64 != row.size {
         return Err(missing());
@@ -816,6 +829,16 @@ pub async fn chat_bytes(
     if image_only && let Some(image) = tool_image_bytes(db, keys, chat, id).await? {
         return Ok(image);
     }
+    if image_only {
+        let origin = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":id,"origin":pdf_vision::ORIGIN})
+            .projection(doc! {"_id":1})
+            .await?;
+        if origin.is_some() {
+            return pdf_vision::bytes(db, keys, chat, id).await;
+        }
+    }
     let channel_guest = image_only && chat.guest && !chat.collaboration_thread;
     let row = if channel_guest {
         super::assistant_channel_media::guest::for_chat(db, chat, id).await?
@@ -871,10 +894,33 @@ pub async fn read(
     )
     .await?;
     let extracted: Extracted = serde_json::from_slice(&bytes).map_err(|_| missing())?;
-    if extracted.text.is_empty() && extracted.sections.is_empty() {
+    let pdf = if row.content_type == "application/pdf" {
+        let current = turn_attachments(
+            db,
+            &chat.user_id,
+            &chat.conversation_id,
+            chat.turn_id.as_deref().ok_or_else(missing)?,
+        )
+        .await?;
+        Some(
+            current
+                .into_iter()
+                .find(|a| a.id == row.id)
+                .and_then(|a| a.pdf)
+                .unwrap_or_else(|| pdf_vision::coverage(&extracted)),
+        )
+    } else {
+        None
+    };
+    if !extracted.text.chars().any(|c| !c.is_whitespace()) {
+        let instructions = if pdf.is_some() {
+            "No nonblank extracted text is available. Analyze only PDF page images delivered in this live turn, following the per-page coverage; do not infer unread pages. If no images were delivered, ask for an image-capable model or use nyx__machine_save_attachment on an authorized machine."
+        } else {
+            "No nonblank extracted text is available. Do not claim to have read this attachment. Use nyx__machine_save_attachment on an authorized machine to inspect the original, or ask the owner for readable content."
+        };
         return Ok(
-            json!({"error":"attachment_has_no_extracted_text", "content_type":row.content_type,
-            "instructions":"The complete original file is attached. Use nyx__machine_save_attachment with an authorized machine to inspect it. Do not claim to have read or transcribed its contents."}),
+            json!({"error":"attachment_has_no_extracted_text", "content_type":row.content_type, "pdf":pdf,
+            "instructions":instructions}),
         );
     }
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
@@ -890,7 +936,17 @@ pub async fn read(
         filter.clone(),
     ))
     .await?;
-    let value = page(&extracted, offset, limit);
+    let mut value = page(&extracted, offset, limit);
+    if let Some(pdf) = &pdf {
+        value["pdf"] = json!(pdf);
+        value["text_complete"] = value["complete"].clone();
+        if !pdf.unread_pages.is_empty() {
+            value["complete"] = json!(false);
+        }
+        value["instructions"] = json!(
+            "Text availability does not prove every page was read. Pages without text require this turn’s delivered PDF images; never infer unread page contents."
+        );
+    }
     let end = value
         .get("next_offset")
         .and_then(Value::as_u64)
@@ -1336,7 +1392,14 @@ fn page(extracted: &Extracted, offset: usize, limit: usize) -> Value {
         // Leave room for the surrounding MCP JSON-RPC envelope and its second
         // round of JSON escaping. Coverage and next_offset are derived from
         // this final page, so bytes trimmed here are never reported as read.
-        if mcp_envelope_size(&result) < 9_000 || text.is_empty() {
+        if mcp_envelope_size(&result)
+            < (if extracted.content_type == "application/pdf" {
+                7_400
+            } else {
+                9_000
+            })
+            || text.is_empty()
+        {
             return result;
         }
         text.truncate(
@@ -1421,24 +1484,28 @@ pub async fn group_attachments(
 /// failed origin lookup against the other attachment model.
 pub enum EgressAttachment {
     User(Box<AssistantUpload>),
+    Pdf(Box<crate::models::assistant_upload::PdfPage>),
     Tool(Box<crate::models::assistant_attachment::AssistantAttachment>),
 }
 impl EgressAttachment {
     pub fn id(&self) -> &str {
         match self {
             Self::User(row) => &row.id,
+            Self::Pdf(row) => &row.id,
             Self::Tool(row) => &row.id,
         }
     }
     pub fn size(&self) -> i64 {
         match self {
             Self::User(row) => row.size,
+            Self::Pdf(row) => row.size,
             Self::Tool(row) => row.size,
         }
     }
     pub fn label(&self) -> &str {
         match self {
             Self::User(row) => &row.label,
+            Self::Pdf(_) => "pdf-page.jpg",
             Self::Tool(row) => match row.content_type.as_str() {
                 "image/jpeg" => "tool-image.jpg",
                 "image/gif" => "tool-image.gif",
@@ -1451,6 +1518,7 @@ impl EgressAttachment {
     pub fn content_type(&self) -> &str {
         match self {
             Self::User(row) => &row.content_type,
+            Self::Pdf(row) => &row.content_type,
             Self::Tool(row) => &row.content_type,
         }
     }
@@ -1475,6 +1543,9 @@ pub async fn for_egress(
         .await?
         .ok_or_else(missing)?;
     match row.get_str("origin").ok() {
+        Some(pdf_vision::ORIGIN) => Ok(EgressAttachment::Pdf(Box::new(
+            pdf_vision::for_chat(db, chat, id).await?,
+        ))),
         Some("user_upload") => Ok(EgressAttachment::User(Box::new(
             for_chat(db, chat, id).await?,
         ))),
@@ -1521,6 +1592,7 @@ pub async fn egress_bytes(
     }
     let bytes = match current {
         EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
+        EgressAttachment::Pdf(row) => pdf_vision::bytes(db, keys, chat, &row.id).await?.1,
         EgressAttachment::Tool(row) => {
             let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
             std::mem::take(&mut *protected)
@@ -1682,6 +1754,7 @@ mod tests {
     fn escaped_read_pages_fit_final_envelope_and_reconstruct_exact_text() {
         let original = "\"\\\n\r\t\u{1}界".repeat(4000);
         let extracted = Extracted {
+            pdf: None,
             content_type: "text/plain".into(),
             text: original.clone(),
             sections: vec![],
@@ -1737,6 +1810,7 @@ mod tests {
         assert_eq!(safe_name(".."), "attachment");
         assert!(validate_ids(&["bad".into()]).is_err());
         let data = Extracted {
+            pdf: None,
             content_type: "text/plain".into(),
             text: "a\n😀".repeat(4000),
             sections: vec![],
@@ -1807,10 +1881,10 @@ fn image_plan_for_origin(
     let mut parts = Vec::new();
     let mut omitted = Vec::new();
     let mut total = 0u64;
-    for item in items
-        .iter()
-        .filter(|a| a.origin == origin && a.content_type.starts_with("image/"))
-    {
+    for item in items.iter().filter(|a| {
+        (a.origin == origin || (origin == "user_upload" && a.origin == pdf_vision::ORIGIN))
+            && a.content_type.starts_with("image/")
+    }) {
         let bytes = item.size.max(0) as u64;
         if enabled
             && parts.len() < (cap["max_images"].as_u64().unwrap_or(0).min(10) as usize)
@@ -1846,8 +1920,9 @@ mod integration_tests {
         services::{assistant_acknowledgement_service as acks, assistant_team_service as team},
         test_utils::{connect_transaction_test_database, test_app_state, test_user},
     };
-    async fn fixture() -> (crate::AppState, String, String) {
+    pub(super) async fn fixture() -> (crate::AppState, String, String) {
         let db = connect_transaction_test_database("uploads").await;
+        pdf_vision::ensure_indexes(&db).await.unwrap();
         let user = Uuid::new_v4().to_string();
         db.collection(USERS)
             .insert_one(test_user(&user, UserType::Person))
@@ -1870,7 +1945,7 @@ mod integration_tests {
         session.commit_transaction().await.unwrap();
         (state, user, row.id)
     }
-    fn request(id: &str, attachments: Vec<String>) -> engine::TurnRequest {
+    pub(super) fn request(id: &str, attachments: Vec<String>) -> engine::TurnRequest {
         engine::TurnRequest {
             acknowledgement_id: None,
             retry_of: None,
@@ -3178,6 +3253,7 @@ mod integration_tests {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         };
         assert_eq!(
@@ -3389,6 +3465,7 @@ mod integration_tests {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
         };
         let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});
@@ -3501,3 +3578,6 @@ mod channel_upload_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pdf_tests;

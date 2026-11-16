@@ -850,6 +850,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -923,6 +924,7 @@ fn guest_recap_omits_owner_tool_metadata() {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -4804,6 +4806,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
                     origin: "user_upload".into(),
                     image_input: None,
                     image_input_reason: None,
+                    pdf: None,
                     image_inspection: None,
                 });
             db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
