@@ -27,8 +27,9 @@ afterEach(()=>{cleanup();client.clear();useAuthStore.setState(initialAuth);useCo
 function show(){return render(<QueryClientProvider client={client}><ConsentBanner/></QueryClientProvider>);}
 it("flag-off first-time banner retains the exact existing disclosure and account/browser choice",async()=>{
   show();
-  await waitFor(()=>expect(mocks.read).toHaveBeenCalledOnce());
-  expect(screen.getByText(original)).toBeInTheDocument();
+  expect(await screen.findByText(original)).toBeInTheDocument();
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(mocks.read).not.toHaveBeenCalled();
   expect(screen.queryByText(/Analytics updated/)).not.toBeInTheDocument();
   expect(screen.queryByText(/crash diagnostics/i)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button",{name:"Decline telemetry"}));
@@ -43,6 +44,7 @@ it("declined users cause no consent GET from the banner",async()=>{
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 it("first-time offered policy-2 disclosure is complete and does not claim an update",async()=>{
+  mocks.crashOffered = true;
   mocks.read.mockResolvedValue({account_id:"owner",enabled:false,current_policy_version:"2",diagnostics_offered:true});
   show();
   await screen.findByText(/Optional crash diagnostics include app version/);
@@ -56,16 +58,20 @@ it("first-time offered policy-2 disclosure is complete and does not claim an upd
 });
 it("flag off hides re-acknowledgement while an offered existing choice gets the updated variant",async()=>{
   useConsentStore.setState({asked:true,enabled:true});
-  show();
-  await waitFor(()=>expect(mocks.read).toHaveBeenCalledOnce());
+  const view = show();
+  await act(async () => { await Promise.resolve(); });
+  expect(mocks.read).not.toHaveBeenCalled();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,policy_version:"1",current_policy_version:"2",diagnostics_offered:true});});
-  expect(screen.getByText(/^Analytics updated:/)).toBeInTheDocument();
+  mocks.read.mockResolvedValue({account_id:"owner",enabled:true,policy_version:"1",current_policy_version:"2",diagnostics_offered:true});
+  mocks.crashOffered = true;
+  view.rerender(<QueryClientProvider client={client}><ConsentBanner/></QueryClientProvider>);
+  expect(await screen.findByText(/^Analytics updated:/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button",{name:"Decline telemetry"}));
   expect(mocks.save).not.toHaveBeenCalled();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 it("a fresh banner cache is reused and window focus does not refetch",async()=>{
+  mocks.crashOffered = true;
   const first=show();
   await waitFor(()=>expect(mocks.read).toHaveBeenCalledOnce());
   first.unmount();show();
@@ -81,6 +87,7 @@ it("unconfigured telemetry makes no preference request and shows no banner", asy
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 it("banner preference cache lasts the session across stale time focus and remount", async () => {
+  mocks.crashOffered = true;
   const clock = vi.spyOn(Date, "now");
   const now = Date.now();
   const first = show();
@@ -96,6 +103,7 @@ it("banner preference cache lasts the session across stale time focus and remoun
 });
 
 it("a failed banner preference read does not retry on remount focus or reconnect", async () => {
+  mocks.crashOffered = true;
   mocks.read.mockRejectedValue(new Error("offline"));
   const first = show();
   await waitFor(() => expect(client.getQueryState(["analytics-consent", "owner"])?.status).toBe("error"));
@@ -112,7 +120,7 @@ it("a failed banner preference read does not retry on remount focus or reconnect
 
 it.each([
   { telemetry: false, crash: false, requests: 0 },
-  { telemetry: true, crash: false, requests: 1 },
+  { telemetry: true, crash: false, requests: 0 },
   { telemetry: false, crash: true, requests: 1 },
   { telemetry: true, crash: true, requests: 1 },
 ])("banner discovery with telemetry=$telemetry and crash=$crash makes $requests preference requests", async ({ telemetry, crash, requests }) => {
@@ -156,4 +164,21 @@ it("a cohort non-member makes one cached preference GET per session and sees no 
   });
   expect(mocks.read).toHaveBeenCalledOnce();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("flag-off telemetry-enabled first-time and opted-in users match main across remounts without preference GETs", async () => {
+  mocks.telemetry = true;
+  mocks.crashOffered = false;
+  for (const optedIn of [false, true]) {
+    useConsentStore.setState({ asked: optedIn, enabled: optedIn, policy: optedIn ? 2 : 1 });
+    for (let mount = 0; mount < 2; mount++) {
+      const view = show();
+      if (!optedIn) expect(await screen.findByText(original)).toBeInTheDocument();
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      expect(mocks.read).not.toHaveBeenCalled();
+      if (optedIn) expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      else expect(screen.getByText(original)).toBeInTheDocument();
+      view.unmount();
+    }
+  }
 });

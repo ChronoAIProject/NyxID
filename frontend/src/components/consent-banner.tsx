@@ -26,7 +26,7 @@ export function ConsentBanner() {
   const permission = useQuery({
     queryKey: ["analytics-consent", accountId],
     queryFn: () => readAnalyticsConsent(accountId!),
-    enabled: candidate && (telemetryActive || cfg?.crash_diagnostics_offered === true),
+    enabled: candidate && cfg?.crash_diagnostics_offered === true,
     staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
@@ -35,7 +35,7 @@ export function ConsentBanner() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
-  const offered = permission.data?.diagnostics_offered === true;
+  const offered = cfg?.crash_diagnostics_offered === true && permission.data?.diagnostics_offered === true;
   const current = offered && permission.data?.current_policy_version === "2" ? 2 : 1;
   const update = asked && deviceEnabled && permission.data?.enabled && current === 2 && (permission.data.policy_version !== "2" || devicePolicy !== 2);
   const dismissalKey = `nyxid.diagnostics.dismissed.${accountId}`;
