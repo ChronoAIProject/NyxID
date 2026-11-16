@@ -7050,7 +7050,7 @@ async fn execute_ssh_command_internal(
 
     // Generate ephemeral SSH credentials (key + cert as strings, no files)
     let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
-        state, ssh_svc, service_id, user_id, principal,
+        state, ssh_svc, service_id, user_id, principal, false,
     )
     .await?;
 
