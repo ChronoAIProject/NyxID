@@ -4,8 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import {
-  FIXTURE_SOURCE, LANGUAGES, allCatalogFiles, analyzePortions, canonicalText, catalogImportIssue,
-  englishOverrides as makeOverrides, isTestSource, loadPortions, readJson,
+  FIXTURE_SOURCE, LANGUAGES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, allCatalogFiles, analyzePortions,
+  canonicalText, catalogImportIssue, englishOverrides as makeOverrides, isTestSource, legacyImportReplacement,
+  loadPortions, mayImportLegacyCatalog, moduleSpecifierOf, readJson,
 } from "./lib/i18n-catalogs.mjs";
 import { portionForPath } from "./lib/i18n-portions.mjs";
 
@@ -115,8 +116,11 @@ function sourceFiles(dir) {
   });
 }
 // The import boundary covers all non-test source, including fixtures and locale barrels;
-// the copy audit covers a narrower list. Each file is parsed once for both.
-const guardedFiles = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) && !isTestSource(file));
+// the copy audit covers a narrower list. Each file is parsed once for both. Legacy
+// catalog imports are reported in every source, tests included; test files are only
+// parsed when their text names a legacy catalog file.
+const allSourceFiles = sourceFiles("src").filter((file) => /\.tsx?$/.test(file));
+const guardedFiles = allSourceFiles.filter((file) => !isTestSource(file));
 const isAuditFile = (file) => !FIXTURE_SOURCE.test(file) &&
   !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file);
 const files = guardedFiles.filter(isAuditFile);
@@ -129,22 +133,23 @@ const errorHelperFiles = new Set([
 ]);
 const hasKey = (key) => [...catalogs.values()].some((catalog) => key in catalog);
 
-for (const file of guardedFiles) {
+for (const file of allSourceFiles) {
   const source = fs.readFileSync(path.join(root, file), "utf8");
+  const test = isTestSource(file);
+  if (test && !mayImportLegacyCatalog(source, LEGACY_CATALOG_IMPORTS)) continue;
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
-  const audit = isAuditFile(file);
+  const audit = !test && isAuditFile(file);
   const report = (node, message) => {
     const line = ast.getLineAndCharacterOfPosition(node.getStart()).line + 1;
     issues.push(`${file}:${line}: ${message}`);
   };
   const guardImport = (node) => {
-    const specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier :
-      ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || node.expression.getText(ast) === "require" || node.expression.getText(ast).startsWith("import.meta.glob")) ? node.arguments[0] :
-      ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
-    if (specifier && ts.isStringLiteralLike(specifier)) {
-      const issue = catalogImportIssue(file, specifier.text);
-      if (issue) report(node, issue);
-    }
+    const specifier = moduleSpecifierOf(node, ast);
+    if (!specifier) return;
+    const replacement = legacyImportReplacement(file, specifier.text, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+    if (replacement) report(node, `legacy catalog import ${specifier.text}; use ${replacement} (npm run adopt:i18n rewrites it; outside a merge or rebase run npm run adopt:i18n -- --imports-only)`);
+    const issue = test ? null : catalogImportIssue(file, specifier.text);
+    if (issue) report(node, issue);
   };
   const withinCode = (node) => {
     for (let parent = node.parent; parent; parent = parent.parent) {

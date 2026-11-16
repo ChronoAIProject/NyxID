@@ -60,6 +60,17 @@ describe("check-i18n", () => {
     ]);
   });
 
+  it("reports a remaining legacy catalog import in a test file with its replacement", () => {
+    const f = fixture();
+    f.write("src/pages/billing.test.tsx", 'import zhCN from "@/i18n/locales/zh-CN.json";\nvi.mock("../i18n/locales/en.json");\n');
+    const result = f.check();
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim().split("\n")).toEqual([
+      "src/pages/billing.test.tsx:1: legacy catalog import @/i18n/locales/zh-CN.json; use @/i18n/locales/app/zh-CN (npm run adopt:i18n rewrites it; outside a merge or rebase run npm run adopt:i18n -- --imports-only)",
+      "src/pages/billing.test.tsx:2: legacy catalog import ../i18n/locales/en.json; use ../i18n/locales/app/en-full (npm run adopt:i18n rewrites it; outside a merge or rebase run npm run adopt:i18n -- --imports-only)",
+    ]);
+  });
+
   it("flags the pre-split en-overrides.json as a legacy file", () => {
     const f = fixture();
     f.write("src/i18n/locales/en-overrides.json", "{}\n");
