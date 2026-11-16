@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, test } from "node:test";
 import { canonicalText } from "../../shared/i18n/catalog-core.mjs";
 import ts from "typescript";
-import { LANGUAGES, auditCatalogs, barrelIdentifiers, barrelText } from "./lib/i18n-catalogs.mjs";
+import { LANGUAGES, auditCatalogs, barrelIdentifiers, barrelText, legacyImportIssues } from "./lib/i18n-catalogs.mjs";
 import { portionForPath } from "./lib/i18n-portions.mjs";
 
 const mobile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -141,6 +141,11 @@ function repository() {
   write(path.join(root, "src/features/account/Screen.tsx"), 'export const a = [t("Save"), t("Change me")];\n');
   write(path.join(root, "src/features/auth/Login.tsx"), 'export const a = [t("Sign in"), t("Save")];\n');
   write(path.join(root, "src/features/auth/Login.test.tsx"), 'export const a = t("Remove me");\n');
+  // Type-checks only the in-flight legacy import added by the branch below.
+  write(path.join(root, "tsconfig.json"), `${JSON.stringify({
+    compilerOptions: { module: "preserve", moduleResolution: "bundler", resolveJsonModule: true, esModuleInterop: true, strict: true, noUncheckedIndexedAccess: true, noEmit: true, skipLibCheck: true, target: "ESNext" },
+    files: ["src/features/auth/legacyCatalog.test.ts"],
+  }, null, 2)}\n`);
   git("add", "."); git("commit", "-q", "-m", "legacy layout");
   const base = git("rev-parse", "HEAD");
   const run = (script, ...args) => spawnSync(process.execPath, [path.join(root, "scripts", script), ...args], { cwd: root, encoding: "utf8" });
@@ -179,12 +184,20 @@ describe("mobile adopt and sync tools", () => {
         write(path.join(r.locales, `${language}.json`), JSON.stringify(next, null, 2));
       }
       write(path.join(r.root, "src/features/auth/Added.tsx"), 'export const a = t("Added");\n');
+      write(path.join(r.root, "src/features/auth/legacyCatalog.test.ts"), 'import zh from "../../i18n/locales/zh-CN.json";\n\nexport const save: string = zh["Save"];\n');
       r.git("add", "-A"); r.git("commit", "-q", "-m", "legacy delta");
       const started = spawnSync("git", mode === "merge" ? ["merge", "--no-commit", "split"] : ["rebase", "split"], { cwd: r.repo, encoding: "utf8" });
       assert.notEqual(started.status, 0);
       const adopted = r.run("adopt-i18n.mjs");
       assert.equal(adopted.status, 0, adopted.stderr);
-      r.git("add", "-A", "mobile/src/i18n/locales");
+      assert.match(adopted.stdout, /i18n: rewrote src\/features\/auth\/legacyCatalog\.test\.ts:1 \.\.\/\.\.\/i18n\/locales\/zh-CN\.json -> \.\.\/\.\.\/i18n\/locales\/zh-CN\n/);
+      assert.match(adopted.stdout, /git add src\/features\/auth\/legacyCatalog\.test\.ts\n/);
+      assert.match(adopted.stdout, /run pnpm typecheck/);
+      assert.equal(fs.readFileSync(path.join(r.root, "src/features/auth/legacyCatalog.test.ts"), "utf8"), 'import zh from "../../i18n/locales/zh-CN";\n\nexport const save: string = zh["Save"];\n');
+      const typecheck = spawnSync(process.execPath, [path.join(r.root, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.json"], { cwd: r.root, encoding: "utf8" });
+      assert.equal(typecheck.status, 0, typecheck.stdout);
+      assert.deepEqual(legacyImportIssues(r.root), []);
+      r.git("add", "-A", "mobile/src/i18n/locales", "mobile/src/features/auth/legacyCatalog.test.ts");
       assert.equal(r.git("diff", "--name-only", "--diff-filter=U"), "");
       if (mode === "rebase") r.git("-c", "core.editor=true", "rebase", "--continue");
       else r.git("commit", "-q", "-m", "resolved");
@@ -203,6 +216,24 @@ describe("mobile adopt and sync tools", () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /src\/features\/shared collides with the reserved catalog area "shared"/);
     assert.equal(fs.existsSync(path.join(r.locales, "shared")), false);
+  });
+
+  test("reports and rewrites remaining legacy imports outside a merge or rebase with --imports-only", () => {
+    const r = repository();
+    assert.equal(r.run("adopt-i18n.mjs", "--branch", r.base, "--base", "empty", "--onto", r.base).status, 0);
+    write(path.join(r.root, "src/features/auth/late.test.tsx"), 'jest.mock("../../i18n/locales/zh-TW.json");\nconst zh = require("../../i18n/locales/zh-CN.json");\nimport data from "./data.json";\n');
+    write(path.join(r.root, "src/i18n/translate.ts"), 'import simplified from "./locales/zh-CN.json";\n');
+    assert.deepEqual(legacyImportIssues(r.root), [
+      "src/features/auth/late.test.tsx:1: legacy catalog import ../../i18n/locales/zh-TW.json; use ../../i18n/locales/zh-TW (pnpm adopt:i18n rewrites it; outside a merge or rebase run pnpm adopt:i18n --imports-only)",
+      "src/features/auth/late.test.tsx:2: legacy catalog import ../../i18n/locales/zh-CN.json; use ../../i18n/locales/zh-CN (pnpm adopt:i18n rewrites it; outside a merge or rebase run pnpm adopt:i18n --imports-only)",
+      "src/i18n/translate.ts:1: legacy catalog import ./locales/zh-CN.json; use ./locales/zh-CN (pnpm adopt:i18n rewrites it; outside a merge or rebase run pnpm adopt:i18n --imports-only)",
+    ]);
+    const result = r.run("adopt-i18n.mjs", "--imports-only");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /i18n: rewrote src\/i18n\/translate\.ts:1 \.\/locales\/zh-CN\.json -> \.\/locales\/zh-CN\n/);
+    assert.equal(fs.readFileSync(path.join(r.root, "src/features/auth/late.test.tsx"), "utf8"), 'jest.mock("../../i18n/locales/zh-TW");\nconst zh = require("../../i18n/locales/zh-CN");\nimport data from "./data.json";\n');
+    assert.deepEqual(legacyImportIssues(r.root), []);
+    assert.equal(r.run("adopt-i18n.mjs", "--imports-only").stdout, "i18n: run pnpm typecheck to type-check the result.\n");
   });
 
   test("rejects a divergent value without writing files", () => {

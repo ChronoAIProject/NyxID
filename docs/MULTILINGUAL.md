@@ -515,6 +515,17 @@ the split layout, places new phrases by their literal use in app sources
 the barrels, deletes the monoliths, and writes nothing if a value diverged on
 both sides. Run `pnpm install` in `mobile/` first if dependencies are missing.
 
+It also rewrites imports of the monoliths in every `mobile/src` `.ts`/`.tsx`
+file in the working tree, tests included (static imports, `import()`,
+`require()` and `jest.mock`-style calls), keeping each relative prefix:
+`…/i18n/locales/zh-CN.json` becomes `…/i18n/locales/zh-CN` and `zh-TW.json`
+becomes `zh-TW` (the barrels). Each rewrite is printed as `file:line old ->
+new` with the `git add` command for the rewritten files; stage them with the
+catalogs and run `pnpm typecheck`. The barrels keep the phrase-keyed literal
+types, so these rewrites do not change type-checking. A branch that only adds
+such an import can run `pnpm adopt:i18n --imports-only`, and `pnpm test`
+reports any remaining legacy import with its replacement.
+
 Merge:
 
 ```sh
@@ -523,7 +534,8 @@ git merge origin/main
 cd mobile
 pnpm install
 pnpm adopt:i18n
-git add -A src/i18n/locales
+git add -A src/i18n/locales # plus the rewritten files the tool lists
+pnpm typecheck
 git commit
 ```
 
@@ -535,11 +547,10 @@ git rebase origin/main
 cd mobile
 pnpm install
 pnpm adopt:i18n
-git add -A src/i18n/locales
+git add -A src/i18n/locales # plus the rewritten files the tool lists
+pnpm typecheck
 git rebase --continue
 ```
 
 Explicit refs are also accepted:
 `pnpm adopt:i18n --branch <old-layout-ref> --base <base-ref|empty> --onto <split-ref>`.
-If the branch also imports `./locales/zh-CN.json` or `./locales/zh-TW.json`,
-change those imports to the barrels (`./locales/zh-CN`, `./locales/zh-TW`).

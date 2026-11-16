@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { gitRepository } from "../../shared/i18n/catalog-core.mjs";
 import {
   LANGUAGES, analyzePortions, collectPortions, consolidateDuplicates, isPlacementSource,
-  legacyFiles, mergeDeltas, placeCatalogs, root, writeCatalogs,
+  legacyFiles, mergeDeltas, placeCatalogs, rewriteLegacyCatalogImports, root, writeCatalogs,
 } from "./lib/i18n-catalogs.mjs";
 
 function snapshot(repo, ref, { sources: withSources }) {
@@ -19,8 +19,13 @@ function snapshot(repo, ref, { sources: withSources }) {
 }
 
 try {
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--imports-only") {
+    rewriteLegacyCatalogImports();
+    process.exit();
+  }
   const repo = gitRepository(root);
-  const refs = repo.resolveAdoptRefs(process.argv.slice(2), "usage: pnpm adopt:i18n --branch <ref> --base <ref|empty> --onto <ref>");
+  const refs = repo.resolveAdoptRefs(args, "usage: pnpm adopt:i18n --branch <ref> --base <ref|empty> --onto <ref> | --imports-only");
   const emptyBase = refs.base === "empty";
   // Placement reads branch sources, plus onto sources unless adopting from an empty base.
   const base = snapshot(repo, refs.base, { sources: false });
@@ -35,6 +40,7 @@ try {
   writeCatalogs(portions);
   for (const file of legacyFiles()) fs.rmSync(file);
   console.log(`i18n: adopted ${refs.branch} (base ${refs.base}) onto ${refs.onto}; ${Object.keys(result.mobile["zh-CN"]).length} mobile keys. Stage the catalog files with git add -A src/i18n/locales.`);
+  rewriteLegacyCatalogImports();
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

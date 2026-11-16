@@ -141,3 +141,22 @@ export function auditCatalogs(dir = locales) {
   }
   return issues;
 }
+
+/** Pre-split monoliths and the barrel each import must use instead (mobile has no import aliases). */
+export const LEGACY_CATALOG_IMPORTS = {
+  "src/i18n/locales/zh-CN.json": "src/i18n/locales/zh-CN",
+  "src/i18n/locales/zh-TW.json": "src/i18n/locales/zh-TW",
+};
+export const moduleSpecifiers = core.moduleSpecifierLister(ts);
+
+/** Rewrite legacy catalog imports in mobile/src (tests included), printing each rewrite. */
+export const rewriteLegacyCatalogImports = (dir = root) => core.rewriteLegacyImportsInTree({
+  root: dir, dir: "src", specifiers: moduleSpecifiers, legacy: LEGACY_CATALOG_IMPORTS, aliases: [], typecheck: "pnpm typecheck",
+});
+
+/** Remaining imports of a legacy catalog path in any mobile/src source, tests included. */
+export function legacyImportIssues(dir = root) {
+  const { rewrites } = core.rewriteLegacyImports(core.legacyImportCandidates(dir, "src", LEGACY_CATALOG_IMPORTS), moduleSpecifiers, LEGACY_CATALOG_IMPORTS, []);
+  return rewrites.map(({ file, line, from, to }) =>
+    `${file}:${line}: legacy catalog import ${from}; use ${to} (pnpm adopt:i18n rewrites it; outside a merge or rebase run pnpm adopt:i18n --imports-only)`);
+}
