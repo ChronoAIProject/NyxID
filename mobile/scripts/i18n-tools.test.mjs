@@ -252,19 +252,103 @@ describe("mobile adopt and sync tools", () => {
     for (const language of LANGUAGES) assert.equal(fs.existsSync(path.join(r.locales, `${language}.json`)), false);
   };
 
-  test("uses a mixed branch's monoliths so its legacy edits land and nothing is lost", () => {
-    const r = repository();
-    const { onto } = splitThenLegacyDelta(r);
+  /** Merge split into legacy, keep the legacy monoliths, and commit (M). */
+  const commitMergeKeepingMonoliths = (r) => {
     // The fixture is small enough to trip rename detection; the real split is not.
     spawnSync("git", ["merge", "--no-commit", "-X", "no-renames", "split"], { cwd: r.repo, encoding: "utf8" });
     const conflicted = r.git("diff", "--name-only", "--diff-filter=U").split("\n").filter(Boolean);
     r.git("checkout", "--ours", "--", ...conflicted);
     r.git("add", "-A"); r.git("commit", "-q", "-m", "merge that kept the monoliths");
     for (const language of LANGUAGES) assert.equal(fs.existsSync(path.join(r.locales, `${language}.json`)), true);
+    return r.git("rev-parse", "HEAD");
+  };
+
+  test("uses a mixed branch's monoliths so its legacy edits land and nothing is lost", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    commitMergeKeepingMonoliths(r);
     const adopted = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
     assert.equal(adopted.status, 0, adopted.stderr);
     expectDeltaAdopted(r);
   });
+
+  /** After M, main moves on: it changes "Save" and adds "Main new" in shared. */
+  const mainMovesAfterMixedMerge = (r) => {
+    const { onto } = splitThenLegacyDelta(r);
+    const mixed = commitMergeKeepingMonoliths(r);
+    r.git("checkout", "-q", "split");
+    for (const language of LANGUAGES) {
+      const file = path.join(r.locales, "shared", `${language}.json`);
+      write(file, canonicalText({ ...JSON.parse(fs.readFileSync(file, "utf8")), Save: `save v2 ${language}`, "Main new": `main ${language}` }));
+    }
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "main moves on");
+    const moved = r.git("rev-parse", "HEAD");
+    r.git("checkout", "-q", "legacy");
+    return { onto, mixed, moved };
+  };
+  /** Run the guidance command adopt printed, through this fixture's script. */
+  /** Run the guidance command adopt printed (filling in the legacy fork where it asks for one). */
+  const runGuidance = (r, stderr) => {
+    const command = stderr.split("\n").find((line) => line.startsWith("  pnpm adopt:i18n --branch"));
+    assert.ok(command, stderr);
+    return spawnSync("sh", ["-c", command.trim().replace("pnpm adopt:i18n", `"${process.execPath}" scripts/adopt-i18n.mjs`).replace("<legacy-fork>", r.base)], { cwd: r.root, encoding: "utf8" });
+  };
+  /** The branch's legacy delta on top of main's later changes, with nothing of main reverted. */
+  const expectNothingReverted = (r) => {
+    assert.deepEqual(auditCatalogs(r.locales), []);
+    const merged = (language) => Object.assign({}, ...fs.readdirSync(r.locales, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()).map((entry) => readCatalog(r.locales, entry.name, language)));
+    for (const language of LANGUAGES) {
+      assert.deepEqual(merged(language), {
+        Save: `save v2 ${language}`, "Main new": `main ${language}`, "Sign in": zh("Sign in", language),
+        "Change me": `changed ${language}`, "Remove me": zh("Remove me", language), Added: zh("Added", language),
+      });
+      assert.equal(fs.existsSync(path.join(r.locales, `${language}.json`)), false);
+    }
+  };
+
+  test("refuses a mixed branch against a split-only --base, and its guidance adopts without reverting main", () => {
+    const r = repository();
+    const { onto, mixed, moved } = mainMovesAfterMixedMerge(r);
+    const before = r.git("status", "--porcelain");
+    const refused = r.run("adopt-i18n.mjs", "--branch", mixed, "--base", onto, "--onto", moved);
+    assert.notEqual(refused.status, 0);
+    assert.ok(refused.stderr.includes(`No files written. ${mixed} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths (and any later edits to those areas). ${onto} (--base) has only the split areas`), refused.stderr);
+    // The mobile adopt does not look up the legacy fork yet, so the guidance asks for it.
+    assert.ok(refused.stderr.includes(`  pnpm adopt:i18n --branch ${mixed} --base <legacy-fork> --onto ${moved}`), refused.stderr);
+    assert.ok(!refused.stderr.includes("^1"), refused.stderr);
+    assert.equal(r.git("status", "--porcelain"), before);
+    const guided = runGuidance(r, refused.stderr);
+    assert.equal(guided.status, 0, guided.stderr);
+    expectNothingReverted(r);
+  });
+
+  test("refuses the auto-detected merge of a branch that kept the monoliths, and its guidance completes the merge", () => {
+    const r = repository();
+    mainMovesAfterMixedMerge(r);
+    spawnSync("git", ["merge", "--no-commit", "split"], { cwd: r.repo, encoding: "utf8" });
+    assert.equal(fs.existsSync(path.join(r.repo, ".git/MERGE_HEAD")), true);
+    const before = r.git("status", "--porcelain");
+    const refused = r.run("adopt-i18n.mjs");
+    assert.notEqual(refused.status, 0);
+    assert.ok(refused.stderr.includes("HEAD (--branch) keeps the legacy monoliths beside split areas it inherited from main"), refused.stderr);
+    assert.ok(refused.stderr.includes("  pnpm adopt:i18n --branch HEAD --base <legacy-fork> --onto MERGE_HEAD"), refused.stderr);
+    assert.equal(r.git("status", "--porcelain"), before);
+    const guided = runGuidance(r, refused.stderr);
+    assert.equal(guided.status, 0, guided.stderr);
+    expectNothingReverted(r);
+    r.git("add", "-A", "mobile/src/i18n/locales"); r.git("commit", "-q", "-m", "second merge");
+    expectNothingReverted(r);
+  });
+
+  test("refuses a split-only branch against a legacy-only base", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    const result = r.run("adopt-i18n.mjs", "--branch", onto, "--base", r.base, "--onto", onto);
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(`No files written. ${onto} (--branch) has no legacy monoliths, so it is not a branch from before the split and there is nothing to adopt`), result.stderr);
+  });
+
 
   test("refuses partial monoliths without writing", () => {
     const r = repository();

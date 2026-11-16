@@ -561,6 +561,9 @@ git rebase --continue
 Explicit refs are also accepted:
 `pnpm adopt:i18n --branch <old-layout-ref> --base <base-ref|empty> --onto <split-ref>`.
 A conflicted `git cherry-pick` is detected like a rebase, `git am` asks for
-explicit refs, and a commit holding both layouts is handled as on the web
-(the branch's monoliths and the onto areas are used; anything that would be
-lost is refused with the refs to use).
+explicit refs, and a commit holding both layouts is handled as on the web:
+the branch's monoliths and the onto areas are used, the base must have the
+same layout as the branch, and anything that would revert `main` or lose a
+value is refused with the command to run instead
+(`pnpm adopt:i18n --branch M^1 --base "$(git merge-base M^1 <onto>)" --onto <onto>`
+for a merge `M` that kept the monoliths).
