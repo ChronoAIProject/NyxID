@@ -126,6 +126,7 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   LanguageSettings: undefined;
   /** `voice` false: only dictation settings (no live voice for this account). */
   VoiceSettings: { voice?: boolean } | undefined;
+  AppleWatchSettings: undefined;
   PrivacySettings: undefined;
   ProfileEdit: { field: "display_name" | "avatar_url" };
   SessionDetail: { sessionId: string };
@@ -214,6 +215,7 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "DisplaySettings",
   "LanguageSettings",
   "VoiceSettings",
+  "AppleWatchSettings",
   "PrivacySettings",
   "DeviceLogin",
   "AgentKeyLogin",

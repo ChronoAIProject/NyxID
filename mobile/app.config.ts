@@ -100,6 +100,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       "./plugins/withVoiceAudio",
+      "./plugins/withWatchCompanion",
       [
         "./plugins/withAndroidGoogleServicesValidation",
         {

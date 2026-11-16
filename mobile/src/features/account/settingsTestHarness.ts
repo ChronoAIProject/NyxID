@@ -73,6 +73,9 @@ export function setupSettingsScreen(
     connectedTelegram = false,
     pushDevices = 0,
     voiceEnabled = false,
+    watchAvailable = false,
+    watchLink,
+    loginCodes,
     nyxbotNotifications,
     params,
     language = "en",
@@ -80,6 +83,12 @@ export function setupSettingsScreen(
     connectedTelegram?: boolean;
     pushDevices?: number;
     voiceEnabled?: boolean;
+    /** iOS build with the Apple Watch companion module. */
+    watchAvailable?: boolean;
+    /** The native Apple Watch link the screen talks to. */
+    watchLink?: Record<string, unknown>;
+    /** `/auth/login-code` calls made by Apple Watch setup. */
+    loginCodes?: Record<string, unknown>;
     /** NyxBot notification flag and its saved push switches. */
     nyxbotNotifications?: {
       enabled: boolean;
@@ -98,6 +107,11 @@ export function setupSettingsScreen(
   const preferences: unknown[] = [];
   const sheets: Array<{ options: string[]; pick: (index: number) => void }> =
     [];
+  const alerts: Array<{
+    title: string;
+    message?: string;
+    buttons?: Array<{ text: string; style?: string; onPress?: () => void }>;
+  }> = [];
   const jsx = (type: unknown, props: Element["props"], key?: number) => ({
     type,
     props,
@@ -172,6 +186,13 @@ export function setupSettingsScreen(
         hairlineWidth: 0.5,
       },
       Platform: { OS: "ios" },
+      Alert: {
+        alert: (
+          title: string,
+          message?: string,
+          buttons?: Array<{ text: string; style?: string; onPress?: () => void }>,
+        ) => alerts.push({ title, message, buttons }),
+      },
       ActionSheetIOS: {
         showActionSheetWithOptions: (
           config: { options: string[] },
@@ -274,6 +295,23 @@ export function setupSettingsScreen(
       assistantVoiceFeatures: async () => [],
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
+    "../../lib/watch/watchLink": {
+      nativeWatchLink: () => watchLink ?? (watchAvailable ? {} : null),
+    },
+    "../../lib/api/loginCodeApi": { loginCodeApi: loginCodes ?? {} },
+    "../../lib/api/baseUrl": {
+      getApiBaseUrl: () => "https://auth.example.test/api/v1",
+    },
+    "../../lib/env": { getFrontendUrl: () => "https://app.example.test" },
+    "../../lib/auth/authAccount": { getAuthAccountId: () => "account" },
+    "../auth/useMfaStepUp": {
+      useMfaStepUp: () => ({
+        handle: async () => false,
+        prompt: null,
+        busy: false,
+        reset() {},
+      }),
+    },
     "../../lib/notifications/pushNotifications": {},
     "../../theme/ThemeContext": theme,
     "../../theme/flowStyles": { createFlowStyles: () => ({}) },
@@ -328,6 +366,7 @@ export function setupSettingsScreen(
     pushPreferenceMutations,
     deviceChoices,
     sheets,
+    alerts,
     pushes,
     preferences,
     harness,
