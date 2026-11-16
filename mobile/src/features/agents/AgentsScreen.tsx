@@ -1,4 +1,3 @@
-import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { channelDetail } from "./channelPresentation";
 import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
 import { AgentAvatar } from "../../components/AgentAvatar";
