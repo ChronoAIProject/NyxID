@@ -1,8 +1,11 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, legacyImportReplacement, moduleSpecifiers, rewriteLegacyImports,
   analyzePortions, applyDelta, canonicalText, catalogImportIssue,
-  consolidateDuplicates, emptyLanguages, isPlacementSource, placeCatalogs, scanUsage, stripPluralSuffix,
+  consolidateDuplicates, emptyLanguages, isPlacementSource, loadPortions, placeCatalogs, scanUsage, stripPluralSuffix, writePortions,
 } from "../scripts/lib/i18n-catalogs.mjs";
 
 describe("legacy i18n delta adoption", () => {
@@ -98,6 +101,20 @@ describe("legacy i18n delta adoption", () => {
     const result = placeCatalogs(merged, [["src/pages/billing.tsx", 't("Count"); t("Added");']], { dashboard: original });
     expect(result.dashboard.en).toEqual({ Count_one: "one", Count_other: "other" });
     expect(result.billing.en).toEqual({ Added: "new" });
+  });
+
+  it("prunes areas emptied by adoption or consolidation instead of writing {} files", () => {
+    const locales = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-i18n-prune-"));
+    try {
+      const full = emptyLanguages(); full.en.Key = "Key"; full["zh-CN"].Key = "键"; full["zh-TW"].Key = "鍵";
+      writePortions(locales, { billing: full, dashboard: structuredClone(full) });
+      expect(Object.keys(loadPortions(locales))).toEqual(["billing", "dashboard"]);
+      writePortions(locales, { billing: full, dashboard: emptyLanguages() });
+      expect(Object.keys(loadPortions(locales))).toEqual(["billing"]);
+      expect(fs.existsSync(path.join(locales, "app/dashboard"))).toBe(false);
+    } finally {
+      fs.rmSync(locales, { recursive: true, force: true });
+    }
   });
 
   it("uses code-unit canonical text and exposes duplicate JSON keys", () => {

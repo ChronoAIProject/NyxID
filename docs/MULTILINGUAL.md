@@ -121,7 +121,8 @@ then the source phrase.
 
 Run `npm run sync:i18n` after changing catalogs. It canonicalizes every app,
 common, error, and wizard JSON file, consolidates cross-portion duplicate keys,
-and regenerates `app/en-overrides.json`. Identical values in every language are
+removes areas left without keys (`check:i18n` flags an empty area file), and
+regenerates `app/en-overrides.json`. Identical values in every language are
 safe to consolidate and are reported by `check:i18n`; differing values are a
 failure that must be resolved before syncing. Production builds run only the
 override regeneration step, so builds never rewrite source catalogs.

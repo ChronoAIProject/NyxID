@@ -37,6 +37,7 @@ for (const language of LANGUAGES) {
   if (fs.existsSync(path.join(locales, `${language}.json`))) issues.push(`legacy monolith ${language}.json is present; ${adoptHint}`);
   for (const portion of Object.keys(portions)) {
     if (!fs.existsSync(path.join(locales, "app", portion, `${language}.json`))) issues.push(`app/${portion}: missing ${language}.json`);
+    else if (!Object.keys(portions[portion][language]).length) issues.push(`app/${portion}/${language}.json: empty area; run npm run sync:i18n`);
   }
 }
 const fullEnglish = analysis.merged.en;

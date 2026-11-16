@@ -201,7 +201,12 @@ export function placeCatalogs(merged, sources, existing = {}) {
   return result;
 }
 
-export function writePortions(locales, portions) {
+/** Areas with at least one key in some language; an emptied area is pruned rather than kept as `{}` files. */
+export const nonEmptyPortions = (portions) => Object.fromEntries(Object.entries(portions)
+  .filter(([, catalogs]) => LANGUAGES.some((language) => Object.keys(catalogs[language] ?? {}).length)));
+
+export function writePortions(locales, allPortions) {
+  const portions = nonEmptyPortions(allPortions);
   for (const [portion, catalogs] of Object.entries(portions)) {
     for (const language of LANGUAGES) writeJson(portionFile(locales, portion, language), catalogs[language]);
   }

@@ -20,7 +20,7 @@ function fixture() {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), text);
   };
-  for (const file of ["check-i18n.mjs", "lib/i18n-catalogs.mjs", "lib/i18n-portions.mjs"]) {
+  for (const file of ["check-i18n.mjs", "sync-i18n.mjs", "lib/i18n-catalogs.mjs", "lib/i18n-portions.mjs"]) {
     write(`scripts/${file}`, fs.readFileSync(path.join(frontend, "scripts", file), "utf8"));
   }
   write("package.json", '{"type":"module"}\n');
@@ -33,7 +33,8 @@ function fixture() {
   write("src/i18n/locales/app/en-overrides.json", "{}\n");
   write("src/pages/billing.tsx", 'export const Page = () => <p>{t("Billing")}</p>;\n');
   const check = () => spawnSync(process.execPath, [path.join(root, "scripts/check-i18n.mjs")], { cwd: root, encoding: "utf8" });
-  return { root, write, check };
+  const sync = () => spawnSync(process.execPath, [path.join(root, "scripts/sync-i18n.mjs")], { cwd: root, encoding: "utf8" });
+  return { root, write, check, sync };
 }
 
 describe("check-i18n", () => {
@@ -69,6 +70,18 @@ describe("check-i18n", () => {
       "src/pages/billing.test.tsx:1: legacy catalog import @/i18n/locales/zh-CN.json; use @/i18n/locales/app/zh-CN (npm run adopt:i18n rewrites it; outside a merge or rebase run npm run adopt:i18n -- --imports-only)",
       "src/pages/billing.test.tsx:2: legacy catalog import ../i18n/locales/en.json; use ../i18n/locales/app/en-full (npm run adopt:i18n rewrites it; outside a merge or rebase run npm run adopt:i18n -- --imports-only)",
     ]);
+  });
+
+  it("flags an emptied area, which sync prunes", () => {
+    const f = fixture();
+    for (const language of LANGUAGES) f.write(`src/i18n/locales/app/dashboard/${language}.json`, "{}\n");
+    const result = f.check();
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim().split("\n")).toEqual(LANGUAGES.map((language) => `app/dashboard/${language}.json: empty area; run npm run sync:i18n`));
+    expect(f.sync().status).toBe(0);
+    expect(fs.existsSync(path.join(f.root, "src/i18n/locales/app/dashboard"))).toBe(false);
+    expect(fs.existsSync(path.join(f.root, "src/i18n/locales/app/billing"))).toBe(true);
+    expect(f.check().status).toBe(0);
   });
 
   it("flags the pre-split en-overrides.json as a legacy file", () => {
