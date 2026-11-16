@@ -137,6 +137,8 @@ thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `use` or `all`, plus `none` and guest-only operation selections behind
 `assistant:guest-operation-scopes`), `update_subagent`, `decide_permission`, `destroy_subagent`,
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
+`get_settings` (owner panel values, bounds and section URLs), `update_settings`
+(owner-requested partial panel changes with approval tightening only),
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
 triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a personal
@@ -1771,7 +1773,7 @@ Only opted-in channel turns run the timer; other turns add no polling reads.
 
 ### Access modes
 
-NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses ordinary resource policies with receipts; covered org connections still require trusted instruction or an exact card. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
+NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses ordinary resource policies with receipts; covered org connections still require trusted instruction or an exact card. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition. NyxBot may also tighten its own mode on owner request through `update_settings`; that Change follows the effective mode (Auto and Full access permit it, Ask every time requires a card).
 
 Per-service `approval_mode`, per-machine `machine_confirm`, saved-login
 `confirm_each_sign_in`, webhook `confirmation_policy`, machine-update cards and
@@ -2331,3 +2333,55 @@ admin's personal specialist while that admin retains live org-admin authority.
 The org owns the bot/route/route key and pays channel usage; this is distinct from
 an enrolled organization-specialist execution lane. See
 [authenticated X outcomes](../CHANNEL_ACTIVITY.md#authenticated-inbound-outcomes-and-x-chat-limits).
+
+### Owner settings tool contract
+
+`nyxid__get_settings` is NyxBot-only and classified Read. It returns the current
+owner's panel settings, `limits` keyed by each numeric field with `minimum` and
+`maximum`, and `sections` entries with section ID and URL. It exposes no owner
+information beyond REST GET, excludes voice and the legacy approval switch, and
+accepts no owner selector. Cite the relevant section URL when answering a settings
+question. Specialists and guests are refused before settings access.
+
+`nyxid__settings_link` accepts optional `section` only with
+`area: "nyxbot_settings"`. Allowed values are `permissions`,
+`permissions/specialists`, `tasks`, `tasks/specialists`, `tasks/groups`,
+`automations`, `automations/budgets`, `notifications`, `channels`,
+`channels/adapters`, `channels/links`. It emits `panelTab` only when supplied;
+missing section retains the existing root link. Unknown values and sections on
+other areas are validation errors. The UI normalizes unavailable pages to their
+nearest available ancestor.
+
+`nyxid__update_settings` accepts at least one panel field, rejects unknown
+properties and shares REST validation and server limits:
+
+- `max_auto_continuations`, `max_live_subagents`,
+  `max_concurrent_subagent_turns`, `max_group_handoffs`,
+  `max_group_handoffs_per_hour`;
+- `timezone`, `schedule_minimum_minutes`, `trigger_runs_per_hour`,
+  `trigger_runs_per_day`;
+- `notifications.push`, a nonempty partial object of `automation_result`,
+  `automation_problem`, `needs_decision`, `agent_update`, `chat_update`,
+  `group_mention` booleans (omitted kinds retain their values);
+- `access_mode` only toward stricter approvals:
+  `autopilot` → `nyxmode` → `ask_every_time`; and
+- `specialist_access_requests` may change only to `"denied"`; an equal stored
+  value, including `"routed_to_nyxbot"`, is a no-op for that field.
+
+NyxBot changes settings only when the owner asks. It never relaxes its own
+approvals: a wider access mode or a change to `routed_to_nyxbot` returns MCP `isError` with
+`error: "settings_authority_widening"`, `url` and `sections` pointing to
+`permissions` or `permissions/specialists`. The whole mixed patch is refused
+before any settings write, even if other fields are valid. Refusals retain the
+metadata-only failed tool audit. An unchanged access mode is a no-op; an already
+stored `routed_to_nyxbot` value is also a no-op for that field. An atomic snapshot fence
+rechecks concurrent owner edits. Per-agent `access_mode_override`, voice and
+other settings stay outside this tool; give the owner the exact page link.
+
+The existing Change classification is retained: Ask every time requires a card
+for a change; Auto and Full access do not. A complete no-op writes no document,
+settings audit, tool audit or automatic receipt. Successful changes use the same
+settings audit path as REST, with a mode-transition audit when appropriate, and
+return current settings plus `changed_sections` IDs/URLs. REST GET/PUT and stored
+documents remain compatible; REST notification updates retain their full-object
+semantics. Owner live events refresh an open panel without replacing dirty drafts.

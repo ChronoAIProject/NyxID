@@ -2960,6 +2960,42 @@ async fn schedule_history_counter_tracks_inserts_and_trims_only_excess() {
 }
 
 #[test]
+fn pause_notice_links_resume_to_automations_workspace() {
+    for code in [
+        "insufficient_credits",
+        "wallet_suspended",
+        "plan_entitlement_required",
+        "credential_invalid",
+        "model_unavailable",
+        "model_not_configured",
+        "unknown",
+    ] {
+        let notice = schedules::pause_notice(code, "https://example.com/");
+        assert!(notice.contains(
+            "After fixing it, open https://example.com/assistant/automations and select Resume."
+        ));
+        assert_eq!(
+            notice
+                .matches("https://example.com/assistant/automations")
+                .count(),
+            1
+        );
+        if matches!(
+            code,
+            "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
+        ) {
+            assert!(
+                notice.contains("https://example.com/assistant?panel=billing&panelTab=overview")
+            );
+            assert!(!notice.contains("panel=nyxbot"));
+        } else {
+            assert!(notice.contains("https://example.com/assistant?panel=nyxbot"));
+            assert!(!notice.contains("panel=nyxbot&panelTab="));
+        }
+    }
+}
+
+#[test]
 fn terminal_failure_streak_resets_on_every_different_result() {
     for code in [
         "insufficient_credits",

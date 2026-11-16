@@ -1,3 +1,4 @@
+import { parseNyxBotSettingsSection } from "./nyxbot-settings-sections";
 import { billingSearchSchema } from "@/schemas/billing";
 import { parseTab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT } from "@/lib/url-tabs";
 import { notificationFilter } from "@/schemas/assistant-notifications";
@@ -41,7 +42,10 @@ export function parseAccountPanelSearch(search: Record<string, unknown>): Accoun
       panelTab: parseTab(tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT),
     } : {}) };
   }
-  if (search.panel === "nyxbot") return { panel: "nyxbot" };
+  if (search.panel === "nyxbot") {
+    const section = parseNyxBotSettingsSection(search.panelTab);
+    return { panel: "nyxbot", ...(section ? { panelTab: section } : {}) };
+  }
   if (search.panel === "notifications") {
     const filter = notificationFilter(search.panelTab);
     return { panel: "notifications", ...(filter && filter !== "all" ? { panelTab: filter } : {}) };

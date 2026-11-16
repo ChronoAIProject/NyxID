@@ -69,3 +69,7 @@ it("classifies only same-origin account links with panel-owned query keys", () =
     expect(assistantModalLinkTarget(href, ORIGIN)).toBeNull();
   }
 });
+
+it("opens exact nested NyxBot settings links in the account panel", () => {
+  expect(assistantModalLinkTarget("/assistant?panel=nyxbot&panelTab=permissions%2Fspecialists", ORIGIN)).toMatchObject({ kind: "account-panel", panel: "nyxbot", params: { panelTab: "permissions/specialists" } });
+});

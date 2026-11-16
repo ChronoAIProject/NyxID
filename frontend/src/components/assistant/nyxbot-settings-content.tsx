@@ -6,22 +6,49 @@ import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
 import { useAuthStore } from "@/stores/auth-store";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { ChannelAdapterBindings } from "./channel-adapter-bindings";
-import { AutomationPreferences } from "./automation-preferences";
+import { AutomationPreferences, AutomationRow } from "./automation-preferences";
 import { NotificationPreferences } from "./notification-preferences";
 import { PlatformPersonalBindings } from "./platform-personal-bindings";
-import { useState } from "react";
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { AlertTriangle } from "lucide-react";
+import {
+  AlertTriangle,
+  Bell,
+  Check,
+  ListChecks,
+  MessageSquare,
+  ShieldCheck,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
+import { DialogHeader } from "@/components/ui/dialog";
+import { CompactChrome } from "@/components/ui/compact-title";
+import { GroupedDetail } from "@/components/ui/grouped-detail";
+import { GroupedDetailContext } from "@/lib/grouped-detail";
+import { useNotificationsEnabled } from "@/hooks/use-assistant-notifications";
+import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
+import { useAccountPanel } from "@/hooks/use-account-panel";
+import { useChannelBots } from "@/hooks/use-channel-bots";
+import { useTriggers } from "@/hooks/use-triggers";
+import { Link, useRouterState } from "@tanstack/react-router";
+import { GroupedDisclosure } from "@/components/ui/grouped-list";
+import {
+  availableNyxBotSettingsSection,
+  NYXBOT_SETTINGS_SECTIONS,
+  NYXBOT_SETTINGS_TITLES,
+  nyxBotSettingsAncestry,
+  nyxBotSettingsParent,
+  parseNyxBotSettingsSection,
+  type NyxBotSettingsSection,
+} from "@/lib/assistant/nyxbot-settings-sections";
 import {
   GroupedList,
   GroupedRow,
   GroupedFooter,
   GroupedInput as Input,
-  GroupedSelectTrigger as SelectTrigger,
 } from "@/components/ui/grouped-list";
 import {
   GroupedField as FormItem,
-  GroupedDescription as FormDescription,
   GroupedMessage as FormMessage,
 } from "@/components/ui/grouped-fields";
 import {
@@ -37,13 +64,8 @@ import {
   useAppForm,
   FormDescription as RowDescription,
 } from "@/components/ui/form";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectValue,
-} from "@/components/ui/select";
 import { ACCESS_MODE_DESCRIPTION, ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
+import { SETTINGS_LABELS, SETTINGS_PAGE_FIELDS, SPECIALIST_ACCESS_LABELS } from "@/lib/assistant/nyxbot-settings-fields";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ChannelBotsManager } from "@/components/assistant/nyxbot-channels";
 import {
@@ -63,50 +85,225 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-const SETTINGS_LABELS = {
-  max_auto_continuations: "Automatic task continuations",
-  max_live_subagents: "Live specialists",
-  max_concurrent_subagent_turns: "Specialists working at once",
-  max_group_handoffs: "Group hand-offs per message",
-  max_group_handoffs_per_hour: "Group hand-offs per hour",
-} as const;
+const ROOT_GROUPS: readonly (readonly NyxBotSettingsSection[])[] = [
+  ["permissions"],
+  ["tasks", "automations", "notifications"],
+  ["channels"],
+];
+const ROOT_ICONS: Partial<Record<NyxBotSettingsSection, LucideIcon>> = {
+  permissions: ShieldCheck,
+  tasks: ListChecks,
+  automations: Zap,
+  notifications: Bell,
+  channels: MessageSquare,
+};
 
 export function NyxBotSettingsContent() {
   useUiTranslation();
+  const panel = useAccountPanel();
+  useNyxAgentLive(true);
   const settings = useNyxBotSettings();
-  const adaptersEnabled = useAuthStore(s=>userHasFeature(s.user,FEATURE_FLAG.NYXBOT_ADAPTERS));
+  const bots = useChannelBots({ scope: "all" });
+  const rawSection = useRouterState({
+    select: (state) =>
+      new URLSearchParams(state.location.searchStr).get("panelTab"),
+  });
+  const triggers = useTriggers();
+  const adapters = useAuthStore((s) =>
+    userHasFeature(s.user, FEATURE_FLAG.NYXBOT_ADAPTERS),
+  );
+  const notifications = useNotificationsEnabled();
+  const available = { "channels/adapters": adapters, notifications };
+  const requested = parseNyxBotSettingsSection(panel.current.panelTab);
+  const selected = availableNyxBotSettingsSection(requested, available);
+  const ancestry = nyxBotSettingsAncestry(selected);
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (
+      requested !== selected ||
+      (rawSection !== null && rawSection !== selected)
+    )
+      void panel.update({ panelTab: selected }, "replace", { force: true });
+  }, [requested, selected, rawSection, panel]);
+  const navigate = (section?: NyxBotSettingsSection) =>
+    void panel.update({ panelTab: section }, "replace");
+  const summaries: Partial<Record<NyxBotSettingsSection, ReactNode>> = {};
+  if (settings.isSuccess && !settings.error) {
+    summaries.permissions = translateUi(
+      ACCESS_MODE_LABEL[formValues(settings.data).access_mode],
+    );
+    summaries["permissions/specialists"] = translateUi(
+      SPECIALIST_ACCESS_LABELS[settings.data.specialist_access_requests ?? "denied"],
+    );
+    const push = settings.data.notifications?.push;
+    if (push) {
+      const count = Object.values(push).filter(Boolean).length;
+      summaries.notifications = count
+        ? translateUi("{{count}} on", { count })
+        : translateUi("Off");
+    }
+  }
+  if (bots.isSuccess && !bots.error)
+    summaries.channels = String(bots.data.length);
+  if (triggers.isSuccess && !triggers.error)
+    summaries.automations = String(
+      triggers.data.triggers.filter(
+        (t) => t.delivery.type === "assistant" && t.status === "active",
+      ).length,
+    );
+  function disclosure(section: NyxBotSettingsSection) {
+    const Icon = ROOT_ICONS[section];
+    return (
+      <GroupedDisclosure
+        key={section}
+        data-drawer-page-trigger={section}
+        onClick={() => navigate(section)}
+        leading={Icon ? <Icon aria-hidden /> : undefined}
+        accessory={
+          summaries[section] != null ? (
+            <span className="text-13 text-text-tertiary">
+              {summaries[section]}
+            </span>
+          ) : undefined
+        }
+      >
+        {translateUi(NYXBOT_SETTINGS_TITLES[section])}
+      </GroupedDisclosure>
+    );
+  }
+  function settingsPage(section: NyxBotSettingsSection) {
+    const loadError = settings.error ? <ErrorBanner
+      message={translateUi("Could not load settings. {{value1}}", { value1: settings.error.message })}
+      onRetry={() => void settings.refetch()}
+    /> : undefined;
+    if (settings.data) return <SettingsForm settings={settings.data} section={section} loadError={loadError} />;
+    return <GroupedList footer={loadError}>
+      {settings.isPending && <GroupedRow title={translateUi("Loading settings...")} role="status" />}
+    </GroupedList>;
+  }
+  function page(section: NyxBotSettingsSection): ReactNode {
+    const children = NYXBOT_SETTINGS_SECTIONS.filter(
+      (child) =>
+        nyxBotSettingsParent(child) === section &&
+        available[child as keyof typeof available] !== false,
+    );
+    return (
+      <GroupedDetail
+        key={section}
+        open={ancestry.includes(section)}
+        compactHeader={selected === section}
+        title={translateUi(NYXBOT_SETTINGS_TITLES[section])}
+        searchPage={section}
+        backLabel={translateUi(
+          nyxBotSettingsParent(section)
+            ? NYXBOT_SETTINGS_TITLES[nyxBotSettingsParent(section)!]
+            : "NyxBot settings",
+        )}
+        onBack={() => navigate(nyxBotSettingsParent(section))}
+      >
+        {section === "permissions" ||
+        section === "permissions/specialists" ||
+        section === "tasks" ||
+        section === "tasks/specialists" ||
+        section === "tasks/groups"
+          ? settingsPage(section)
+          : null}
+        {section === "automations" && <AutomationList />}
+        {section === "automations/budgets" && <AutomationPreferences detail />}
+        {section === "notifications" && <NotificationPreferences />}
+        {section === "channels" && (
+          <div className="@container/channel-bots">
+            <ChannelBotsSection />
+          </div>
+        )}
+        {section === "channels/adapters" && adapters && (
+          <ChannelAdapterBindings />
+        )}
+        {section === "channels/links" && <PlatformPersonalBindings />}
+        {children.length > 0 && (
+          <GroupedList>{children.map(disclosure)}</GroupedList>
+        )}
+        {children.map(page)}
+      </GroupedDetail>
+    );
+  }
   return (
     <GroupedFormScope viewport>
-      <section aria-label={translateUi("NyxBot settings")} className="flex min-h-0 flex-1 flex-col">
-      <FormViewport className="flex min-h-0 flex-1 flex-col"><CompactScroll className="flex-1 space-y-6 pb-4">
-        {settings.isPending ? (
-          <GroupedList title={translateUi("General")}>
-            <GroupedRow title={translateUi("Loading settings...")} role="status" />
-          </GroupedList>
-        ) : settings.error ? (
-          <GroupedList
-            title={translateUi("General")}
-            footer={
-              <ErrorBanner
-                message={translateUi("Could not load settings. {{value1}}", { value1: settings.error.message })}
-                onRetry={() => void settings.refetch()}
-              />
-            }
-          />
-        ) : (
-          <SettingsForm settings={settings.data} />
-        )}
-        <AutomationPreferences />
-        <NotificationPreferences />
-        <div className="@container/channel-bots">
-          <ChannelBotsSection />
-        </div>
-        {adaptersEnabled && <ChannelAdapterBindings />}
-        <PlatformPersonalBindings />
-        </CompactScroll></FormViewport>
+      <section
+        aria-label={translateUi("NyxBot settings")}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <FormViewport className="flex min-h-0 flex-1 flex-col">
+          <div
+            ref={setContainer}
+            className="relative flex min-h-0 flex-1 flex-col"
+          >
+            <CompactChrome enabled={!selected} className="[[data-compact=true]]:border-b [[data-compact=true]]:border-border/50">
+              <DialogHeader className="shrink-0 pr-6">
+                <h2
+                  tabIndex={-1}
+                  className="type-card-title outline-none [[data-compact=true]_&]:text-15"
+                >
+                  {translateUi("NyxBot settings")}
+                </h2>
+              </DialogHeader>
+            </CompactChrome>
+            <GroupedDetailContext value={{ container, visible: true }}>
+              <CompactScroll
+                active={!selected}
+                className="flex-1 space-y-6 pb-4 pt-4"
+              >
+                {ROOT_GROUPS.map((group, index) => (
+                  <GroupedList key={index} footer={index === 0 ? translateUi("NyxBot runs with full access to your connected services and account; specialists use only what you or NyxBot grant them. These settings apply to all of your agents.") : undefined}>
+                    {group.filter(section => available[section as keyof typeof available] !== false).map(disclosure)}
+                  </GroupedList>
+                ))}
+              </CompactScroll>
+              {NYXBOT_SETTINGS_SECTIONS.filter(
+                (section) => !nyxBotSettingsParent(section) && available[section as keyof typeof available] !== false,
+              ).map(page)}
+            </GroupedDetailContext>
+          </div>
+        </FormViewport>
         <GroupedFormBar viewport />
       </section>
     </GroupedFormScope>
+  );
+}
+
+function AutomationList() {
+  useUiTranslation();
+  const settings = useNyxBotSettings();
+  const triggers = useTriggers();
+  return (
+    <GroupedList
+      title={translateUi("Automations")}
+      footer={
+        triggers.error ? (
+          <ErrorBanner
+            message={triggers.error.message}
+            onRetry={() => void triggers.refetch()}
+          />
+        ) : undefined
+      }
+    >
+      {triggers.isPending && (
+        <GroupedRow
+          role="status"
+          title={translateUi("Loading automations...")}
+        />
+      )}
+      {!triggers.error &&
+        triggers.data?.triggers
+          .filter((t) => t.delivery.type === "assistant")
+          .map((row) => <AutomationRow key={row.id} row={row} timezone={settings.data?.timezone} />)}
+
+      <GroupedRow asChild interactive>
+        <Link to="/assistant/automations">
+          {translateUi("Manage automations")}
+        </Link>
+      </GroupedRow>
+    </GroupedList>
   );
 }
 
@@ -122,7 +319,27 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
   };
 }
 
-function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
+function radioKeys(event: KeyboardEvent<HTMLButtonElement>) {
+  const keys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"];
+  if (!keys.includes(event.key)) return;
+  event.preventDefault();
+  const rows = [...(event.currentTarget.closest('[role="radiogroup"]')?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? [])];
+  const index = rows.indexOf(event.currentTarget);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1
+    : (index + (event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1) + rows.length) % rows.length;
+  rows[next]?.focus();
+  rows[next]?.click();
+}
+
+function SettingsForm({
+  settings,
+  section,
+  loadError,
+}: {
+  readonly loadError?: ReactNode;
+  readonly settings: NyxAgentSettings;
+  readonly section: NyxBotSettingsSection;
+}) {
   useUiTranslation();
   const update = useUpdateNyxBotSettings();
   const form = useAppForm<NyxAgentSettingsForm>({
@@ -131,10 +348,18 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
   });
   const [error, setError] = useState<string>();
   const mode = form.watch("access_mode");
+  const fields = SETTINGS_PAGE_FIELDS[section] ?? [];
+  const errors = <>{loadError}{error && <p role="alert" className="text-destructive">{error}</p>}</>;
+  const { reset } = form;
+  useEffect(() => {
+    reset(formValues(settings), { keepDirtyValues: true });
+  }, [settings, reset]);
 
   async function save(values: NyxAgentSettingsForm) {
     setError(undefined);
-    const dirty = form.formState.dirtyFields;
+    const dirty = Object.fromEntries(
+      fields.map((key) => [key, form.formState.dirtyFields[key]]),
+    );
     // Send only what changed, so a concurrent edit elsewhere is not overwritten.
     const body: NyxAgentSettingsUpdate = {
       ...(dirty.access_mode ? { access_mode: values.access_mode } : {}),
@@ -169,169 +394,207 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
   return (
     <Form {...form}>
       <form
-        aria-label={translateUi("NyxBot preferences")}
+        aria-label={translateUi(NYXBOT_SETTINGS_TITLES[section])}
         // Limits are validated by the schema so messages match the rest of the form.
         noValidate
         onSubmit={form.handleSubmit(save)}
         className="space-y-6"
       >
-        <GroupedList title={translateUi("General")}>
-          <FormField
-            control={form.control}
-            name="access_mode"
-            render={({ field }) => (
-              <FormItem inline>
-                <FormLabel className="flex-1">{translateUi("Access mode")}</FormLabel>
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <FormControl>
-                    <SelectTrigger aria-label={translateUi("Access mode")}>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {nyxAgentAccessModeSchema.options.map((option) => (
-                      <SelectItem key={option} value={option}>
-                        {translateUi(ACCESS_MODE_LABEL[option])}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <FormDescription>{translateUi("When NyxBot and your specialists ask you before acting. An agent can have its own mode in its details.")}</FormDescription>
-                <FormDescription>{translateUi(ACCESS_MODE_DESCRIPTION[mode])}</FormDescription>
-                {mode === "autopilot" ? (
-                  <GroupedFooter>
-                    <div
-                      role="alert"
-                      className="flex items-start gap-2 text-warning"
-                    >
-                      <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>{translateUi("Approvals are bypassed: NyxBot deletes keys, channel bots, services and nodes and changes access without asking you first. Deletions cannot be undone. Automation, machine, saved-login, publication and service-approval confirmations are also bypassed and recorded in chat.")}</span>
-                    </div>
-                  </GroupedFooter>
-                ) : null}
-              </FormItem>
-            )}
-          />
-        </GroupedList>
-        <GroupedList
-          title={translateUi("Task limits")}
-          footer={translateUi("Every specialist turn and group hand-off is billed to your credits like any other NyxBot turn, so higher limits can spend credits faster.")}
-        >
-          {(
-            [
-              {
-                name: "max_auto_continuations",
-                label: SETTINGS_LABELS.max_auto_continuations,
-                min: 0,
-                max: 32,
-                description:
-                  "0–32 · 0 turns this off. Resumes with the same context after a tool or time budget; Stop always ends the task.",
-              },
-              {
-                name: "max_live_subagents",
-                label: SETTINGS_LABELS.max_live_subagents,
-                min: 0,
-                max: settings.max_live_subagents_limit,
-                description: `0–${settings.max_live_subagents_limit} · 0 stops new specialists`,
-              },
-              {
-                name: "max_concurrent_subagent_turns",
-                label: SETTINGS_LABELS.max_concurrent_subagent_turns,
-                min: 1,
-                max: settings.max_concurrent_subagent_turns_limit,
-                description: `1–${settings.max_concurrent_subagent_turns_limit} · Maximum specialists working simultaneously`,
-              },
-              {
-                name: "max_group_handoffs",
-                label: SETTINGS_LABELS.max_group_handoffs,
-                min: 0,
-                max: settings.max_group_handoffs_limit,
-                description: `0–${settings.max_group_handoffs_limit} · 0 turns off hand-offs after a message`,
-              },
-              {
-                name: "max_group_handoffs_per_hour",
-                label: SETTINGS_LABELS.max_group_handoffs_per_hour,
-                min: 0,
-                max: settings.max_group_handoffs_per_hour_limit,
-                description: `0–${settings.max_group_handoffs_per_hour_limit} · Across all your groups`,
-              },
-            ] as const
-          ).map(({ name, label, min, max, description }) => (
-            <FormField
-              key={name}
-              control={form.control}
-              name={name}
-              render={({ field }) => (
-                <FormItem inline>
-                  <div className="min-w-0 flex-1">
-                    <FormLabel>
-                      {label}
-                    </FormLabel>
-                    <RowDescription className="type-secondary text-text-tertiary">
-                      {description}
-                    </RowDescription>
-                  </div>
-                  <FormControl>
-                    <Input
-                      className="w-20 text-right"
-                      type="number"
-                      inputMode="numeric"
-                      min={min}
-                      max={max}
-                      step={1}
-                      {...field}
-                      value={Number.isNaN(field.value) ? "" : field.value}
-                      onChange={(event) =>
-                        field.onChange(event.target.valueAsNumber)
-                      }
+        {section === "permissions" && (
+          <GroupedList
+            title={translateUi("Access mode")}
+            footer={
+              <>
+                <p>
+                  {translateUi(
+                    "When NyxBot and your specialists ask you before acting. An agent can have its own mode in its details.",
+                  )}
+                </p>
+                {errors}
+                {mode === "autopilot" && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 text-warning"
+                  >
+                    <AlertTriangle
+                      aria-hidden
+                      className="mt-0.5 h-3.5 w-3.5 shrink-0"
                     />
-                  </FormControl>
-                  <FormMessage className="sm:col-span-2" />
-                </FormItem>
+                    <span>
+                      {translateUi(
+                        "Approvals are bypassed: NyxBot deletes keys, channel bots, services and nodes and changes access without asking you first. Deletions cannot be undone. Automation, machine, saved-login, publication and service-approval confirmations are also bypassed and recorded in chat.",
+                      )}
+                    </span>
+                  </div>
+                )}
+              </>
+            }
+            role="radiogroup" aria-label={translateUi("Access mode")}
+          >
+            {nyxAgentAccessModeSchema.options.map((option) => (
+              <GroupedRow key={option} asChild interactive>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === option}
+                  tabIndex={mode === option ? 0 : -1}
+                  onKeyDown={radioKeys}
+                  onClick={() => form.setValue("access_mode", option)}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span>{translateUi(ACCESS_MODE_LABEL[option])}</span>
+                    <span className="block text-13 text-text-tertiary">
+                      {translateUi(ACCESS_MODE_DESCRIPTION[option])}
+                    </span>
+                  </span>
+                  {mode === option && (
+                    <Check aria-hidden className="size-[1.125em] shrink-0" />
+                  )}
+                </button>
+              </GroupedRow>
+            ))}
+          </GroupedList>
+        )}
+        {section.startsWith("tasks") && (
+          <GroupedList
+            footer={<>{section !== "tasks" && <p>{translateUi("Every specialist turn and group hand-off is billed to your credits like any other NyxBot turn, so higher limits can spend credits faster.")}</p>}{errors}</>}
+          >
+            {(
+              [
+                {
+                  name: "max_auto_continuations",
+                  label: SETTINGS_LABELS.max_auto_continuations,
+                  min: 0,
+                  max: 32,
+                  description: translateUi("0–32 · 0 turns this off. Resumes with the same context after a tool or time budget; Stop always ends the task."),
+                },
+                {
+                  name: "max_live_subagents",
+                  label: SETTINGS_LABELS.max_live_subagents,
+                  min: 0,
+                  max: settings.max_live_subagents_limit,
+                  description: translateUi("0–{{limit}} · 0 stops new specialists", { limit: settings.max_live_subagents_limit }),
+                },
+                {
+                  name: "max_concurrent_subagent_turns",
+                  label: SETTINGS_LABELS.max_concurrent_subagent_turns,
+                  min: 1,
+                  max: settings.max_concurrent_subagent_turns_limit,
+                  description: translateUi("1–{{limit}} · Maximum specialists working simultaneously", { limit: settings.max_concurrent_subagent_turns_limit }),
+                },
+                {
+                  name: "max_group_handoffs",
+                  label: SETTINGS_LABELS.max_group_handoffs,
+                  min: 0,
+                  max: settings.max_group_handoffs_limit,
+                  description: translateUi("0–{{limit}} · 0 turns off hand-offs after a message", { limit: settings.max_group_handoffs_limit }),
+                },
+                {
+                  name: "max_group_handoffs_per_hour",
+                  label: SETTINGS_LABELS.max_group_handoffs_per_hour,
+                  min: 0,
+                  max: settings.max_group_handoffs_per_hour_limit,
+                  description: translateUi("0–{{limit}} · Across all your groups", { limit: settings.max_group_handoffs_per_hour_limit }),
+                },
+              ] as const
+            )
+              .filter(({ name }) => fields.includes(name))
+              .map(({ name, label, min, max, description }) => (
+                <FormField
+                  key={name}
+                  control={form.control}
+                  name={name}
+                  render={({ field }) => (
+                    <FormItem inline>
+                      <div className="min-w-0 flex-1">
+                        <FormLabel>{translateUi(label)}</FormLabel>
+                        <RowDescription className="type-secondary text-text-tertiary">
+                          {description}
+                        </RowDescription>
+                      </div>
+                      <FormControl>
+                        <Input
+                          className="w-20 text-right"
+                          type="number"
+                          inputMode="numeric"
+                          min={min}
+                          max={max}
+                          step={1}
+                          {...field}
+                          value={Number.isNaN(field.value) ? "" : field.value}
+                          onChange={(event) =>
+                            field.onChange(event.target.valueAsNumber)
+                          }
+                        />
+                      </FormControl>
+                      <FormMessage className="sm:col-span-2" />
+                    </FormItem>
+                  )}
+                />
+              ))}
+          </GroupedList>
+        )}
+        {section === "permissions/specialists" && (
+          <GroupedList role="radiogroup" aria-label={translateUi("Specialist access requests")}>
+            {(["denied", "routed_to_nyxbot"] as const).map((option) => (
+              <GroupedRow key={option} asChild interactive>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={form.watch("specialist_access_requests") === option}
+                  tabIndex={form.watch("specialist_access_requests") === option ? 0 : -1}
+                  onKeyDown={radioKeys}
+                  onClick={() =>
+                    form.setValue("specialist_access_requests", option)
+                  }
+                >
+                  <span className="min-w-0 flex-1">
+                    <span>
+                      {translateUi(SPECIALIST_ACCESS_LABELS[option])}
+                    </span>
+                    <span className="block text-13 text-text-tertiary">
+                      {option === "denied"
+                        ? translateUi(
+                            "A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details. Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead.",
+                          )
+                        : translateUi(
+                            "For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead. A specialist you talk to directly still tells you what it is missing.",
+                          )}
+                    </span>
+                  </span>
+                  {form.watch("specialist_access_requests") === option && (
+                    <Check aria-hidden className="size-[1.125em] shrink-0" />
+                  )}
+                </button>
+              </GroupedRow>
+            ))}
+            <GroupedFooter>
+              {errors}
+              {translateUi(
+                "Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists cannot grant themselves or each other anything.",
               )}
-            />
-          ))}
-        </GroupedList>
-        <GroupedList
-          title={translateUi("Specialist access")}
-          footer={
-            error ? (
-              <p role="alert" className="text-destructive">
-                {translateUi(error)}
-              </p>
-            ) : undefined
-          }
-        >
-          <FormField
-            control={form.control}
-            name="specialist_access_requests"
-            render={({ field }) => (
-              <FormItem inline>
-                <FormLabel className="flex-1">{translateUi("Specialist access requests")}</FormLabel>
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <FormControl>
-                    <SelectTrigger aria-label={translateUi("Specialist access requests")}>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    <SelectItem value="denied">{translateUi("Deny requests")}</SelectItem>
-                    <SelectItem value="routed_to_nyxbot">{translateUi("Route to NyxBot")}</SelectItem>
-                  </SelectContent>
-                </Select>
-                <FormDescription>{translateUi("Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists cannot grant themselves or each other anything.")}</FormDescription>
-                <FormDescription>
-                    {field.value === "denied"
-                      ? translateUi("A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details. Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead.")
-                      : translateUi("For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead. A specialist you talk to directly still tells you what it is missing.")}
-                </FormDescription>
-              </FormItem>
-            )}
-          />
-        </GroupedList>
+            </GroupedFooter>
+          </GroupedList>
+        )}
         <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [...(Object.keys(SETTINGS_LABELS) as (keyof typeof SETTINGS_LABELS)[]).map(key => ({ key, label: SETTINGS_LABELS[key] })), { key: "access_mode", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL) }, { key: "specialist_access_requests", label: "Specialist access requests", format: labelValue({ denied: "Deny requests", routed_to_nyxbot: "Route to NyxBot" }) }])}
-          label={translateUi("NyxBot preferences")}
+          changes={() =>
+            describeChanges(form.formState.defaultValues, form.getValues(), [
+              ...(
+                Object.keys(SETTINGS_LABELS) as (keyof typeof SETTINGS_LABELS)[]
+              ).map((key) => ({ key, label: SETTINGS_LABELS[key] })),
+              {
+                key: "access_mode",
+                label: "Access mode",
+                format: labelValue(ACCESS_MODE_LABEL),
+              },
+              {
+                key: "specialist_access_requests",
+                label: "Specialist access requests",
+                format: labelValue(SPECIALIST_ACCESS_LABELS),
+              },
+            ])
+          }
+          label={translateUi(NYXBOT_SETTINGS_TITLES[section])}
           dirty={form.formState.isDirty}
           pending={update.isPending}
           save={form.handleSubmit(save)}

@@ -5,6 +5,20 @@ pub const AGENT_DETAILS_SKILLS: &str = "skills";
 /// The agent's Chats settings (channel bots and their chats).
 pub const AGENT_DETAILS_CHANNELS: &str = "channels";
 
+pub const NYXBOT_SETTINGS_SECTIONS: &[&str] = &[
+    "permissions",
+    "permissions/specialists",
+    "tasks",
+    "tasks/specialists",
+    "tasks/groups",
+    "automations",
+    "automations/budgets",
+    "notifications",
+    "channels",
+    "channels/adapters",
+    "channels/links",
+];
+
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
     Agent {
@@ -24,7 +38,9 @@ pub enum AssistantPage<'a> {
     Settings {
         tab: &'a str,
     },
-    NyxBotSettings,
+    NyxBotSettings {
+        section: Option<&'a str>,
+    },
     ReviewCard {
         conversation: &'a str,
         card: &'a str,
@@ -100,8 +116,11 @@ impl AssistantPage<'_> {
                     .append_pair("card", card);
                 "/assistant".into()
             }
-            Self::NyxBotSettings => {
+            Self::NyxBotSettings { section } => {
                 query.append_pair("panel", "nyxbot");
+                if let Some(section) = section {
+                    query.append_pair("panelTab", section);
+                }
                 "/assistant".into()
             }
             Self::Billing { tab } => {
@@ -236,7 +255,7 @@ mod tests {
                 },
                 "/channel-bots?connect=telegram-new&request_id=a%26b",
             ),
-            (NyxBotSettings, "/assistant?panel=nyxbot"),
+            (NyxBotSettings { section: None }, "/assistant?panel=nyxbot"),
             (Approvals, "/assistant/approvals"),
             (
                 Billing { tab: "billing" },
@@ -342,6 +361,43 @@ mod tests {
             assert_eq!(
                 page.url("https://nyxid.test/"),
                 format!("https://nyxid.test{path}")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+    #[test]
+    fn nyxbot_sections_match_frontend_and_encode_links() {
+        let source =
+            include_str!("../../../frontend/src/lib/assistant/nyxbot-settings-sections.ts");
+        let list = source
+            .split("export const NYXBOT_SETTINGS_SECTIONS = [")
+            .nth(1)
+            .unwrap()
+            .split("] as const;")
+            .next()
+            .unwrap();
+        let frontend: Vec<&str> = list
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix("\","))
+            })
+            .collect();
+        assert_eq!(NYXBOT_SETTINGS_SECTIONS, frontend);
+        for section in NYXBOT_SETTINGS_SECTIONS {
+            let path = AssistantPage::NyxBotSettings {
+                section: Some(section),
+            }
+            .path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert_eq!(
+                url.query_pairs().find(|(k, _)| k == "panelTab").unwrap().1,
+                *section
             );
         }
     }

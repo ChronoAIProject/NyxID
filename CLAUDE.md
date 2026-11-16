@@ -775,7 +775,9 @@ never as in-shell pages. The assistant has no desktop top bar: the sidebar colum
 carries the logo, search (⌘K: recent chats, agents/groups, pages, settings tabs,
 theme) and the account menu, and both open the same panel URLs as NyxBot's
 settings links.
-Opening pushes history; Settings tab changes replace, Billing user changes push
+NyxBot uses hierarchical `panelTab` sections (slash paths); nested Back replaces to
+the parent. One retained form scope preserves drafts; live settings refresh pristine fields.
+Opening pushes history; Settings tabs and NyxBot sections replace, Billing user changes push
 and automatic cleanup replaces. Back immediately after opening closes the panel;
 Back after an explicit close reopens it with any pending top-up already consumed.
 Notification settings links to Studio. The agent details sheet and in-chat
@@ -840,6 +842,9 @@ with no delivery retry.
 NyxBot owner settings include an enforced `access_mode` (`nyxmode`, `autopilot`,
 or `ask_every_time`) and optional specialist override. The backend acknowledgement
 service owns classification and approval; clients cannot bypass policy floors.
+NyxBot can read panel settings and change them on owner request; updates are Change,
+may only tighten access mode or deny specialist requests, and refuse mixed widening
+patches atomically with the exact owner page link. Agent overrides stay human-only.
 NyxAgent model selection is owner-authenticated, validated against live models,
 and changing an existing thread resets its upstream context.
 Delegated specialist tool images use server-authored assignment edges and a

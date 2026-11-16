@@ -217,3 +217,8 @@ it("refreshes titles even when the turn and message count did not change", () =>
   expect(refresh.lists).toContainEqual(["assistant", "nyxagent", "u", "threads"]);
   expect(refresh.now).toContainEqual(["assistant", "nyxagent", "u", "history", "nyxa-1"]);
 });
+
+it("refreshes only owner settings for an identifier-only settings event", () => {
+  expect(parseNyxAgentLiveEvent('{"type":"settings"}')).toEqual({ type: "settings" });
+  expect(nyxAgentLiveRefresh("owner", { type: "settings" }, new Map())).toEqual({ now: [["assistant", "nyxagent", "owner", "settings"]], lists: [] });
+});

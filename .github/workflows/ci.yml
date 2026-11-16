@@ -161,6 +161,7 @@ jobs:
               - 'Cargo.lock'
               - 'shared/native-app-links.json'
             backend:
+              - 'frontend/src/lib/assistant/nyxbot-settings-sections.ts'
               - 'scripts/docker-dependency-recipe.py'
               - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/**'

@@ -5545,3 +5545,311 @@ async fn durable_wake_recovery_obeys_hourly_budget_and_consecutive_event_guard()
         state.db.drop().await.unwrap();
     }).await;
 }
+
+#[tokio::test]
+async fn nyxbot_panel_tools_read_update_audit_and_leave_noops_untouched() {
+    use crate::models::assistant_settings::{AccessMode, COLLECTION_NAME as SETTINGS};
+    let (state, _, server) = setup("nyxbot_panel_tools").await;
+    let (_, chat) = orchestrator(&state).await;
+    let (read, error) = execute_tool(&state, &chat, "nyxid__get_settings", &json!({})).await;
+    assert!(!error, "{read}");
+    assert_eq!(read["access_mode"], "autopilot");
+    assert!(read.get("voice").is_none());
+    assert!(read.get("skip_destructive_confirmation").is_none());
+    assert_eq!(
+        read["notifications"],
+        json!({"push": {
+            "automation_result": false,
+            "automation_problem": false,
+            "needs_decision": false,
+            "agent_update": false,
+            "chat_update": false,
+            "group_mention": false,
+        }})
+    );
+    assert_eq!(read["limits"]["max_live_subagents"]["minimum"], 0);
+    assert_eq!(
+        read["limits"]["max_live_subagents"]["maximum"],
+        json!(crate::models::assistant_settings::MAX_LIVE_SUBAGENTS_LIMIT)
+    );
+    assert_eq!(
+        read["sections"].as_array().unwrap().len(),
+        crate::services::assistant_links::NYXBOT_SETTINGS_SECTIONS.len()
+    );
+    let patch = json!({"max_auto_continuations":3,"max_live_subagents":7,"max_concurrent_subagent_turns":2,"max_group_handoffs":2,"max_group_handoffs_per_hour":8,"timezone":"Asia/Tokyo","schedule_minimum_minutes":30,"trigger_runs_per_hour":4,"trigger_runs_per_day":10,"notifications":{"push":{"chat_update":true,"automation_result":false}}});
+    let (saved, error) = execute_tool(&state, &chat, "nyxid__update_settings", &patch).await;
+    assert!(!error, "{saved}");
+    for key in patch
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|key| key.as_str() != "notifications")
+    {
+        assert_eq!(saved[key], patch[key], "{key}");
+    }
+    assert_eq!(saved["notifications"]["push"]["chat_update"], true);
+    assert_eq!(saved["notifications"]["push"]["automation_result"], false);
+    assert_eq!(
+        saved["notifications"]["push"]["needs_decision"],
+        read["notifications"]["push"]["needs_decision"]
+    );
+    let changed = saved["changed_sections"].as_array().unwrap();
+    assert!(changed.iter().any(|page| {
+        page["section"] == "automations/budgets"
+            && page["url"]
+                .as_str()
+                .unwrap()
+                .contains("panelTab=automations%2Fbudgets")
+    }));
+    let logs = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    assert_eq!(
+        logs.count_documents(doc! {"event_type":"assistant_settings_updated"})
+            .await
+            .unwrap(),
+        1
+    );
+    let rows = state.db.collection::<bson::Document>(SETTINGS);
+    let before = rows.find_one(doc! {"_id":OWNER}).await.unwrap().unwrap();
+    let audit_count = logs.count_documents(doc! {}).await.unwrap();
+    let (unchanged, error) = execute_tool(&state, &chat, "nyxid__update_settings", &patch).await;
+    assert!(!error, "{unchanged}");
+    assert_eq!(unchanged["changed_sections"], json!([]));
+    assert_eq!(
+        rows.find_one(doc! {"_id":OWNER}).await.unwrap().unwrap(),
+        before
+    );
+    assert_eq!(logs.count_documents(doc! {}).await.unwrap(), audit_count);
+    // Tightening remains a Change: Auto permits it, then Ask requires a card.
+    settings::update(
+        &state.db,
+        OWNER,
+        settings::Update {
+            access_mode: Some(AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (saved, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_settings",
+        &json!({"access_mode":"ask_every_time"}),
+    )
+    .await;
+    assert!(!error, "{saved}");
+    assert_eq!(saved["access_mode"], "ask_every_time");
+    assert_eq!(
+        logs.count_documents(doc! {"event_type":"assistant_access_mode_changed"})
+            .await
+            .unwrap(),
+        1
+    );
+    let (needs_card, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_settings",
+        &json!({"max_auto_continuations":4}),
+    )
+    .await;
+    assert!(error, "{needs_card}");
+    assert_eq!(needs_card["error"], "acknowledgement_required");
+    let (unchanged, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_settings",
+        &json!({"access_mode":"ask_every_time"}),
+    )
+    .await;
+    assert!(!error, "{unchanged}");
+    assert!(unchanged["changed_sections"].as_array().unwrap().is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_panel_refuses_widening_atomically_and_denies_specialists_and_guests() {
+    use crate::models::assistant_settings::{
+        AccessMode, COLLECTION_NAME as SETTINGS, SpecialistAccessRequests,
+    };
+    let (state, _, server) = setup("nyxbot_panel_refusals").await;
+    let (_, chat) = orchestrator(&state).await;
+    // All strict-to-loose pairs refuse even an otherwise valid mixed patch.
+    for (before_mode, requested) in [
+        (AccessMode::Nyxmode, "autopilot"),
+        (AccessMode::AskEveryTime, "autopilot"),
+        (AccessMode::AskEveryTime, "nyxmode"),
+    ] {
+        settings::update(
+            &state.db,
+            OWNER,
+            settings::Update {
+                access_mode: Some(before_mode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let rows = state.db.collection::<bson::Document>(SETTINGS);
+        let before = rows.find_one(doc! {"_id":OWNER}).await.unwrap();
+        let (refused, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__update_settings",
+            &json!({"access_mode":requested,"max_live_subagents":9}),
+        )
+        .await;
+        assert!(error, "{refused}");
+        assert_eq!(refused["error"], "settings_authority_widening");
+        assert!(
+            refused["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("panelTab=permissions")
+        );
+        assert_eq!(rows.find_one(doc! {"_id":OWNER}).await.unwrap(), before);
+    }
+    settings::update(
+        &state.db,
+        OWNER,
+        settings::Update {
+            access_mode: Some(AccessMode::Autopilot),
+            specialist_access_requests: Some(SpecialistAccessRequests::Denied),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (refused, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_settings",
+        &json!({"specialist_access_requests":"routed_to_nyxbot","timezone":"Europe/London"}),
+    )
+    .await;
+    assert!(error, "{refused}");
+    assert_eq!(refused["error"], "settings_authority_widening");
+    assert!(
+        refused["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("panelTab=permissions%2Fspecialists")
+    );
+    assert_ne!(
+        settings::get(&state.db, OWNER)
+            .await
+            .unwrap()
+            .timezone
+            .as_deref(),
+        Some("Europe/London")
+    );
+    let logs = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    assert_eq!(
+        logs.count_documents(
+            doc! {"event_type":"assistant_team_tool_call", "event_data.outcome":"refused"}
+        )
+        .await
+        .unwrap(),
+        4
+    );
+    settings::update(
+        &state.db,
+        OWNER,
+        settings::Update {
+            specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (same, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_settings",
+        &json!({"specialist_access_requests":"routed_to_nyxbot", "timezone":"UTC"}),
+    )
+    .await;
+    assert!(!error, "{same}");
+    assert_eq!(same["specialist_access_requests"], "routed_to_nyxbot");
+    assert_eq!(
+        same["changed_sections"][0]["section"],
+        "automations/budgets"
+    );
+    let (denied, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__update_settings",
+        &json!({"specialist_access_requests":"denied"}),
+    )
+    .await;
+    assert!(!error, "{denied}");
+    assert_eq!(denied["specialist_access_requests"], "denied");
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"panel-reader","description":"Read assigned work"}),
+    )
+    .await;
+    let home = specialist_home(&state, "panel-reader").await;
+    let specialist = chat_for(&state, &home).await;
+    let mut guest = chat.clone();
+    guest.guest = true;
+    for caller in [&specialist, &guest] {
+        for (tool, args) in [
+            ("get_settings", json!({})),
+            ("update_settings", json!({"max_auto_continuations":1})),
+            (
+                "settings_link",
+                json!({"area":"nyxbot_settings","section":"permissions"}),
+            ),
+        ] {
+            let (value, error) =
+                execute_tool(&state, caller, &format!("nyxid__{tool}"), &args).await;
+            assert!(error, "{tool}: {value}");
+            assert_ne!(value["error"], "settings_authority_widening");
+        }
+    }
+    let (link, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__settings_link",
+        &json!({"area":"nyxbot_settings","section":"tasks/groups"}),
+    )
+    .await;
+    assert!(!error, "{link}");
+    assert!(
+        link["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("panelTab=tasks%2Fgroups")
+    );
+    // Disabled admission must win over the authority preflight, including no-ops.
+    use crate::services::feature_flag_service as flags;
+    flags::set_platform_override(
+        &state.db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::User(OWNER.into()),
+        false,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let rows = state.db.collection::<bson::Document>(SETTINGS);
+    let before = rows.find_one(doc! {"_id": OWNER}).await.unwrap();
+    for args in [
+        json!({"specialist_access_requests": "routed_to_nyxbot"}),
+        json!({"specialist_access_requests": "denied"}),
+    ] {
+        let (value, error) = execute_tool(&state, &chat, "nyxid__update_settings", &args).await;
+        assert!(error, "{value}");
+        assert_ne!(value["error"], "settings_authority_widening");
+        assert!(value["changed_sections"].is_null());
+    }
+    assert_eq!(rows.find_one(doc! {"_id": OWNER}).await.unwrap(), before);
+    server.abort();
+    state.db.drop().await.unwrap();
+}

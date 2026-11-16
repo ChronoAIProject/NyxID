@@ -1124,7 +1124,8 @@ fn authoring_guidance_uses_three_parts_and_existing_skills_first() {
     }
     assert!(prompt.ends_with(" Description=role/scope; persona=tone; skills=procedures."));
     for preserved in [
-        "For uncovered settings (agent-key creation, security, profile, billing, organizations), give the exact page with nyxid__settings_link.",
+        "Use nyxid__get_settings; nyxid__update_settings only on owner request.",
+        "Link wider approvals/uncovered settings with nyxid__settings_link.",
         "the owner's account and connected services.",
         "When the owner must finish a connect link, channel bot setup or verification outside chat, explain what to do and end your turn.",
         "NyxID resumes you when they finish; never ask them to reply that they are done or connected.",

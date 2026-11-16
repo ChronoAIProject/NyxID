@@ -407,8 +407,21 @@ field-specific explanations directly below their field in `text-13 text-text-ter
 actions are destructive-colored rows in their own neutral group.
 
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
-multi-select lists. Selection lists use checkmark or switch rows, search when there are more than
-eight items, and scroll internally only for long lists. `GroupedFormScope viewport` gives
+multi-select lists. Single-choice selection lists use named radio groups with
+checkmark rows and arrow-key navigation; search when there are more than eight
+items, and scroll internally only for long lists. Multi-level settings use retained
+`GroupedDetail` pages, with a short root of icon disclosures and saved-value
+summaries. Keep saved summaries during background refetches; omit them before
+first load and on error.
+Derive parents from section paths; deep links mount ancestors, Back walks one level
+with a replace, and focus returns to the originating row. Unavailable pages replace
+to the nearest available ancestor. Keep one form scope and save bar across the tree;
+live values refresh pristine fields while dirty drafts survive.
+Workspace search indexes each page's rendered setting and option labels in the
+current language, alongside synonyms, from the same definitions as the forms.
+Keep the root limited to category disclosures and shared safety copy.
+
+`GroupedFormScope viewport` gives
 the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`. Use a compact row with `py-2`, right-aligned Discard and Save changes; wrap actions to another row when needed and allow long button labels to wrap within their insets. Announce unsaved section names through sr-only live text in the “Unsaved changes” region, with no visible unsaved label. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
 form keeps its draft and local error; successful forms stay saved. Discard resets
@@ -692,7 +705,8 @@ settings links to Studio at `/approvals/settings` with a visible Studio hint.
 Open Studio and Log out complete both menus. Studio `/settings` and `/billing`
 retain their pages and chrome. Lago checkout returns to Studio `/billing`.
 Panels push on open and explicit close (Back after close reopens); Settings tabs
-replace, while Billing user changes push and automatic cleanup replaces.
+and NyxBot sections replace, while Billing user changes push and automatic
+cleanup replaces.
 
 ### Naming reconciliation
 The sidebar label and page title can drift; track this when writing breadcrumbs or copy:
@@ -883,6 +897,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-16 | NyxBot settings use a URL-addressable hierarchy | Short category groups lead to retained focused pages with nested permission, task, automation and channel settings. Section navigation replaces history; one scope preserves reviewed saves and drafts. Live values refresh pristine fields, and NyxBot may change safe settings while approval widening stays with the owner. |
 | 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |
 | 2026-11-05 | Conversation previews require an intentional gesture | Passing pointers leave the rail quiet. Press and drag preview until release; keyboard focus retains its preview. Browser coverage includes virtualized-message jumps, isolated wheel scrolling and one roving tab stop. |
 | 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |

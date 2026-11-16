@@ -30,7 +30,10 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { SEARCH_SHORTCUT_ARIA, SEARCH_SHORTCUT_KEYS } from "@/hooks/use-assistant-search-shortcut";
 import { useAssistantDrawerDismiss } from "@/components/assistant/assistant-drawer-context";
+import { NYXBOT_SETTINGS_SECTIONS, NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
+import { nyxBotSettingsSearchTerms } from "@/lib/assistant/nyxbot-settings-search";
 import { useAccountPanel } from "@/hooks/use-account-panel";
+import { useNotificationsEnabled } from "@/hooks/use-assistant-notifications";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
@@ -112,6 +115,8 @@ interface Entry {
 
 function SearchCommand({ onDone }: { readonly onDone: () => void }) {
   useUiTranslation();
+  const notificationsEnabled = useNotificationsEnabled();
+  const adaptersEnabled = useFeature(FEATURE_FLAG.NYXBOT_ADAPTERS);
   const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const [query, setQuery] = useState("");
   const typing = query.trim().length > 0;
@@ -208,7 +213,17 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
       run: () => panel("settings", { panelTab: tab }),
     })),
     ...(nyxagentEnabled
-      ? [{ id: "nyxbot", label: "NyxBot settings", icon: Settings2, keywords: ["access mode", "channels", "bots"], run: () => panel("nyxbot") }]
+      ? [{ id: "nyxbot", label: "NyxBot settings", icon: Settings2, keywords: ["access mode", "channels", "bots"], run: () => panel("nyxbot") },
+          ...NYXBOT_SETTINGS_SECTIONS
+            .filter(section => (section !== "channels/adapters" || adaptersEnabled) && (section !== "notifications" || notificationsEnabled))
+            .map(section => ({
+              id: `nyxbot-${section}`,
+              label: translateUi(NYXBOT_SETTINGS_TITLES[section]),
+              hint: translateUi("NyxBot settings"),
+              icon: Settings2,
+              keywords: ["NyxBot", section, "settings", ...nyxBotSettingsSearchTerms(section)],
+              run: () => panel("nyxbot", { panelTab: section }),
+            }))]
       : []),
     ...(billingAvailable
       ? [

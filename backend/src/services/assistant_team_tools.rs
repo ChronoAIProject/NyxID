@@ -49,6 +49,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "delete_group",
     "settings_link",
     "update_settings",
+    "get_settings",
     "channel_bot_setup_link",
     "channel_setup_guide",
     "machine_setup_link",
@@ -125,7 +126,7 @@ pub fn settings_path(area: &str, _service: Option<&str>, org_id: Option<&str>) -
         "services" => "/keys?tab=services".into(),
         "service_pools" => "/keys?tab=pools".into(),
         "channel_bots" => "/channel-bots".into(),
-        "nyxbot_settings" => AssistantPage::NyxBotSettings.path(),
+        "nyxbot_settings" => AssistantPage::NyxBotSettings { section: None }.path(),
         "nodes" => "/nodes".into(),
         "approvals" | "notifications" => "/approvals/settings".into(),
         "approval_history" => "/approvals/history".into(),
@@ -168,6 +169,7 @@ pub fn read_only(name: &str) -> bool {
     matches!(
         name,
         "task_status"
+            | "get_settings"
             | "list_notifications"
             | "get_agent_sharing"
             | "list_schedules"
@@ -545,12 +547,11 @@ pub fn schema(name: &str) -> Value {
             json!({"org":string(128),"group": string(64)}),
             vec!["group"],
         ),
-        "update_settings" => (
-            json!({"max_auto_continuations":{"type":"integer","minimum":0,"maximum":32,"description":"Owner-requested automatic continuations after upstream tool/time budgets; default 8, 0 disables. Ordinary usage billing still applies."}}),
-            vec!["max_auto_continuations"],
-        ),
+        "get_settings" => (json!({}), vec![]),
+        "update_settings" => (settings_properties(), vec![]),
         "settings_link" => (
             json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
+                "section": {"type":"string", "enum": crate::services::assistant_links::NYXBOT_SETTINGS_SECTIONS, "description":"Only with nyxbot_settings; omit for the root"},
                 "agent": string(64), "label":string(128), "instruction":string(8192),
                 "service": {"type": "string", "minLength": 1, "maxLength": 100,
                     "description": "add_service only: authorized catalog slug or UUID; returns nyx__connect_service guidance, never a Studio connection URL"},
@@ -807,11 +808,14 @@ pub(crate) fn description(name: &str) -> &'static str {
         }
         "update_group" => "Rename a group or add/remove members.",
         "delete_group" => "Delete a group chat and its transcript.",
+        "get_settings" => {
+            "Read the owner's current NyxBot preferences, numeric limits and exact section URLs. Cite the relevant page when answering settings questions. Does not include voice preferences."
+        }
         "update_settings" => {
-            "Change NyxBot settings only when the owner asks. Automatic continuations preserve context and the same logical task; higher limits may use more credits."
+            "Change NyxBot preferences only when the owner asks: task limits, automation timezone/budgets and push kinds. Higher limits may spend credits faster. Access mode may only tighten (Full access -> Auto -> Ask every time); specialist access requests may change only to denied. Equal authority values are no-ops. To relax approvals or newly route requests to NyxBot, give the returned owner-only page. Agent access_mode_override and voice are human-only and excluded. Omitted fields stay unchanged; returns updated preferences and changed section URLs."
         }
         "settings_link" => {
-            "add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
+            "For NyxBot push preferences use area nyxbot_settings, section notifications; for automation budgets use section automations/budgets; for channel configuration use section channels. Other areas notifications, automations and channel_bots retain their separate destinations. Optional section is only valid with nyxbot_settings. add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
             and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
@@ -982,6 +986,49 @@ fn input_rules_schema() -> Value {
     },"additionalProperties":false})
 }
 
+fn settings_properties() -> Value {
+    use crate::models::assistant_settings::*;
+    let mut result = json!({
+        "timezone": {"type":"string", "minLength":1, "maxLength":128},
+        "access_mode": {"type":"string", "enum":["autopilot","nyxmode","ask_every_time"]},
+        "specialist_access_requests": {"type":"string", "enum":["denied","routed_to_nyxbot"]},
+        "notifications": {"type":"object", "properties": {
+            "push": {"type":"object", "properties": {
+                "automation_result":{"type":"boolean"}, "automation_problem":{"type":"boolean"}, "needs_decision":{"type":"boolean"}, "agent_update":{"type":"boolean"}, "chat_update":{"type":"boolean"}, "group_mention":{"type":"boolean"}
+            },  "additionalProperties":false}
+        }, "required":["push"], "additionalProperties":false}
+    });
+    for (field, min, max) in [
+        (
+            "max_auto_continuations",
+            0,
+            super::assistant_continuation::HARD_MAX,
+        ),
+        ("max_live_subagents", 0, MAX_LIVE_SUBAGENTS_LIMIT),
+        (
+            "max_concurrent_subagent_turns",
+            1,
+            MAX_CONCURRENT_SUBAGENT_TURNS_LIMIT,
+        ),
+        ("max_group_handoffs", 0, MAX_GROUP_HANDOFFS_LIMIT),
+        (
+            "max_group_handoffs_per_hour",
+            0,
+            MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
+        ),
+        (
+            "schedule_minimum_minutes",
+            DEFAULT_SCHEDULE_MINIMUM_MINUTES,
+            SCHEDULE_MINIMUM_MINUTES_LIMIT,
+        ),
+        ("trigger_runs_per_hour", 1, TRIGGER_RUNS_PER_HOUR_LIMIT),
+        ("trigger_runs_per_day", 1, TRIGGER_RUNS_PER_DAY_LIMIT),
+    ] {
+        result[field] = json!({"type":"integer","minimum":min,"maximum":max});
+    }
+    result
+}
+
 /// Strict validation mirroring the schemas: unknown keys, wrong types and
 /// out-of-range values are rejected before any state is read.
 pub fn validate(name: &str, args: &Value) -> AppResult<()> {
@@ -1008,6 +1055,29 @@ pub fn validate_against(name: &str, args: &Value, schema: &Value) -> AppResult<(
             ));
         }
         super::assistant_team_service::validate_memory_text(text)?;
+    }
+    if name == "settings_link"
+        && object.contains_key("section")
+        && args["area"] != "nyxbot_settings"
+    {
+        return Err(invalid());
+    }
+    if name == "update_settings" {
+        let mut patch = args.clone();
+        patch.as_object_mut().unwrap().remove("acknowledgement_id");
+        let update: super::assistant_settings_service::PanelUpdate =
+            serde_json::from_value(patch).map_err(|_| invalid())?;
+        if update
+            .notifications
+            .as_ref()
+            .is_some_and(|settings| settings.push.is_empty())
+        {
+            return Err(invalid());
+        }
+        super::assistant_settings_service::validate(&update.into_update())?;
+        if object.keys().all(|key| key == "acknowledgement_id") {
+            return Err(invalid());
+        }
     }
     validate_input_rules(name, object, schema)?;
     for (key, value) in object {
@@ -1567,5 +1637,94 @@ mod tests {
         assert_eq!(agent_endpoints().len(), AGENT_TOOL_NAMES.len());
         assert!(validate("remember", &json!({"text": "Prefers mornings"})).is_ok());
         assert!(validate("remember", &json!({"text": "x".repeat(501)})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod settings_contract_tests {
+    use super::*;
+    #[test]
+    fn settings_schemas_classification_and_annotations_match_dispatch() {
+        use crate::services::assistant_acknowledgement_service::{
+            OwnerActionClass, known_action_class,
+        };
+        assert!(read_only("get_settings"));
+        assert!(!is_agent_tool("get_settings"));
+        assert_eq!(
+            known_action_class("nyxid__get_settings", &json!({})),
+            Some(OwnerActionClass::Read)
+        );
+        assert_eq!(
+            known_action_class("nyxid__update_settings", &json!({"timezone":"UTC"})),
+            Some(OwnerActionClass::Change)
+        );
+        assert_eq!(
+            crate::services::mcp_service::tool_annotations("nyxid__get_settings", &[]).unwrap(),
+            json!({"title":"Read NyxBot settings","readOnlyHint":true,"destructiveHint":false,"openWorldHint":false})
+        );
+        assert!(validate("get_settings", &json!({})).is_ok());
+        assert!(validate("get_settings", &json!({"user_id":"other"})).is_err());
+        for section in crate::services::assistant_links::NYXBOT_SETTINGS_SECTIONS {
+            assert!(
+                validate(
+                    "settings_link",
+                    &json!({"area":"nyxbot_settings","section":section})
+                )
+                .is_ok()
+            );
+            assert!(
+                validate(
+                    "settings_link",
+                    &json!({"area":"security","section":section})
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate(
+                "settings_link",
+                &json!({"area":"nyxbot_settings","section":"tasks/unknown"})
+            )
+            .is_err()
+        );
+        for args in [
+            json!({}),
+            json!({"acknowledgement_id":"card"}),
+            json!({"voice":null}),
+            json!({"access_mode_override":"autopilot"}),
+            json!({"skip_destructive_confirmation":true}),
+            json!({"timezone":"not/a/zone"}),
+            json!({"max_live_subagents":null}),
+            json!({"notifications":{"push":{}}}),
+            json!({"notifications":{"push":{"unknown":true}}}),
+        ] {
+            assert!(validate("update_settings", &args).is_err(), "{args}");
+        }
+        assert!(
+            validate(
+                "update_settings",
+                &json!({"notifications":{"push":{"chat_update":false}}})
+            )
+            .is_ok()
+        );
+        let schema = schema("update_settings");
+        for (name, spec) in schema["properties"].as_object().unwrap() {
+            if spec["type"] == "integer" {
+                let minimum = spec["minimum"].as_i64().unwrap();
+                let maximum = spec["maximum"].as_i64().unwrap();
+                for value in [minimum, maximum] {
+                    assert!(
+                        validate("update_settings", &json!({name:value})).is_ok(),
+                        "{name}={value}"
+                    );
+                }
+                for value in [minimum - 1, maximum + 1] {
+                    assert!(
+                        validate("update_settings", &json!({name:value})).is_err(),
+                        "{name}={value}"
+                    );
+                }
+            }
+        }
     }
 }

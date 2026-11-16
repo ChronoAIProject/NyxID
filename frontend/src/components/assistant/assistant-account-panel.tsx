@@ -1,3 +1,4 @@
+import { parseNyxBotSettingsSection, NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactChrome } from "@/components/ui/compact-title";
@@ -24,7 +25,7 @@ const Notifications = lazy(() => import("./notifications-panel").then((m) => ({ 
 const panels: Record<Exclude<AccountPanel, "notifications">, { title: string; description: string; width: string }> = {
   settings: { title: "Account Settings", description: "Manage your account settings and preferences.", width: "md:max-w-3xl" },
   billing: { title: "Billing & Usage", description: "Your balance, benefits, and usage in one place.", width: "md:max-w-5xl" },
-  nyxbot: { title: "NyxBot settings", description: "NyxBot runs with full access to your connected services and account; specialists use only what you or NyxBot grant them. These settings apply to all of your agents.", width: "md:max-w-2xl" },
+  nyxbot: { title: "NyxBot settings", description: "Manage permissions, tasks, automations, notifications, and chats for your agents.", width: "md:max-w-2xl" },
 };
 
 export function AssistantAccountPanel() {
@@ -57,6 +58,8 @@ export function AssistantAccountPanel() {
     );
   }
   const panel = panels[current.panel];
+  const section = current.panel === "nyxbot" ? parseNyxBotSettingsSection(current.panelTab) : undefined;
+  const dialogTitle = section ? NYXBOT_SETTINGS_TITLES[section] : panel.title;
   const grouped = current.panel !== "billing";
   const PanelDialog = grouped ? GroupedDialog : Dialog;
   const PanelBody = grouped ? "div" : DialogBody;
@@ -69,16 +72,17 @@ export function AssistantAccountPanel() {
     >
       <PanelContent
         scrollMode="body"
-        className={`${panel.width}${current.panel === "settings" ? " md:h-[min(48rem,85dvh)]" : ""}`}
+        className={`${panel.width}${current.panel === "settings" || current.panel === "nyxbot" ? " md:h-[min(48rem,85dvh)]" : ""}`}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           restorePanelFocus(opener());
         }}
       >
-        <CompactChrome className="[[data-compact=true]]:border-b [[data-compact=true]]:border-border/50"><DialogHeader className="shrink-0 pr-6">
+        {current.panel === "nyxbot" && <><DialogTitle asChild><span className="sr-only">{translateUi(dialogTitle)}</span></DialogTitle><DialogDescription className="sr-only">{translateUi(panel.description)}</DialogDescription></>}
+        {current.panel !== "nyxbot" && <CompactChrome className="[[data-compact=true]]:border-b [[data-compact=true]]:border-border/50"><DialogHeader className="shrink-0 pr-6">
           <DialogTitle className="[[data-compact=true]_&]:text-15">{translateUi(panel.title)}</DialogTitle>
           <DialogDescription className="[[data-compact=true]_&]:hidden">{translateUi(panel.description)}</DialogDescription>
-        </DialogHeader></CompactChrome>
+        </DialogHeader></CompactChrome>}
         <PanelBody className={grouped ? "flex min-h-0 flex-1 flex-col" : undefined} style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
           <DialogFocusReturnContext value={true}>
           <Suspense fallback={<p role="status" className="text-14 text-text-tertiary">{translateUi("Loading ")}{translateUi(panel.title)}...</p>}>

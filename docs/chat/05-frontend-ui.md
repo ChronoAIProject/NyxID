@@ -704,3 +704,60 @@ previews in the same reply can load. Idle LRU eviction, two-minute idle expiry, 
 revoke URLs. No file bytes enter persistent browser storage. Recovery refreshes the
 original reply's history page and invalidates the conversation query, preserving
 the draft and page state. Controls use the existing Button variants.
+
+## NyxBot settings navigation
+
+The NyxAgent account panel opens over any assistant workspace route with
+`?panel=nyxbot`. Its title is “NyxBot settings”. The root has three inset groups:
+Permissions; Tasks & specialists, Automations, Notifications; Chats & channels.
+Each disclosure has a leading icon and chevron. Permissions summarizes the saved
+access mode, Automations counts active assistant automations, Notifications shows
+“Off” or the number of enabled push kinds, and Chats & channels counts channel
+bots, including the organisation bots in the all-scope inventory shown by the
+manager (connected bots and Connect another bot). Saved summaries remain visible
+during background refetches; omit them before first load and on error.
+
+`panelTab` is namespaced to this panel and identifies a page:
+
+| Section | Contents |
+| --- | --- |
+| `permissions` | Access-mode checkmark selection and Full access warning |
+| `permissions/specialists` | Specialist access-request checkmark selection |
+| `tasks` | Automatic task continuations |
+| `tasks/specialists` | Live specialists and simultaneous specialist turns |
+| `tasks/groups` | Group hand-offs per message and per hour |
+| `automations` | Automation list and Manage automations |
+| `automations/budgets` | Timezone, schedule interval and run budgets |
+| `notifications` | Push-kind switches and explanations |
+| `channels` | Channel bot manager |
+| `channels/adapters` | Feature-gated adapter bindings |
+| `channels/links` | Personal platform links |
+
+For example, `/assistant?panel=nyxbot&panelTab=tasks%2Fspecialists` opens the
+specialist limits. The section vocabulary is defined once in
+`nyxbot-settings-sections.ts`; parents are derived from slash-separated paths.
+Missing, malformed or unknown sections select the root and drop `panelTab`.
+Unavailable adapter bindings replace the URL with `channels`. The Notifications
+row and search entry require the notifications feature; its unavailable URL
+replaces to the root. Personal links renders loading, empty, error and populated
+states, so its row is always reachable. NotificationPreferences renders nothing
+when its feature is off.
+
+Opening the panel pushes history. All section changes, in-panel Back and URL
+normalization replace history, preserving underlying conversation/workspace
+search. Browser Back immediately after opening closes the panel. A nested deep
+link mounts its ancestors; in-panel Back walks up one level. Search indexes the
+available sections, their synonyms and the current-language labels of every
+setting on each page, using the same field and option definitions as the forms;
+personal-link completion opens its exact
+page. Account-menu NyxBot settings opens the root.
+
+Retained `GroupedDetail` pages share one viewport form scope and dirty-only save
+bar outside the scroll viewport. Drafts survive navigation and query refetches;
+Back guards the departing page and descendants, and closing guards all drafts.
+Each save retains its review, validation and dirty-field payload. Channel actions
+keep their immediate behavior. Owner settings live events invalidate the settings
+query: pristine fields refresh and dirty fields retain the owner's draft. Load
+errors leave existing drafts mounted. Drill-in focuses the page title; Back
+returns focus to its originating disclosure. Shared compact headers and scroll
+viewports work in the desktop dialog and full-width mobile sheet.

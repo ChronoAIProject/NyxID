@@ -4,6 +4,7 @@ import { openAssistant } from "./helpers";
 for (const width of [1280, 320]) {
   test(`Agent Details groups saved accounts by service at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
+    await page.route("**/api/v1/triggers", route => route.fulfill({ json: { triggers: [] } }));
     await page.route("**/api/v1/service-preferences", (route) => route.fulfill({
       json: { groups: [], version: 0, updated_at: null },
     }));
@@ -24,7 +25,15 @@ for (const width of [1280, 320]) {
     expect(bounds.x).toBeGreaterThanOrEqual(0);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
     expect(await connections.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath("agent-connections.png") });
+    await page.screenshot({ path: testInfo.outputPath("agent-connections.png"), animations: "disabled" });
+    await sheet.getByRole("tab", { name: "Channels", exact: true }).click();
+    await sheet.getByRole("button", { name: "Connect another bot", exact: true }).click();
+    const heading = sheet.getByRole("heading", { name: "Connect another bot", exact: true });
+    await expect(heading).toBeFocused();
+    await expect(heading.locator("..")).not.toHaveAttribute("data-compact-chrome");
+    await page.screenshot({ path: testInfo.outputPath("agent-detail-page.png"), animations: "disabled" });
+    await sheet.getByRole("button", { name: "Back to Channels", exact: true }).click();
+    await expect(sheet.getByRole("button", { name: "Connect another bot", exact: true })).toBeFocused();
   });
 }
 

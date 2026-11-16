@@ -114,7 +114,7 @@ export function GroupedDraftNavigation({ active }: { readonly active: boolean })
         // Account tabs and canonical chat adoption retain their mounted drafts.
         const sameSettings = action === "REPLACE" && currentLocation.pathname === nextLocation.pathname && (
           (currentLocation.pathname === "/settings" && current.get("tab") !== next.get("tab")) ||
-          (current.get("panel") === "settings" && next.get("panel") === "settings")
+          (["settings", "nyxbot"].includes(current.get("panel") ?? "") && current.get("panel") === next.get("panel"))
         );
         return sameDrawer || sameSettings ? false : !(await confirm());
       },

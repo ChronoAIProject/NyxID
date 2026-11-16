@@ -14,10 +14,10 @@ export function CompactTitleProvider({ children }: { readonly children: ReactNod
   const current = [...sizes.values()].reduce((sum, size) => sum + size.current, 0);
   return <CompactTitleContext value={{ compact, gap: compact ? Math.max(0, expanded - current) : 0, scroll, chrome }}>{children}</CompactTitleContext>;
 }
-export function CompactChrome({ children, className, ...props }: ComponentProps<"div">) {
+export function CompactChrome({ children, className, enabled = true, ...props }: ComponentProps<"div"> & { readonly enabled?: boolean }) {
   const context = useContext(CompactTitleContext);
-  const register = context?.chrome;
-  const compact = context?.compact ?? false;
+  const register = enabled ? context?.chrome : undefined;
+  const compact = enabled && (context?.compact ?? false);
   const id = useId();
   const element = useRef<HTMLDivElement>(null);
   const expanded = useRef(0);
@@ -43,7 +43,7 @@ export function CompactChrome({ children, className, ...props }: ComponentProps<
     observer.observe(element.current);
     return () => { observer.disconnect(); register(id, null); };
   }, [register, compact, id]);
-  return <div {...props} ref={element} data-compact-chrome="" data-compact={compact} className={cn("shrink-0 bg-background", className)}>{children}</div>;
+  return <div {...props} ref={element} data-compact-chrome={enabled ? "" : undefined} data-compact={enabled ? compact : undefined} className={cn(enabled && "shrink-0 bg-background", className)}>{children}</div>;
 }
 export function CompactScroll({ children, active = true, level = 0, className, ...props }: ComponentProps<"div"> & { readonly active?: boolean; readonly level?: number }) {
   const context = useContext(CompactTitleContext);

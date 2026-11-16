@@ -163,6 +163,7 @@ export function useUpdateNyxBotSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (update: NyxAgentSettingsUpdate) => nyxBotApi.updateSettings(update),
+    onMutate: () => queryClient.cancelQueries({ queryKey: nyxBotQueryKeys.settings(userId) }),
     onSuccess: (settings) => {
       queryClient.setQueryData(nyxBotQueryKeys.settings(userId), settings);
     },

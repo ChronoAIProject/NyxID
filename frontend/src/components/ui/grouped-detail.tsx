@@ -1,6 +1,6 @@
 import { SectionInfo } from "./section-info";
 import { drawerSectionInfo, DrawerSectionInfoContext } from "@/lib/drawer-section-info";
-import { CompactScroll } from "./compact-title";
+import { CompactChrome, CompactScroll } from "./compact-title";
 import { DrawerSearchRevealContext, useDrawerSearching, useDrawerSearchPage } from "@/lib/drawer-search";
 import {
   useCallback,
@@ -24,6 +24,7 @@ import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-dr
 /** A retained sheet page: navigation changes visibility without discarding its forms. */
 export function GroupedDetail({
   open,
+  compactHeader = false,
   searchPage,
   title,
   info,
@@ -34,6 +35,7 @@ export function GroupedDetail({
   level: requestedLevel,
 }: {
   readonly open: boolean;
+  readonly compactHeader?: boolean;
   readonly searchPage?: string;
   readonly title: string;
   readonly info?: string;
@@ -116,7 +118,7 @@ export function GroupedDetail({
       data-grouped-level={level}
       className={`${container === document.body ? "fixed" : "absolute"} inset-0 z-10 flex flex-col bg-background p-4`}
     >
-      <div className="shrink-0 pb-4">
+      <CompactChrome enabled={compactHeader && active} className={`shrink-0 pb-4${compactHeader ? " [[data-compact=true]]:pb-2" : ""}`}>
         <Button variant="ghost" onClick={async () => { if (!guard || await guard.confirmDiscard(owner)) onBack(); }}>
           <ChevronLeft aria-hidden />
           {backLabel}
@@ -124,11 +126,11 @@ export function GroupedDetail({
         <h2
           aria-label={title}
           tabIndex={-1}
-          className="mt-3 flex items-center gap-1 break-words px-4 type-card-title outline-none"
+          className={`mt-3 flex items-center gap-1 break-words px-4 type-card-title outline-none${compactHeader ? " [[data-compact=true]_&]:mt-1 [[data-compact=true]_&]:text-15" : ""}`}
         >
           <span>{title}</span>{help && <SectionInfo title={title}>{help}</SectionInfo>}
         </h2>
-      </div>
+      </CompactChrome>
       <CompactScroll active={active} level={level} className="assistant-scrollbar flex-1 space-y-6">
         <GroupedDetailContext.Provider
           value={{ container, visible: active, level }}

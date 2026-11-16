@@ -1330,7 +1330,7 @@ async fn native_inventory(full: bool) {
         adapters["setup_url"]
             .as_str()
             .unwrap()
-            .ends_with("/assistant?panel=nyxbot")
+            .ends_with("/assistant?panel=nyxbot&panelTab=channels%2Fadapters")
     );
     let profiles = adapters["adapters"].as_array().unwrap();
     for expected in [

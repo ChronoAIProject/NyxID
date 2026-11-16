@@ -1290,7 +1290,7 @@ impl AccountTools<'_> {
                         })
                         .collect();
                 Ok(
-                    json!({"adapters":adapters,"setup_enabled":enabled,"setup_reason":if enabled{None}else{Some("disabled")},"setup_url":format!("{}/assistant?panel=nyxbot",self.config.frontend_url.trim_end_matches('/')),"setup_instructions":"After all API replicas are upgraded, an administrator can enable nyxbot:service-adapters. Open NyxBot Settings, Phone and speech connections. Select an owner-configured specialist; for a Notion FAQ grant Notion and set Guest access to Read. Public callers never inherit owner authority."}),
+                    json!({"adapters":adapters,"setup_enabled":enabled,"setup_reason":if enabled{None}else{Some("disabled")},"setup_url":super::assistant_links::AssistantPage::NyxBotSettings { section: Some("channels/adapters") }.url(&self.config.frontend_url),"setup_instructions":"After all API replicas are upgraded, an administrator can enable nyxbot:service-adapters. Open NyxBot settings, Chats & channels, Adapter bindings. Select an owner-configured specialist; for a Notion FAQ grant Notion and set Guest access to Read. Public callers never inherit owner authority."}),
                 )
             }
             "list_channel_bots" => {

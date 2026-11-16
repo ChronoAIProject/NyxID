@@ -45,7 +45,7 @@ export function useAccountPanel() {
   const change = useCallback((
     mode: "open" | "update" | "close",
     params: AccountPanelParams = {},
-    options: { history?: "push" | "replace"; panel?: AccountPanel; opener?: HTMLElement | null } = {},
+    options: { history?: "push" | "replace"; panel?: AccountPanel; opener?: HTMLElement | null; force?: boolean } = {},
   ) => {
     const pathname = location.pathname;
     const expectedPanel = current.panel;
@@ -57,7 +57,7 @@ export function useAccountPanel() {
       const live = parseAccountPanelSearch(router.state.location.search);
       if (mode !== "open" && (!expectedPanel || live.panel !== expectedPanel || coordinator.generation !== generation)) return;
       const replace = options.history === "replace";
-      if (mode === "update" && JSON.stringify(live) === JSON.stringify(parseAccountPanelSearch({
+      if (mode === "update" && !options.force && JSON.stringify(live) === JSON.stringify(parseAccountPanelSearch({
         ...live, ...(!replace ? { panelAction: undefined } : {}), ...params,
       }))) return;
       // Consume an abandoned top-up in its own history entry before pushing.
@@ -91,8 +91,8 @@ export function useAccountPanel() {
     open: (panel: AccountPanel, params: AccountPanelParams = {}, opener: HTMLElement | null =
       document.activeElement instanceof HTMLElement ? document.activeElement : null) =>
       change("open", params, { panel, opener }),
-    update: (params: AccountPanelParams, history: "push" | "replace" = "replace") =>
-      change("update", params, { history }),
+    update: (params: AccountPanelParams, history: "push" | "replace" = "replace", options: { force?: boolean } = {}) =>
+      change("update", params, { history, ...options }),
     close,
     opener: () => coordinator.opener,
     // Schedule outside the menu's lifetime: drawer dismissal unmounts that menu.

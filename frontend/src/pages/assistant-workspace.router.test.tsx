@@ -18,6 +18,13 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { router as appRouter } from "@/router";
+import { appI18n } from "@/i18n/instance";
+import { translateUi } from "@/i18n/use-ui-translation";
+import zhCN from "@/i18n/locales/zh-CN.json";
+import { SETTINGS_LABELS, AUTOMATION_BUDGET_ROWS, AUTOMATION_TIMEZONE_LABEL, SPECIALIST_ACCESS_LABELS } from "@/lib/assistant/nyxbot-settings-fields";
+import { ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
+import { NOTIFICATION_PUSH_ROWS } from "@/lib/assistant/notification-presentation";
+import { NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import {
@@ -194,8 +201,9 @@ beforeEach(() => {
     user: person,
   });
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await appI18n.changeLanguage("en");
   useAuthStore.setState(originalAuth);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -647,4 +655,78 @@ it.each(["settings", "billing", "nyxbot"])("preserves signed-out %s deep links i
   expect(assign).toHaveBeenCalledWith(`/login?return_to=${encodeURIComponent(`${window.location.origin}${path}`)}`);
   expect(router.state.location.search).toMatchObject({ panel });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it.each(ASSISTANT_SHELL_ROUTES)("retains nested NyxBot addressing over %s", async (route) => {
+  const path = route.replace("$machineId", "machine-1");
+  const router = await open(`${path}?panel=nyxbot&panelTab=tasks%2Fgroups`);
+  expect(await screen.findByRole("dialog", { name: "Group hand-offs" })).toBeVisible();
+  expect(router.state.location.search).toMatchObject({ panel: "nyxbot", panelTab: "tasks/groups" });
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(router.state.location.search.panel).toBeUndefined());
+  expect(router.state.location.pathname).toBe(path);
+});
+
+it("searches NyxBot section keywords and opens the exact nested page", async () => {
+  const router = await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
+  const search = await screen.findByRole("combobox");
+  await userEvent.type(search, "timezone");
+  await userEvent.click(await screen.findByRole("option", { name: /Timezone and budgets/ }));
+  await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "automations/budgets" }));
+  expect(router.state.location.pathname).toBe("/assistant/plugins");
+});
+
+it("excludes disabled adapter settings from assistant search", async () => {
+  await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
+  await userEvent.type(await screen.findByRole("combobox"), "Adapter bindings");
+  expect(screen.queryByRole("option", { name: /Adapter bindings/ })).not.toBeInTheDocument();
+});
+
+it("excludes unavailable push settings from assistant search", async () => {
+  await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
+  await userEvent.type(await screen.findByRole("combobox"), "push");
+  expect(screen.queryByRole("option", { name: /Notifications.*NyxBot settings/ })).not.toBeInTheDocument();
+});
+
+it.each(["en", "zh-CN"])("finds rendered setting labels in %s and opens their exact section", async (language) => {
+  appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
+  await appI18n.changeLanguage(language);
+  useAuthStore.setState({ user: { ...person, capabilities: { ...person.capabilities, enabled_features: [FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS] } } });
+  const router = await open("/assistant/plugins");
+  const cases = [
+    [SETTINGS_LABELS.max_auto_continuations, "tasks"],
+    [SETTINGS_LABELS.max_live_subagents, "tasks/specialists"],
+    [SETTINGS_LABELS.max_concurrent_subagent_turns, "tasks/specialists"],
+    [SETTINGS_LABELS.max_group_handoffs, "tasks/groups"],
+    [SETTINGS_LABELS.max_group_handoffs_per_hour, "tasks/groups"],
+    [AUTOMATION_TIMEZONE_LABEL, "automations/budgets"],
+    ...AUTOMATION_BUDGET_ROWS.map(row => [row[1], "automations/budgets"] as const),
+    ...NOTIFICATION_PUSH_ROWS.map(row => [row.label, "notifications"] as const),
+    ...Object.values(ACCESS_MODE_LABEL).map(label => [label, "permissions"] as const),
+    ...Object.values(SPECIALIST_ACCESS_LABELS).map(label => [label, "permissions/specialists"] as const),
+  ] as const;
+  for (const [label, section] of cases) {
+    await userEvent.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
+    await userEvent.type(await screen.findByRole("combobox"), translateUi(label));
+    const name = `${translateUi(NYXBOT_SETTINGS_TITLES[section])} ${translateUi("NyxBot settings")}`;
+    await userEvent.click(await screen.findByRole("option", { name }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: section }));
+    await userEvent.click(screen.getByRole("button", { name: translateUi("Close") }));
+  }
+}, 20_000);
+
+it.each(["en", "zh-CN"])("omits disabled push settings labels from search in %s", async (language) => {
+  appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
+  await appI18n.changeLanguage(language);
+  await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
+  const search = await screen.findByRole("combobox");
+  for (const row of NOTIFICATION_PUSH_ROWS) {
+    await userEvent.clear(search);
+    await userEvent.type(search, translateUi(row.label));
+    expect(screen.queryByRole("option", { name: `${translateUi("Notifications")} ${translateUi("NyxBot settings")}` })).not.toBeInTheDocument();
+  }
 });

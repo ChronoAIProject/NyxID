@@ -204,3 +204,31 @@ it("guards drill-in Back, keeps editing, and discards only after confirmation", 
   await user.click(screen.getByRole("button", { name: "Open detail" }));
   expect(screen.getByRole("textbox", { name: "Machine draft" })).toHaveValue("");
 });
+
+it("registers compact chrome only for an active detail that opts in", async () => {
+  function CompactPages() {
+    const [open, setOpen] = useState(false);
+    const [container, setContainer] = useState<HTMLDivElement | null>(null);
+    return <div ref={setContainer} role="dialog">
+      <GroupedDetailContext value={{ container, visible: true }}>
+        <button onClick={() => setOpen(true)}>Open compact</button>
+        <GroupedDetail open={open} compactHeader title="Compact page" backLabel="Root" onBack={() => setOpen(false)}>Contents</GroupedDetail>
+      </GroupedDetailContext>
+    </div>;
+  }
+  const user = userEvent.setup();
+  const { container } = render(<CompactPages />);
+  expect(container.querySelectorAll("[data-compact-chrome]")).toHaveLength(0);
+  await user.click(screen.getByRole("button", { name: "Open compact" }));
+  expect(container.querySelectorAll("[data-compact-chrome]")).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Root" }));
+  expect(container.querySelectorAll("[data-compact-chrome]")).toHaveLength(0);
+});
+
+it("leaves existing detail headers outside compact chrome by default", async () => {
+  const user = userEvent.setup();
+  const { container } = render(<Pages />);
+  await user.click(screen.getByRole("button", { name: "Open machine" }));
+  await user.click(screen.getByRole("button", { name: "Open version" }));
+  expect(container.querySelectorAll("[data-compact-chrome]")).toHaveLength(0);
+});

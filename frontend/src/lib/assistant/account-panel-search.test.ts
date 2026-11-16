@@ -26,3 +26,14 @@ describe("account panel search", () => {
     expect(parseAssistantSearch({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "nyxbot" })).toEqual({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "nyxbot" });
   });
 });
+
+it.each([undefined, null, "", "tasks/", "/tasks", "tasks/groups/extra", "TASKS", ["tasks"], 1, "permissions%2Fspecialists"])("drops malformed or unknown NyxBot section %j", (panelTab) => {
+  expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab })).toEqual({ panel: "nyxbot" });
+});
+
+it("preserves every typed NyxBot section and ignores unnamespaced tabs", async () => {
+  const { NYXBOT_SETTINGS_SECTIONS } = await import("./nyxbot-settings-sections");
+  for (const panelTab of NYXBOT_SETTINGS_SECTIONS) {
+    expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab, tab: "security" })).toEqual({ panel: "nyxbot", panelTab });
+  }
+});
