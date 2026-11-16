@@ -29,11 +29,11 @@ export function hookHarness<T>(
   mocks: Record<string, unknown>,
   globals: Record<string, unknown> = {},
 ) {
-  const webBrowserMock = (mocks["expo-web-browser"] ?? {}) as {
-    openBrowserAsync?: (url: string, options?: unknown) => unknown;
-  };
   const inAppBrowserMock = {
     openInAppBrowser: (url: string, options?: unknown) => {
+      const webBrowserMock = (mocks["expo-web-browser"] ?? {}) as {
+        openBrowserAsync?: (url: string, options?: unknown) => unknown;
+      };
       const open = webBrowserMock.openBrowserAsync;
       if (typeof open !== "function") return Promise.resolve();
       return options === undefined ? open(url) : open(url, options);
