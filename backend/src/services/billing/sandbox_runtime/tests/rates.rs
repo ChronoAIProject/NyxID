@@ -299,8 +299,8 @@ async fn rate_change_caps_coverage_and_preserves_delayed_usage_at_accepted_price
             super::super::evidence::verify_usage_provider_rate(&f.db, f.provider.as_ref(), &row)
                 .await
                 .unwrap()
-                .as_deref(),
-            Some("test-subscription")
+                .map(|target| target.subscription_id),
+            Some("test-subscription".into())
         );
     }
     let saved =

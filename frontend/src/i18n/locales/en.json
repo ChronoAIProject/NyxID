@@ -1,4 +1,5 @@
 {
+  "Since {{value1}}": "Since {{value1}}",
   "Dashboard": "Dashboard",
   "AI Services": "AI Services",
   "Tools": "Tools",
@@ -12214,5 +12215,6 @@
   "Machine assignments": "Machine assignments",
   "Available with service restrictions": "Available with service restrictions",
   "MFA on": "MFA on",
-  "MFA off": "MFA off"
+  "MFA off": "MFA off",
+  "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."
 }

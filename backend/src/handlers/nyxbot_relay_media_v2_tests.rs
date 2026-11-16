@@ -417,6 +417,19 @@ async fn channel_media_v2_all_adapters_owner_history_model_originals_and_duplica
                 let response = respond(&state, &key, &body, "retry").await;
                 assert_eq!(response.status(), StatusCode::OK);
                 let _ = body_text(response).await;
+                let alias =
+                    crate::services::nyxbot_dispatch_identity::dispatch_key(&row.id, "retry");
+                let winner = state
+                    .db
+                    .collection::<NyxbotEvent>(EVENTS)
+                    .find_one(doc! {"dispatch_identity.keys":alias})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    winner.id, event.id,
+                    "{name}/{transport}: retry alias must resolve the admitted media event"
+                );
             }
             assert_eq!(calls.lock().await.len(), count);
             assert_eq!(provider.received_requests().await.unwrap().len(), downloads);
@@ -805,6 +818,19 @@ async fn channel_guest_media_relay_adapters_and_gateway_relay_retain_only_curren
                 let reply = respond(&state, &key, &provider_event(&row, &source), "retry").await;
                 assert_eq!(reply.status(), StatusCode::OK);
                 let _ = body_text(reply).await;
+                let alias =
+                    crate::services::nyxbot_dispatch_identity::dispatch_key(&row.id, "retry");
+                let winner = state
+                    .db
+                    .collection::<NyxbotEvent>(EVENTS)
+                    .find_one(doc! {"dispatch_identity.keys":alias})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    winner.id, event.id,
+                    "{name}/{transport}: retry alias must resolve the admitted media event"
+                );
             }
             assert_eq!(calls.lock().await.len(), count);
             assert_eq!(provider.received_requests().await.unwrap().len(), downloads);

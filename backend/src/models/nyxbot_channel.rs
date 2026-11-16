@@ -1,6 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Aliases added to legacy admissions retain version zero.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DispatchIdentity {
+    pub version: i32,
+    pub keys: Vec<String>,
+}
+
 pub const COLLECTION_NAME: &str = "nyxbot_channels";
 pub const THREADS_COLLECTION_NAME: &str = "nyxbot_threads";
 pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
@@ -436,6 +444,8 @@ impl std::fmt::Debug for EventMedia {
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_identity: Option<DispatchIdentity>,
     /// Server-issued ingress association, piggybacked on the source insert.
     /// Retained across queue/replay; never execution authority or a caller ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]

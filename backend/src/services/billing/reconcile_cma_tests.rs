@@ -108,6 +108,7 @@ impl LagoApi for Provider {
     }
 
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         self.calls.lock().unwrap().push("usage");
         Ok(LagoUsage {
             customer_id: customer.into(),

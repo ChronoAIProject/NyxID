@@ -70,6 +70,7 @@ function setup(
   } = {},
 ) {
   const calls: ApiCall[] = [];
+  const translations: string[] = [];
   const alerts: Array<{
     title: string;
     buttons: Array<{ text: string; onPress?: () => void }>;
@@ -85,6 +86,7 @@ function setup(
     },
   };
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ t: (phrase: string) => { translations.push(phrase); return phrase; } }) },
     "./OrgGuestControls": { OrgGuestChannel: "OrgGuestChannel", OrgGuestGrantsAdoption: "OrgGuestGrantsAdoption" },
     "./AgentCollaborationPanel": {
       AgentCollaborationPanel: "AgentCollaborationPanel",
@@ -276,6 +278,7 @@ function setup(
   }
   return {
     harness,
+    translations,
     calls,
     alerts,
     guard: () => guard,
@@ -791,4 +794,26 @@ test("mounted agentId changes keep the memory owner until Discard and ignore sta
   row(env, "Handle").props.onPress();
   assert.deepEqual(env.edits.at(-1), ["third-agent", "name"], "Discard selects the requested agent");
   env.harness.unmount();
+});
+
+test("personal agent channel row explains retained Discord draining without a retry control", () => {
+  const state = setup();
+  state.latest({ channels: [{ id: "discord", bot_label: "Shop", platform: "discord", status: "active", gateway_native_activation: "gateway_native_draining" }] });
+  const rows = elements(state.harness.render());
+  const row = rows.find((r) => r.props.label === "Shop");
+  assert.ok(row);
+  assert.match(row.props.detail, /Discord intake is paused/);
+  assert.match(row.props.detail, /cannot bypass/);
+  assert.ok(!rows.some((r) => /Retry native/.test(r.props.label ?? "")));
+});
+
+
+test("personal channel slugs bypass translation", () => {
+  for (const platform of ["x", "lark", "discord"]) {
+    const state = setup();
+    state.latest({ channels: [{ id: platform, bot_label: "Plain slug", platform, status: "active" }] });
+    const rows = elements(state.harness.render());
+    assert.equal(rows.find((r) => r.props.label === "Plain slug")?.props.detail, platform);
+    assert.ok(!state.translations.includes(platform));
+  }
 });

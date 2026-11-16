@@ -332,6 +332,22 @@ still require multiple provider messages. Saved manager replies and automation
 results use the larger delivery bound below, with their saved thread as the
 source for any overflow link.
 
+New Discord/WhatsApp assistant text plans use renderer v2. URLs retain their
+original bytes, with trailing sentence punctuation outside the URL. Discord
+escapes only active literal syntax; unsafe masked-link targets become visible
+label-plus-URL text. WhatsApp uses its native style markers and `label (URL)`;
+unsafe literal markers use the smallest code span. Colliding backticks that its
+documented code syntax cannot represent pass through unchanged. Formatting never
+adds a refusal; URLs exceeding one message retain the existing split behavior.
+Slack and Telegram output remain unchanged.
+
+The journal pins the renderer version with its fingerprint and notice inputs.
+An absent version means v1, retained only to finish recorded plans. New workers
+resume each version's pending suffix without replaying accepted parts. An old
+worker encountering v2 refuses its different fingerprint before claiming a part;
+the recipient keeps the accepted prefix. Normal source-specific failure/recovery
+reporting still applies. Never reset a journal to change its renderer.
+
 Each text delivery is bounded to 64 messages, matching ordinary channel relay's
 amplification bound. An oversized result sends 63 content messages and a final
 plain notice linking the exact saved thread for the remainder. Ordinary replies

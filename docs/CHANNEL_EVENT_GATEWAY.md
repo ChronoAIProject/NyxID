@@ -953,10 +953,86 @@ existing assistant history owns answer content; additive `nyxbot_events.delivery
 metadata arbitrates streamed versus delayed answers. Late gateway answers now recover
 expired text preparations under current authority, with a fenced MongoDB-time
 lease. The claim becomes irreversible immediately before the gateway request;
-a missing or ambiguous receipt still forbids any resend. Interrupted sends add
-a fixed notice only to an existing authorized owner thread. No provider
-idempotency guarantee or public-manager readback is added. The implementation contract
+a missing or ambiguous receipt still forbids a new send. The two closed
+reply-target retry responses described below permit re-asking the same operation. Interrupted sends add
+a fixed notice only to an existing authorized owner thread. No
+public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
+
+### Reply-target receipts and dispatch lookup
+
+`POST /reply-targets/{ref}/messages` with exactly `409` and
+`detail: "routed_reply_in_progress"` proves gateway admission without a receipt.
+Exactly `503` and `detail: "routed_reply_unavailable"` permits the same retry but
+does not prove admission. NyxID re-asks only these responses with the same target,
+serialized body and Idempotency-Key. Delays are 15, 30, 60, 120, then 300 seconds;
+valid `Retry-After` can lengthen them. The deadline is the earliest original
+target expiry, event expiry and first retryable observation plus 24 hours.
+Timeouts, connection failures, other 5xx and broken 2xx stop as unknown. Definite
+4xx refusals, including idempotency conflict and operation limit, stop as rejected.
+
+Receipt waits reuse the text preparation claim and lease. Their compatible outer
+state is `unknown`, with a versioned pending receipt marker; old sweepers ignore
+them and old recovery readers suppress their output. A new worker can resume the
+identical operation. An old `sending` row without a durable retryable observation
+never authorizes a re-ask.
+
+`GET /api/v1/nyxbot/dispatches` authenticates with the original channel provider
+bearer and `Idempotency-Key` header. Optional `dispatched_at` is Unix seconds.
+This endpoint observes; it never admits, resumes, claims replay or sends output.
+Successful responses are:
+
+```json
+{"state":"not_received"}
+{"state":"in_progress","response_id":"resp_..."}
+{"state":"finished","response_id":"resp_...","outcome":"completed","stored_response":false,"provider_delivery":"unconfirmed"}
+{"state":"expired"}
+```
+
+`outcome` is `completed` or `failed`, independent of chat delivery.
+`provider_delivery` is `none`, `started`, `confirmed` or `unconfirmed`.
+`stored_response` means retained output is retrievable; it is false when the
+local sender owns the answer. Lookup does not reserve that ownership: the later
+GET or repeated POST arbitrates it atomically against the local send barrier,
+including `preparing_text`. A local winner returns the same response identity,
+queued `response.created`, optional `response.in_progress`, and empty
+`response.completed` with contiguous SSE IDs/sequences. No text/error output is
+returned, even if the execution failed; lookup retains the actual execution outcome.
+
+Provider admission records a versioned `dispatch_identity` with up to 32
+header-derived aliases (`keys`) on the event,
+including native group and thread-follow identities without a stored response.
+Custom bindings use the binding namespace. A recognized duplicate POST adds its
+alias; a 33rd distinct alias returns `409 dispatch_alias_limit` without resuming
+work or evicting an earlier key. Reusing a key for a different body-derived event,
+or adding an alias already owned by another event, returns
+`409 dispatch_identity_conflict`; no turn starts and no other event is replayed.
+Native gateway-source identities remain supported.
+Shared platform-entry providers use separate native receipts and return
+`400 dispatch_identity_unavailable`. Legacy body-keyed events without a retained
+association also return that refusal when their identity cannot be proven.
+
+Ordinary events retain 24 hours, admitted media events seven days, and stored
+response output 24 hours. A missing resolvable identity older than 24 hours is
+`expired` when `dispatched_at` is supplied. Without it, callers enforce their own
+history bound. For ambiguous legacy group/custom absence, the automatic capability's
+activation time and the absence of retained legacy admissions establish alias
+coverage. A dispatch before activation, or an ambiguous missing key while legacy
+admissions remain, receives a typed refusal unless it is older than seven days.
+Aliases appended to legacy admissions never mark their original identity complete;
+this also covers old writers returning during rollback. Never interpret that refusal
+as nonacceptance. The historical body-keyed relay platforms are Telegram, Lark,
+and Feishu; live adapter capabilities cannot describe past admission keys. This
+legacy branch covers seven days after activation (and old-writer rollback can
+introduce new legacy rows); without `dispatched_at`, the caller supplies the
+history bound.
+
+The lookup returns `503 response_delivery_not_ready` until all live generations
+support `nyxbot:gateway-reply-arbitration-v1` and its automatic activation exists.
+It uses the existing heartbeat/activation rules; no operator switch is required.
+Invalid keys return 401, inactive channels 404 `conversation_not_found`, and invalid
+headers/timestamps 400 `invalid_request`. Refusal auditing/rate limiting remains
+enabled; successful observation does not even touch key `last_used_at`.
 
 With `assistant:channel-media` enabled, a supported relay media activity whose source
 ID names an existing row outside its authorized owner/chat/sender/route returns
@@ -1212,8 +1288,15 @@ by claim, revision, state and lease. Recovery reads `/channel-records/{record_id
 and validates owner, provider, binding and the captured relay or native source. It never creates a record
 or replaces the captured deletion version with an observed version. Destination
 drift, version changes, malformed identity and live-reference conflicts require
-review. An uncertain POST that remains unobserved for 24 hours requires review:
-that deadline is not proof that creation never happened.
+review. Discord reviews are automatically re-observed on the existing sweep
+with leased, bounded backoff (30 seconds to one hour). Original matching proof
+can requeue exact cleanup; acknowledged absence can settle. Explicit preservation
+permits only read-only absence checks, never deletion. An uncertain POST that
+remains unobserved for 24 hours retains its review state and continues being
+checked: that deadline and repeated 404s are not proof that creation never
+happened. Unknown creation requires a recoverable exact record or a gateway
+contract that positively fences late creation; current record-lookup 404 alone
+cannot safely release it.
 
 Administrators use the [release review API](API.md#nyxbot-gateway-release-review)
 to inspect a sanitized observation and resolve its exact revision. `retry_original`
@@ -1231,7 +1314,12 @@ Filter audit events by `nyxbot_gateway_release_queued`,
 `nyxbot_gateway_release_settled`, `nyxbot_gateway_release_review_required`,
 `nyxbot_gateway_release_reviewed`, `nyxbot_channel_continuity_restored` and
 `nyxbot_gateway_release_reconcile_pass_completed`. These metadata events commit
-with their transitions. Retries do not add audit events. Review transition logs
+with their transitions. `nyxbot_gateway_release_failed` records failed attempts
+and automatic review observations, with closed stored/current reason and gateway
+answer codes, obligation/channel/channel-bot IDs, attempt counts and retry times.
+The event is emitted when the `(state, code, gateway_answer)` tuple changes,
+otherwise at most once per 24 hours per obligation, in the state transaction.
+Overdue non-adopted native guards follow the same daily diagnostic bound. Review transition logs
 contain only obligation ID, local channel ID and a stable reason.
 
 An hourly, resumable keyset scan processes at most 100 retained-identity retired
@@ -1586,3 +1674,24 @@ uploads belong to the guest's channel conversation and only the current guest
 turn can supply them to the model. Org-specialist guest media is deferred. Native
 Discord/WhatsApp still waits for CMA#1402; this flag does not enable native reads.
 See [guest uploads](chat/10-uploads.md#personal-channel-guest-media).
+
+Recovery claims at most ten additional Discord reviews sequentially per sweep,
+stopping on the first empty claim. The release index beginning with `platform`,
+`native_drain_for`, `state`, and `resolution` excludes unrelated platforms,
+native drain guards, and successfully settled history before checking retry/lease
+times. The original closed `review_reason` survives later observations;
+`last_gateway_answer` and `failure_audit` are optional diagnostic fields, ignored
+by old replicas and never used as cleanup or session authority. Legacy optional
+timestamps deserialize as absent. An administrator-preserved preparation may
+detach its own stale pending references without revoking its keys or routes:
+the preserved record may still use them, and observation uses creator authority.
+
+Health identifies authority, destination, owner, identity/version and explicit
+preservation decisions and names the administrator who must act. Retryable
+cleanup describes automatic checks. Unacknowledged creation with a not-found
+answer explicitly explains that the gateway cannot yet confirm it was never
+created. The existing warning action remains for old clients. Web and mobile
+channel summaries explain the local `gateway_native_draining` fence; web hides
+native activation retry only for `gateway_native_draining`, alongside the existing
+intake evidence; the previous `relay_draining` text and retry action are unchanged. None of these
+observations relaxes exclusive ingress or the persisted 90-second drain.

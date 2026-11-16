@@ -374,6 +374,13 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
             "A delayed thread update could not be sent because its gateway reply reference expired after 29 minutes. No owner action is needed; a new message starts a new reply window.".into()),
         _ => {},
     }
+    match facts.outbound_reason {
+        Some("gateway_reply_unconfirmed") => return advice("none", "The gateway accepted this reply, but delivery was not confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_unavailable") => return advice("none", "The gateway was temporarily unavailable. This reply has no confirmed delivery. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_rejected") => return advice("none", "The gateway refused this reply. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_unknown") => return advice("none", "Delivery of this reply could not be confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        _ => {}
+    }
     // Preserve existing gateway advice when no org-guest billing fact was added.
     if facts.gateway && facts.org_guest_billing.is_none() {
         return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());

@@ -12,6 +12,165 @@ use crate::{
 use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
+#[tokio::test]
+async fn gateway_dispatch_native_group_and_followed_aliases_are_recorded_by_post() {
+    let f = Box::pin(Fixture::new("gateway_dispatch_group_post")).await;
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+    let (body, id) = f
+        .input("group lookup", ThreadAddress::Mention, false, true)
+        .await;
+    let response = Box::pin(respond(&f.state, &f.key, &body, &id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = body_text(response).await;
+    let calls = f.calls.lock().await.len();
+    let duplicate = Box::pin(respond(&f.state, &f.key, &body, "new-dispatch-key")).await;
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let _ = body_text(duplicate).await;
+    assert_eq!(f.calls.lock().await.len(), calls);
+    let row = f
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id":&f.row.id,"event_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(row.id, dispatch_identity::dispatch_key(&f.row.id, &id));
+    assert!(
+        row.dispatch_identity
+            .as_ref()
+            .unwrap()
+            .keys
+            .contains(&dispatch_identity::dispatch_key(&f.row.id, &id))
+    );
+    assert!(row.dispatch_identity.as_ref().unwrap().keys.contains(
+        &dispatch_identity::dispatch_key(&f.row.id, "new-dispatch-key")
+    ));
+    for n in 2..32 {
+        let duplicate = Box::pin(respond(&f.state, &f.key, &body, &format!("alias-{n}"))).await;
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let _ = body_text(duplicate).await;
+    }
+    let overflow = Box::pin(respond(&f.state, &f.key, &body, "alias-overflow")).await;
+    assert_eq!(overflow.status(), StatusCode::CONFLICT);
+    assert!(body_text(overflow).await.contains("dispatch_alias_limit"));
+    let repeated = Box::pin(respond(&f.state, &f.key, &body, &id)).await;
+    assert_eq!(repeated.status(), StatusCode::OK);
+    let _ = body_text(repeated).await;
+    assert_eq!(f.calls.lock().await.len(), calls);
+    for key in [&id, "new-dispatch-key"] {
+        let mut headers = bearer(&f.key);
+        headers.insert("idempotency-key", key.parse().unwrap());
+        let response = dispatches::get(
+            State(f.state.clone()),
+            headers,
+            axum::extract::Query(dispatches::Query {
+                dispatched_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert!(matches!(
+            body["state"].as_str(),
+            Some("in_progress" | "finished")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn gateway_dispatch_alias_conflicts_never_start_or_replay_other_events() {
+    let f = Box::pin(Fixture::new("gateway_dispatch_alias_conflict")).await;
+    for native_source in [true, false] {
+        let (body_a, id_a) = f
+            .input("answer A", ThreadAddress::Mention, false, true)
+            .await;
+        let (body_b, id_b) = f
+            .input("answer B", ThreadAddress::Mention, false, true)
+            .await;
+        if !native_source {
+            // Without a retained native source, admission uses the thread-follow
+            // event identity. Both identities must obey the HTTP alias fence.
+            f.state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .delete_many(doc! {"_id":{"$in":[&id_a,&id_b]}})
+                .await
+                .unwrap();
+        }
+        let key_a = format!("key-a-{native_source}");
+        let key_b = format!("key-b-{native_source}");
+        let response = Box::pin(respond(&f.state, &f.key, &body_a, &key_a)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = body_text(response).await;
+        let events = f.state.db.collection::<bson::Document>(EVENTS);
+        let event_a = events
+            .find_one(doc! {"channel_id":&f.row.id,"event_id":&id_a})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            event_a.get_str("_id").unwrap(),
+            dispatch_identity::dispatch_key(&f.row.id, &key_a)
+        );
+        let calls = f.calls.lock().await.len();
+        let response = Box::pin(respond(&f.state, &f.key, &body_b, &key_a)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_text(response).await;
+        assert!(body.contains("dispatch_identity_conflict"), "{body}");
+        assert!(!body.contains("response.created") && !body.contains("Here is your answer"));
+        assert_eq!(f.calls.lock().await.len(), calls);
+        assert_eq!(
+            events
+                .count_documents(doc! {"channel_id":&f.row.id,"event_id":&id_b})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            events
+                .find_one(doc! {"_id":event_a.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            event_a
+        );
+
+        // Admit B under its own key, then try to attach B's alias to A.
+        let response = Box::pin(respond(&f.state, &f.key, &body_b, &key_b)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = body_text(response).await;
+        let event_b = events
+            .find_one(doc! {"channel_id":&f.row.id,"event_id":&id_b})
+            .await
+            .unwrap()
+            .unwrap();
+        let calls = f.calls.lock().await.len();
+        let response = Box::pin(respond(&f.state, &f.key, &body_a, &key_b)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_text(response).await;
+        assert!(body.contains("dispatch_identity_conflict"), "{body}");
+        assert!(!body.contains("response.created") && !body.contains("Here is your answer"));
+        assert_eq!(f.calls.lock().await.len(), calls);
+        assert_eq!(
+            events
+                .find_one(doc! {"_id":event_a.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            event_a
+        );
+        assert_eq!(
+            events
+                .find_one(doc! {"_id":event_b.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            event_b
+        );
+    }
+}
+
 struct Fixture {
     state: AppState,
     row: NyxbotChannel,

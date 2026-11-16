@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { translate } from "../../../i18n/translate";
 import { deferred, hookHarness } from "../assistantHookTestHarness";
 import { voiceSettingsView } from "../../account/voiceSettingsModel";
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
@@ -88,6 +89,36 @@ function expand(element: Element): Element {
     },
   };
 }
+
+test("microphone denial offers Settings and only retryable permission prompts offer Try again", () => {
+  for (const canAskAgain of [true, false]) {
+    const f = setup({
+      error: "Microphone access is off.",
+      microphonePermission: { kind: "denied", canAskAgain },
+    });
+    const settings = f.find("Open Settings");
+    assert.ok(settings);
+    settings.props.onPress();
+    assert.ok(f.events.some((event) => event[0] === "openSettings"));
+    assert.equal(!!f.find("Try again"), canAskAgain);
+    f.harness.unmount();
+  }
+});
+for (const language of ["zh-CN", "zh-TW"] as const) {
+  test(`microphone denial translates Open Settings in ${language}`, () => {
+    const f = setup({
+      error: "Microphone access is off.",
+      microphonePermission: { kind: "denied", canAskAgain: false },
+      translate: (phrase) => translate(language, phrase),
+    });
+    assert.equal(f.find("Open Settings"), undefined);
+    const settings = f.find(translate(language, "Open Settings"));
+    assert.ok(settings);
+    settings.props.onPress();
+    assert.ok(f.events.some((event) => event[0] === "openSettings"));
+    f.harness.unmount();
+  });
+}
 function elements(root: Element): Element[] {
   return [
     root,
@@ -112,6 +143,7 @@ function setup(
     snapshot?: VoiceSnapshot;
     error?: string;
     recovery?: VoiceStartRecovery;
+    microphonePermission?: { kind: "denied"; canAskAgain: boolean };
     reducedMotion?: boolean;
     conflict?: VoiceSession;
     conflictThread?: string;
@@ -190,6 +222,8 @@ function setup(
     snapshot: input.snapshot ?? (input.active ? snapshot : null),
     error: input.error,
     recovery: input.recovery,
+    microphonePermission: input.microphonePermission,
+    openSettings: () => events.push(["openSettings"]),
     conflict: input.conflict ?? (null as VoiceSession | null),
     conflictThread: input.conflictThread,
     conflictUnknown: input.conflictUnknown ?? false,
@@ -2331,6 +2365,25 @@ test("replacing another chat's call requires the explicit action and waits for c
     f.events.some(([event]) => event === "close"),
     false,
   );
+  f.harness.unmount();
+});
+
+test("iOS inactivity preserves a queued restart until the previous call is confirmed ended", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  assert.match(f.text(), /Disconnecting previous call/);
+  f.appState("inactive");
+  f.appState("active");
+  await f.harness.settle();
+  assert.match(f.text(), /Disconnecting previous call/);
+  assert.equal(f.starts().length, 0);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 1);
   f.harness.unmount();
 });
 

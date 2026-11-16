@@ -2190,6 +2190,7 @@ impl crate::services::billing::lago_client::LagoApi for FundedLago {
         c: &str,
         s: &str,
     ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(s)?;
         Ok(crate::services::billing::lago_client::LagoUsage {
             customer_id: c.into(),
             subscription_id: s.into(),

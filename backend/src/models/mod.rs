@@ -22,6 +22,8 @@ pub mod billing_target;
 pub mod billing_tax_plan_epoch;
 pub mod billing_tax_profile;
 pub mod billing_topup_session;
+pub mod billing_usage_comparison;
+pub mod billing_usage_delivery;
 pub mod billing_wallet;
 pub mod bson_bytes;
 pub mod bson_datetime;
@@ -283,3 +285,5 @@ pub mod execution_permission_channel;
 pub mod assistant_tool_result;
 
 pub mod channel_turn_preparation;
+
+pub mod gateway_reply;

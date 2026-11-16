@@ -2394,3 +2394,5 @@ settings audit path as REST, with a mode-transition audit when appropriate, and
 return current settings plus `changed_sections` IDs/URLs. REST GET/PUT and stored
 documents remain compatible; REST notification updates retain their full-object
 semantics. Owner live events refresh an open panel without replacing dirty drafts.
+
+Gateway reply-target receipt waits reuse this preparation state: exact 409 `routed_reply_in_progress` and exact 503 `routed_reply_unavailable` allow only the identical same-key operation, with admission recorded only for 409. The [receipt and dispatch lookup contract](../CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup) specifies bounds, automatic compatibility readiness and output suppression after local ownership.

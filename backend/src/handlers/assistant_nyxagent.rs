@@ -474,6 +474,8 @@ struct VoiceTranscriptResponse {
     end_ms: i64,
     sealed: bool,
     complete: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    interrupted: bool,
     delivery: String,
     request_id: Option<String>,
     backend_message_id: Option<String>,
@@ -487,6 +489,7 @@ impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscript
             end_ms: v.end_ms,
             sealed: v.sealed,
             complete: v.complete,
+            interrupted: v.interrupted,
             delivery: v.delivery,
             request_id: v.request_id,
             backend_message_id: v.backend_message_id,

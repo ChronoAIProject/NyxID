@@ -239,15 +239,24 @@ async fn heals(value: Bson, with_failure: bool) {
             .unwrap();
     } else {
         assert!(
-            checkpoint(&f.db).await.is_none(),
-            "malformed status must be removed on a clean pass"
+            failures(&f.db).await.is_empty(),
+            "malformed failures must be replaced by the informational warming checkpoint"
         );
     }
     f.reconciler
         .run_once()
         .await
         .expect("repair must stop perpetual pass failures");
-    assert!(checkpoint(&f.db).await.is_none());
+    assert!(failures(&f.db).await.is_empty());
+    assert!(
+        checkpoint(&f.db)
+            .await
+            .unwrap()
+            .as_document()
+            .unwrap()
+            .get_datetime("usage_warming_since")
+            .is_ok()
+    );
     let diagnostics = crate::services::billing::startup_diagnostics(&f.db)
         .await
         .unwrap();

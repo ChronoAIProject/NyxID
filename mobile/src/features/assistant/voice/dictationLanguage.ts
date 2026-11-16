@@ -20,19 +20,35 @@ export async function saveDictationLanguage(locale: string | undefined) {
   }
 }
 
-/** "English (United States)", in the reader's own language where possible. */
-export function languageLabel(locale: string): string {
+export {
+  languageLabel,
+  languageOptions,
+  matchesLanguage,
+} from "./dictationLanguageLabels";
+
+export const RECENT_DICTATION_LANGUAGES_KEY = "nyxid.dictation_language_recent";
+export async function recentDictationLanguages(): Promise<string[]> {
   try {
-    const names = new Intl.DisplayNames(undefined, { type: "language" });
-    return names.of(locale.replace(/_/g, "-")) ?? locale;
+    const value: unknown = JSON.parse(
+      (await AsyncStorage.getItem(RECENT_DICTATION_LANGUAGES_KEY)) ?? "[]",
+    );
+    return Array.isArray(value)
+      ? value.filter((x): x is string => typeof x === "string").slice(0, 3)
+      : [];
   } catch {
-    return locale;
+    return [];
   }
 }
-
-/** Supported recognizer locales as menu options, sorted by their names. */
-export function languageOptions(supported: readonly string[]) {
-  return [...new Set(supported)]
-    .map((value) => ({ value, label: languageLabel(value) }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+export async function rememberDictationLanguage(locale: string) {
+  const recent = await recentDictationLanguages();
+  try {
+    await AsyncStorage.setItem(
+      RECENT_DICTATION_LANGUAGES_KEY,
+      JSON.stringify(
+        [locale, ...recent.filter((value) => value !== locale)].slice(0, 3),
+      ),
+    );
+  } catch {
+    // Selection remains usable for this recording.
+  }
 }

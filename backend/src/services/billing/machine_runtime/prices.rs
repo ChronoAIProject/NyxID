@@ -346,7 +346,7 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
     db: &Database,
     lago: &dyn LagoApi,
     row: &UsageMeterRow,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<super::super::usage_delivery::UsageTarget>> {
     if row.metric != BillingMetric::MachineRunningSeconds {
         return Ok(None);
     }
@@ -390,5 +390,8 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
     {
         return Err(unavailable("runtime usage subscription binding changed"));
     }
-    Ok(Some(subscription.external_id))
+    Ok(Some(super::super::usage_delivery::UsageTarget {
+        customer_id: subscription.external_customer_id,
+        subscription_id: subscription.external_id,
+    }))
 }

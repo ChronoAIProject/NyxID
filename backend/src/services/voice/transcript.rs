@@ -24,6 +24,8 @@ pub struct Segment {
     pub end_ms: i64,
     pub sealed: bool,
     pub complete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 impl std::fmt::Debug for Segment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,6 +67,10 @@ impl Transcripts {
             let segment: Segment = serde_json::from_value(event["segment"].clone())
                 .map_err(|_| AppError::VoiceProviderUnavailable)?;
             if segment.text.len() > MAX_TEXT_BYTES
+                || (segment.interrupted
+                    && (segment.speaker != Speaker::Assistant
+                        || !segment.sealed
+                        || segment.complete))
                 || segment.fragments.len() > MAX_FRAGMENTS
                 || segment
                     .fragments
@@ -196,8 +202,10 @@ impl Transcripts {
         out
     }
 }
+
 fn assemble(p: &Pending, speaker: Speaker, sealed: bool, complete: bool) -> Segment {
     Segment {
+        interrupted: false,
         fragments: p
             .fragments
             .iter()
@@ -241,7 +249,7 @@ pub async fn persist(
             if db.collection::<bson::Document>(CALLS).update_one(super::session::fence(&call),doc!{"$set":{"transcript_fence":uuid::Uuid::new_v4().to_string()}})
                 .session(&mut *tx).await?.matched_count!=1 {return Err(AppError::Conflict("Voice lease lost".into()));}
             let messages=db.collection::<AssistantMessage>(MESSAGES);
-            let metadata=VoiceTranscript{fragments:segment.fragments.clone(),session_id:call.id.clone(),segment_id:segment.id.clone(),start_ms:segment.start_ms,
+            let metadata=VoiceTranscript{interrupted:segment.interrupted,fragments:segment.fragments.clone(),session_id:call.id.clone(),segment_id:segment.id.clone(),start_ms:segment.start_ms,
                 end_ms:segment.end_ms,sealed:segment.sealed,complete:segment.complete,delivery:if segment.speaker==Speaker::User {"received"}else{"generated"}.into(),
                 request_id:None,backend_message_id:None};
             if let Some(row)=messages.find_one(doc!{"_id":&segment.id,"user_id":&call.user_id,"conversation_id":&call.conversation_id})
@@ -403,4 +411,78 @@ async fn admit_task(
         })
         .await
         .map_err(super::super::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+mod interruption_tests {
+    use super::*;
+    use mongodb::bson::{Document, doc};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn explicit_interruption_persists_and_legacy_segments_keep_their_shape() {
+        let (state, _, call) = super::super::tests::setup("voice_interruption_metadata").await;
+        let mut transcripts = Transcripts::default();
+        let mut event = json!({"type":"nyx.transcript","segment":{
+            "id":uuid::Uuid::new_v4().to_string(),"speaker":"assistant","text":"spoken words",
+            "start_ms":0,"end_ms":1000,"sealed":true,"complete":false,"interrupted":true
+        }});
+        let segment = transcripts.ingest(&event, 1000).unwrap().remove(0);
+        persist(&state.db, &call, &segment).await.unwrap();
+        let rows = state
+            .db
+            .collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
+        let row = rows
+            .find_one(doc! {"_id":&segment.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.get_document("voice")
+                .unwrap()
+                .get_bool("interrupted")
+                .unwrap()
+        );
+
+        event["segment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("interrupted");
+        event["segment"]["id"] = uuid::Uuid::new_v4().to_string().into();
+        let legacy = transcripts.ingest(&event, 1100).unwrap().remove(0);
+        assert!(!legacy.interrupted);
+        persist(&state.db, &call, &legacy).await.unwrap();
+        let row = rows
+            .find_one(doc! {"_id":&legacy.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !row.get_document("voice")
+                .unwrap()
+                .contains_key("interrupted")
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn bounded_continuations_and_disconnect_seals_never_infer_interruption() {
+        let mut transcripts = Transcripts::default();
+        let event = |id: &str, start, end| {
+            json!({"type":"session.output_transcript.delta",
+            "event_id":id,"start_ms":start,"end_ms":end,"delta":"continuing words"})
+        };
+        transcripts.ingest(&event("first", 0, 1000), 1000).unwrap();
+        let continuation = transcripts
+            .ingest(&event("next", 15000, 16000), 16000)
+            .unwrap();
+        assert!(continuation[0].sealed && !continuation[0].complete);
+        assert!(!continuation[0].interrupted);
+        assert!(
+            transcripts
+                .seal_ready(17000, true)
+                .iter()
+                .all(|row| !row.interrupted)
+        );
+    }
 }

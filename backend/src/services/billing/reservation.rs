@@ -1393,6 +1393,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),

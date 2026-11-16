@@ -90,6 +90,7 @@ impl LagoApi for Provider {
         unreachable!()
     }
     async fn current_usage(&self, c: &str, s: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(s)?;
         self.call("usage", c)?;
         Ok(LagoUsage {
             customer_id: c.into(),
@@ -153,12 +154,11 @@ enum Step {
     Rates,
 }
 impl Step {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::Taxes,
         Self::Prices,
         Self::Machine,
         Self::Push,
-        Self::Compare,
         Self::Wallet,
         Self::Rates,
     ];
@@ -366,14 +366,7 @@ impl Fixture {
                 doc! {"_id":id,"sync_status":"synced"},
             ),
             Step::Push => (USAGE_METER, doc! {"_id":id,"lago_acked":true}),
-            Step::Compare => {
-                return self
-                    .provider
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .contains(&format!("usage:{id}"));
-            }
+            Step::Compare => return self.provider.calls.lock().unwrap().is_empty(),
             Step::Wallet => (
                 BILLING_WALLET,
                 doc! {"_id":id,"balance_synced_at":{"$gt":bson::DateTime::from_millis(0)}},
@@ -459,12 +452,22 @@ regression!(provider_step_tax_isolates_bad_wallet, Taxes);
 regression!(provider_step_price_isolates_bad_service, Prices);
 regression!(provider_step_machine_isolates_bad_claim, Machine);
 regression!(provider_step_push_isolates_bad_row, Push);
-regression!(provider_step_comparison_isolates_bad_group, Compare);
+#[tokio::test]
+async fn provider_step_comparison_warms_without_reading_usage() {
+    let f = Fixture::new().await;
+    f.poison(Step::Compare).await;
+    f.healthy(Step::Compare).await;
+    f.commands.lock().unwrap().clear();
+    Step::Compare.run(&f).await.unwrap();
+    assert!(f.provider.calls.lock().unwrap().is_empty());
+    assert!(f.commands.lock().unwrap().is_empty());
+    f.db.drop().await.unwrap();
+}
 regression!(provider_step_wallet_isolates_bad_wallet, Wallet);
 regression!(provider_step_rate_isolates_failed_publication, Rates);
 #[tokio::test]
 async fn provider_step_clean_command_counts() {
-    for step in Step::ALL {
+    for step in Step::ALL.into_iter().chain([Step::Compare]) {
         let f = Fixture::new().await;
         f.commands.lock().unwrap().clear();
         step.run(&f).await.unwrap();
@@ -477,8 +480,8 @@ async fn provider_step_clean_command_counts() {
             Step::Taxes => (1, 8),
             Step::Prices => (2, 18),
             Step::Machine => (1, 17),
-            Step::Push => (1, 5),
-            Step::Compare => (1, 1),
+            Step::Push => (2, 9),
+            Step::Compare => (0, 0),
             Step::Wallet => (1, 11),
             Step::Rates => (4, 8),
         };
@@ -586,7 +589,7 @@ async fn provider_step_publication_races_are_waits() {
 }
 #[tokio::test]
 async fn provider_step_processing_failure_keeps_retry_and_visits_later_wallet() {
-    for step in [Step::Taxes, Step::Wallet, Step::Push, Step::Compare] {
+    for step in [Step::Taxes, Step::Wallet, Step::Push] {
         let f = Fixture::new().await;
         match step {
             Step::Taxes | Step::Wallet => f.wallet("a-bad").await,

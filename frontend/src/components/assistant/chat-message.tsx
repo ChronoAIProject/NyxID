@@ -1,3 +1,4 @@
+import { groupVoiceMessages } from "@/lib/assistant/voice-message-groups";
 import { larkAttachmentFailureReason } from "../../../../shared/larkAttachmentDiagnostics";
 import { activityPresentationStatus } from "@/schemas/assistant-history-compat";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -16,6 +17,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -613,8 +615,52 @@ function WaitingStatus({ label, interrupted, startedAt, capacity, queued, capaci
   );
 }
 
+function ConversationMessageFooter({
+  message,
+  content,
+  conversationId,
+  showFeedback,
+  streaming,
+}: {
+  readonly message: ChatMessage;
+  readonly content: string;
+  readonly conversationId?: string;
+  readonly showFeedback: boolean;
+  readonly streaming: boolean;
+}) {
+  const feedback = useReplyFeedback({
+    scope: "conversation",
+    parentId: conversationId ?? "",
+    messageId: message.anchorId ?? message.id,
+    initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
+    onVoted: (vote) =>
+      capture({
+        name: "ui.assistant_feedback_submitted",
+        props: { message_id: message.anchorId ?? message.id, vote },
+      }),
+  });
+  return (
+    <>
+      {streaming ? null : (
+        <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
+          <MessageCopyAction text={content} format="markdown" />
+          {showFeedback ? <ReplyFeedbackVotes feedback={feedback} /> : null}
+          <MessageTime
+            value={message.timestamp}
+            reveal
+            className={showFeedback ? "ml-1" : undefined}
+          />
+        </div>
+      )}
+      {showFeedback ? <ReplyFeedbackFollowUp feedback={feedback} /> : null}
+    </>
+  );
+}
+
 export function ChatMessageBubble({
   message,
+  contentOverride,
   interactiveCards = true,
   onRetry,
   onCheckRecovery,
@@ -623,6 +669,7 @@ export function ChatMessageBubble({
   selectedDecisionId,
 }: {
   readonly message: ChatMessage;
+  readonly contentOverride?: ReactNode;
   readonly interactiveCards?: boolean;
   readonly onRetry?: () => Promise<void> | void;
   readonly onCheckRecovery?: () => Promise<unknown> | void;
@@ -660,18 +707,6 @@ export function ChatMessageBubble({
     message.role === "assistant"
       ? sanitizeAssistantMessageContent(message.content)
       : message.content;
-  const feedback = useReplyFeedback({
-    scope: "conversation",
-    parentId: conversationId ?? "",
-    messageId: message.id,
-    initialVote: message.feedback?.vote,
-    initialComment: message.feedback?.comment,
-    onVoted: (vote) =>
-      capture({
-        name: "ui.assistant_feedback_submitted",
-        props: { message_id: message.id, vote },
-      }),
-  });
   if (message.continuation_of) {
     return <p role="status" className="px-[7px] text-13 text-muted-foreground">{translateUi("Continuing after your decision")}</p>;
   }
@@ -771,7 +806,7 @@ export function ChatMessageBubble({
         ) : null}
         {capacityNote ? (
           <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
-        ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
+        ) : content ? (contentOverride ?? <TextBlock text={content} streaming={streaming} />) : null}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
             <div className={BANNER_ROW}>
@@ -932,18 +967,14 @@ export function ChatMessageBubble({
         ) : null}
         {/* The time joins the feedback line once the reply settles; a
             streaming reply has no settled instant yet. */}
-        {streaming ? null : (
-          <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
-            <MessageCopyAction text={content} format="markdown" />
-            {showFeedback ? <ReplyFeedbackVotes feedback={feedback} /> : null}
-            <MessageTime
-              value={message.timestamp}
-              reveal
-              className={showFeedback ? "ml-1" : undefined}
-            />
-          </div>
-        )}
-        {showFeedback ? <ReplyFeedbackFollowUp feedback={feedback} /> : null}
+        <ConversationMessageFooter
+          key={message.anchorId ?? message.id}
+          message={message}
+          content={content}
+          conversationId={conversationId}
+          showFeedback={showFeedback}
+          streaming={streaming}
+        />
       </div>
     </article>
   );
@@ -951,6 +982,7 @@ export function ChatMessageBubble({
 
 export function ChatMessageEntry({
   message,
+  contentOverride,
   interactiveCards = true,
   conversationId,
   feedbackEnabled = true,
@@ -959,6 +991,7 @@ export function ChatMessageEntry({
   selectedDecisionId,
 }: {
   readonly message: ChatMessage;
+  readonly contentOverride?: ReactNode;
   readonly interactiveCards?: boolean;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
@@ -981,7 +1014,10 @@ export function ChatMessageEntry({
       </p>
     );
   }
-  const authorName = message.authorName?.trim() ?? "";
+  const authorName = [
+    message.authorName?.trim(),
+    message.role === "assistant" && message.voice ? translateUi("Voice") : undefined,
+  ].filter(Boolean).join(" · ");
   if (message.role === "user" || message.role === "assistant") {
     return (
       <div className="flex flex-col gap-1">
@@ -997,6 +1033,7 @@ export function ChatMessageEntry({
         ) : null}
         <ChatMessageBubble
           message={message}
+          contentOverride={contentOverride}
           selectedDecisionId={selectedDecisionId}
           interactiveCards={interactiveCards}
           conversationId={conversationId}
@@ -1155,7 +1192,10 @@ export function ChatMessageList({
   const previousConversationRef = useRef<string | undefined>(undefined);
   const previousUserMessageRef = useRef<string | undefined>(undefined);
   const previousWindowedRef = useRef(false);
-  const messages = session?.messages ?? EMPTY_MESSAGES;
+  const messages = useMemo(
+    () => groupVoiceMessages(session?.messages ?? EMPTY_MESSAGES),
+    [session?.messages],
+  );
   // Windowing starts when a thread opens long, or while the reader follows the
   // newest message; never under a reader who scrolled up, whose place a mode
   // switch would lose. Once on, it stays on for that thread.
@@ -1288,7 +1328,9 @@ export function ChatMessageList({
 
   // Bring a linked row into view once, mounting it first when it is windowed out.
   const focusIndex = focusMessageId
-    ? messages.findIndex((message) => message.id === focusMessageId)
+    ? messages.findIndex((message) =>
+        message.id === focusMessageId ||
+        message.voiceGroup?.some((segment) => segment.id === focusMessageId))
     : -1;
   const focusedRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -1306,7 +1348,10 @@ export function ChatMessageList({
   const revealedHashRef = useRef<string | undefined>(undefined);
   const revealHash = useCallback(() => {
     const id = hashMessageId();
-    const index = id ? messagesRef.current.findIndex((message) => message.id === id) : -1;
+    const index = id
+      ? messagesRef.current.findIndex((message) =>
+          message.id === id || message.voiceGroup?.some((segment) => segment.id === id))
+      : -1;
     if (index < 0 || !windowedRef.current) return;
     revealedHashRef.current = id;
     followingRef.current = false;
@@ -1317,7 +1362,9 @@ export function ChatMessageList({
     return () => window.removeEventListener("hashchange", revealHash);
   }, [revealHash]);
   // A link opened with the hash already set: reveal it once its row has loaded.
-  const hashTargetLoaded = messages.some((message) => message.id === hashMessageId());
+  const hashTargetLoaded = messages.some((message) =>
+    message.id === hashMessageId() ||
+    message.voiceGroup?.some((segment) => segment.id === hashMessageId()));
   useEffect(() => {
     if (hashTargetLoaded && windowed && revealedHashRef.current !== hashMessageId()) revealHash();
   }, [hashTargetLoaded, revealHash, windowed]);

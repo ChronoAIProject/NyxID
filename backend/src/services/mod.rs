@@ -608,3 +608,5 @@ pub mod shutdown;
 pub(crate) mod durable_wake_tests;
 
 pub mod channel_turn_preparation;
+
+pub mod nyxbot_dispatch_identity;

@@ -893,6 +893,8 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                voice_link_publication: None,
+                links_in_chat: None,
                 artifact_recovery_target: None,
                 artifact_delivery: None,
                 failure_reason: reason.map(|reason| {
@@ -1737,3 +1739,6 @@ async fn late_unscoped_direct_reply_uses_only_ordinary_delivery_records() {
     assert!(!counts.keys().any(|key| key.ends_with(":nyxbot_events")));
     assert_eq!(status(&f).await, "waiting");
 }
+
+#[path = "nyxbot_gateway_reply_tests.rs"]
+mod gateway_reply_tests;

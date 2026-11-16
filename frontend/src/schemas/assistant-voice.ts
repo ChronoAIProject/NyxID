@@ -3,6 +3,7 @@ import { voiceMetadataSchema } from "./platform-keys";
 import { voicePreferencesSchema } from "./assistant-nyxagent";
 
 export const voiceSessionSchema = z.object({
+  client_request_id: z.string().optional(),
   created_at: z.string().datetime(),
   closed_at: z.string().datetime().nullable(),
   id: z.string().uuid(),
@@ -32,6 +33,7 @@ const strictVoiceSnapshotSchema = z.object({
       text: z.string(),
       sealed: z.boolean(),
       complete: z.boolean(),
+      interrupted: z.boolean().optional(),
       start_ms: z.number().nonnegative().nullable().optional(),
       end_ms: z.number().nonnegative().nullable().optional(),
       fragments: z

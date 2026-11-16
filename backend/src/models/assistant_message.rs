@@ -146,6 +146,8 @@ pub struct VoiceTranscript {
     pub end_ms: i64,
     pub sealed: bool,
     pub complete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     pub delivery: String,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -170,6 +172,10 @@ pub struct Steering {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_link_publication: Option<VoiceLinkPublication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_in_chat: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_recovery_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_delivery: Option<super::generated_artifact::SavedOutcome>,
@@ -185,6 +191,13 @@ pub struct TurnMetadata {
     pub channel_delivery: Option<ChannelDelivery>,
     pub attempts: Option<u32>,
     pub capacity_wait_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoiceLinkPublication {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub links_in_chat: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

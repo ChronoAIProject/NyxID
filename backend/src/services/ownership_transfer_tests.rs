@@ -2133,9 +2133,13 @@ async fn org_deletion_follows_current_catalog_owner_and_preserves_transferred_ro
     .await
     .unwrap();
     assert!(
-        crate::services::org_service::delete_org_user(&f.db, &f.destination)
-            .await
-            .is_err()
+        crate::services::org_service::delete_org_user(
+            &f.db,
+            &f.destination,
+            &crate::services::org_service::audit::fixture_actor()
+        )
+        .await
+        .is_err()
     );
     f.db.collection::<Document>(SERVICES)
         .update_one(
@@ -2144,9 +2148,13 @@ async fn org_deletion_follows_current_catalog_owner_and_preserves_transferred_ro
         )
         .await
         .unwrap();
-    crate::services::org_service::delete_org_user(&f.db, &f.owner)
-        .await
-        .unwrap();
+    crate::services::org_service::delete_org_user(
+        &f.db,
+        &f.owner,
+        &crate::services::org_service::audit::fixture_actor(),
+    )
+    .await
+    .unwrap();
     assert!(
         f.db.collection::<Document>(SERVICES)
             .find_one(doc! {"_id": &f.service.id})
@@ -2154,9 +2162,13 @@ async fn org_deletion_follows_current_catalog_owner_and_preserves_transferred_ro
             .unwrap()
             .is_some()
     );
-    crate::services::org_service::delete_org_user(&f.db, &f.destination)
-        .await
-        .unwrap();
+    crate::services::org_service::delete_org_user(
+        &f.db,
+        &f.destination,
+        &crate::services::org_service::audit::fixture_actor(),
+    )
+    .await
+    .unwrap();
     assert!(
         f.db.collection::<Document>(SERVICES)
             .find_one(doc! {"_id": &f.service.id})

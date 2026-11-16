@@ -185,7 +185,8 @@ pub async fn progress(db: &Database) -> AppResult<Vec<Job>> {
 
 /// The org deletion cascade already removes its flag rows first. Delete member
 /// rows in bounded transactions, retaining repair receipts before their actor
-/// IDs disappear. No hint lookup can abort deletion; no population scan is needed.
+/// IDs disappear. Active admins stay for the final organization transaction.
+/// No hint lookup can abort deletion; no population scan is needed.
 pub(crate) async fn delete_org_memberships(db: &Database, org: &str) -> AppResult<()> {
     let mut deferred = false;
     loop {
@@ -197,33 +198,7 @@ pub(crate) async fn delete_org_memberships(db: &Database, org: &str) -> AppResul
             .write_concern(WriteConcern::majority())
             .and_run2(async move |session| {
                 transactions::transaction_result(
-                    async {
-                        let members: Vec<OrgMembership> = db
-                            .collection::<OrgMembership>(MEMBERSHIPS)
-                            .find(doc! {"org_user_id":&org})
-                            .sort(doc! {"member_user_id":1})
-                            .limit(BATCH)
-                            .session(&mut *session)
-                            .await?
-                            .stream(&mut *session)
-                            .try_collect()
-                            .await?;
-                        let ids: Vec<_> = members.iter().map(|m| &m.id).collect();
-                        db.collection::<OrgMembership>(MEMBERSHIPS)
-                            .delete_many(doc! {"_id":{"$in":ids}})
-                            .session(&mut *session)
-                            .await?;
-                        if !members.is_empty() {
-                            enqueue(&db, &org, session).await?;
-                        }
-                        // No hint reads in this multi-person transaction: even
-                        // bounded per-person timeouts could exhaust its lifetime.
-                        for member in &members {
-                            lifecycle::defer_person(&db, &member.member_user_id, session).await?;
-                        }
-                        Ok(members.len())
-                    }
-                    .await,
+                    delete_memberships_in_session(&db, &org, true, session).await,
                 )
             })
             .await
@@ -239,4 +214,47 @@ pub(crate) async fn delete_org_memberships(db: &Database, org: &str) -> AppResul
             .await?;
     }
     Ok(())
+}
+
+/// Early pages preserve every active admin, so competing deletion requests
+/// cannot remove each other's retry authority. The final org transaction removes
+/// those retained rows and writes the same person repair receipts atomically.
+pub(crate) async fn delete_memberships_in_session(
+    db: &Database,
+    org: &str,
+    keep_admins: bool,
+    tx: &mut ClientSession,
+) -> AppResult<usize> {
+    let mut filter = doc! {"org_user_id":org};
+    if keep_admins {
+        filter.insert(
+            "$or",
+            bson::bson!([
+                {"role":{"$ne":"admin"}}, {"revoked_at":{"$ne":null}}
+            ]),
+        );
+    }
+    let memberships = db.collection::<OrgMembership>(MEMBERSHIPS);
+    let mut query = memberships.find(filter).sort(doc! {"member_user_id":1});
+    if keep_admins {
+        query = query.limit(BATCH);
+    }
+    let members: Vec<OrgMembership> = query
+        .session(&mut *tx)
+        .await?
+        .stream(&mut *tx)
+        .try_collect()
+        .await?;
+    let ids: Vec<_> = members.iter().map(|m| &m.id).collect();
+    db.collection::<OrgMembership>(MEMBERSHIPS)
+        .delete_many(doc! {"_id":{"$in":ids}})
+        .session(&mut *tx)
+        .await?;
+    if !members.is_empty() {
+        enqueue(db, org, tx).await?;
+    }
+    for member in &members {
+        lifecycle::defer_person(db, &member.member_user_id, tx).await?;
+    }
+    Ok(members.len())
 }

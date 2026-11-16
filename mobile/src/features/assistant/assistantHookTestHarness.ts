@@ -113,11 +113,11 @@ export function hookHarness<T>(
     }
     return value;
   }
-  return {
+  const harness = {
     mock: (name: string, value: unknown) => {
       mocks[name] = value;
     },
-    load: (filename: string) => {
+    load: (filename: string): Record<string, unknown> => {
       const require = createRequire(filename);
       const output = ts.transpileModule(readFileSync(filename, "utf8"), {
         compilerOptions: {
@@ -137,17 +137,19 @@ export function hookHarness<T>(
               ? react
               : name in mocks
                 ? mocks[name]
-                : name.endsWith("/i18n/LanguageProvider")
-                  ? {
-                      useAppLanguage: () => ({
-                        language: "en",
-                        t: (
-                          phrase: string,
-                          values?: Record<string, string | number>,
-                        ) => translate("en", phrase, values),
-                      }),
-                    }
-                  : require(name),
+                : name.endsWith("/deviceLanguages")
+                  ? harness.load(require.resolve(name))
+                  : name.endsWith("/i18n/LanguageProvider")
+                    ? {
+                        useAppLanguage: () => ({
+                          language: "en",
+                          t: (
+                            phrase: string,
+                            values?: Record<string, string | number>,
+                          ) => translate("en", phrase, values),
+                        }),
+                      }
+                    : require(name),
           AbortController,
           URL,
           URLSearchParams,
@@ -189,4 +191,5 @@ export function hookHarness<T>(
       effects.clear();
     },
   };
+  return harness;
 }

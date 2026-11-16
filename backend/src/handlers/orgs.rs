@@ -867,14 +867,12 @@ pub async fn delete_org(
     let actor = auth_user.user_id.to_string();
     require_org_admin(&state.db, &actor, &org_id).await?;
 
-    org_service::delete_org_user(&state.db, &org_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "org_deleted",
-        Some(serde_json::json!({ "org_user_id": org_id })),
-    );
+    org_service::delete_org_user(
+        &state.db,
+        &org_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

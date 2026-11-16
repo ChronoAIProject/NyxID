@@ -1,4 +1,5 @@
 {
+  "Since {{value1}}": "自 {{value1}} 起",
   "Dashboard": "仪表盘",
   "AI Services": "AI 服务",
   "Tools": "工具",
@@ -12214,5 +12215,6 @@
   "Machine assignments": "机器授权",
   "Available with service restrictions": "受服务限制的可用额度",
   "MFA on": "多重验证已开启",
-  "MFA off": "多重验证已关闭"
+  "MFA off": "多重验证已关闭",
+  "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord 消息接收已暂停，正在检查保留的网关释放记录和安全等待期。NyxID 会持续检查；重试激活无法绕过此安全检查。"
 }

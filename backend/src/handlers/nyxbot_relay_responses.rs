@@ -254,20 +254,37 @@ pub(super) async fn settle_admission(
 /// Observation is not delivery. An observer disconnect may hand an unclaimed
 /// answer to the old late sender. A successful recovery read claims it first,
 /// fencing that sender atomically (including before turn admission).
-pub(super) async fn claim_replay(state: &AppState, row: &NyxbotChannel, id: &str) -> AppResult<()> {
+pub(super) async fn claim_replay(
+    state: &AppState,
+    row: &NyxbotChannel,
+    id: &str,
+) -> AppResult<bool> {
     if row.gateway_source.is_some() {
-        return Ok(());
+        return Ok(true);
     }
     let Some(stored) = recovery::load(&state.db, row, id).await? else {
-        return Ok(());
+        return Ok(false);
     };
-    state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {
-        "_id":&stored.event_key,"channel_id":&row.id,"user_id":&row.user_id,
-        "delivery.state":{"$in":[bson::Bson::Null,"waiting","pending","streamed","replay"]},
+    claim_event_replay(&state.db, row, &stored.event_key).await
+}
+
+pub(super) async fn claim_event_replay(
+    db: &mongodb::Database,
+    row: &NyxbotChannel,
+    event: &str,
+) -> AppResult<bool> {
+    let changed = db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {
+        "_id":event,"channel_id":&row.id,"user_id":&row.user_id,
+        "$or":[
+            {"delivery.state":{"$in":[bson::Bson::Null,"waiting","pending","streamed","replay"]}},
+            {"delivery.state":"preparing_text","delivery.transport":"gateway",
+             "delivery.preparation.version":1,"delivery.preparation.next":{"$in":[bson::Bson::Null,0]},
+             "delivery.preparation.gateway_receipt":bson::Bson::Null}
+        ]
     }, vec![doc! {"$set":{"gateway_replay_claimed":true,
         "delivery":{"$cond":[{"$eq":[{"$ifNull":["$delivery",bson::Bson::Null]},bson::Bson::Null]},
             "$$REMOVE",{"$mergeObjects":["$delivery",{"state":"replay"}]}]}}}]).await?;
-    Ok(())
+    Ok(changed.matched_count == 1)
 }
 
 pub(super) struct Observer {

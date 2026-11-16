@@ -3,7 +3,9 @@ import { z } from "zod";
 
 export const conversationIdSchema = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 export const activitySchema = z.object({
-  decision: z.object({ kind: z.string(), id: z.string(), state: z.string() }).nullish(),
+  decision: z
+    .object({ kind: z.string(), id: z.string(), state: z.string() })
+    .nullish(),
   id: z.string(),
   label: z.string(),
   status: historyEnum(["running", "completed", "error"]),
@@ -176,6 +178,7 @@ export const messageSchema = z.object({
       segment_id: z.string(),
       sealed: z.boolean(),
       complete: z.boolean(),
+      interrupted: z.boolean().optional(),
     })
     .nullish(),
   steering: z
@@ -295,10 +298,11 @@ const historyBodySchema = z.object({
   before_seq: z.number().int().positive().nullable(),
 });
 export const historySchema = z.preprocess(
-  (value) => isolateHistoryItems(value, {
-    acknowledgements: acknowledgementSchema,
-    approvals: historyApprovalSchema,
-  }),
+  (value) =>
+    isolateHistoryItems(value, {
+      acknowledgements: acknowledgementSchema,
+      approvals: historyApprovalSchema,
+    }),
   historyBodySchema,
 );
 export const indexSchema = z.object({

@@ -260,9 +260,14 @@ export function setupSettingsScreen(
       useNetworkStatus: () => ({ isConnected: true }),
     },
     "../../lib/api/mobileApi": { mobileApi: {} },
+    "../assistant/voice/DictationLanguagePicker": {
+      DictationLanguagePicker: "DictationLanguagePicker",
+    },
     "../assistant/voice/useDictationLanguage": {
+      AUTOMATIC_DICTATION_LANGUAGE: "automatic",
       useDictationLanguage: () => ({
         value: "automatic",
+        label: "English (United States)",
         options: [],
         choose() {},
       }),

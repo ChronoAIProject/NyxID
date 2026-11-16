@@ -412,6 +412,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    crate::services::org_service::cascade::ensure_indexes(db).await?;
+    crate::services::org_service::diagnostics::ensure_indexes(db).await?;
+
     // ── users ──
     let users = db.collection::<mongodb::bson::Document>("users");
     // Backfill user_type before changing the email index. Without this, legacy
@@ -3374,6 +3377,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     // ── usage_meter ──
+    crate::services::billing::usage_delivery::ensure_indexes(db).await?;
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
     usage_meter.create_indexes(billing_hold_indexes()).await?;
     usage_meter

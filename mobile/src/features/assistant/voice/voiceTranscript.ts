@@ -54,6 +54,7 @@ export function mergeVoiceTranscript(
         segment_id: caption.id,
         sealed: caption.sealed,
         complete: caption.complete,
+        ...(caption.interrupted ? { interrupted: true } : {}),
       },
     };
   });
@@ -80,6 +81,7 @@ export function mergeVoiceTranscript(
         segment_id: caption.id,
         sealed: caption.sealed,
         complete: caption.complete,
+        ...(caption.interrupted ? { interrupted: true } : {}),
       },
     };
     // A caption already in history anchors unknown rows on either side. Real

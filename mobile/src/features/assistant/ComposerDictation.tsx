@@ -14,6 +14,9 @@ import { Check, Mic, Square, X } from "lucide-react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { DictationLanguagePicker } from "./voice/DictationLanguagePicker";
+import { useDictationLanguage } from "./voice/useDictationLanguage";
+import { languageLabel } from "./voice/dictationLanguage";
 import { formatElapsed } from "./voice/dictationLevel";
 import type { ComposerDictationState } from "./useComposerDictation";
 
@@ -122,6 +125,8 @@ export function ComposerDictationNotice({
   dictation: ComposerDictationState;
 }) {
   const { t } = useAppLanguage();
+  const language = useDictationLanguage(!!dictation.error);
+  const [picker, setPicker] = useState(false);
   if (!dictation.error) return null;
   return (
     <View style={styles.notice}>
@@ -137,6 +142,23 @@ export function ComposerDictationNotice({
             onPress={dictation.openSettings}
           />
         )}
+        {dictation.chooseLanguage ? (
+          <ActionButton
+            label={t("Choose language")}
+            compact
+            variant="secondary"
+            onPress={() => setPicker(true)}
+          />
+        ) : !dictation.permissionDenied ? (
+          <ActionButton
+            label={t("Retry")}
+            compact
+            variant="secondary"
+            onPress={() => {
+              void dictation.retry();
+            }}
+          />
+        ) : null}
         <ActionButton
           label={t("Dismiss")}
           accessibilityLabel={t("Dismiss dictation message")}
@@ -145,6 +167,12 @@ export function ComposerDictationNotice({
           onPress={dictation.discard}
         />
       </View>
+      {picker && (
+        <DictationLanguagePicker
+          language={language}
+          onClose={() => setPicker(false)}
+        />
+      )}
     </View>
   );
 }
@@ -158,6 +186,9 @@ function DictationInline({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const language = useDictationLanguage(true);
+  const [picker, setPicker] = useState(false);
+  const { language: uiLanguage } = useAppLanguage();
   const { fontScale } = useWindowDimensions();
   const minHeight = composerInputMinHeight(fontScale);
   const maxHeight = Math.max(minHeight, useComposerHeight());
@@ -237,6 +268,21 @@ function DictationInline({
             </View>
           )}
         </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("Choose language")}
+          onPress={() => setPicker(true)}
+          style={styles.languageChip}
+        >
+          <Text
+            numberOfLines={1}
+            style={[styles.languageLabel, { color: colors.textSecondary }]}
+          >
+            {dictation.recognitionLocale
+              ? languageLabel(dictation.recognitionLocale, uiLanguage)
+              : language.label}
+          </Text>
+        </Pressable>
         <View style={styles.inlineWaveRow}>
           <View style={styles.inlineMeter}>
             {capturing ? (
@@ -303,11 +349,24 @@ function DictationInline({
           )}
         </Pressable>
       </View>
+      {picker && (
+        <DictationLanguagePicker
+          language={language}
+          onClose={() => setPicker(false)}
+        />
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  languageChip: {
+    maxWidth: "30%",
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  languageLabel: { fontFamily: fonts.body, fontSize: 11 },
   target: {
     width: 44,
     height: 44,

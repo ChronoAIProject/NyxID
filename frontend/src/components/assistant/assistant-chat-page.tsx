@@ -1,4 +1,6 @@
 import { useAgentDetailsNavigation } from "@/hooks/use-agent-details-navigation";
+import { TextBlock } from "./blocks/text-block";
+import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -35,6 +37,7 @@ import { VoiceCaptionText } from "./voice-captions";
 import {
   mergeVoiceCaptions,
   voiceDeliveryRevision,
+  type VoiceCaption,
   type VoiceView,
 } from "./voice-caption-state";
 import { LazyVoicePanel as VoicePanel } from "./lazy-voice-panel";
@@ -76,7 +79,7 @@ import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageEntry, ChatMessageList } from "@/components/assistant/chat-message";
 import { WorkingContextPanel } from "@/components/assistant/working-context-panel";
-import type { ChatSessionState } from "@/lib/assistant/chat-types";
+import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import {
   DirectChatControls,
   DirectModeBanner,
@@ -125,6 +128,38 @@ function sidebarConversation(
 
 export function AevatarAssistantMessageList({ session, bottomInset, footer, notice, projectionVersion, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly footer?: React.ReactNode; readonly notice?: React.ReactNode; readonly projectionVersion?: string; readonly emptyDescription?: React.ReactNode }) {
   useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} footer={footer} notice={notice} projectionVersion={projectionVersion} emptyDescription={emptyDescription} />; }
+
+export function VoiceMessageGroupContent({
+  message,
+  liveCaptions,
+  playbackMs,
+}: {
+  readonly message: ChatMessage;
+  readonly liveCaptions: readonly VoiceCaption[];
+  readonly playbackMs: number;
+}) {
+  return (
+    <>
+      {message.voiceGroup?.map((segment) => {
+        const live = liveCaptions.find((caption) => caption.id === segment.id);
+        return (
+          <div
+            key={segment.id}
+            id={segment.id === message.id ? undefined : `message-${segment.id}`}
+            className="mt-3 first:mt-0"
+          >
+            {live ? (
+              <VoiceCaptionText caption={live} playbackMs={playbackMs} />
+            ) : (
+              <TextBlock text={sanitizeAssistantMessageContent(segment.content)} />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 /** How the NyxAgent thread page renders an assistant reply: the entry with
  * author header and feedback controls, and Retry for a failed reply. */
 export function NyxAgentAssistantEntry({
@@ -133,17 +168,20 @@ export function NyxAgentAssistantEntry({
   retry,
   checkRecovery,
   selectedDecisionId,
+  contentOverride,
 }: {
   readonly message: import("@/lib/assistant/chat-types").ChatMessage;
   readonly conversationId: string | undefined;
   readonly retry: (messageId: string) => Promise<void>;
   readonly checkRecovery: (messageId: string) => Promise<unknown>;
   readonly selectedDecisionId?: string;
+  readonly contentOverride?: React.ReactNode;
 }) {
   useUiTranslation();
   return (
     <ChatMessageEntry
       message={message}
+      contentOverride={contentOverride}
       selectedDecisionId={selectedDecisionId}
       conversationId={conversationId}
       feedbackEnabled
@@ -1193,6 +1231,22 @@ function NyxAgentThreadPage() {
             <NyxAgentThreadMessageList
               session={voiceSession}
               renderMessage={(message) => {
+                if (message.voiceGroup) return (
+                  <NyxAgentAssistantEntry
+                    message={message}
+                    conversationId={chat.session.conversationId}
+                    retry={retryFailedMessage}
+                    checkRecovery={checkFailedMessage}
+                    selectedDecisionId={search.card}
+                    contentOverride={
+                      <VoiceMessageGroupContent
+                        message={message}
+                        liveCaptions={liveCaptions}
+                        playbackMs={currentVoice?.activity?.playbackMs ?? 0}
+                      />
+                    }
+                  />
+                );
                 const caption = liveCaptions.find(
                   (item) => item.id === message.id,
                 );

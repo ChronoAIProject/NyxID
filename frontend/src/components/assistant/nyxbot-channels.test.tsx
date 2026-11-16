@@ -1,4 +1,7 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { formatDateTime } from "@/lib/utils";
+import { appI18n } from "@/i18n/instance";
+import zh from "@/i18n/locales/zh-CN.json";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { assistantAgentSchema, nyxAgentChannelAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
@@ -517,4 +520,39 @@ it.each(["unknown", "unconfirmed"])("does not call legacy relay status %s workin
   expect(screen.queryByText("Working on NyxID relay.")).not.toBeInTheDocument();
   if (status === "unconfirmed") expect(screen.getByText(/Intake not confirmed: No authenticated inbound has been confirmed/)).toBeVisible();
   expect(screen.queryByText(/delivery failed/)).not.toBeInTheDocument();
+});
+
+
+it.each(["gateway_native_draining", "relay_draining"])("preserves intake evidence and the correct retry action for %s", (code) => {
+  for (const intake of [undefined, { receiving_side: "nyxid_relay", state: "stopped", code: "discord_relay_blocked", block_reason: "auth_refused", handed_over_at: at, last_inbound_at: at }]) {
+    data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", gateway_native_activation: code, discord_intake: intake })];
+    render(<ChannelBotsManager agents={[]} />);
+    if (code === "gateway_native_draining") {
+      expect(screen.getByText(/Discord intake is paused while/)).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Retry native gateway now" })).not.toBeInTheDocument();
+    } else {
+      expect(screen.queryByText(/Discord intake is paused while/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Retry native gateway now" })).toBeVisible();
+      if (!intake) expect(screen.getByText("Waiting for the native gateway to release Discord before the relay can resume.")).toBeVisible();
+    }
+    if (intake) {
+      expect(screen.getByText("Receiving side: NyxID relay. Intake: stopped.")).toBeVisible();
+      expect(screen.getByText(/^Last confirmed inbound:/)).toHaveTextContent(formatDateTime(at));
+      expect(screen.getByText(/^Handed over:/)).toHaveTextContent(formatDateTime(at));
+      expect(screen.getByText("Intake blocked by: auth_refused.")).toBeVisible();
+    }
+    expect(screen.queryByText(/activation did not complete|Working on NyxID relay/)).not.toBeInTheDocument();
+    cleanup();
+  }
+});
+
+it("renders the Discord release safety explanation in Chinese without a retry button", async () => {
+  appI18n.addResourceBundle("zh-CN", "app", zh, true, true);
+  await act(() => appI18n.changeLanguage("zh-CN"));
+  try {
+    data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", gateway_native_activation: "gateway_native_draining" })];
+    render(<ChannelBotsManager agents={[]} />);
+    expect(screen.getByText(zh["Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."])).toBeVisible();
+    expect(screen.queryByRole("button", { name: /重试|Retry native/ })).not.toBeInTheDocument();
+  } finally { await act(() => appI18n.changeLanguage("en")); }
 });

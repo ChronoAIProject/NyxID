@@ -183,11 +183,11 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     assert_eq!(
         commands.len(),
         46,
-        "clean pass includes the holdless state and registry reads"
+        "warming keeps the bounded prepared-receipt read and holdless reads"
     );
     assert_eq!(
         commands.iter().filter(|c| c.as_str() == "delete").count(),
-        1
+        0
     );
     assert!(failures(&db).await.is_empty());
     db.collection::<Document>("credit_schedules")
@@ -234,14 +234,14 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         46,
         "clearing status adds no command"
     );
-    assert_eq!(count("update"), 0);
+    assert_eq!(count("update"), 1);
     assert_eq!(
         count("delete"),
-        1,
-        "clearing status is the normal lease release delete"
+        0,
+        "clearing failures retains the informational warming timestamp"
     );
     println!(
-        "BILLING_PASS_STATUS failure_commands=46 clear_commands=46 failed_updates=1 clear_deletes=1 added_commands=0"
+        "BILLING_PASS_STATUS failure_commands=46 clear_commands=46 failed_updates=1 clear_updates=1 added_commands=0"
     );
     db.drop().await.unwrap();
 }
@@ -270,11 +270,9 @@ async fn billing_pass_isolation_drain_preserves_unattempted_failure() {
         .delete_one(doc! {"_id":"poison"})
         .await
         .unwrap();
-    f.db.collection::<Document>(USAGE)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"lago_acked":false,"updated_at":bson::DateTime::from_millis(0)}},
-        )
+    // Acknowledged meter/receipt pairs are terminal; drain a fresh delivery.
+    f.db.collection::<UsageMeterRow>(USAGE)
+        .insert_one(finalized_row("drain-fresh-delivery"))
         .await
         .unwrap();
     f.db.collection::<Document>(USAGE)
