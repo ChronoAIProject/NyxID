@@ -43,7 +43,9 @@ try {
     legacyFork: () => repo.legacyForks(refs.branch, refs.onto, LANGUAGES.map((language) => `src/i18n/locales/${language}.json`)),
   });
   for (const role of ["base", "branch", "onto"]) ({ base, branch, onto })[role].catalogs.mobile = chosen[role];
-  const { result, conflicts } = mergeDeltas(base.catalogs, branch.catalogs, onto.catalogs, ["mobile"], emptyBase);
+  // Then a mixed branch's own edits to the split areas it inherited (mirrored edits are no-ops).
+  const followUps = chosen.areaDelta ? { mobile: { label: "mobile split areas", ...chosen.areaDelta } } : {};
+  const { result, conflicts } = mergeDeltas(base.catalogs, branch.catalogs, onto.catalogs, ["mobile"], emptyBase, followUps);
   if (conflicts.length) throw new Error(`No files written. Resolve these catalog divergences explicitly:\n${conflicts.join("\n")}`);
   const sources = emptyBase ? branch.sources : [...onto.sources, ...branch.sources];
   const portions = consolidateDuplicates(placeCatalogs(result.mobile, sources, emptyBase ? {} : onto.portions));
