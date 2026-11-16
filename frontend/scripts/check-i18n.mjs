@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { identicalDuplicateWarnings } from "../../shared/i18n/catalog-core.mjs";
 import {
   FIXTURE_SOURCE, LANGUAGES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, allCatalogFiles, analyzePortions,
   canonicalText, catalogImportIssue, englishOverrides as makeOverrides, isTestSource, legacyImportReplacement,
@@ -21,9 +22,7 @@ const catalogs = new Map();
 const portions = loadPortions(locales);
 const analysis = analyzePortions(portions);
 issues.push(...analysis.issues);
-for (const { key, portions: owners, identical } of analysis.duplicates) {
-  if (identical) console.warn(`i18n: identical duplicate ${key} in ${owners.join(", ")}; run npm run sync:i18n`);
-}
+for (const warning of identicalDuplicateWarnings(analysis, "run npm run sync:i18n")) console.warn(warning);
 for (const file of allCatalogFiles(locales)) {
   try {
     if (fs.readFileSync(file, "utf8") !== canonicalText(readJson(file))) issues.push(`${path.relative(root, file)}: non-canonical catalog; run npm run sync:i18n`);

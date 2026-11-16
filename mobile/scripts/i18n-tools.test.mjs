@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, test } from "node:test";
 import { canonicalText } from "../../shared/i18n/catalog-core.mjs";
 import ts from "typescript";
-import { LANGUAGES, auditCatalogs, barrelIdentifiers, barrelText, legacyImportIssues } from "./lib/i18n-catalogs.mjs";
+import { LANGUAGES, auditCatalogs, barrelIdentifiers, barrelText, catalogWarnings, legacyImportIssues } from "./lib/i18n-catalogs.mjs";
 import { portionForPath } from "./lib/i18n-portions.mjs";
 
 const mobile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -112,6 +112,12 @@ describe("mobile catalog audit", () => {
       "mobile duplicate key has differing values: a (account, auth)",
       "unexpected file notes.txt; catalogs live in <area>/{zh-CN,zh-TW}.json",
     ]);
+  });
+
+  test("warns about identical cross-area duplicates without failing", () => {
+    const dir = catalogDir({ account: ["Save", "Profile"], auth: ["Save", "Sign in"] });
+    assert.deepEqual(auditCatalogs(dir), []);
+    assert.deepEqual(catalogWarnings(dir), ["i18n: identical duplicate Save in account, auth; run pnpm sync:i18n"]);
   });
 
   test("flags an empty area file", () => {
@@ -334,6 +340,7 @@ describe("mobile adopt and sync tools", () => {
     for (const language of LANGUAGES) write(path.join(r.locales, "auth", `${language}.json`), JSON.stringify({ "Change me": zh("Change me", language), "Sign in": zh("Sign in", language) }));
     const synced = r.run("sync-i18n.mjs");
     assert.equal(synced.status, 0, synced.stderr);
+    assert.equal(synced.stderr, "i18n: identical duplicate Change me in account, auth; moved to shared\n");
     assert.deepEqual(Object.keys(readCatalog(r.locales, "shared", "zh-TW")), ["Change me", "Save"]);
     assert.equal(fs.existsSync(path.join(r.locales, "account")), false);
     assert.deepEqual(auditCatalogs(r.locales), []);

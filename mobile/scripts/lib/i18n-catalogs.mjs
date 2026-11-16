@@ -142,6 +142,9 @@ export function auditCatalogs(dir = locales) {
   return issues;
 }
 
+/** Warn-only identical cross-area duplicates (see identicalDuplicateWarnings for why they do not fail). */
+export const catalogWarnings = (dir = locales, action = "run pnpm sync:i18n") => core.identicalDuplicateWarnings(analyzePortions(loadPortions(dir)), action);
+
 /** Pre-split monoliths and the barrel each import must use instead (mobile has no import aliases). */
 export const LEGACY_CATALOG_IMPORTS = {
   "src/i18n/locales/zh-CN.json": "src/i18n/locales/zh-CN",

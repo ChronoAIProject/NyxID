@@ -115,6 +115,17 @@ export function scanUsage(sources, keys, { isSource, areaForPath, literals }) {
   ]));
 }
 
+/**
+ * Warnings for keys stored in several areas with identical values in every
+ * language. These only warn (sync moves them to `shared`): two branches can add
+ * the same phrase to different areas and git merges both cleanly, so failing
+ * would turn main red with nothing to resolve. Differing values remain errors.
+ */
+export function identicalDuplicateWarnings(analysis, action) {
+  return analysis.duplicates.filter(({ identical }) => identical)
+    .map(({ key, portions }) => `i18n: identical duplicate ${key} in ${portions.join(", ")}; ${action}`);
+}
+
 /** Catalog operations bound to one package's language list and issue label. */
 export function catalogTools(languages, { label }) {
   const emptyLanguages = () => Object.fromEntries(languages.map((language) => [language, {}]));

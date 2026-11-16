@@ -505,6 +505,11 @@ regenerates both barrels (including after a new area directory is added).
 `pnpm test` enforces the layout in CI: sorted catalogs, no empty area files,
 per-area zh-CN/zh-TW parity, placeholders, no differing duplicates, barrels
 that import exactly the existing areas, and no leftover monolith.
+A phrase stored in two areas with identical values only warns, in both
+`pnpm sync:i18n` and `pnpm test` output, and sync moves it to `shared`. As on
+the web this is deliberate: two branches can add the same phrase to different
+areas, git merges both cleanly, and failing would turn `main` red with nothing
+to resolve. Differing values fail.
 
 #### In-flight native branches from before the split
 
