@@ -63,6 +63,7 @@ export const settingsNames = [
   "LanguageSettings",
   "QuickAccessSettings",
   "VoiceSettings",
+  "AppleWatchSettings",
   "PrivacySettings",
   "ProfileEdit",
   "SessionDetail",

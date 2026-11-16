@@ -46,6 +46,7 @@ import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
 import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
 import { VoiceSettingsScreen } from "../features/account/VoiceSettingsScreen";
+import { AppleWatchSettingsScreen } from "../features/account/AppleWatchSettingsScreen";
 import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
 import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
 import {
@@ -787,6 +788,11 @@ function SettingsSheetRoute({
             name="VoiceSettings"
             component={VoiceSettingsScreen}
             options={{ title: t("Voice") }}
+          />
+          <SheetStack.Screen
+            name="AppleWatchSettings"
+            component={AppleWatchSettingsScreen}
+            options={{ title: t("Apple Watch") }}
           />
           <SheetStack.Screen
             name="PrivacySettings"

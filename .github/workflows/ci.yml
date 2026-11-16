@@ -851,6 +851,14 @@ jobs:
       - run: pnpm test
       - run: pnpm test:jest --runInBand
       - run: pnpm typecheck
+      # The Apple Watch app's Foundation-only core (sign-in, refresh, API
+      # contracts, reply parsing) is plain SwiftPM, so it runs on the
+      # runner's preinstalled Swift without Xcode or a simulator.
+      - name: Apple Watch core tests
+        working-directory: mobile/ios/NyxIDWatch
+        run: |
+          swift --version
+          swift test
 
   # ---------------------------------------------------------------------------
   # CLI wizard bundle: source-closure freshness check.
