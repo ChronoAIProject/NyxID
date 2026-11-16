@@ -142,7 +142,7 @@ try {
   const branch = snapshot(refs.branch, { sources: true });
   const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
   // A mixed branch (monoliths kept beside split areas) already contains main up to the latest main it
-  // merged, the merge-base with onto: its split areas are diffed against that.
+  // merged, the merge-base with onto: its split areas and its unsplit family files are diffed against that.
   const mixed = Boolean(branch.areas && branch.monolith);
   const mergeBase = mixed ? tryGit("merge-base", refs.branch, refs.onto) : null;
   const latestMerged = mergeBase ? snapshot(mergeBase, { sources: false }) : null;
@@ -150,6 +150,7 @@ try {
     languages: LANGUAGES, adopt: "npm run adopt:i18n --", inherited: latestMerged?.areas ?? null,
     legacyFork: () => legacyForks(refs.branch, refs.onto),
   });
+  const familyBase = mixed && latestMerged ? latestMerged.families : base.families;
   const conflicts = [];
   const merged = emptyLanguages();
   const families = Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()]));
@@ -164,7 +165,7 @@ try {
       conflicts.push(...areaDelta.conflicts);
     }
     for (const family of FAMILIES) {
-      const delta = applyDelta(base.families[family][language], branch.families[family][language], refs.base === "empty" ? {} : onto.families[family][language], `${family}/${language}`);
+      const delta = applyDelta(familyBase[family][language], branch.families[family][language], refs.base === "empty" ? {} : onto.families[family][language], `${family}/${language}`);
       families[family][language] = delta.result;
       conflicts.push(...delta.conflicts);
     }

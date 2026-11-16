@@ -296,7 +296,8 @@ be lost. A mixed branch's split areas already contain `main` up to the last
 `main` it merged (its merge-base with `--onto`), so they are compared with that
 commit: any addition, change or removal the branch made to its areas is adopted
 after its monolith edits, and a contradiction between the two is reported as a
-conflict.
+conflict. Its unsplit `common`, `errors` and `wizard` files contain that `main`
+too, so they get an ordinary three-way merge against the same commit.
 
 When it refuses a branch that keeps the monoliths, it finds the branch's
 legacy fork (the newest pre-split commit the branch is based on through its own
