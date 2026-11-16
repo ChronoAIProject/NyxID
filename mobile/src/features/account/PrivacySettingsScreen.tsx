@@ -78,7 +78,7 @@ export function PrivacySettingsScreen(
     onError: () =>
       setToast({
         message:
-          "Could not save account analytics permission.",
+          "Could not save account analytics permission. This device remains off; retry to withdraw across devices.",
         kind: "error",
       }),
   });
@@ -168,7 +168,7 @@ export function PrivacySettingsScreen(
     },
     onError: () =>
       setToast({
-        message: "Could not save updated analytics permission.",
+        message: t("Could not save updated analytics permission."),
         kind: "error",
       }),
   });

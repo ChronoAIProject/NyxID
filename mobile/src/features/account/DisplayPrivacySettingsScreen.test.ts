@@ -300,3 +300,31 @@ for (const [accountPolicy,devicePolicy,offered,expected] of [["2",1,true,2],["1"
   assert.equal(env.analyticsSaves[0]![5],expected);
   env.harness.unmount();
 });
+
+for (const [language, reviewMessage] of [
+  ["en", "Could not save updated analytics permission."],
+  ["zh-CN", "无法保存更新后的分析授权。"],
+  ["zh-TW", "無法儲存更新後的分析授權。"],
+] as const) {
+  test(`Privacy policy-1 failure feedback matches main (${language})`, () => {
+    const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", {
+      diagnosticsOffered: false, accountPolicy: "1", devicePolicy: 1, language,
+    });
+    env.mutationOptions[0]!.onError!();
+    env.harness.flush();
+    const toast = env.all().find((node) => node.type === "ToastOverlay");
+    assert.equal(toast?.props.toast?.message,
+      "Could not save account analytics permission. This device remains off; retry to withdraw across devices.");
+    env.harness.unmount();
+  });
+  test(`Privacy policy-2 review failure feedback is localized (${language})`, () => {
+    const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", {
+      diagnosticsOffered: true, language,
+    });
+    env.mutationOptions[2]!.onError!();
+    env.harness.flush();
+    const toast = env.all().find((node) => node.type === "ToastOverlay");
+    assert.equal(toast?.props.toast?.message, reviewMessage);
+    env.harness.unmount();
+  });
+}
