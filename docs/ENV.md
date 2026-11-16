@@ -512,7 +512,7 @@ The erasure credential is a project API credential, not the ingestion DSN. Prese
 
 ## Audit Log Hash Chain (Optional)
 
-Broker binding and consent revocations commit metadata-only audit intents with their source writes; the relay chains each stable event UUID once. Old replicas retain their existing behavior, and rollback parks intents until a compatible worker returns.
+Broker binding/consent revocations and administrator user creation, profile/role/status changes, password resets, email verification and session revocation commit metadata-only audit intents with their source writes; the relay chains each stable event UUID once. Administrator profile edits retain the prior audit facts, including submitted display names and email values; avatar URLs retain origin/path while query strings, fragments and credential-bearing userinfo are removed. Required metadata is bounded to 16 KiB before mutation commits. Required audit strings retain byte-for-byte values up to their UTF-8 byte cap (identifiers/IP/key name 256, User-Agent 1,024, email/display name 512, sanitized avatar URL 4,096), including a visible `...[truncated]` suffix when shortened; request validation and stored account values are unchanged. Old replicas retain their existing behavior, and rollback parks intents until a compatible worker returns.
 
 NyxID audit-log rows created after this feature is enabled are tamper-evident. Each chained row carries `seq`, `prev_hash`, and `entry_hash`; `entry_hash` is an HMAC-SHA256 over a canonical encoding of the row content and the previous row's hash. The HMAC key stays in process memory and is never written to MongoDB, so a database-only attacker cannot recompute a valid chain after editing, deleting, inserting, or reordering chained rows.
 
