@@ -519,6 +519,35 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
   });
 
   describe("shapes adoption models", () => {
+    it.each(["forward", "reverse"])("adopts a %s merge (legacy branch checked out, or split branch checked out)", (direction) => {
+      const f = fixture();
+      if (direction === "reverse") f.git("checkout", "-q", "split");
+      expect(spawnSync("git", ["merge", "--no-commit", direction === "reverse" ? "legacy" : "split"], { cwd: f.repo, encoding: "utf8" }).status).not.toBe(0);
+      const result = f.adopt();
+      expect(result.status, result.stderr).toBe(0);
+      if (direction === "reverse") {
+        expect(result.stdout).toContain("i18n: MERGE_HEAD has the legacy monoliths and HEAD does not, so MERGE_HEAD is adopted onto HEAD");
+        expect(result.stdout).toContain("i18n: adopted MERGE_HEAD");
+      } else expect(result.stdout).not.toContain("MERGE_HEAD is adopted onto HEAD");
+      f.verify();
+    });
+
+    it("guides a reverse merge of a branch that kept the monoliths, and the guidance completes it", () => {
+      const f = fixture();
+      mainMovesAfterMixedMerge(f);
+      f.git("checkout", "-q", "split");
+      spawnSync("git", ["merge", "--no-commit", "legacy"], { cwd: f.repo, encoding: "utf8" });
+      const before = f.git("status", "--porcelain");
+      const refused = f.adopt();
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain("MERGE_HEAD (--branch) keeps the legacy monoliths beside split areas it inherited from main");
+      expect(refused.stderr).toContain(`  npm run adopt:i18n -- --branch MERGE_HEAD --base ${f.base} --onto HEAD`);
+      expect(f.git("status", "--porcelain")).toBe(before);
+      const guided = runGuidance(f, refused.stderr);
+      expect(guided.status, guided.stderr).toBe(0);
+      expectNothingReverted(f);
+    });
+
     it("places a new key by the branch's source file, after the key's area on onto (N11)", () => {
       const f = fixture();
       commitMergeKeepingMonoliths(f);

@@ -49,7 +49,15 @@ function resolveRefs() {
   if (exists("MERGE_HEAD")) {
     const heads = fs.readFileSync(path.resolve(repoRoot, git("rev-parse", "--git-path", "MERGE_HEAD")), "utf8").split("\n").filter(Boolean);
     if (heads.length > 1) throw new Error(`No files written. MERGE_HEAD names ${heads.length} heads (an octopus merge), but adoption reads one branch and one onto at a time; merge one branch at a time and run npm run adopt:i18n after each.`);
-    return { branch: "HEAD", onto: "MERGE_HEAD", base: git("merge-base", "HEAD", "MERGE_HEAD") };
+    const base = git("merge-base", "HEAD", "MERGE_HEAD");
+    // A legacy branch merged into a split one: the incoming side is the branch being adopted. The
+    // three-way result is the same either way round, so the roles are swapped rather than refused.
+    const hasMonoliths = (ref) => LANGUAGES.some((language) => tryGit("cat-file", "-e", `${ref}:${prefix}/src/i18n/locales/${language}.json`) !== null);
+    if (!hasMonoliths("HEAD") && hasMonoliths("MERGE_HEAD")) {
+      console.log("i18n: MERGE_HEAD has the legacy monoliths and HEAD does not, so MERGE_HEAD is adopted onto HEAD (a legacy branch merged into a split one).");
+      return { branch: "MERGE_HEAD", onto: "HEAD", base };
+    }
+    return { branch: "HEAD", onto: "MERGE_HEAD", base };
   }
   throw new Error(`no merge, rebase or cherry-pick detected; provide --branch, --base and --onto.\n${USAGE}`);
 }
