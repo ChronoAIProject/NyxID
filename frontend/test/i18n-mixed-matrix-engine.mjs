@@ -116,6 +116,8 @@ export function historyFacts(history) {
  * The message each run-level refusal must print. A `git cherry-pick -m` that applied cleanly leaves
  * nothing in progress (`run.nothingInProgress`); adoption then says so instead (NOTHING_IN_PROGRESS).
  */
+/** The --branch and --onto an auto-detected merge adopts: the legacy side onto the split side. */
+export const mergeRoles = (history) => history.reverse ? { branch: "MERGE_HEAD", onto: "HEAD" } : { branch: "HEAD", onto: "MERGE_HEAD" };
 export const NOTHING_IN_PROGRESS = /no merge, rebase or cherry-pick detected/;
 export const REFUSALS = {
   unreferenced: /neither .* has split areas/,
@@ -435,7 +437,8 @@ export function randomHistory(seed) {
       branchCommit();
     }
     mainEdit();
-    return { title: `random seed ${seed}: the branch made its own split areas${variant === "selfMadeAreas" ? ", then merged main's" : ""}`, seed, route: "merge", steps };
+    const reverse = Math.floor(seed / 10) % 2 === 1;
+    return { title: `random seed ${seed}: the branch made its own split areas${variant === "selfMadeAreas" ? ", then merged main's" : ""}${reverse ? ", merged into main" : ""}`, seed, route: "merge", reverse, steps };
   }
   const keeps = variant === "rebaseAllLinear" ? 0 : variant === "unrelatedOnto" ? rand.int(1, 2) : rand.int(0, 4);
   for (let index = 0; index < keeps; index++) {
@@ -453,8 +456,10 @@ export function randomHistory(seed) {
   if (route === "unrelatedOnto") return { title: `random seed ${seed}: --onto shares no history with the branch`, seed, route, steps };
   const all = variant === "rebaseAllLinear" || variant === "rebaseAllMerges";
   const count = route === "rebase" && !all ? Math.min(trailing, (Math.floor(seed / 10) % 2) + 1) : undefined;
-  const description = `${steps.filter((step) => step.t === "merge" && !step.keep).length} legacy and ${keep} keep-monolith merges, ${all ? "rebase of the whole branch" : route}${count ? ` of ${count}` : ""}`;
-  return { title: `random seed ${seed}: ${description}`, seed, route, count, all, steps };
+  // Half the merge routes merge the legacy branch into main (split checked out) instead.
+  const reverse = route === "merge" && Math.floor(seed / 10) % 2 === 1;
+  const description = `${steps.filter((step) => step.t === "merge" && !step.keep).length} legacy and ${keep} keep-monolith merges, ${all ? "rebase of the whole branch" : reverse ? "merge into main" : route}${count ? ` of ${count}` : ""}`;
+  return { title: `random seed ${seed}: ${description}`, seed, route, reverse, count, all, steps };
 }
 
 /**
@@ -722,8 +727,9 @@ async function rehearseIn(repo, history, cases, pkg) {
   const before = async () => ({ status: await git("status", "--porcelain"), monoliths: pkg.languages.filter((language) => fs.existsSync(monolithFile(language))) });
   const run = { repo, locales, fork, route: history.route, stops: [] };
   if (history.route === "merge") {
-    await git("checkout", "-q", "legacy");
-    await exec("git", ["merge", "--no-commit", "-q", "-X", "no-renames", "main"], { cwd: repo });
+    // `reverse`: the legacy branch is merged into main (split checked out); adoption swaps the roles.
+    await git("checkout", "-q", history.reverse ? "main" : "legacy");
+    await exec("git", ["merge", "--no-commit", "-q", "-X", "no-renames", history.reverse ? "legacy" : "main"], { cwd: repo });
     run.state = await before();
     run.refused = await adopt();
     run.command = run.refused.stderr.split("\n").find((line) => line.startsWith(`  ${pkg.adoptCommand} --branch`));
@@ -817,7 +823,8 @@ async function rehearseIn(repo, history, cases, pkg) {
 /**
  * Invariants checked against the history itself, independently of the model, for an adopted case:
  * (1) a value that is not main's latest must come from a branch edit, or from a conflict the branch
- * resolved in its own favour at a merge (no revert to an older value);
+ * resolved in its own favour at a merge (no revert to an older value); on a cherry-pick or rebase,
+ * only from an edit in a commit that was actually picked;
  * (2) a key main no longer has reappears only with a branch value; (3) the branch's last edit to a
  * key in the adopted commits (after its layout last took main's values: the monoliths at the legacy
  * fork, split areas and families at the last merged main, or the adopted commit's parent) is applied,
@@ -828,7 +835,13 @@ async function rehearseIn(repo, history, cases, pkg) {
 export async function invariantViolations(history, testCase, run, languages) {
   const branchTags = new Set([...historyPoints(history).filter((point) => point.side === "branch").map((point) => point.name)]);
   const tagOf = (value) => value === undefined ? undefined : value.slice(0, value.indexOf("-"));
-  const isBranchValue = (value) => branchTags.has(tagOf(value)) || /^third/.test(tagOf(value) ?? "") || tagOf(value) === "same";
+  const layoutOf = (point) => testCase.catalog !== "app" ? "family" : isAreaPoint(point) ? "areas" : "monolith";
+  // On a cherry-pick or rebase only the picked commits are the branch's: a value from any other branch
+  // commit (or a merge resolution, never picked) must not appear. A merge adopts the branch's history.
+  const commitRoute = history.route === "cherryPick" || history.route === "rebase";
+  const adoptedTags = new Set(testCase.ops.filter((op) => branchTags.has(op.point) && run.adoptedPoint(op.point, layoutOf(op.point))).map((op) => op.tag ?? op.point));
+  const isBranchValue = (value) => commitRoute ? adoptedTags.has(tagOf(value))
+    : branchTags.has(tagOf(value)) || /^third/.test(tagOf(value) ?? "") || tagOf(value) === "same";
   const violations = [];
   for (const form of formsOf(testCase)) {
     const key = keyName(testCase, form);
@@ -837,11 +850,10 @@ export async function invariantViolations(history, testCase, run, languages) {
       const mainLatest = await run.mainTip(testCase.catalog, key, language);
       // A conflict the branch resolved in its own favour at a merge is a branch decision too.
       let resolved = false;
-      for (const mergeCommit of run.branchResolutions.get(key) ?? []) if (value !== undefined && value === await run.valueAt(mergeCommit, testCase.catalog, key, language)) resolved = true;
+      for (const mergeCommit of commitRoute ? [] : run.branchResolutions.get(key) ?? []) if (value !== undefined && value === await run.valueAt(mergeCommit, testCase.catalog, key, language)) resolved = true;
       const branchValue = isBranchValue(value) || resolved;
       if (value !== undefined && value !== mainLatest && !branchValue) violations.push(`${key} ${language}: ${value} is neither main's latest (${mainLatest}) nor a branch value`);
       if (mainLatest === undefined && value !== undefined && !branchValue) violations.push(`${key} ${language}: removed by main but reappeared as ${value}`);
-      const layoutOf = (point) => testCase.catalog !== "app" ? "family" : isAreaPoint(point) ? "areas" : "monolith";
       const last = testCase.ops.filter((op) => branchTags.has(op.point) && run.adoptedPoint(op.point, layoutOf(op.point)) && (!op.only || op.only === language)
         && (!op.forms || op.forms.includes(form))).at(-1);
       if (!last) continue;

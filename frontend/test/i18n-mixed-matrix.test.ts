@@ -8,12 +8,14 @@
  * whole. Each clean case is also checked against model-independent invariants. Test names carry the
  * seed and case. Repositories run with bounded concurrency (I18N_MATRIX_CONCURRENCY, else the cores).
  */
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FAMILIES, LANGUAGES, englishOverrides } from "../scripts/lib/i18n-catalogs.mjs";
 import {
-  HISTORIES, NOTHING_IN_PROGRESS, REFUSALS, buildCases, cleanupAll, historyFacts, inParallel, invariantViolations, keyName, randomCases, randomHistory, rehearse,
+  HISTORIES, NOTHING_IN_PROGRESS, REFUSALS, buildCases, cleanupAll, historyFacts, inParallel, invariantViolations, keyName, mergeRoles, randomCases, randomHistory, rehearse,
 } from "./i18n-mixed-matrix-engine.mjs";
 
 // I18N_MATRIX_SEEDS=<n> runs seeds 1..n (e.g. a deeper sweep before changing the adoption tool).
@@ -83,9 +85,10 @@ for (const plan of plans) {
     if (plan.history.route === "merge" && facts.mixed) {
       it("refuses the auto-detected merge and prints the legacy-fork command", () => {
         const run = plan.runs!.clean;
+        const roles = mergeRoles(plan.history);
         expect(run.refused.status).not.toBe(0);
-        expect(run.refused.stderr).toContain("HEAD (--branch) keeps the legacy monoliths beside split areas it inherited from main");
-        expect(run.command).toBe(`  npm run adopt:i18n -- --branch HEAD --base ${run.fork} --onto MERGE_HEAD`);
+        expect(run.refused.stderr).toContain(`${roles.branch} (--branch) keeps the legacy monoliths beside split areas it inherited from main`);
+        expect(run.command).toBe(`  npm run adopt:i18n -- --branch ${roles.branch} --base ${run.fork} --onto ${roles.onto}`);
       });
     }
 
@@ -130,3 +133,27 @@ for (const plan of plans) {
     });
   });
 }
+
+describe("invariants without the model", () => {
+  it("flag a cherry-pick that also applies edits from commits it did not pick (the N8 class, injected)", async () => {
+    // Inject N8: measure the picked commit from the older merge-base instead of its parent.
+    const adopt = fs.readFileSync(path.join(frontend, "scripts/adopt-legacy-i18n.mjs"), "utf8");
+    const anchor = 'const order = !mergeBaseRef ? "base" : referenceOrder(refs.base, mergeBaseRef);';
+    expect(adopt).toContain(anchor);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-i18n-n8-"));
+    try {
+      const mutated = path.join(dir, "adopt-legacy-i18n.mjs");
+      fs.writeFileSync(mutated, adopt.replace(anchor, 'const order = !mergeBaseRef ? "base" : "mergeBase";'));
+      const history = randomHistory(2);
+      expect(history.route).toBe("cherryPick");
+      const { clean } = randomCases(history, CATALOGS, LANGUAGES, { clean: 30, conflicts: 0 });
+      const run = await rehearse(history, clean, { ...pkg, copy: [[mutated, "frontend/scripts/adopt-legacy-i18n.mjs"], ...pkg.copy.slice(1)] });
+      expect(run.final?.status, run.final?.stderr).toBe(0);
+      const violations: string[] = [];
+      for (const testCase of clean) violations.push(...await invariantViolations(history, testCase, run, LANGUAGES));
+      expect(violations.some((violation) => / is neither main's latest .* nor a branch value| removed by main but reappeared /.test(violation)), violations.join("\n")).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
