@@ -545,8 +545,12 @@ pnpm typecheck
 git commit
 ```
 
+A split branch that merges a legacy branch (`git merge <legacy-branch>`) is
+adopted the same way: the tool adopts `MERGE_HEAD` onto `HEAD` and says so.
+
 Rebase, at each catalog conflict (only a branch without merge commits, or only
-the commits after its last merge):
+the commits after its last merge; a merge below the first replayed commit is
+named in a notice, since its catalog resolutions are not carried over):
 
 ```sh
 git fetch origin
