@@ -562,12 +562,18 @@ Explicit refs are also accepted:
 `pnpm adopt:i18n --branch <old-layout-ref> --base <base-ref|empty> --onto <split-ref>`.
 A conflicted `git cherry-pick` is detected like a rebase, `git am` asks for
 explicit refs, and a commit holding both layouts is handled as on the web:
-the branch's monoliths and the onto areas are used, the base must have the
-same layout as the branch, and anything that would revert `main` or lose a
-value is refused. The branch's split areas were inherited from `main`, so any
-addition, change or removal it made to them is adopted against the last `main`
-it merged and takes precedence over its monolith edit of that key; monoliths
-and areas changed differently are reported as a contradiction. For a branch that keeps the monoliths the
+the branch's monoliths and the onto areas are used, and a branch read from its
+monoliths needs a base with monoliths. Each layout the branch has is compared
+with that layout at the newer of `--base` and the merge-base of the branch and
+`--onto`, so a rebased or cherry-picked commit adopts only its own edits and the
+legacy-fork route reads the split areas from the last `main` the branch merged.
+An addition, change or removal made in the split areas takes precedence over a
+monolith edit of that key; monoliths and areas changed differently are reported
+as a contradiction, and a key that arrives only through the area edits keeps
+the branch's area unless `--onto` already places it or a plural sibling. A
+layout with no such reference (areas the branch made itself, or an `--onto`
+with unrelated history) is refused, as is anything that would revert `main` or
+lose a value. For a branch that keeps the monoliths the
 refusal finds its legacy fork and prints the one command that adopts everything
 it changed, whatever its tip commit is:
 `pnpm adopt:i18n --branch <branch> --base <legacy-fork> --onto <onto>`
