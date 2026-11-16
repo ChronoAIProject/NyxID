@@ -214,6 +214,23 @@ test("Preferences always offers dictation; it is Voice only when live voice is e
   on.harness.unmount();
 });
 
+test("Apple Watch setup appears only on builds that include the watch app", () => {
+  const without = setupSettingsScreen(
+    "./AccountSettingsScreen.tsx",
+    "AccountSettingsScreen",
+  );
+  assert.throws(() => without.row("Apple Watch"));
+  without.harness.unmount();
+  const withWatch = setupSettingsScreen(
+    "./AccountSettingsScreen.tsx",
+    "AccountSettingsScreen",
+    { watchAvailable: true },
+  );
+  withWatch.row("Apple Watch").props.onPress();
+  assert.equal(JSON.stringify(withWatch.pushes.at(-1)), '["AppleWatchSettings"]');
+  withWatch.harness.unmount();
+});
+
 test("tablet account identity uses its measured card width when Dynamic Type outgrows the sheet", () => {
   const env = setup();
   env.resize(1032, 2.2);
