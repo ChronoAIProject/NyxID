@@ -566,7 +566,8 @@ the branch's monoliths and the onto areas are used, the base must have the
 same layout as the branch, and anything that would revert `main` or lose a
 value is refused. The branch's split areas were inherited from `main`, so any
 addition, change or removal it made to them is adopted against the last `main`
-it merged, after its monolith edits. For a branch that keeps the monoliths the
+it merged and takes precedence over its monolith edit of that key; monoliths
+and areas changed differently are reported as a contradiction. For a branch that keeps the monoliths the
 refusal finds its legacy fork and prints the one command that adopts everything
 it changed, whatever its tip commit is:
 `pnpm adopt:i18n --branch <branch> --base <legacy-fork> --onto <onto>`
