@@ -1,6 +1,6 @@
 # Native integration and device verification (#1868, Workstream 3)
 
-This work supports the Expo 55 / React Native 0.83 iOS and Android apps. Automated checks exercise protocol, persistence, lifecycle and configuration boundaries. The PM owns verification on physical devices and records device/OS/build, provider, backend revision, configuration and observed result. No device verification is claimed by the implementation tests; recorded results are in [NATIVE_VALIDATION_2026-11-14.md](NATIVE_VALIDATION_2026-11-14.md).
+This work supports the Expo 55 / React Native 0.83 iOS and Android apps. Automated checks exercise protocol, persistence, lifecycle and configuration boundaries. The PM owns verification on physical devices and records device/OS/build, provider, backend revision, configuration and observed result. No device verification is claimed by the implementation tests; recorded results are in [NATIVE_VALIDATION_2026-11-14.md](NATIVE_VALIDATION_2026-11-14.md) (iOS) and [NATIVE_VALIDATION_2026-11-17.md](NATIVE_VALIDATION_2026-11-17.md) (Android and the iOS delta).
 
 ## Scope and status
 
