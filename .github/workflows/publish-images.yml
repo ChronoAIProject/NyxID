@@ -223,13 +223,14 @@ jobs:
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
+        env:
+          CRASH_ARTIFACTS_SENTRY: ${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY || '' }}
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          secrets: |
-            crash_artifacts_sentry=${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY || '' }}
+          secret-envs: ${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY != '' && 'crash_artifacts_sentry=CRASH_ARTIFACTS_SENTRY' || '' }}
           # Build-args: git hash for backend/node-agent surface tagging
           # (stamped on /health). Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no
