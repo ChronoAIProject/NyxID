@@ -460,8 +460,79 @@ credentials and protocol values are preserved. Legal content stays in its
 authored language. App language does not change dictation recognition or the
 model's response language.
 
-Native catalogs in `mobile/src/i18n/locales` reuse main's matching app phrases
-and include native-specific copy. They are small bundled catalogs and import
-no browser runtime. Mark app-owned copy explicitly with `useAppLanguage().t`;
-never translate arbitrary text in the generic Text component. Keep both
-catalogs and interpolation placeholders in sync.
+Native catalogs reuse the web app's matching phrases and include native-specific
+copy. They are small bundled catalogs and import no browser runtime. Mark
+app-owned copy explicitly with `useAppLanguage().t`; never translate arbitrary
+text in the generic Text component.
+
+### Native catalog layout
+
+English phrases are the keys, so the native app has no English file. The
+Chinese catalogs use the same structure as the web app catalogs:
+
+- `mobile/src/i18n/locales/<area>/{zh-CN,zh-TW}.json`: flat JSON, code-unit
+  sorted, one directory per area. Each `src/features/<name>` directory has its
+  own area, `app` covers the navigation shell in `src/app`, `shared` holds keys
+  used by several areas plus shared components, hooks and libraries, and
+  `unattributed` holds phrases with no literal source reference. The ordered
+  map is `mobile/scripts/lib/i18n-portions.mjs`.
+- `mobile/src/i18n/locales/zh-CN.ts` and `zh-TW.ts`: generated barrels that
+  import every area JSON explicitly, in sorted order, and merge them. Metro,
+  jest and `node:test` need no glob support. Import catalogs only through these
+  barrels (`./locales/zh-CN`), never an area file.
+
+The web and native tools share `shared/i18n/catalog-core.mjs`; each package
+supplies its languages, area map and source parser.
+
+To add a phrase, add the English phrase as the key to its area in both
+`zh-CN.json` and `zh-TW.json`, in sorted position, keeping `{{name}}`
+placeholders identical to the phrase. Then run, from `mobile/`:
+
+```sh
+pnpm sync:i18n
+```
+
+It canonicalizes every area catalog, moves identical cross-area duplicates to
+`shared`, fails on differing values, and regenerates both barrels (including
+after a new area directory is added). `pnpm test` enforces the layout in CI:
+sorted catalogs, per-area zh-CN/zh-TW parity, placeholders, no differing
+duplicates, barrels that import exactly the existing areas, and no leftover
+monolith.
+
+#### In-flight native branches from before the split
+
+A branch that still edits `mobile/src/i18n/locales/zh-CN.json` or `zh-TW.json`
+uses `pnpm adopt:i18n`. It applies the branch's three-way catalog delta onto
+the split layout, places new phrases by their literal use in app sources
+(tests, harnesses, fixtures, mocks and QA scripts are ignored), regenerates
+the barrels, deletes the monoliths, and writes nothing if a value diverged on
+both sides. Run `pnpm install` in `mobile/` first if dependencies are missing.
+
+Merge:
+
+```sh
+git fetch origin
+git merge origin/main
+cd mobile
+pnpm install
+pnpm adopt:i18n
+git add -A src/i18n/locales
+git commit
+```
+
+Rebase, at each catalog conflict:
+
+```sh
+git fetch origin
+git rebase origin/main
+cd mobile
+pnpm install
+pnpm adopt:i18n
+git add -A src/i18n/locales
+git rebase --continue
+```
+
+Explicit refs are also accepted:
+`pnpm adopt:i18n --branch <old-layout-ref> --base <base-ref|empty> --onto <split-ref>`.
+If the branch also imports `./locales/zh-CN.json` or `./locales/zh-TW.json`,
+change those imports to the barrels (`./locales/zh-CN`, `./locales/zh-TW`).
