@@ -218,7 +218,8 @@ relative). Each rewrite is printed as `file:line old -> new`, followed by the
 The barrels are typed `Record<string, string>` instead of the old literal JSON
 type, so indexing one with a literal key can become `string | undefined`.
 Run `npx tsc -b` afterwards and fix any such error by hand (for example with
-`?? phrase`). A branch that only adds such an import, with no catalog
+`?? phrase` or a non-null assertion in a test) before `npm run build:wizard`,
+which starts with the same type-check. A branch that only adds such an import, with no catalog
 conflict, can run `npm run adopt:i18n -- --imports-only`; `npm run check:i18n`
 reports any remaining legacy import with its replacement.
 
@@ -235,10 +236,10 @@ git merge origin/main
 cd frontend
 npm ci
 npm run adopt:i18n
+npx tsc -b                  # fix any string | undefined from rewritten imports
 npm run build:wizard        # only if cli/src/wizard/ conflicted
 git add -A src/i18n/locales # plus the rewritten files the tool lists
 git add -A ../cli/src/wizard # only if you rebuilt the wizard bundle
-npx tsc -b
 git commit
 ```
 
@@ -257,10 +258,10 @@ git rebase origin/main
 cd frontend
 npm ci
 npm run adopt:i18n
+npx tsc -b                  # fix any string | undefined from rewritten imports
 npm run build:wizard        # only if cli/src/wizard/ conflicted
 git add -A src/i18n/locales # plus the rewritten files the tool lists
 git add -A ../cli/src/wizard # only if you rebuilt the wizard bundle
-npx tsc -b
 git rebase --continue
 ```
 
