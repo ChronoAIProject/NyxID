@@ -18,9 +18,11 @@ use crate::{
 
 pub(crate) mod adoption;
 pub(crate) mod budget;
+pub(crate) mod defaults;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
 pub(crate) mod management;
+pub(crate) mod preview;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod transcript;
@@ -217,13 +219,18 @@ pub(crate) async fn link_target(
         version: 1,
         org_id: agent.user_id.clone(),
         revision: uuid::Uuid::new_v4().to_string(),
-        guests: GuestPolicy {
-            follows_agent_grants: guest_grants_ready(db).await?,
-            // Conservative compatibility fields for an old reader.
-            daily_credits: Some(management::default_daily_credits()),
-            ..Default::default()
-        },
+        guests: new_guest_policy(guest_grants_ready(db).await?),
     }))
+}
+
+pub(crate) fn new_guest_policy(grants_ready: bool) -> GuestPolicy {
+    GuestPolicy {
+        enabled: true,
+        revision: uuid::Uuid::new_v4().to_string(),
+        follows_agent_grants: grants_ready,
+        daily_credits: Some(management::default_daily_credits()),
+        ..Default::default()
+    }
 }
 
 /// Preserve the existing closed/typed refusal before resolving any bot on
@@ -678,6 +685,7 @@ pub(crate) fn event_actor(event: &crate::models::nyxbot_channel::NyxbotEvent) ->
 }
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    defaults::ensure_indexes(db).await?;
     use crate::models::org_channel::*;
     use mongodb::{IndexModel, options::IndexOptions};
     for (collection, keys) in [

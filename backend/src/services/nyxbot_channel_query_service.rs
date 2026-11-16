@@ -9,8 +9,15 @@ use crate::{
 /// One current record per bot: a live connection wins over failed attempts;
 /// otherwise the latest attempt or disconnection determines visibility.
 pub async fn list_current(db: &Database, owner: &str) -> AppResult<Vec<NyxbotChannel>> {
+    list_matching(db, doc! {"user_id":owner}).await
+}
+
+pub(crate) async fn list_matching(
+    db: &Database,
+    filter: bson::Document,
+) -> AppResult<Vec<NyxbotChannel>> {
     let rows = db.collection::<NyxbotChannel>(COLLECTION_NAME).aggregate([
-        doc! {"$match": {"user_id": owner}},
+        doc! {"$match": filter},
         doc! {"$set": {"live_rank": {"$cond": [{"$in": ["$status", ["pending", "active"]]}, 1, 0]}}},
         doc! {"$sort": {"channel_bot_id": 1, "live_rank": -1, "created_at": -1, "_id": -1}},
         doc! {"$group": {"_id": "$channel_bot_id", "channel": {"$first": "$$ROOT"}}},
@@ -21,6 +28,53 @@ pub async fn list_current(db: &Database, owner: &str) -> AppResult<Vec<NyxbotCha
         doc! {"$limit": 50},
     ]).await?;
     Ok(rows.with_type::<NyxbotChannel>().try_collect().await?)
+}
+
+pub(crate) async fn active_for_bot(
+    db: &Database,
+    owner: &str,
+    bot_id: &str,
+) -> AppResult<Option<NyxbotChannel>> {
+    Ok(db
+        .collection::<NyxbotChannel>(COLLECTION_NAME)
+        .find_one(
+            doc! {"user_id":owner,"channel_bot_id":bot_id,"status":{"$in":["pending","active"]}},
+        )
+        .sort(doc! {"created_at":-1,"_id":-1})
+        .await?)
+}
+
+/// Connect and its read-only preview must choose the same reusable binding.
+pub(crate) async fn reusable(
+    db: &Database,
+    actor: &str,
+    bot_owner: &str,
+    row: &NyxbotChannel,
+) -> AppResult<bool> {
+    let owner = row.bot_owner_id.as_deref().unwrap_or(&row.user_id);
+    let keys_alive = super::key_service::get_api_key(db, owner, &row.route_api_key_id)
+        .await
+        .is_ok_and(|key| key.is_active)
+        && match row.agent_api_key_id.as_deref() {
+            Some(key) => super::key_service::get_api_key(db, actor, key)
+                .await
+                .is_ok_and(|key| key.is_active),
+            None => true,
+        };
+    let route_alive = match row.route_id.as_deref() {
+        Some(id) => {
+            db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+                .count_documents(doc! {"_id":id,"user_id":bot_owner,"is_active":true})
+                .await?
+                > 0
+        }
+        None => false,
+    };
+    Ok(row.status == "active"
+        && keys_alive
+        && route_alive
+        && row.delivery_status.as_deref() != Some("failing")
+        && owner == bot_owner)
 }
 
 #[cfg(test)]

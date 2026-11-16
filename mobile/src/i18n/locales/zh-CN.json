@@ -333,5 +333,7 @@
   "{{page}} / {{total}}": "{{page}}／{{total}}",
   "{{name}}, {{count}} pending": "{{name}}，{{count}} 项待处理",
   "Unable to open link": "无法打开链接",
-  "Try again, or open the link outside NyxID.": "请重试，或在 NyxID 之外打开此链接。"
+  "Try again, or open the link outside NyxID.": "请重试，或在 NyxID 之外打开此链接。",
+  "An organization admin can change these settings.": "组织管理员可以更改这些设置。",
+  "Set up organization billing to serve guests.": "设置组织账单以服务访客。"
 }

@@ -11,6 +11,7 @@ const data = vi.hoisted(() => ({
   orgs: [] as unknown[],
   orgChannels: false,
   connect: vi.fn(),
+  preview: vi.fn(),
   link: vi.fn(),
   retryGateway: vi.fn(),
   pending: false,
@@ -18,6 +19,7 @@ const data = vi.hoisted(() => ({
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   nyxBotOf: (agents: AssistantAgent[]) => agents.find((agent) => agent.kind === "nyxbot"),
   useNyxBotChannels: () => ({ data: data.channels }),
+  usePreviewOrgChannel: () => ({ isPending: false, mutateAsync: data.preview }),
   useConnectNyxBotChannel: () => ({ isPending: data.pending, mutateAsync: data.connect }),
   useDisconnectNyxBotChannel: () => ({ isPending: false }),
   useLinkNyxBotChannel: () => ({ isPending: false, mutateAsync: data.link }),
@@ -43,8 +45,8 @@ vi.mock("./org-specialist-channel-settings", () => ({
   OrgSpecialistChannelSettings: () => <section data-member-verification="" tabIndex={-1} aria-label="Verify my chat account">Member verification</section>,
 }));
 vi.mock("./nyxbot-channel-chats", () => ({
-  ChannelChats: ({ agents }: { agents: readonly AssistantAgent[] }) => (
-    <div data-testid="channel-chat-agents">
+  ChannelChats: ({ agents, readOnly }: { agents: readonly AssistantAgent[]; readOnly?: boolean }) => (
+    <div data-testid="channel-chat-agents" data-read-only={readOnly}>
       {agents.map((agent) => <span key={agent.id}>{agent.name}</span>)}
     </div>
   ),
@@ -64,6 +66,12 @@ beforeEach(() => {
     },
   });
   data.link.mockResolvedValue(undefined);
+  data.preview.mockResolvedValue({
+    bot_id:"owned",agent_id:"org-specialist",org_id:"team",guest_enabled:true,private_chats:"everyone",guest_policy_mode:"grants",
+    description:"Guests can talk privately and in groups. The organization pays for guest messages and tool use.",
+    effective_guest_services:[{id:"calendar",label:"Calendar",access:"use",limited_operations:true}],
+    audience_readiness:{guest_readiness:{status:"ready"},configuration:{instructions_present:true,persona_present:false,memory_notes:0,skills:0,service_grants:1,account_read:true},note:"Configuration facts"},health:null,
+  });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -395,7 +403,7 @@ it("keeps member verification available on an existing binding without giving ma
   expect(
     screen.queryByRole("button", { name: /Link account|Link another account/ }),
   ).not.toBeInTheDocument();
-  expect(screen.queryByTestId("channel-chat-agents")).not.toBeInTheDocument();
+  expect(screen.getByTestId("channel-chat-agents")).toHaveAttribute("data-read-only", "true");
   expect(
     screen.getByRole("combobox", { name: "Agent for Receipts" }),
   ).toBeDisabled();
@@ -461,7 +469,14 @@ it("explains individual verification after connecting an organization specialist
   render(<ChannelBotsManager agents={[specialist]} agent={specialist} />);
   await userEvent.click(screen.getByRole("button", { name: "Connect another bot" }));
   await userEvent.click(screen.getByRole("button", { name: "Connect Team bot to org-specialist" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("Each member, including admins, must verify their own chat account");
+  const disclosure = await screen.findByRole("dialog", {name:"Connect organization bot"});
+  expect(disclosure).toHaveTextContent("organization pays");
+  expect(disclosure).toHaveTextContent("Calendar: Use, but not change or delete");
+  expect(disclosure).toHaveTextContent("Selected operations only");
+  expect(disclosure).toHaveTextContent("Guests cannot use account tools");
+  expect(data.connect).not.toHaveBeenCalled();
+  await userEvent.click(within(disclosure).getByRole("button", {name:"Confirm connection"}));
+  expect(await screen.findByText(/Each member, including admins, must verify their own chat account/)).toBeVisible();
   expect(screen.queryByText("LINK123")).not.toBeInTheDocument();
 });
 

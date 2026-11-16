@@ -2081,11 +2081,14 @@ expiry without an owner action. Confirmed bot outbound clears the thread error.
 Queued questions enter that transcript atomically with source acceptance; queue
 instructions and unfinished/failed reply drafts remain private execution state.
 
-Guests are off by default; only an organization admin can enable them. After
+Guests are on by default on new organization bindings, including private chats.
+Only an organization admin can change exposure; Members can read settings.
+The connect preview on web and NyxBot states the audience, organization payer,
+guest service levels and existing readiness facts before confirmation. Preview
+is metadata only; connect revalidates live authority. After
 `nyxbot:org-guest-grants-v1` fleet readiness, a genuinely new binding follows the
-specialist's **Grants** immediately when enabled, including default `use` for a
-granted service without a saved guest override. The page states this before the
-switch is flipped. Active org-owned HTTP services must be granted to the specialist
+specialist's **Grants** immediately, including default `use` for a
+granted service without a saved guest override. Active org-owned HTTP services must be granted to the specialist
 and pass the existing guest levels, guest operation selections and ordinary
 operation scopes. MCP uses `filter_guest_catalog` / `guest_service_refusal`;
 HTTP uses `check_non_mcp_context`. No second operation classifier is introduced.
@@ -2107,7 +2110,8 @@ First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 `GET/PUT org-specialist`, `POST/DELETE member-link`,
 `GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.
 Other live org admins can manage/unlink the binding without reading member DMs
-or obtaining provider keys. Changing the specialist resets verification and guest exposure;
+or obtaining provider keys. Changing the specialist resets verification and guest
+service authority while retaining the saved exposure choice;
 changing personal ↔ org target requires disconnect/reconnect. Loss of the
 transport admin or org/bot/agent authority retires the link with
 `org_access_lost`. Flag-off, unavailable security readiness and dependency errors
@@ -2124,8 +2128,12 @@ activation then permit enabling for an admin, without roster/drain declarations.
 
 Every listed binding has a **Who can talk to this bot** section on web and mobile:
 Allow guests; a localized explanation of guest identity and org payment; named
-service access with a Grants link; and read-only Organization spend today (this
-bot's guest usage, including earlier connections, not all org spending). No budget
+service access with a Grants link. Admins also see Organization spend today (this
+bot's guest usage, including earlier connections, not all org spending). Members
+see disabled controls; existing amount fields remain in API responses for released-client compatibility; private/unclassified chats and
+conversation/history identifiers are omitted from their group settings list.
+Existing Viewer bot detail and health reads are unchanged; newly readable
+settings require Admin/Member. The native mobile screen adds no connect operation. No budget
 input or separate service checklist remains. Failed/pending bindings stay readable.
 Before fleet readiness the page explains legacy enforcement and does not offer
 new enablement; disabling stays available under the existing management ACL.
@@ -2147,8 +2155,30 @@ service guest policy. There is no per-service migration state.
 Persisted `GuestPolicy.follows_agent_grants` defaults false; the optional
 `grants_adoption_id` identifies the reviewed transition. Legacy lists, digests,
 cap values and financial rows remain stored. Old readers ignore the additive
-fields and remain restrictive. New bindings start guest-off with the marker only
-when ready; a rebuild is never treated as new consent. The shared validator and
+fields and remain restrictive. New bindings start guest-on with a fresh revision and private chats open; the
+Grants marker is set only when ready. The bounded versioned background step
+enables historical Off when bounded same-bot/org history has no evidence of a
+guest choice, including relinked and restored rows. It examines at most 32 stored
+specialist rows: a settings-save audit for any row/continuity id, a nonempty revision
+without continuity, or a revision that differs from its recorded restoration
+revision (or enabled bit) preserves Off. Both restoration branches now audit `guest_revision` in
+their transaction; old restoration audits omit it and rely on save audits alone.
+Missing continuity history, too many rows and malformed facts stay unchanged.
+The existing hinted audit lookup retries errors. Active bindings require live
+org, bot, specialist and linking-admin authority; recoverable authority failures
+remain pending. Bot health status is not authority. Absent/null private settings open,
+while explicit owner-only and frozen service limits remain. Completion in `assistant_migrations`,
+exact-field updates and one chained metadata audit commit transactionally.
+Explicit Off saves now mint a revision even when otherwise unchanged; REST and
+NyxBot saves append the save audit in the settings transaction. Old handlers
+also queue that audit after no-op saves, but their asynchronous audit can be
+delayed or lost during mixed rollout. This accepted evidence limit applies to
+ordinary, relinked and restored bindings; a missing save audit can misidentify
+explicit Off as untouched. A switched binding sends one typed
+guest-default notice per current admin, including service access and billing
+readiness. Switched bindings stay On on rollback; list them in `audit_log` by
+`event_type: "org_channel_guest_defaults_applied"` and
+`event_data.guest_access_switched_on: true`. The shared validator and
 key synchronization select legacy narrowing or Grants; final proxy/MCP/effect and
 delivery barriers retain live source/revision checks. A legacy digest drift still
 refuses rather than silently updating the frozen authority.
@@ -2156,8 +2186,13 @@ refuses rather than silently updating the frozen authority.
 Rebuilding the same org/bot/specialist preserves the adopted/legacy mode and
 original `continuity_channel_id`, with fresh guest identity and live authority
 checks. Legacy invalid/revoked/node/moved services are dropped. The newest
-incompatible predecessor remains a boundary. Missing/suspended wallets disable
-restored exposure; an invalid old cap does so only before readiness. Sender
+incompatible predecessor remains a boundary. Missing/suspended wallets and an invalid legacy cap no longer rewrite the
+carried exposure choice. The subsequent defaults pass can enable a carried Off
+without choice evidence. Guest admission still refuses unusable billing/caps.
+Saving a policy that stays On does not require a wallet; manual Off-to-On does.
+The existing health recommendation reports `enable_billing` before gateway
+advice; provisioning usable billing lets the next guest message proceed. Manual
+Off-to-On retains its wallet requirement. Sender
 verification is not copied; claimed/erased identities cannot become paid guests.
 
 **Automatic pre-#2288 restoration.** A failed v1 org-specialist row with
@@ -2221,8 +2256,10 @@ neither drops nor conflicts with them.
 Exact holds settle once against their original UTC admission day even across
 cutover, revocation or midnight. Removing the cap never removes funding holds.
 
-GET continues returning legacy `delegated_service_ids`, `daily_credits` and
-`default_daily_credits`, adding `grants_ready`, `guest_policy_mode`,
+Admin and Member GET continue returning legacy `delegated_service_ids`,
+`daily_credits`, `default_daily_credits`, and spend/reserved amounts. Web and mobile
+now tolerate absent amounts and hide Member spend rows, preparing for a later
+server release after compatible clients ship. Existing bot detail is unchanged. Both roles receive `grants_ready`, `guest_policy_mode`,
 `legacy_fields_ignored`, `agent_id` and `effective_guest_services`. PUT accepts
 legacy `service_ids` and `daily_credits`; omission preserves them. In ready mode
 they are ignored, never release a frozen restriction and never restore the cap.
@@ -2273,7 +2310,7 @@ A disabled option blocks new enrollment while persisted work continues draining.
 
 A hosted bot-setup watch retains an optional, server-authored `source_turn_id` from the exact live chat authority, bound by `source_connect_link_id` to the exact hosted request. If an old replica replaces the request but leaves these unknown fields, the mismatched link makes the context unknown. On completion it reads at most four retained messages around that turn in the requesting owner's conversation, retaining a bounded excerpt of the preceding questions and the partial answer in the setup notice. This historical context is not new authority. Missing/legacy origin, deleted history, or a context reset yields an explicit unknown-context instruction; NyxBot must recover the unanswered questions. The existing outcome sentence stays first so web/mobile keep their compact channel-status label; historical context follows only for the model. Escaped excerpts remain complete JSON and bounded. The setup notice alone has a 4,800-character ceiling. The stable system/schedule prompt still satisfies its 4 KiB compile-time limit.
 
-Creating/linking a bot does not mean onboarding is complete and never widens its `private_chats`: a new binding is `owner`. NyxBot must not propose `everyone` merely because setup finished. It keeps unanswered questions pending and proposes a wider audience only when the owner asks or actual configuration and a customer test support readiness. Explicit owner opening remains allowed; no keyword classifier, new approval format, readiness veto, or second confirmation is introduced.
+Creating/linking a personal bot does not mean onboarding is complete and never widens its `private_chats`: a new personal binding is `owner`. NyxBot must not propose `everyone` merely because setup finished. It keeps unanswered questions pending and proposes a wider audience only when the owner asks or actual configuration and a customer test support readiness. Explicit owner opening remains allowed; no keyword classifier, new approval format, readiness veto, or second confirmation is introduced.
 
 The existing `update_channel_access` action summary discloses the live customer-model readiness, instructions/persona presence, memory-note and skill counts, service-grant count and account-read flag before opening. The tool response (including Full access) and human audience settings use the same metadata-only facts. Settings GET adds optional `configuration`; the audience PATCH/tool result adds `audience_readiness`. A post-save model-setup/readiness failure is reported as `readiness_unavailable` with a saved-access explanation, not as an unsuccessful audience write. No instructions, memory contents, or secrets enter these diagnostics or audits.
 

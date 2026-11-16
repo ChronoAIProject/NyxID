@@ -54,6 +54,14 @@ impl Fixture {
         let (agent, _) = org.create().await;
         let db = &org.state.db;
         ensure_indexes(db).await.unwrap();
+        db.collection::<bson::Document>("audit_log")
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {"event_type":1,"created_at":-1})
+                    .build(),
+            )
+            .await
+            .unwrap();
         crate::services::feature_flag_service::set_platform_override(
             db,
             FLAG,
@@ -70,10 +78,15 @@ impl Fixture {
             .insert_one(&bot)
             .await
             .unwrap();
-        let binding = link_target(db, &org.admin, &bot, &agent)
+        let mut binding = link_target(db, &org.admin, &bot, &agent)
             .await
             .unwrap()
             .unwrap();
+        // Legacy scenarios start with a pre-release, untouched Off policy.
+        binding.guests = GuestPolicy {
+            daily_credits: Some(management::default_daily_credits()),
+            ..Default::default()
+        };
         let channel:NyxbotChannel=bson::from_document(doc!{"_id":uuid::Uuid::new_v4().to_string(),"user_id":&org.admin,"channel_bot_id":&bot.id,"bot_owner_id":&org.org,
             "platform":"lark","bot_label":"Organization bot","transport":"direct","status":"active","route_api_key_id":uuid::Uuid::new_v4().to_string(),
             "route_id":uuid::Uuid::new_v4().to_string(),"agent_id":&agent.id,"org_specialist":bson::to_bson(&binding).unwrap(),"private_chats":"everyone",
@@ -2373,3 +2386,6 @@ impl Fixture {
         row
     }
 }
+
+#[path = "defaults_tests.rs"]
+mod defaults_2482;

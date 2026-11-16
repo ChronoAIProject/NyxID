@@ -117,6 +117,7 @@ fn http_status(message: &str) -> Option<u16> {
 /// Facts the recommendation depends on. Build with [`HealthFacts::for_bot`].
 #[derive(Clone, Debug)]
 pub struct HealthFacts<'a> {
+    pub org_guest_billing: Option<&'a str>,
     pub platform: &'a str,
     pub status: &'a str,
     pub webhook_registered: bool,
@@ -134,6 +135,7 @@ pub struct HealthFacts<'a> {
 impl<'a> HealthFacts<'a> {
     pub fn for_bot(bot: &'a ChannelBot, now: DateTime<Utc>, gateway: bool) -> Self {
         Self {
+            org_guest_billing: None,
             platform: &bot.platform,
             inbound_outcome: bot
                 .diagnostics
@@ -189,6 +191,63 @@ pub struct Recommendation {
 
 fn advice(action: &'static str, text: String) -> Recommendation {
     Recommendation { action, text }
+}
+
+pub(crate) async fn org_guest_billing(
+    db: &mongodb::Database,
+    org: &str,
+) -> AppResult<Option<&'static str>> {
+    match super::org_channel_service::budget::require_wallet(db, org).await {
+        Ok(()) => Ok(None),
+        Err(AppError::BillingNotConfigured(_)) => Ok(Some("org_wallet_not_provisioned")),
+        Err(AppError::WalletSuspended) => Ok(Some("org_wallet_suspended")),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn guest_billing_advice(reason: &str) -> Recommendation {
+    advice("enable_billing", match reason {
+        "org_wallet_suspended" => "Guest access is on, but guests cannot be served while the organization wallet is suspended.",
+        _ => "Guest access is on, but guests cannot be served until the organization's billing wallet and subscription are set up.",
+    }.into())
+}
+
+pub(crate) async fn load_org_guest_billing_many(
+    db: &mongodb::Database,
+    bindings: &[(String, String)],
+) -> AppResult<std::collections::BTreeMap<String, &'static str>> {
+    use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS};
+    let mut result = std::collections::BTreeMap::new();
+    if bindings.is_empty() {
+        return Ok(result);
+    }
+    let orgs: Vec<_> = bindings.iter().map(|(_, org)| org).collect();
+    let wallets: Vec<BillingWallet> = db
+        .collection(WALLETS)
+        .find(doc! {"owner_id":{"$in":orgs}})
+        .await?
+        .try_collect()
+        .await?;
+    for (id, org) in bindings {
+        let wallet = wallets.iter().find(|wallet| &wallet.owner_id == org);
+        let reason = match wallet {
+            None => Some("org_wallet_not_provisioned"),
+            Some(wallet)
+                if wallet
+                    .lago_subscription_id
+                    .as_deref()
+                    .is_none_or(str::is_empty) =>
+            {
+                Some("org_wallet_not_provisioned")
+            }
+            Some(wallet) if wallet.is_suspended() => Some("org_wallet_suspended"),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            result.insert(id.clone(), reason);
+        }
+    }
+    Ok(result)
 }
 
 fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recommendation> {
@@ -315,11 +374,9 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
             "A delayed thread update could not be sent because its gateway reply reference expired after 29 minutes. No owner action is needed; a new message starts a new reply window.".into()),
         _ => {},
     }
-    if facts.gateway {
-        return advice(
-            "gateway",
-            "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into(),
-        );
+    // Preserve existing gateway advice when no org-guest billing fact was added.
+    if facts.gateway && facts.org_guest_billing.is_none() {
+        return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());
     }
     if facts.failure_reason == Some(codes::BILLING_SUSPENDED) && is_x(facts.platform) {
         return super::channel_inbound_diagnostics::recommendation("x_billing_refused")
@@ -361,6 +418,15 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
         .and_then(super::channel_inbound_diagnostics::recommendation)
     {
         return found;
+    }
+    if let Some(reason) = facts.org_guest_billing {
+        return guest_billing_advice(reason);
+    }
+    if facts.gateway {
+        return advice(
+            "gateway",
+            "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into(),
+        );
     }
     if is_x(facts.platform) {
         return advice(
@@ -418,15 +484,42 @@ pub(crate) static TEST_NOTICES: std::sync::LazyLock<
 /// Best-effort failure notice to the bot owner, or to every admin of an
 /// org-owned bot. Called once per failure transition; never fails the caller.
 pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: &Recommendation) {
+    notify_bot(
+        db,
+        bot,
+        recommendation,
+        crate::services::notification_service::ChannelBotNoticeKind::Failure,
+    );
+}
+
+pub(crate) fn notify_guest_defaults(db: &mongodb::Database, bot: &ChannelBot, description: &str) {
+    notify_bot(
+        db,
+        bot,
+        &advice("review_guest_access", description.into()),
+        crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults,
+    );
+}
+
+fn notify_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    recommendation: &Recommendation,
+    kind: crate::services::notification_service::ChannelBotNoticeKind,
+) {
     let context = crate::services::notification_service::ChannelBotFailedNotificationContext {
         bot_id: bot.id.clone(),
         bot_label: bot.label.clone(),
         platform_name: platform_name(&bot.platform),
         recommended_action: recommendation.action.to_string(),
         recommended_action_text: recommendation.text.clone(),
-        notice_kind: crate::services::notification_service::ChannelBotNoticeKind::Failure,
-        notice_title: None,
-        notice_body: None,
+        notice_kind: kind.clone(),
+        notice_title: (kind
+            == crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults)
+            .then(|| "Organization bot guest access".to_owned()),
+        notice_body: (kind
+            == crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults)
+            .then(|| format!("{}: {}", bot.label, recommendation.text)),
     };
     #[cfg(test)]
     let recorder = TEST_NOTICES.lock().unwrap().get(&bot.id).cloned();
@@ -439,16 +532,31 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
     let db = db.clone();
     let owner = bot.user_id.clone();
     crate::services::shutdown::process().spawn(async move {
-        let mut recipients = match crate::services::org_service::list_admin_user_ids(&db, &owner)
-            .await
-        {
-            Ok(recipients) => recipients,
-            Err(error) => {
-                tracing::warn!(%error, "channel bot failure notice could not resolve org admins");
-                Vec::new()
-            }
-        };
-        if recipients.is_empty() {
+        let mut recipients =
+            match crate::services::org_service::list_admin_user_ids(&db, &owner).await {
+                Ok(recipients) => recipients,
+                Err(error) => {
+                    tracing::warn!(%error, "channel bot notice could not resolve org admins");
+                    Vec::new()
+                }
+            };
+        if kind == crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults {
+            let active = db
+                .collection::<bson::Document>("users")
+                .find(doc! {"_id":{"$in":&recipients},"is_active":true})
+                .projection(doc! {"_id":1})
+                .await;
+            let Ok(active) = active else {
+                return;
+            };
+            let Ok(active): Result<Vec<bson::Document>, _> = active.try_collect().await else {
+                return;
+            };
+            recipients = active
+                .iter()
+                .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+                .collect();
+        } else if recipients.is_empty() {
             recipients.push(owner);
         }
         for recipient in recipients {
@@ -470,7 +578,7 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
                 )
                 .await
             {
-                tracing::warn!(%error, bot_id = %context.bot_id, "channel bot failure notice failed");
+                tracing::warn!(%error, bot_id = %context.bot_id, "channel bot notice failed");
             }
         }
     });
