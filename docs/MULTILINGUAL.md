@@ -273,6 +273,13 @@ new portion-layout commit. Explicit refs are also accepted:
 npm run adopt:i18n -- --branch <old-layout-ref> --base <base-ref> --onto <portion-layout-ref>
 ```
 
+If a commit holds both layouts (for example a merge whose modify/delete
+conflict was resolved by keeping the old monoliths), a `--branch` commit is
+read from its monoliths, where the legacy edits live, and an `--onto` commit
+from its areas. The tool refuses, writing nothing, when only some monoliths
+exist or when the layout it would discard holds values found nowhere else,
+and prints the explicit refs to use instead.
+
 The initial migration is the same deterministic operation with an empty base:
 
 ```sh

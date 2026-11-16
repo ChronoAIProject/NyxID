@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta,
+  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta, chooseCatalogViews,
   consolidateDuplicates, emptyLanguages, englishOverrides, isPlacementSource, mayImportLegacyCatalog,
   moduleSpecifiers, placeCatalogs, rewriteLegacyImports, walkFiles, writeJson, writePortions,
 } from "./lib/i18n-catalogs.mjs";
@@ -54,7 +54,7 @@ function readBlobs(ref, files) {
 }
 
 function snapshot(ref, { sources: withSources }) {
-  if (ref === "empty") return { app: emptyLanguages(), portions: {}, families: Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()])), sources: [] };
+  if (ref === "empty") return { areas: null, monolith: null, monolithLanguages: [], portions: {}, families: Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()])), sources: [] };
   const files = execFileSync("git", ["ls-tree", "-r", "-z", "--name-only", ref, "--", `${prefix}/src`], { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28 })
     .split("\0").filter(Boolean).map((file) => file.slice(prefix.length + 1));
   const catalogPaths = files.filter((file) => /^src\/i18n\/locales\/.*\.json$/.test(file));
@@ -71,10 +71,13 @@ function snapshot(ref, { sources: withSources }) {
   }
   const analysis = analyzePortions(portions);
   if (analysis.issues.length) throw new Error(`${ref}: ${analysis.issues.join("\n")}`);
-  const app = Object.keys(portions).length ? analysis.merged : Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${language}.json`)]));
+  // Both layouts are reported; chooseCatalogViews decides which one each role uses.
+  const areas = Object.keys(portions).length ? analysis.merged : null;
+  const monolithLanguages = LANGUAGES.filter((language) => blobs.has(`${prefix}/src/i18n/locales/${language}.json`));
+  const monolith = monolithLanguages.length ? Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${language}.json`)])) : null;
   const families = Object.fromEntries(FAMILIES.map((family) => [family, Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${family}-${language}.json`)]))]));
   const sources = sourcePaths.map((file) => [file, text(file)]);
-  return { app, portions, families, sources };
+  return { areas, monolith, monolithLanguages, portions, families, sources };
 }
 
 /**
@@ -107,11 +110,12 @@ try {
   const base = snapshot(refs.base, { sources: false });
   const branch = snapshot(refs.branch, { sources: true });
   const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
+  const app = chooseCatalogViews({ base, branch, onto }, refs, { languages: LANGUAGES, adopt: "npm run adopt:i18n --" });
   const conflicts = [];
   const merged = emptyLanguages();
   const families = Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()]));
   for (const language of LANGUAGES) {
-    const delta = applyDelta(base.app[language], branch.app[language], refs.base === "empty" ? {} : onto.app[language], `app/${language}`);
+    const delta = applyDelta(app.base[language], app.branch[language], refs.base === "empty" ? {} : app.onto[language], `app/${language}`);
     merged[language] = delta.result;
     conflicts.push(...delta.conflicts);
     for (const family of FAMILIES) {

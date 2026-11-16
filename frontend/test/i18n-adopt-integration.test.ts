@@ -116,6 +116,57 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     expect(f.git("status", "--porcelain", "--", "frontend/src")).toBe("?? frontend/src/pages/late.test.ts");
   });
 
+  /** Merge split into legacy, keep the legacy monoliths (and legacy families), and commit. */
+  const commitMergeKeepingMonoliths = (f: ReturnType<typeof fixture>) => {
+    f.git("checkout", "legacy");
+    // As in the real repository, the monoliths are not renamed into an area (the fixture is small enough to trip rename detection).
+    spawnSync("git", ["merge", "--no-commit", "-X", "no-renames", "split"], { cwd: f.repo, encoding: "utf8" });
+    const conflicted = f.git("diff", "--name-only", "--diff-filter=U").split("\n").filter(Boolean);
+    f.git("checkout", "--ours", "--", ...conflicted);
+    f.git("add", "-A", "frontend/src");
+    f.git("commit", "-m", "merge that kept the monoliths");
+    for (const language of LANGUAGES) expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(true);
+    expect(fs.existsSync(path.join(f.locales, "app"))).toBe(true);
+    return f.git("rev-parse", "HEAD");
+  };
+
+  it("uses a mixed branch's monoliths so its legacy edits land and nothing is lost", () => {
+    const f = fixture();
+    const mixed = commitMergeKeepingMonoliths(f);
+    const adopted = f.adopt("--branch", mixed, "--base", f.base, "--onto", f.onto);
+    expect(adopted.status, adopted.stderr).toBe(0);
+    f.verify();
+  });
+
+  it("refuses a mixed branch whose split areas hold values found nowhere else, and writes nothing", () => {
+    const f = fixture();
+    commitMergeKeepingMonoliths(f);
+    const file = path.join(f.locales, "app/unattributed/zh-TW.json");
+    f.catalog(file, { ...JSON.parse(fs.readFileSync(file, "utf8")), "Area only": "only here" });
+    for (const language of ["en", "zh-CN"]) {
+      const other = path.join(f.locales, `app/unattributed/${language}.json`);
+      f.catalog(other, { ...JSON.parse(fs.readFileSync(other, "utf8")), "Area only": `only ${language}` });
+    }
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "edit the areas too");
+    const before = f.git("status", "--porcelain");
+    const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("No files written. HEAD (--branch) holds both the legacy monoliths and the split areas, and 3 value(s) exist only in its split areas");
+    expect(result.stderr).toContain('--branch HEAD^1 --base "$(git merge-base HEAD^1 HEAD^2)" --onto HEAD^2');
+    expect(f.git("status", "--porcelain")).toBe(before);
+    for (const language of LANGUAGES) expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(true);
+  });
+
+  it("refuses a snapshot with only some legacy monoliths", () => {
+    const f = fixture();
+    f.git("checkout", "legacy");
+    f.git("rm", "-q", "frontend/src/i18n/locales/zh-TW.json");
+    f.git("commit", "-m", "partial monoliths");
+    const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("No files written. HEAD (--branch) has only some legacy monoliths (en.json, zh-CN.json)");
+  });
+
   it("rejects divergence in a later language without writing any files", () => {
     const f = fixture();
     f.git("checkout", "split");
