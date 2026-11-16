@@ -1,5 +1,7 @@
 /**
- * Matrix engine for adoption of legacy-layout branches, including "mixed" branches that merged the
+ * Matrix engine shared by the web (frontend/test/i18n-mixed-matrix.test.ts) and native
+ * (mobile/scripts/i18n-mixed-matrix.test.mjs) suites, for adoption of legacy-layout branches,
+ * including "mixed" branches that merged the
  * split main while keeping the legacy monoliths. Each case owns one key (or a plural family); one
  * real-git history hosts every case of a run. Expected outcomes come from an abstract model of the
  * history (`simulateCase`), independent of the tool; the rehearsal builds the history in git, adopts

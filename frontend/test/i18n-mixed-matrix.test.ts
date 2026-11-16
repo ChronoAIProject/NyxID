@@ -1,6 +1,6 @@
 // @vitest-environment node
 /**
- * Adoption matrix (see i18n-mixed-matrix-engine.mjs for the histories, the case enumeration and the
+ * Adoption matrix (see shared/i18n/testing/mixed-matrix-engine.mjs for the histories, the case enumeration and the
  * model the expected outcomes come from): the exhaustive enumeration of three fixed mixed-branch
  * histories, plus seeded random histories covering legacy and keep-monolith merges in any number
  * and order, merge/cherry-pick/rebase routes, intermediate resolutions, per-language edits, plural
@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FAMILIES, LANGUAGES, englishOverrides } from "../scripts/lib/i18n-catalogs.mjs";
 import {
   HISTORIES, NOTHING_IN_PROGRESS, REFUSALS, buildCases, cleanupAll, historyFacts, inParallel, invariantViolations, keyName, mergeRoles, randomCases, randomHistory, rehearse,
-} from "./i18n-mixed-matrix-engine.mjs";
+} from "../../shared/i18n/testing/mixed-matrix-engine.mjs";
 
 // I18N_MATRIX_SEEDS=<n> runs seeds 1..n (e.g. a deeper sweep before changing the adoption tool).
 const RANDOM_SEEDS = Array.from({ length: Number(process.env.I18N_MATRIX_SEEDS ?? 16) }, (_, index) => index + 1);
