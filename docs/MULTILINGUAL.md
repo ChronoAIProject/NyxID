@@ -499,12 +499,12 @@ placeholders identical to the phrase. Then run, from `mobile/`:
 pnpm sync:i18n
 ```
 
-It canonicalizes every area catalog, moves identical cross-area duplicates to
-`shared`, fails on differing values, and regenerates both barrels (including
-after a new area directory is added). `pnpm test` enforces the layout in CI:
-sorted catalogs, per-area zh-CN/zh-TW parity, placeholders, no differing
-duplicates, barrels that import exactly the existing areas, and no leftover
-monolith.
+It canonicalizes every area catalog, removes areas left without keys, moves
+identical cross-area duplicates to `shared`, fails on differing values, and
+regenerates both barrels (including after a new area directory is added).
+`pnpm test` enforces the layout in CI: sorted catalogs, no empty area files,
+per-area zh-CN/zh-TW parity, placeholders, no differing duplicates, barrels
+that import exactly the existing areas, and no leftover monolith.
 
 #### In-flight native branches from before the split
 

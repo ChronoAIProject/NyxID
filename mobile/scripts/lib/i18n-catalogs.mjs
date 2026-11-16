@@ -76,10 +76,9 @@ export function barrelText(areas, language) {
 }
 export const barrelFile = (language, dir = locales) => path.join(dir, `${language}.ts`);
 
-/** Write the non-empty area catalogs (pruning emptied areas) and both barrels. */
+/** Write the area catalogs (the shared writer prunes emptied areas) and both barrels. */
 export function writeCatalogs(portions, dir = locales) {
-  tools.writePortions(dir, Object.fromEntries(Object.entries(portions)
-    .filter(([, catalogs]) => LANGUAGES.some((language) => Object.keys(catalogs[language]).length))));
+  tools.writePortions(dir, portions);
   const areas = core.discoverPortions(dir);
   for (const language of LANGUAGES) {
     const file = barrelFile(language, dir);
@@ -118,6 +117,7 @@ export function auditCatalogs(dir = locales) {
         const text = fs.readFileSync(file, "utf8");
         portions[area][language] = JSON.parse(text);
         if (text !== core.canonicalText(portions[area][language])) issues.push(`${area}/${language}.json: non-canonical catalog; run pnpm sync:i18n`);
+        else if (!Object.keys(portions[area][language]).length) issues.push(`${area}/${language}.json: empty area; run pnpm sync:i18n`);
       } catch (error) {
         issues.push(`${area}/${language}.json: invalid catalog (${error.message})`);
       }

@@ -114,9 +114,14 @@ describe("mobile catalog audit", () => {
     ]);
   });
 
+  test("flags an empty area file", () => {
+    const dir = catalogDir({ account: ["Save"], auth: [] });
+    assert.deepEqual(auditCatalogs(dir), ["auth/zh-CN.json: empty area; run pnpm sync:i18n", "auth/zh-TW.json: empty area; run pnpm sync:i18n"]);
+  });
+
   test("reports per-area language parity", () => {
     const dir = catalogDir({ account: ["Save"] });
-    write(path.join(dir, "account/zh-TW.json"), "{}\n");
+    write(path.join(dir, "account/zh-TW.json"), canonicalText({ Other: "其他" }));
     assert.deepEqual(auditCatalogs(dir), ["mobile/account: key parity differs across zh-CN/zh-TW"]);
   });
 });
