@@ -273,9 +273,11 @@ describe("mobile adopt and sync tools", () => {
   });
 
   /** After M, main moves on: it changes "Save" and adds "Main new" in shared. */
-  const mainMovesAfterMixedMerge = (r) => {
+  const mainMovesAfterMixedMerge = (r, { beforeMerge = () => {}, afterMerge = () => {} } = {}) => {
     const { onto } = splitThenLegacyDelta(r);
+    beforeMerge();
     const mixed = commitMergeKeepingMonoliths(r);
+    afterMerge();
     r.git("checkout", "-q", "split");
     for (const language of LANGUAGES) {
       const file = path.join(r.locales, "shared", `${language}.json`);
@@ -287,21 +289,20 @@ describe("mobile adopt and sync tools", () => {
     return { onto, mixed, moved };
   };
   /** Run the guidance command adopt printed, through this fixture's script. */
-  /** Run the guidance command adopt printed (filling in the legacy fork where it asks for one). */
   const runGuidance = (r, stderr) => {
     const command = stderr.split("\n").find((line) => line.startsWith("  pnpm adopt:i18n --branch"));
     assert.ok(command, stderr);
-    return spawnSync("sh", ["-c", command.trim().replace("pnpm adopt:i18n", `"${process.execPath}" scripts/adopt-i18n.mjs`).replace("<legacy-fork>", r.base)], { cwd: r.root, encoding: "utf8" });
+    return spawnSync("sh", ["-c", command.trim().replace("pnpm adopt:i18n", `"${process.execPath}" scripts/adopt-i18n.mjs`)], { cwd: r.root, encoding: "utf8" });
   };
   /** The branch's legacy delta on top of main's later changes, with nothing of main reverted. */
-  const expectNothingReverted = (r) => {
+  const expectNothingReverted = (r, extra = () => ({})) => {
     assert.deepEqual(auditCatalogs(r.locales), []);
     const merged = (language) => Object.assign({}, ...fs.readdirSync(r.locales, { withFileTypes: true })
       .filter((entry) => entry.isDirectory()).map((entry) => readCatalog(r.locales, entry.name, language)));
     for (const language of LANGUAGES) {
       assert.deepEqual(merged(language), {
         Save: `save v2 ${language}`, "Main new": `main ${language}`, "Sign in": zh("Sign in", language),
-        "Change me": `changed ${language}`, "Remove me": zh("Remove me", language), Added: zh("Added", language),
+        "Change me": `changed ${language}`, "Remove me": zh("Remove me", language), Added: zh("Added", language), ...extra(language),
       });
       assert.equal(fs.existsSync(path.join(r.locales, `${language}.json`)), false);
     }
@@ -314,8 +315,7 @@ describe("mobile adopt and sync tools", () => {
     const refused = r.run("adopt-i18n.mjs", "--branch", mixed, "--base", onto, "--onto", moved);
     assert.notEqual(refused.status, 0);
     assert.ok(refused.stderr.includes(`No files written. ${mixed} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths (and any later edits to those areas). ${onto} (--base) has only the split areas`), refused.stderr);
-    // The mobile adopt does not look up the legacy fork yet, so the guidance asks for it.
-    assert.ok(refused.stderr.includes(`  pnpm adopt:i18n --branch ${mixed} --base <legacy-fork> --onto ${moved}`), refused.stderr);
+    assert.ok(refused.stderr.includes(`  pnpm adopt:i18n --branch ${mixed} --base ${r.base} --onto ${moved}`), refused.stderr);
     assert.ok(!refused.stderr.includes("^1"), refused.stderr);
     assert.equal(r.git("status", "--porcelain"), before);
     const guided = runGuidance(r, refused.stderr);
@@ -332,13 +332,53 @@ describe("mobile adopt and sync tools", () => {
     const refused = r.run("adopt-i18n.mjs");
     assert.notEqual(refused.status, 0);
     assert.ok(refused.stderr.includes("HEAD (--branch) keeps the legacy monoliths beside split areas it inherited from main"), refused.stderr);
-    assert.ok(refused.stderr.includes("  pnpm adopt:i18n --branch HEAD --base <legacy-fork> --onto MERGE_HEAD"), refused.stderr);
+    assert.ok(refused.stderr.includes(`  pnpm adopt:i18n --branch HEAD --base ${r.base} --onto MERGE_HEAD`), refused.stderr);
     assert.equal(r.git("status", "--porcelain"), before);
     const guided = runGuidance(r, refused.stderr);
     assert.equal(guided.status, 0, guided.stderr);
     expectNothingReverted(r);
     r.git("add", "-A", "mobile/src/i18n/locales"); r.git("commit", "-q", "-m", "second merge");
     expectNothingReverted(r);
+  });
+
+  test("adopts a branch that edited its monoliths after the merge that kept them, following the printed guidance", () => {
+    const r = repository();
+    mainMovesAfterMixedMerge(r, {
+      // Main changes "Save" before the branch merges it (and again afterwards).
+      beforeMerge: () => {
+        r.git("checkout", "-q", "split");
+        for (const language of LANGUAGES) {
+          const file = path.join(r.locales, "shared", `${language}.json`);
+          write(file, canonicalText({ ...JSON.parse(fs.readFileSync(file, "utf8")), Save: `save v1 ${language}` }));
+        }
+        r.git("add", "-A"); r.git("commit", "-q", "-m", "main changes Save");
+        r.git("checkout", "-q", "legacy");
+      },
+      // X: after the merge that kept the monoliths, the branch edits them again.
+      afterMerge: () => {
+        for (const language of LANGUAGES) {
+          const file = path.join(r.locales, `${language}.json`);
+          write(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), "X key": `x ${language}` }, null, 2));
+        }
+        r.git("add", "-A"); r.git("commit", "-q", "-m", "X edits the monoliths");
+      },
+    });
+    assert.equal(r.git("rev-list", "--parents", "-n", "1", "HEAD").split(" ").length, 2);
+    // The branch merges main again; adopt, then follow exactly what it prints.
+    spawnSync("git", ["merge", "--no-commit", "split"], { cwd: r.repo, encoding: "utf8" });
+    const before = r.git("status", "--porcelain");
+    const refused = r.run("adopt-i18n.mjs");
+    assert.notEqual(refused.status, 0);
+    assert.ok(refused.stderr.includes("HEAD (--branch) keeps the legacy monoliths beside split areas it inherited from main"), refused.stderr);
+    assert.ok(!refused.stderr.includes("^1"), refused.stderr);
+    assert.ok(refused.stderr.includes(`  pnpm adopt:i18n --branch HEAD --base ${r.base} --onto MERGE_HEAD`), refused.stderr);
+    assert.equal(r.git("status", "--porcelain"), before);
+    const guided = runGuidance(r, refused.stderr);
+    assert.equal(guided.status, 0, guided.stderr);
+    const xKey = (language) => ({ "X key": `x ${language}` });
+    expectNothingReverted(r, xKey);
+    r.git("add", "-A", "mobile/src/i18n/locales"); r.git("commit", "-q", "-m", "merge main again");
+    expectNothingReverted(r, xKey);
   });
 
   test("refuses a split-only branch against a legacy-only base", () => {

@@ -38,7 +38,10 @@ try {
   const mergeBaseRef = emptyBase ? null : repo.mergeBase(refs.branch, refs.onto);
   const mergeBase = mergeBaseRef ? snapshot(repo, mergeBaseRef, { sources: false }) : null;
   const order = !mergeBaseRef ? "base" : repo.referenceOrder(refs.base, mergeBaseRef);
-  const chosen = chooseCatalogViews({ base, branch, onto }, refs, { languages: LANGUAGES, adopt: "pnpm adopt:i18n", mergeBase, order });
+  const chosen = chooseCatalogViews({ base, branch, onto }, refs, {
+    languages: LANGUAGES, adopt: "pnpm adopt:i18n", mergeBase, order,
+    legacyFork: () => repo.legacyForks(refs.branch, refs.onto, LANGUAGES.map((language) => `src/i18n/locales/${language}.json`)),
+  });
   for (const role of ["base", "branch", "onto"]) ({ base, branch, onto })[role].catalogs.mobile = chosen[role];
   const { result, conflicts } = mergeDeltas(base.catalogs, branch.catalogs, onto.catalogs, ["mobile"], emptyBase);
   if (conflicts.length) throw new Error(`No files written. Resolve these catalog divergences explicitly:\n${conflicts.join("\n")}`);
