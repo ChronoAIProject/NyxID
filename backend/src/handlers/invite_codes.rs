@@ -161,24 +161,14 @@ pub async fn create_invite_code(
     let max_uses = body.max_uses.unwrap_or(10);
     let admin_id = auth_user.user_id.to_string();
 
-    let invite = invite_code_service::create_invite_code(
+    let invite = invite_code_service::create_invite_code_as(
         &state.db,
         &admin_id,
         max_uses,
         body.note.as_deref(),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_invite_code_create",
-        Some(serde_json::json!({
-            "invite_code_id": invite.id,
-            "code": invite.code,
-            "max_uses": invite.max_uses,
-        })),
-    );
 
     emit_event(
         state.telemetry.as_deref(),
@@ -237,17 +227,13 @@ pub async fn update_invite_code(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    let updated = invite_code_service::update_invite_code_note(&state.db, &id, body.note).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_invite_code_update",
-        Some(serde_json::json!({
-            "invite_code_id": id,
-            "fields_changed": ["note"],
-        })),
-    );
+    let updated = invite_code_service::update_invite_code_note_as(
+        &state.db,
+        &id,
+        body.note,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     // Resolve usage users for the single updated code so the response carries
     // the same enrichment shape as the list endpoint. The drawer reuses this
@@ -269,14 +255,12 @@ pub async fn deactivate_invite_code(
 ) -> AppResult<Json<DeactivateInviteCodeResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    invite_code_service::deactivate_invite_code(&state.db, &id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_invite_code_deactivate",
-        Some(serde_json::json!({ "invite_code_id": id })),
-    );
+    invite_code_service::deactivate_invite_code_as(
+        &state.db,
+        &id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(DeactivateInviteCodeResponse {
         message: "Invite code deactivated".to_string(),

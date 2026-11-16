@@ -2,13 +2,17 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use mongodb::bson::{self, doc};
-use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+use mongodb::options::ReturnDocument;
 use rand::Rng;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::invite_code::{COLLECTION_NAME, InviteCode, InviteCodeUsage};
 use crate::models::user::COLLECTION_NAME as USERS_COLLECTION;
+
+use crate::services::audit_service::AuditActor;
+
+mod audit;
 
 /// Minimal user projection used to enrich invite code usage entries in admin
 /// responses. Built from the `users` collection via a single batch lookup.
@@ -104,14 +108,13 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 /// Retries on unique-index collision (extremely unlikely in practice but
 /// possible in principle, and we never want to surface a raw DB error to the
 /// admin for this branch).
-pub async fn create_invite_code(
+pub async fn create_invite_code_as(
     db: &mongodb::Database,
     created_by: &str,
     max_uses: i32,
     note: Option<&str>,
+    actor: &AuditActor,
 ) -> AppResult<InviteCode> {
-    let collection = db.collection::<InviteCode>(COLLECTION_NAME);
-
     for attempt in 0..CODE_INSERT_MAX_ATTEMPTS {
         let now = Utc::now();
         let invite = InviteCode {
@@ -128,17 +131,16 @@ pub async fn create_invite_code(
             reservations: Vec::new(),
         };
 
-        match collection.insert_one(&invite).await {
+        match audit::create(db, &invite, actor).await {
             Ok(_) => return Ok(invite),
-            Err(e) if is_duplicate_key_error(&e) => {
+            Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
                 tracing::warn!(
                     attempt = attempt + 1,
-                    code = %invite.code,
                     "Invite code generation collision, retrying"
                 );
                 continue;
             }
-            Err(e) => return Err(AppError::DatabaseError(e)),
+            Err(e) => return Err(e),
         }
     }
 
@@ -456,10 +458,11 @@ pub async fn list_invite_codes(db: &mongodb::Database) -> AppResult<InviteCodesW
 /// `None` both clear it (stored as `null` on the document). Returns the
 /// freshly-updated `InviteCode` so the handler can render it back to the
 /// admin without an extra read.
-pub async fn update_invite_code_note(
+pub async fn update_invite_code_note_as(
     db: &mongodb::Database,
     id: &str,
     note: Option<String>,
+    actor: &AuditActor,
 ) -> AppResult<InviteCode> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
@@ -468,45 +471,30 @@ pub async fn update_invite_code_note(
         Some(text) => bson::Bson::String(text.to_string()),
     };
 
-    let options = FindOneAndUpdateOptions::builder()
-        .return_document(ReturnDocument::After)
-        .projection(admin_projection())
-        .build();
-
-    let updated = db
-        .collection::<InviteCode>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! { "_id": id },
-            doc! {
-                "$set": {
-                    "note": note_bson,
-                    "updated_at": now,
-                },
-            },
-        )
-        .with_options(options)
-        .await?;
-
-    updated.ok_or_else(|| AppError::NotFound("Invite code not found".to_string()))
+    audit::update(
+        db,
+        id,
+        doc! {"$set":{"note":note_bson,"updated_at":now}},
+        actor,
+    )
+    .await
 }
 
 /// Deactivate an invite code by ID.
-pub async fn deactivate_invite_code(db: &mongodb::Database, id: &str) -> AppResult<()> {
+pub async fn deactivate_invite_code_as(
+    db: &mongodb::Database,
+    id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
-    let result = db
-        .collection::<InviteCode>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": id },
-            doc! { "$set": { "is_active": false, "updated_at": now } },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Invite code not found".to_string()));
-    }
-
-    Ok(())
+    audit::deactivate(
+        db,
+        id,
+        doc! {"$set":{"is_active":false,"updated_at":now}},
+        actor,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -740,3 +728,32 @@ mod tests {
 #[cfg(test)]
 #[path = "invite_reservation_tests.rs"]
 mod durability_tests;
+
+#[cfg(test)]
+mod audit_tests;
+
+// Existing fixtures go through the same preparation and source transaction.
+#[cfg(test)]
+pub async fn create_invite_code(
+    db: &mongodb::Database,
+    created_by: &str,
+    max_uses: i32,
+    note: Option<&str>,
+) -> AppResult<InviteCode> {
+    create_invite_code_as(db, created_by, max_uses, note, &fixture_actor(created_by)).await
+}
+
+#[cfg(test)]
+pub async fn deactivate_invite_code(db: &mongodb::Database, id: &str) -> AppResult<()> {
+    deactivate_invite_code_as(db, id, &fixture_actor(&Uuid::nil().to_string())).await
+}
+#[cfg(test)]
+fn fixture_actor(user_id: &str) -> AuditActor {
+    AuditActor {
+        user_id: user_id.to_owned(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    }
+}
