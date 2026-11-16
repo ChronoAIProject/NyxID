@@ -1,6 +1,6 @@
 import React from "react";
 import { act, fireEvent, render, waitFor } from "@testing-library/react-native";
-import { AppState, type AppStateStatus } from "react-native";
+import { AppState, Platform, type AppStateStatus } from "react-native";
 import { SshTerminalScreen } from "./SshTerminalScreen";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { refreshAccessTokenIfNeeded } from "../../lib/api/http";
@@ -207,6 +207,22 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   await screen.unmount();
   expect(socket.close).toHaveBeenCalledWith(1000);
 });
+
+test.each(["ios", "android"] as const)(
+  "%s receives the array form for the WebView data detector prop",
+  async (platform) => {
+    jest.replaceProperty(Platform, "OS", platform);
+    const screen = await renderTerminal(
+      <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
+    );
+    // Android Fabric parses this native prop as an array; the iOS string
+    // shorthand can crash while creating the WebView node.
+    const value = screen.getByTestId("terminal-webview").props.dataDetectorTypes;
+    expect(Array.isArray(value)).toBe(true);
+    expect(value).toEqual(["none"]);
+    await screen.unmount();
+  },
+);
 
 test("background grace keeps the socket for 15 seconds while inactive stays harmless; 401 retries once", async () => {
   jest.useFakeTimers();

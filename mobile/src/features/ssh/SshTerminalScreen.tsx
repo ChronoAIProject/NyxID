@@ -779,7 +779,8 @@ export function SshTerminalScreen({
               allowFileAccessFromFileURLs={false}
               allowUniversalAccessFromFileURLs={false}
               mixedContentMode="never"
-              dataDetectorTypes="none"
+              // Android Fabric requires an array; only iOS normalizes the string shorthand.
+              dataDetectorTypes={["none"]}
               sharedCookiesEnabled={false}
               thirdPartyCookiesEnabled={false}
               domStorageEnabled={false}
