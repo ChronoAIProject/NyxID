@@ -1243,48 +1243,39 @@ async fn paid_provider_evidence(images: bool, family: bool, checkpoint_crash: bo
             .unwrap(),
         count
     );
-    let mut remote_usage: Vec<_> = rows
-        .iter()
-        .filter_map(|row| {
-            let quantity = row.funding.as_ref()?.lago_billable_quantity_micros?;
-            (quantity > 0).then(|| {
-                json!({
-                    "code": row.lago_metric_code,
-                    "units": Credits::from_pico(i128::from(quantity) * 1_000_000)
-                        .unwrap().to_string(),
-                })
-            })
-        })
-        .collect();
-    assert!(!remote_usage.is_empty());
-    let matched = Mock::given(method("GET"))
-        .and(path(format!("/api/v1/customers/{actor}/current_usage")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"fees": remote_usage})))
-        .expect(remote_usage.len() as u64)
-        .mount_as_scoped(&server)
-        .await;
-    assert_eq!(
-        reconciler
-            .compare_usage_for_test()
-            .await
-            .unwrap()
-            .drift_alerts,
-        0
-    );
-    drop(matched);
-    // A deliberate one-unit discrepancy must be detected, proving the zero
-    // above came from comparing the wallet-only quantities, not a skipped read.
-    let original: Credits = remote_usage[0]["units"].as_str().unwrap().parse().unwrap();
-    remote_usage[0]["units"] = json!(
-        original
-            .checked_add(Credits::from_whole(1))
-            .unwrap()
-            .to_string()
-    );
+    let receipts: Vec<crate::models::billing_usage_delivery::BillingUsageDelivery> = db
+        .collection("billing_usage_deliveries")
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(receipts.len() as u64, failed_stats.retried);
+    for receipt in &receipts {
+        let row = rows
+            .iter()
+            .find(|row| row.transaction_id == receipt.transaction_id)
+            .unwrap();
+        let expected =
+            billing::lago_client::LagoEvent::from_usage_row(row, Some("subscription".into()))
+                .unwrap();
+        assert_eq!(receipt.customer_id, actor);
+        assert_eq!(receipt.subscription_id, expected.external_subscription_id);
+        assert_eq!(receipt.code, expected.code);
+        assert_eq!(receipt.event_second, expected.timestamp);
+        assert_eq!(receipt.properties.quantity, expected.properties.quantity);
+        assert_eq!(
+            receipt.state,
+            crate::models::billing_usage_delivery::DeliveryState::Acknowledged
+        );
+        assert!(receipt.acknowledgement_sequence.is_some());
+    }
+    // Capture records emitted wallet quantities; warming performs no provider read.
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/customers/{actor}/current_usage")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"fees": remote_usage})))
-        .expect(remote_usage.len() as u64)
+        .respond_with(ResponseTemplate::new(503))
+        .expect(0)
         .mount(&server)
         .await;
     assert_eq!(
@@ -1293,7 +1284,7 @@ async fn paid_provider_evidence(images: bool, family: bool, checkpoint_crash: bo
             .await
             .unwrap()
             .drift_alerts,
-        1
+        0
     );
     server.verify().await;
     db.drop().await.unwrap();

@@ -663,6 +663,83 @@ async fn automation_receipts_are_erased_by_exact_owner_and_block_final_completio
 }
 
 #[tokio::test]
+async fn billing_meter_receipt_and_capture_state_share_financial_erasure_retention() {
+    for org in [false, true] {
+        let (db, owner) = tests::fixture().await;
+        let state = test_app_state(db.clone());
+        db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id":"retained-meter",
+                "billing_owner_id":&owner,
+                "status":"finalized",
+                "released":true,
+                "lago_acked":true,
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_usage_deliveries")
+            .insert_one(doc! {
+                "_id":"retained-delivery",
+                "owner_id":&owner,
+                "wallet_id":"wallet",
+                "transaction_id":"retained-transaction",
+                "state":"acknowledged",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_usage_comparisons")
+            .insert_one(doc! {
+                "_id":"retained-capture",
+                "owner_id":&owner,
+                "wallet_id":"wallet",
+                "customer_id":"customer",
+                "subscription_id":"subscription",
+            })
+            .await
+            .unwrap();
+        if org {
+            db.collection::<Document>(USERS)
+                .update_one(doc! {"_id":&owner}, doc! {"$set":{"user_type":"org"}})
+                .await
+                .unwrap();
+            crate::services::org_service::delete_org_user(
+                &db,
+                &owner,
+                &crate::services::org_service::audit::fixture_actor(),
+            )
+            .await
+            .unwrap();
+        } else {
+            accept(&db, &owner, &owner, None).await.unwrap();
+            until_source_removed(&state, &owner).await;
+        }
+        assert!(
+            db.collection::<Document>(USERS)
+                .find_one(doc! {"_id":&owner})
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        for collection in [
+            crate::models::usage_meter::COLLECTION_NAME,
+            "billing_usage_deliveries",
+            "billing_usage_comparisons",
+        ] {
+            assert!(
+                db.collection::<Document>(collection)
+                    .find_one(doc! {"$or":[{"billing_owner_id":&owner},{"owner_id":&owner}]})
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "financial collection {collection} must retain the owner's record"
+            );
+        }
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn notification_feed_is_erased_for_exact_person_and_blocks_completion_if_leftover() {
     let (db, owner) = tests::fixture().await;
     let state = test_app_state(db.clone());

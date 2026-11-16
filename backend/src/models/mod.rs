@@ -22,6 +22,8 @@ pub mod billing_target;
 pub mod billing_tax_plan_epoch;
 pub mod billing_tax_profile;
 pub mod billing_topup_session;
+pub mod billing_usage_comparison;
+pub mod billing_usage_delivery;
 pub mod billing_wallet;
 pub mod bson_bytes;
 pub mod bson_datetime;
