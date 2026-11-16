@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { gitRepository } from "../../shared/i18n/catalog-core.mjs";
+import { chooseCatalogViews, gitRepository } from "../../shared/i18n/catalog-core.mjs";
 import {
   LANGUAGES, analyzePortions, collectPortions, consolidateDuplicates, isPlacementSource,
   legacyFiles, mergeDeltas, placeCatalogs, rewriteLegacyCatalogImports, root, writeCatalogs,
@@ -12,10 +12,13 @@ function snapshot(repo, ref, { sources: withSources }) {
   const portions = collectPortions(files, /^src\/i18n\/locales\/([^/]+)\/([^/]+)\.json$/);
   const analysis = analyzePortions(portions);
   if (analysis.issues.length) throw new Error(`${ref}: ${analysis.issues.join("\n")}`);
+  // Both layouts are reported; chooseCatalogViews decides which one each role uses.
   const legacy = (language) => files.has(`src/i18n/locales/${language}.json`) ? JSON.parse(files.get(`src/i18n/locales/${language}.json`)) : {};
-  const mobile = Object.keys(portions).length ? analysis.merged : Object.fromEntries(LANGUAGES.map((language) => [language, legacy(language)]));
+  const areas = Object.keys(portions).length ? analysis.merged : null;
+  const monolithLanguages = LANGUAGES.filter((language) => files.has(`src/i18n/locales/${language}.json`));
+  const monolith = monolithLanguages.length ? Object.fromEntries(LANGUAGES.map((language) => [language, legacy(language)])) : null;
   const sources = [...files].filter(([file]) => isPlacementSource(file));
-  return { catalogs: { mobile }, portions, sources };
+  return { areas, monolith, monolithLanguages, catalogs: {}, portions, sources };
 }
 
 try {
@@ -31,6 +34,12 @@ try {
   const base = snapshot(repo, refs.base, { sources: false });
   const branch = snapshot(repo, refs.branch, { sources: true });
   const onto = snapshot(repo, refs.onto, { sources: !emptyBase });
+  // Each branch layout is diffed against that layout at the newer of --base and merge-base(branch, onto).
+  const mergeBaseRef = emptyBase ? null : repo.mergeBase(refs.branch, refs.onto);
+  const mergeBase = mergeBaseRef ? snapshot(repo, mergeBaseRef, { sources: false }) : null;
+  const order = !mergeBaseRef ? "base" : repo.referenceOrder(refs.base, mergeBaseRef);
+  const chosen = chooseCatalogViews({ base, branch, onto }, refs, { languages: LANGUAGES, adopt: "pnpm adopt:i18n", mergeBase, order });
+  for (const role of ["base", "branch", "onto"]) ({ base, branch, onto })[role].catalogs.mobile = chosen[role];
   const { result, conflicts } = mergeDeltas(base.catalogs, branch.catalogs, onto.catalogs, ["mobile"], emptyBase);
   if (conflicts.length) throw new Error(`No files written. Resolve these catalog divergences explicitly:\n${conflicts.join("\n")}`);
   const sources = emptyBase ? branch.sources : [...onto.sources, ...branch.sources];

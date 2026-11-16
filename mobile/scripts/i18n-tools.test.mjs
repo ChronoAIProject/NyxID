@@ -208,6 +208,75 @@ describe("mobile adopt and sync tools", () => {
     });
   }
 
+  /** Commit the split on `split`, then a legacy catalog delta on `legacy`. */
+  const splitThenLegacyDelta = (r) => {
+    r.git("checkout", "-q", "-b", "split");
+    assert.equal(r.run("adopt-i18n.mjs", "--branch", r.base, "--base", "empty", "--onto", r.base).status, 0);
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "split");
+    const onto = r.git("rev-parse", "HEAD");
+    r.git("checkout", "-q", "legacy");
+    for (const language of LANGUAGES) {
+      const next = catalog(["Save", "Sign in", "Change me", "Remove me", "Added"], language);
+      next["Change me"] = `changed ${language}`;
+      write(path.join(r.locales, `${language}.json`), JSON.stringify(next, null, 2));
+    }
+    write(path.join(r.root, "src/features/auth/Added.tsx"), 'export const a = t("Added");\n');
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "legacy delta");
+    return { onto, branch: r.git("rev-parse", "HEAD") };
+  };
+  const expectDeltaAdopted = (r) => {
+    assert.deepEqual(auditCatalogs(r.locales), []);
+    assert.deepEqual(readCatalog(r.locales, "account", "zh-CN"), { "Change me": "changed zh-CN" });
+    assert.deepEqual(readCatalog(r.locales, "auth", "zh-TW"), { Added: zh("Added", "zh-TW"), "Sign in": zh("Sign in", "zh-TW") });
+    for (const language of LANGUAGES) assert.equal(fs.existsSync(path.join(r.locales, `${language}.json`)), false);
+  };
+
+  test("uses a mixed branch's monoliths so its legacy edits land and nothing is lost", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    // The fixture is small enough to trip rename detection; the real split is not.
+    spawnSync("git", ["merge", "--no-commit", "-X", "no-renames", "split"], { cwd: r.repo, encoding: "utf8" });
+    const conflicted = r.git("diff", "--name-only", "--diff-filter=U").split("\n").filter(Boolean);
+    r.git("checkout", "--ours", "--", ...conflicted);
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "merge that kept the monoliths");
+    for (const language of LANGUAGES) assert.equal(fs.existsSync(path.join(r.locales, `${language}.json`)), true);
+    const adopted = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
+    assert.equal(adopted.status, 0, adopted.stderr);
+    expectDeltaAdopted(r);
+  });
+
+  test("refuses partial monoliths without writing", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    r.git("rm", "-q", "mobile/src/i18n/locales/zh-TW.json"); r.git("commit", "-q", "-m", "partial");
+    const result = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /No files written\. HEAD \(--branch\) has only some legacy monoliths \(zh-CN\.json\)/);
+    assert.equal(r.git("status", "--porcelain"), "");
+  });
+
+  test("adopts a conflicted cherry-pick and explains git am", () => {
+    const r = repository();
+    const { branch } = splitThenLegacyDelta(r);
+    r.git("checkout", "-q", "split");
+    assert.notEqual(spawnSync("git", ["cherry-pick", branch], { cwd: r.repo, encoding: "utf8" }).status, 0);
+    const picked = r.run("adopt-i18n.mjs");
+    assert.equal(picked.status, 0, picked.stderr);
+    assert.match(picked.stdout, /adopted CHERRY_PICK_HEAD \(base CHERRY_PICK_HEAD\^\) onto HEAD/);
+    expectDeltaAdopted(r);
+
+    const am = repository();
+    const delta = splitThenLegacyDelta(am);
+    const patch = path.join(am.repo, "legacy.patch");
+    fs.writeFileSync(patch, am.git("format-patch", "-1", "--stdout", delta.branch));
+    am.git("checkout", "-q", "split");
+    assert.notEqual(spawnSync("git", ["am", "-3", patch], { cwd: am.repo, encoding: "utf8" }).status, 0);
+    const result = am.run("adopt-i18n.mjs");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /git am is in progress; .*\(pnpm adopt:i18n --branch <legacy-commit> --base <legacy-commit>\^ --onto HEAD\)/);
+    assert.doesNotMatch(result.stderr, /bad revision/);
+  });
+
   test("refuses to place keys when a feature directory uses a reserved area name", () => {
     const r = repository();
     write(path.join(r.root, "src/features/shared/Screen.tsx"), 'export const a = t("Remove me");\n');
