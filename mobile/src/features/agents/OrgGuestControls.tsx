@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { channelDetail } from "./channelPresentation";
 import { useState } from "react";
 import { Alert, Linking, Switch } from "react-native";
 import { useQuery } from "@tanstack/react-query";
@@ -27,6 +29,8 @@ export function OrgGuestChannel({
   agent: AssistantAgent;
   channel: AssistantAgent["channels"][number];
 }) {
+  const { t } = useAppLanguage();
+  const detail = channelDetail(channel);
   const [open, setOpen] = useState(false);
   const session = useCollaborationSession("nyxbot:org-specialist-channels");
   const query = useQuery({
@@ -45,7 +49,7 @@ export function OrgGuestChannel({
     <>
       <SettingsRow
         label={channel.bot_label}
-        detail={channel.platform}
+        detail={detail.kind === "message" ? t(detail.value) : detail.value}
         value={channel.status}
         onPress={() => setOpen(!open)}
       />

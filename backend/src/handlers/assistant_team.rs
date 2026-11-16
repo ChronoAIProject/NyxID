@@ -3325,6 +3325,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
 
 #[derive(Serialize)]
 pub struct ChannelLinkResponse {
+    gateway_native_activation: Option<String>,
     id: String,
     platform: String,
     bot_label: String,
@@ -3366,6 +3367,7 @@ async fn agent_responses(
                 channel.agent_id.as_deref().unwrap_or(nyxbot.id.as_str()) == summary.id
             })
             .map(|channel| ChannelLinkResponse {
+                gateway_native_activation: channel.gateway_native_activation.clone(),
                 id: channel.id.clone(),
                 platform: channel.platform.clone(),
                 bot_label: channel.bot_label.clone(),

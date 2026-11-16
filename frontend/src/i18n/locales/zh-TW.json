@@ -12174,5 +12174,6 @@
   "Saved guest access stays on. Private chats stay restricted to verified organization members. Guests can talk in groups that allow everyone; the organization pays for their messages and tool use. Existing guest service limits apply. Guests can use only the services listed below; an empty list means model-only chat.": "已儲存的訪客存取保持開啟。私聊仍僅限已驗證的組織成員。訪客可以在允許所有人的群聊中交談；組織支付其訊息和工具使用費用。現有訪客服務限制繼續適用。訪客只能使用下列服務；清單為空時只能與模型聊天。",
   "Oldest outstanding effect: {{value1}}": "最早的待處理操作：{{value1}}",
   "No outstanding effects": "沒有待處理操作",
-  "Security effect relay": "安全操作中繼"
+  "Security effect relay": "安全操作中繼",
+  "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord 訊息接收已暫停，正在檢查保留的閘道釋放記錄和安全等待期。NyxID 會持續檢查；重試啟用無法繞過此安全檢查。"
 }

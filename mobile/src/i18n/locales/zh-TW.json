@@ -338,6 +338,7 @@
   "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。",
   "An organization admin can change these settings.": "組織管理員可以變更這些設定。",
   "Set up organization billing to serve guests.": "設定組織帳單以服務訪客。",
+  "Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check.": "Discord 訊息接收已暫停，正在檢查保留的閘道釋放記錄和安全等待期。NyxID 會持續檢查；重試啟用無法繞過此安全檢查。",
   "Authorization completed. Your connection is ready.": "授權已完成，連線已就緒。",
   "Authorization isn't finished. Continue authorization or check again.": "授權尚未完成。請繼續授權或再次檢查。",
   "We couldn't confirm authorization yet. Check again in a moment.": "暫時無法確認授權。請稍後再次檢查。",

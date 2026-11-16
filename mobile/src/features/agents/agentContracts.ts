@@ -62,6 +62,7 @@ export const agentSchema = z.object({
         id: z.string(),
         platform: z.string(),
         bot_label: z.string(),
+        gateway_native_activation: z.string().nullish(),
         status: z.string(),
       }),
     )
