@@ -179,6 +179,75 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     f.verify();
   });
 
+  /** After the merge that kept the monoliths (M), main moves on: it changes "Kept" and adds "Main new". */
+  const mainMovesAfterMixedMerge = (f: ReturnType<typeof fixture>) => {
+    const mixed = commitMergeKeepingMonoliths(f);
+    f.git("checkout", "split");
+    for (const language of LANGUAGES) {
+      const file = path.join(f.locales, "app/billing", `${language}.json`);
+      f.catalog(file, { ...JSON.parse(fs.readFileSync(file, "utf8")), Kept: `kept v2 ${language}`, "Main new": `main ${language}` });
+    }
+    f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "main moves on");
+    const moved = f.git("rev-parse", "HEAD");
+    f.git("checkout", "legacy");
+    return { mixed, moved };
+  };
+  /** Run the guidance command adopt printed, through this fixture's script. */
+  const runGuidance = (f: ReturnType<typeof fixture>, stderr: string) => {
+    const command = stderr.split("\n").find((line) => line.startsWith("  npm run adopt:i18n -- --branch"));
+    expect(command, stderr).toBeDefined();
+    return spawnSync("sh", ["-c", command!.trim().replace("npm run adopt:i18n --", `"${process.execPath}" scripts/adopt-legacy-i18n.mjs`)], { cwd: f.root, encoding: "utf8" });
+  };
+  /** The branch's legacy delta on top of main's later changes, with nothing of main reverted. */
+  const expectNothingReverted = (f: ReturnType<typeof fixture>) => {
+    const { merged, issues } = analyzePortions(loadPortions(f.locales));
+    expect(issues).toEqual([]);
+    for (const language of LANGUAGES) {
+      expect(merged[language]).toEqual({ "Change me": `new ${language}`, Kept: `kept v2 ${language}`, "Added key": `added ${language}`, "Main new": `main ${language}` });
+      expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(false);
+    }
+  };
+
+  it("refuses a mixed branch against a split-only --base, and its guidance adopts without reverting main", () => {
+    const f = fixture();
+    const { mixed, moved } = mainMovesAfterMixedMerge(f);
+    const before = f.git("status", "--porcelain");
+    const refused = f.adopt("--branch", mixed, "--base", f.onto, "--onto", moved);
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain(`No files written. ${f.onto} (--base) has only the split areas, but ${mixed} (--branch) is read from its legacy monoliths`);
+    expect(refused.stderr).toContain(`  npm run adopt:i18n -- --branch ${mixed}^1 --base "$(git merge-base ${mixed}^1 ${moved})" --onto ${moved}`);
+    expect(f.git("status", "--porcelain")).toBe(before);
+    const guided = runGuidance(f, refused.stderr);
+    expect(guided.status, guided.stderr).toBe(0);
+    expectNothingReverted(f);
+  });
+
+  it("refuses the auto-detected merge of a branch that kept the monoliths, and its guidance completes the merge", () => {
+    const f = fixture();
+    mainMovesAfterMixedMerge(f);
+    spawnSync("git", ["merge", "--no-commit", "split"], { cwd: f.repo, encoding: "utf8" });
+    expect(fs.existsSync(path.join(f.repo, ".git/MERGE_HEAD"))).toBe(true);
+    const before = f.git("status", "--porcelain");
+    const refused = f.adopt();
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain("(--base) has only the split areas, but HEAD (--branch) is read from its legacy monoliths");
+    expect(refused.stderr).toContain('  npm run adopt:i18n -- --branch HEAD^1 --base "$(git merge-base HEAD^1 MERGE_HEAD)" --onto MERGE_HEAD');
+    expect(f.git("status", "--porcelain")).toBe(before);
+    const guided = runGuidance(f, refused.stderr);
+    expect(guided.status, guided.stderr).toBe(0);
+    expectNothingReverted(f);
+    f.git("add", "-A", "frontend/src/i18n/locales");
+    f.git("commit", "-m", "second merge");
+    expectNothingReverted(f);
+  });
+
+  it("refuses a split-only branch against a legacy-only base", () => {
+    const f = fixture();
+    const result = f.adopt("--branch", f.onto, "--base", f.base, "--onto", f.onto);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(`No files written. ${f.base} (--base) has only the legacy monoliths, but ${f.onto} (--branch) has only the split areas`);
+  });
+
   it("refuses a mixed branch whose split areas hold values found nowhere else, and writes nothing", () => {
     const f = fixture();
     commitMergeKeepingMonoliths(f);
@@ -193,7 +262,7 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("No files written. HEAD (--branch) holds both the legacy monoliths and the split areas, and 3 value(s) exist only in its split areas");
-    expect(result.stderr).toContain('--branch HEAD^1 --base "$(git merge-base HEAD^1 HEAD^2)" --onto HEAD^2');
+    expect(result.stderr).toContain(`--branch HEAD^1 --base "$(git merge-base HEAD^1 ${f.onto})" --onto ${f.onto}`);
     expect(f.git("status", "--porcelain")).toBe(before);
     for (const language of LANGUAGES) expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(true);
   });

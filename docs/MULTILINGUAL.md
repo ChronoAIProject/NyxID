@@ -285,9 +285,20 @@ npm run adopt:i18n -- --branch <old-layout-ref> --base <base-ref> --onto <portio
 If a commit holds both layouts (for example a merge whose modify/delete
 conflict was resolved by keeping the old monoliths), a `--branch` commit is
 read from its monoliths, where the legacy edits live, and an `--onto` commit
-from its areas. The tool refuses, writing nothing, when only some monoliths
-exist or when the layout it would discard holds values found nowhere else,
-and prints the explicit refs to use instead.
+from its areas. The base must then be read from the same layout as the
+branch: a commit's monoliths and areas come from different points in history,
+so comparing a stale monolith with a newer split base would make every key
+`main` added or changed since the fork look removed or reverted by the branch.
+The tool refuses, writing nothing, when the base and branch layouts differ,
+when only some monoliths exist, or when the layout it would discard holds
+values found nowhere else. For a merge commit `M` that kept the monoliths it
+prints the command to adopt its legacy side instead:
+
+```sh
+npm run adopt:i18n -- --branch M^1 --base "$(git merge-base M^1 <onto>)" --onto <onto>
+```
+
+During a later merge of `main` into such a branch, `<onto>` is `MERGE_HEAD`.
 
 The initial migration is the same deterministic operation with an empty base:
 

@@ -321,22 +321,49 @@ export const mayImportLegacyCatalog = (source, legacy) =>
  * snapshot may hold the split areas (`areas`, merged), the legacy monoliths
  * (`monolith`, with `monolithLanguages` present), or both, e.g. when a merge
  * that kept the monoliths was committed. The branch uses its monoliths (where
- * legacy edits live), onto uses its areas, and base follows the branch's
- * choice. Partial monoliths, and a mixed branch or onto whose discarded layout
- * holds values found in no chosen catalog, are refused so nothing is lost.
+ * legacy edits live) and onto uses its areas. The base must be read from the
+ * same layout as the branch: a commit's two layouts come from different points
+ * in history, so comparing a stale monolith with newer areas would turn every
+ * key main added or changed since the fork into a branch removal or revert.
+ * Mismatched layouts, partial monoliths, and a mixed branch or onto whose
+ * discarded layout holds values found in no chosen catalog are refused, with
+ * nothing written.
  */
 export function chooseCatalogViews(snapshots, refs, { languages, adopt }) {
-  const fail = (message) => { throw new Error(`No files written. ${message}`); };
+  const fail = (lines) => { throw new Error(`No files written. ${[lines].flat().join("\n")}`); };
+  // For a merge commit that kept the monoliths: its legacy parent, from the fork point, onto the target.
+  const legacyParentGuidance = [
+    "Adopt the legacy side instead. For a merge commit that kept the monoliths:",
+    `  ${adopt} --branch ${refs.branch}^1 --base "$(git merge-base ${refs.branch}^1 ${refs.onto})" --onto ${refs.onto}`,
+  ];
   for (const role of ["base", "branch", "onto"]) {
     const present = snapshots[role].monolithLanguages;
     if (present.length && present.length < languages.length) {
       fail(`${refs[role]} (--${role}) has only some legacy monoliths (${present.map((language) => `${language}.json`).join(", ")}); restore or delete the others, or pass a commit with one complete layout as --${role}.`);
     }
   }
+  const { base, branch, onto } = snapshots;
+  const branchView = branch.monolith ? "monolith" : branch.areas ? "areas" : null;
+  const baseHasCatalogs = Boolean(base.monolith || base.areas);
+  if (!branchView && baseHasCatalogs) {
+    fail(`${refs.branch} (--branch) has no app catalogs, so every key of ${refs.base} (--base) would be removed; pass the commit that holds the branch's catalogs as --branch.`);
+  }
+  if (branchView === "monolith" && baseHasCatalogs && !base.monolith) {
+    fail([
+      `${refs.base} (--base) has only the split areas, but ${refs.branch} (--branch) is read from its legacy monoliths; comparing the two layouts would treat every key main added or changed since the fork as removed or reverted by the branch.`,
+      ...legacyParentGuidance,
+      "Otherwise pass the legacy-layout commit the branch forked from as --base.",
+    ]);
+  }
+  if (branchView === "areas" && baseHasCatalogs && !base.areas) {
+    fail(`${refs.base} (--base) has only the legacy monoliths, but ${refs.branch} (--branch) has only the split areas; pass a split-layout --base (the split commit the branch is based on), or adopt the branch's legacy commits first.`);
+  }
   const empty = () => Object.fromEntries(languages.map((language) => [language, {}]));
-  const pick = ({ areas, monolith }, prefer) => (prefer === "monolith" ? monolith ?? areas : areas ?? monolith) ?? empty();
-  const branchView = snapshots.branch.monolith ? "monolith" : "areas";
-  const chosen = { base: pick(snapshots.base, branchView), branch: pick(snapshots.branch, "monolith"), onto: pick(snapshots.onto, "areas") };
+  const chosen = {
+    base: (branchView === "monolith" ? base.monolith : base.areas) ?? empty(),
+    branch: (branch.monolith ?? branch.areas) ?? empty(),
+    onto: (onto.areas ?? onto.monolith) ?? empty(),
+  };
   for (const role of ["branch", "onto"]) {
     const { areas, monolith } = snapshots[role];
     if (!areas || !monolith) continue;
@@ -347,10 +374,9 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt }) {
     if (lost.length) {
       fail([
         `${refs[role]} (--${role}) holds both the legacy monoliths and the split areas, and ${lost.length} value(s) exist only in its ${droppedName} (${lost.slice(0, 3).join(", ")}${lost.length > 3 ? ", ..." : ""}); adopting would lose them.`,
-        "Adopt from commits that each have one layout. For a merge commit that kept the monoliths:",
-        `  ${adopt} --branch ${refs[role]}^1 --base "$(git merge-base ${refs[role]}^1 ${refs[role]}^2)" --onto ${refs[role]}^2`,
+        ...(role === "branch" ? legacyParentGuidance : []),
         "Otherwise move those values into one layout, commit, and rerun.",
-      ].join("\n"));
+      ]);
     }
   }
   return chosen;
