@@ -142,6 +142,20 @@ fn selection(revision: i64, entries: &[(&str, &str)]) -> Selection {
             .collect(),
     }
 }
+
+#[test]
+fn download_root_accepts_operation_scoped_path_without_leading_slash() {
+    let registry = Registry::new();
+    let reference = registry.reference();
+    let mut owner = agent();
+    owner.skills = vec![reference.clone()];
+    let path = format!(
+        "api/v1/skills/{}/versions/{}/download",
+        reference.skill_id, reference.version
+    );
+    assert_eq!(download_root(&owner, &path), Some(&reference));
+    assert_eq!(download_root(&owner, &format!("/{path}")), Some(&reference));
+}
 fn actor(person: &str) -> AuditActor {
     AuditActor {
         user_id: person.into(),

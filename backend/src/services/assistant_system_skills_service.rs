@@ -249,13 +249,17 @@ pub(crate) fn download_root<'a>(
     agent: &'a AssistantAgent,
     path: &str,
 ) -> Option<&'a SkillReference> {
+    // Operation-scoped forwarding supplies the canonical path without its
+    // leading slash; ordinary proxy requests retain it. Treat both forms as
+    // the same internal path before comparing the exact pinned package.
+    let path = path.strip_prefix('/').unwrap_or(path);
     agent.skills.iter().filter(|pin| !pin.disabled).find(|pin| {
         path == format!(
-            "/api/v1/skills/{}/versions/{}/download",
+            "api/v1/skills/{}/versions/{}/download",
             pin.skill_id, pin.version
         ) || pin.dependencies.iter().any(|dep| {
             path == format!(
-                "/api/v1/skills/{}/versions/{}/download",
+                "api/v1/skills/{}/versions/{}/download",
                 dep.skill_id, dep.version
             )
         })
