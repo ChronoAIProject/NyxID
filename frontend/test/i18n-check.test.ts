@@ -72,6 +72,14 @@ describe("check-i18n", () => {
     ]);
   });
 
+  it("only warns about an identical cross-area duplicate", () => {
+    const f = fixture();
+    for (const language of LANGUAGES) f.write(`src/i18n/locales/app/dashboard/${language}.json`, canonicalText({ Billing: language === "en" ? "Billing" : `Billing ${language}` }));
+    const result = f.check();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("i18n: identical duplicate Billing in billing, dashboard; run npm run sync:i18n\n");
+  });
+
   it("flags an emptied area, which sync prunes", () => {
     const f = fixture();
     for (const language of LANGUAGES) f.write(`src/i18n/locales/app/dashboard/${language}.json`, "{}\n");
