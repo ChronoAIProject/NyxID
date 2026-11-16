@@ -292,8 +292,11 @@ different points in history, so comparing a stale monolith with a newer split
 base would make every key `main` added or changed since the fork look removed
 or reverted by the branch. The tool refuses, writing nothing, when the base and
 branch layouts differ, when only some monoliths exist, or when a value would
-be lost. Values in a mixed branch's areas that match the `main` it last merged
-are inherited, not branch edits, and never count as lost.
+be lost. A mixed branch's split areas already contain `main` up to the last
+`main` it merged (its merge-base with `--onto`), so they are compared with that
+commit: any addition, change or removal the branch made to its areas is adopted
+after its monolith edits, and a contradiction between the two is reported as a
+conflict.
 
 When it refuses a branch that keeps the monoliths, it finds the branch's
 legacy fork (the newest pre-split commit the branch is based on through its own

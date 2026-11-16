@@ -215,7 +215,7 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     const before = f.git("status", "--porcelain");
     const refused = f.adopt("--branch", mixed, "--base", f.onto, "--onto", moved);
     expect(refused.status).not.toBe(0);
-    expect(refused.stderr).toContain(`No files written. ${mixed} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths. ${f.onto} (--base) has only the split areas`);
+    expect(refused.stderr).toContain(`No files written. ${mixed} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths (and any later edits to those areas). ${f.onto} (--base) has only the split areas`);
     expect(refused.stderr).toContain(`  npm run adopt:i18n -- --branch ${mixed} --base ${f.base} --onto ${moved}`);
     expect(refused.stderr).not.toContain("^1");
     expect(f.git("status", "--porcelain")).toBe(before);
@@ -278,6 +278,7 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     expectNothingReverted(f, (language) => ({ "X key": `x ${language}` }));
   });
 
+
   it("refuses a split-only branch against a legacy-only base", () => {
     const f = fixture();
     const result = f.adopt("--branch", f.onto, "--base", f.base, "--onto", f.onto);
@@ -285,24 +286,23 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     expect(result.stderr).toContain(`No files written. ${f.base} (--base) has only the legacy monoliths, but ${f.onto} (--branch) has only the split areas`);
   });
 
-  it("refuses a mixed branch whose split areas hold values found nowhere else, and writes nothing", () => {
+  it("adopts edits a mixed branch made to the split areas it inherited", () => {
     const f = fixture();
     commitMergeKeepingMonoliths(f);
-    const file = path.join(f.locales, "app/unattributed/zh-TW.json");
-    f.catalog(file, { ...JSON.parse(fs.readFileSync(file, "utf8")), "Area only": "only here" });
-    for (const language of ["en", "zh-CN"]) {
-      const other = path.join(f.locales, `app/unattributed/${language}.json`);
-      f.catalog(other, { ...JSON.parse(fs.readFileSync(other, "utf8")), "Area only": `only ${language}` });
+    for (const language of LANGUAGES) {
+      const file = path.join(f.locales, `app/unattributed/${language}.json`);
+      f.catalog(file, { ...JSON.parse(fs.readFileSync(file, "utf8")), "Area only": `only ${language}` });
     }
     f.git("add", "-A", "frontend/src"); f.git("commit", "-m", "edit the areas too");
-    const before = f.git("status", "--porcelain");
     const result = f.adopt("--branch", "HEAD", "--base", f.base, "--onto", f.onto);
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("No files written. HEAD (--branch) holds both the legacy monoliths and the split areas, and 3 value(s) exist only in its split areas");
-    expect(result.stderr).toContain("Its split areas were inherited from main, so these values were added there on the branch. Copy them into the legacy monoliths, commit, and rerun.");
-    expect(f.git("status", "--porcelain")).toBe(before);
-    for (const language of LANGUAGES) expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(true);
+    expect(result.status, result.stderr).toBe(0);
+    const { merged } = analyzePortions(loadPortions(f.locales));
+    for (const language of LANGUAGES) {
+      expect(merged[language]).toEqual({ "Change me": `new ${language}`, Kept: `kept ${language}`, "Added key": `added ${language}`, "Area only": `only ${language}` });
+      expect(fs.existsSync(path.join(f.locales, `${language}.json`))).toBe(false);
+    }
   });
+
 
   it("refuses a snapshot with only some legacy monoliths", () => {
     const f = fixture();

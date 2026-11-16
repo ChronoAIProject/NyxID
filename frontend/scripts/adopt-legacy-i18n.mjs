@@ -46,12 +46,6 @@ function resolveRefs() {
 
 const tryGit = (...args) => { try { return git(...args); } catch { return null; } };
 
-/** The split areas at the merge-base of branch and onto (the latest main the branch merged), if any. */
-function mergeBaseAreas(branchRef, ontoRef) {
-  const mergeBase = tryGit("merge-base", branchRef, ontoRef);
-  return mergeBase ? snapshot(mergeBase, { sources: false }).areas : null;
-}
-
 /**
  * The branch's legacy fork candidates: the newest pre-split commits it is based
  * on through its own history. The split is the commit in onto's history that
@@ -147,10 +141,14 @@ try {
   const base = snapshot(refs.base, { sources: false });
   const branch = snapshot(refs.branch, { sources: true });
   const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
-  // A mixed branch's split areas were inherited from main: the areas at the latest main it merged.
-  const inherited = branch.areas && branch.monolith ? mergeBaseAreas(refs.branch, refs.onto) : null;
+  // A mixed branch (monoliths kept beside split areas) already contains main up to the latest main it
+  // merged, the merge-base with onto: its split areas are diffed against that.
+  const mixed = Boolean(branch.areas && branch.monolith);
+  const mergeBase = mixed ? tryGit("merge-base", refs.branch, refs.onto) : null;
+  const latestMerged = mergeBase ? snapshot(mergeBase, { sources: false }) : null;
   const app = chooseCatalogViews({ base, branch, onto }, refs, {
-    languages: LANGUAGES, adopt: "npm run adopt:i18n --", inherited, legacyFork: () => legacyForks(refs.branch, refs.onto),
+    languages: LANGUAGES, adopt: "npm run adopt:i18n --", inherited: latestMerged?.areas ?? null,
+    legacyFork: () => legacyForks(refs.branch, refs.onto),
   });
   const conflicts = [];
   const merged = emptyLanguages();
@@ -159,6 +157,12 @@ try {
     const delta = applyDelta(app.base[language], app.branch[language], refs.base === "empty" ? {} : app.onto[language], `app/${language}`);
     merged[language] = delta.result;
     conflicts.push(...delta.conflicts);
+    if (app.areaDelta) {
+      // Then the branch's own edits to the split areas it inherited (mirrored edits are no-ops).
+      const areaDelta = applyDelta(app.areaDelta.base[language], app.areaDelta.branch[language], merged[language], `app split areas/${language}`);
+      merged[language] = areaDelta.result;
+      conflicts.push(...areaDelta.conflicts);
+    }
     for (const family of FAMILIES) {
       const delta = applyDelta(base.families[family][language], branch.families[family][language], refs.base === "empty" ? {} : onto.families[family][language], `${family}/${language}`);
       families[family][language] = delta.result;
