@@ -475,8 +475,11 @@ mod tests {
         assert!(start(&runtime, &a).await.get("error").is_none());
         let mut request = signed_owner(&runtime, &a, Operation::Job);
         request.timestamp += 3;
+        // Anchor expiry to the signed whole-second timestamp. Deriving it from
+        // a later wall-clock read exceeded the signed lifetime whenever a
+        // second boundary passed after signing.
         request.parameters["owner_job_access"]["expires_at_ms"] =
-            json!(chrono::Utc::now().timestamp_millis() + 48_000);
+            json!(request.timestamp * 1000 + nyxid_machine::authority::LEASE_MS);
         request.signature = nyxid_machine::signing::sign(&request, b"external-node-test");
         let result = runtime.handle(request.clone(), b"external-node-test").await;
         assert!(result.get("error").is_none(), "{result}");
