@@ -21,6 +21,16 @@ use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
 pub(crate) const MAX_PAYLOAD: usize = 256 * 1024;
 
+#[cfg(test)]
+pub(crate) type ModelApprovalHook = std::sync::Arc<
+    dyn Fn(Database, ApprovalRequest) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static MODEL_APPROVAL_DELAY: std::time::Duration;
+    pub(crate) static MODEL_APPROVAL_PREPARE: ModelApprovalHook;
+}
+
 fn missing() -> AppError {
     AppError::NotFound("Permission request not found".into())
 }
@@ -221,7 +231,6 @@ fn scope(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn create(
     db: &Database,
-    frontend: &str,
     keys: &Arc<EncryptionKeys>,
     context: &RequestContext,
     chat: &acks::ChatAuthority,
@@ -477,9 +486,11 @@ pub(super) async fn create(
         exact_service: None,
         created_at: now,
     };
-    // Claim only a representable model proposal. A fallback to the ordinary
-    // connected approval wait must keep its existing owner-chat behavior.
-    crate::services::assistant_model_observer::before_approval_request(frontend, true).await?;
+    #[cfg(test)]
+    if let Ok(hook) = MODEL_APPROVAL_PREPARE.try_with(Clone::clone) {
+        hook(db.clone(), request.clone()).await;
+    }
+    let result = async {
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db,chat,&request,snapshot),|session,(db,chat,request,snapshot)|Box::pin(async move {
         let result:AppResult<ApprovalRequest>=async {
@@ -492,17 +503,41 @@ pub(super) async fn create(
             snapshot.fence(db,session).await?;
             fence_endpoint(db,session,p).await?;
             let collection=db.collection::<ApprovalRequest>(REQUESTS);
+            // Reused and new proposals both end this model turn. Keep the claim
+            // transactional so the watcher cannot beat an uncommitted insert.
+            crate::services::assistant_model_observer::before_approval_request(Some(&mut *session)).await?;
             if let Some(existing)=collection.find_one(assistant_selector(doc!{"execution_proposal.v1.gap_key":&p.gap_key})).sort(doc!{"created_at":-1}).session(&mut *session).await? {
                 // Denial is task-bound. A pending or dispatched effect is never queued twice.
                 return Ok(existing);
             }
             if collection.count_documents(assistant_selector(doc!{"user_id":&chat.user_id,"execution_proposal.v1.task.task":bson::to_bson(&p.task.task).map_err(encoding)?})).session(&mut *session).await?>=32 {return Err(AppError::Forbidden("Too many permission requests for this task".into()));}
+            #[cfg(test)]
+            if let Ok(delay) = MODEL_APPROVAL_DELAY.try_with(|delay| *delay) {
+                eprintln!("model approval claim-to-insert stress: {} ms", delay.as_millis());
+                tokio::time::sleep(delay).await;
+            }
             collection.insert_one(*request).session(&mut *session).await?;
             audit(db,session,&chat.user_id,"execution_permission_requested",&request.id).await?;
             Ok((*request).clone())
         }.await;
         super::super::api_key_mutation_service::transaction_result(result)
-    })).await.map_err(super::super::api_key_mutation_service::map_transaction_error).map(Some)
+    })).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
+    }.await;
+    if result.is_err() {
+        // The transaction has ended: no approval can still commit behind this
+        // refusal. Preserve the base's terminal model outcome on failure too.
+        // The creation error is what the caller must see; a failure to record
+        // the refusal must not replace it.
+        if let Err(error) =
+            crate::services::assistant_model_observer::failed_approval_proposal().await
+        {
+            tracing::warn!(
+                error_code = error.error_code(),
+                "Model approval refusal was not recorded after a failed proposal"
+            );
+        }
+    }
+    result.map(Some)
 }
 
 pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&Proposal> {

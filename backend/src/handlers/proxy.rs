@@ -5056,12 +5056,9 @@ async fn execute_resolved_proxy_inner<'a>(
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
             request_audit.model_approval_required();
-            crate::services::assistant_model_observer::before_approval_request(
-                &state.config.frontend_url,
-                false,
-            )
-            .await
-            .inspect_err(|error| request_audit.model_approval_error(error))?;
+            crate::services::assistant_model_observer::before_approval_request(None)
+                .await
+                .inspect_err(|error| request_audit.model_approval_error(error))?;
             let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
                 &approval_owner_user_id,
