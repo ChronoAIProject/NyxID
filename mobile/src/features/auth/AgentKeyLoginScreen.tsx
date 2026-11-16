@@ -1,6 +1,33 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { LoginRequestTerminalView } from "./LoginRequestTerminalView";
+import { useUncertainLoginPreview } from "./useUncertainLoginPreview";
+import { useLoginRequestResume } from "./useLoginRequestResume";
+import { useLoginPreviewCooldown } from "./useLoginPreviewCooldown";
+import { useLoginRequestHandoff } from "./useLoginRequestHandoff";
+import {
+  takeLoginRequest,
+  resolveLoginRequest,
+  previewLoginRequest,
+  previewCooldownMs,
+  LoginRequestError,
+  loginErrorCopy,
+  classifyLoginError,
+  isLoginDecisionUncertain,
+  loginServerHost,
+  terminalFromError,
+  terminalFromPreview,
+  type LoginTerminal,
+} from "./loginRequestResolver";
 import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useMfaStepUp } from "./useMfaStepUp";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   KeyboardAvoidingView,
@@ -23,6 +50,7 @@ import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSel
 import { useAuthTheme as useTheme } from "./useAuthTheme";
 import { AuthTextInput } from "./AuthTextInput";
 import { agentKeyLoginApi } from "../../lib/api/agentKeyLoginApi";
+import type { AuthDevicePreview } from "../../lib/api/authDeviceSchema";
 import {
   loginCodeApi,
   type IssuedLoginCode,
@@ -58,7 +86,7 @@ import {
 import { AgentKeyCreateForm } from "./AgentKeyCreateForm";
 import { DeviceCodeScanner } from "./DeviceCodeScanner";
 import {
-  agentKeyLoginError,
+  agentKeyActionErrorCopy,
   issuanceNotice,
   newKeySummary,
   permissionRows,
@@ -74,9 +102,20 @@ type Step =
   | "account"
   | "approved"
   | "denied"
-  | "expired";
+  | "expired"
+  | "completed"
+  | "unavailable";
+
+function isTerminalStep(step: Step): step is LoginTerminal {
+  return ["approved", "denied", "expired", "completed", "unavailable"].includes(
+    step,
+  );
+}
 
 export function AgentKeyLoginScreen({ navigation, route }: Props) {
+  const { t } = useAppLanguage();
+  const cooldown = useLoginPreviewCooldown();
+  const handoffLoginRequest = useLoginRequestHandoff(navigation);
   const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const flow = route.params?.flow ?? "agent-key";
   const mint = route.params?.mint ?? false;
@@ -102,13 +141,14 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
   const [deadline, setDeadline] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now);
   const [pending, setPending] = useState(false);
+  const [writing, setWriting] = useState(false);
   const [scanning, setScanning] = useState(false);
   const stepUp = useMfaStepUp(
     `${flow}:${mint}:${code}:${isAuthenticated}:${step}`,
   );
   useWorkspaceBack({
     active: inWorkspaceSheet && scanning,
-    disabled: pending || stepUp.busy,
+    disabled: writing || stepUp.busy,
     defaultRole: "back",
     options: { headerShown: inWorkspaceSheet },
     label: "Back to login",
@@ -116,14 +156,39 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
   });
   const [error, setError] = useState<string | null>(null);
   const lastAction = useRef(0);
+  const actionBusy = useRef(false);
+  const operation = useRef<{
+    criticalWrite: boolean;
+    dispatched: boolean;
+    decision: "approve" | "deny" | null;
+  } | null>(null);
+  const [decisionUncertain, setDecisionUncertain] = useState<
+    "approve" | "deny" | null
+  >(null);
+  const finishedRequestCode = useRef<string | null>(null);
+  const currentCode = useRef(code);
+  currentCode.current = code;
   const generation = useRef(0);
   const previousMode = useRef({ flow, mint });
-  useEffect(() => {
+  const deferredRoute = useRef(false);
+  const [routeRevision, setRouteRevision] = useState(0);
+  const latestRouteCode = useRef(route.params?.user_code);
+  latestRouteCode.current = route.params?.user_code;
+  useLayoutEffect(() => {
+    if (
+      operation.current?.criticalWrite ||
+      decisionUncertain ||
+      (isTerminalStep(step) && deferredRoute.current)
+    ) {
+      if (route.params?.user_code !== undefined) deferredRoute.current = true;
+      return;
+    }
     const modeChanged =
       previousMode.current.flow !== flow || previousMode.current.mint !== mint;
     previousMode.current = { flow, mint };
     if (route.params?.user_code === undefined && !modeChanged) return;
     generation.current += 1;
+    actionBusy.current = false;
     setIssued(null);
     setCode(formatAuthDeviceUserCode(route.params?.user_code ?? ""));
     setStep(mint ? "review" : "code");
@@ -135,21 +200,57 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     setCredentialExpiry("");
     setError(null);
     setPending(false);
-    return () => {
-      generation.current += 1;
-    };
-  }, [route.params?.user_code, flow, mint]);
+    setWriting(false);
+    setDecisionUncertain(null);
+    if (!mint && route.params?.user_code) {
+      const handoff = takeLoginRequest(route.params.user_code, flow);
+      if (handoff) {
+        lastAction.current = handoff.at;
+        acceptPreview(handoff.code, handoff.result.preview);
+      }
+    }
+  }, [route.params?.user_code, flow, mint, routeRevision]);
+  useEffect(() => {
+    // Commit the decision or verification prompt before applying the newest link.
+    if (
+      operation.current ||
+      isTerminalStep(step) ||
+      decisionUncertain ||
+      !deferredRoute.current
+    )
+      return;
+    deferredRoute.current = false;
+    setRouteRevision((revision) => revision + 1);
+  }, [pending, writing, step, decisionUncertain]);
+  function applyDeferredRoute() {
+    if (!deferredRoute.current) return false;
+    deferredRoute.current = false;
+    const incoming = route.params?.user_code;
+    if (
+      incoming === undefined ||
+      (isTerminalStep(step) &&
+        normalizeAuthDeviceUserCode(incoming) === finishedRequestCode.current)
+    )
+      return false;
+    setDecisionUncertain(null);
+    setRouteRevision((revision) => revision + 1);
+    return true;
+  }
   useEffect(
     () => () => {
       generation.current += 1;
+      operation.current = null;
     },
     [],
   );
   const remaining =
     deadline === null ? null : secondsUntilDeviceLoginDeadline(deadline, now);
-  const expired = remaining === 0;
+  const expired = remaining === 0 && !decisionUncertain && !writing;
+  const waitingForDecision = Boolean(
+    decisionUncertain || (writing && remaining === 0),
+  );
   const finish = useCallback(
-    (result: "approved" | "denied" | "expired") => {
+    (result: LoginTerminal, requestCode = code) => {
       setStep(result);
       setCode("");
       setPreview(null);
@@ -159,55 +260,201 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       setCredentialExpiry("");
       setDeadline(null);
       setError(null);
-      navigation.setParams({ user_code: undefined });
+      const finishedCode = normalizeAuthDeviceUserCode(requestCode);
+      finishedRequestCode.current = finishedCode;
+      if (
+        finishedCode &&
+        normalizeAuthDeviceUserCode(latestRouteCode.current ?? "") ===
+          finishedCode
+      ) {
+        deferredRoute.current = false;
+        navigation.setParams({ user_code: undefined });
+      }
     },
-    [navigation],
+    [navigation, code],
   );
   useEffect(() => {
     if (deadline === null) return;
     const timer = setInterval(() => {
       const now = Date.now();
       setNow(now);
-      if (now >= deadline && !pending) finish("expired");
+      if (
+        now >= deadline &&
+        !pending &&
+        !actionBusy.current &&
+        !decisionUncertain
+      )
+        finish("expired");
     }, 1000);
     return () => clearInterval(timer);
-  }, [deadline, pending, finish]);
-  async function act(action: () => Promise<void>, verifiedRetry = false) {
-    if (pending || (!verifiedRetry && Date.now() - lastAction.current < 750))
+  }, [deadline, pending, decisionUncertain, finish]);
+  async function act(
+    action: () => Promise<void>,
+    verifiedRetry = false,
+    criticalWrite = false,
+    automatic = false,
+  ) {
+    if (actionBusy.current || pending) return;
+    if (step === "code" && cooldown.coolingDown) return;
+    if (
+      !mint &&
+      preview &&
+      deadline !== null &&
+      deadline <= Date.now() &&
+      !decisionUncertain
+    ) {
+      finish("expired");
       return;
+    }
+    if (!verifiedRetry && Date.now() - lastAction.current < 750) {
+      setError(t("Please wait a moment before trying again."));
+      return;
+    }
+    if (!automatic) uncertainPreview.reset();
     lastAction.current = Date.now();
+    actionBusy.current = true;
+    const owner: NonNullable<typeof operation.current> = {
+      criticalWrite,
+      dispatched: false,
+      decision: null,
+    };
+    operation.current = owner;
     setPending(true);
-    setError(null);
+    setWriting(criticalWrite);
+    if (!automatic) setError(null);
     const current = generation.current;
     try {
       await action();
     } catch (failure) {
-      if (await stepUp.handle(failure, () => act(action, true))) return;
-      if (current === generation.current) setError(agentKeyLoginError(failure));
+      if (current !== generation.current) return;
+      actionBusy.current = false;
+      if (
+        !mint &&
+        criticalWrite &&
+        owner.decision !== null &&
+        owner.dispatched &&
+        isLoginDecisionUncertain(failure)
+      )
+        setDecisionUncertain(owner.decision);
+      if (
+        classifyLoginError(failure) === "mfa_step_up" &&
+        (await stepUp.handle(failure, () => act(action, true, criticalWrite)))
+      )
+        return;
+      const terminal = terminalFromError(failure, decisionUncertain);
+      if (!mint && terminal && (step !== "code" || terminal !== "unavailable"))
+        finish(terminal);
+      else if (!automatic)
+        setError(
+          t(agentKeyActionErrorCopy(failure, step), {
+            host: loginServerHost(),
+          }),
+        );
+      cooldown.sync();
     } finally {
-      if (current === generation.current) setPending(false);
+      if (operation.current === owner) {
+        operation.current = null;
+        actionBusy.current = false;
+        setPending(false);
+        setWriting(false);
+      }
     }
   }
   async function loadPreview() {
     const normalized = normalizeAuthDeviceUserCode(code);
-    if (!normalized) return;
+    if (!normalized) throw new LoginRequestError("malformed");
     const current = generation.current;
-    const result = await agentKeyLoginApi.preview(normalized, flow);
+    // Explicit device-grant selection stays in this screen; generic Agent Key
+    // entry resolves either code type before handing off the fetched preview.
+    const result =
+      flow === "device"
+        ? {
+            kind: "device" as const,
+            preview: await previewLoginRequest(normalized, flow, "agent-key"),
+          }
+        : await resolveLoginRequest(normalized, "agent-key");
     if (current !== generation.current) return;
-    if (result.status !== "pending") {
-      finish(result.status === "delivered" ? "approved" : result.status);
-      return;
-    }
-    setCode(formatAuthDeviceUserCode(normalized));
-    setPreview(result);
-    setDeadline(
-      resolveDeviceLoginDeadlineMs(result.expires_at, result.seconds_remaining),
-    );
-    setNow(Date.now());
+    if (flow !== "device" && result.kind === "device") {
+      if (handoffLoginRequest(normalized, result))
+        navigation.navigate("DeviceLogin", { user_code: normalized });
+    } else acceptPreview(normalized, result.preview);
+  }
+  function acceptPreview(code: string, result: AuthDevicePreview) {
+    if (!refreshPreview(result, code)) return;
+    setCode(formatAuthDeviceUserCode(code));
     setStep("review");
   }
+  function refreshPreview(result: AuthDevicePreview, requestCode = code) {
+    setDecisionUncertain(null);
+    setError(null);
+    const terminal = terminalFromPreview(result, decisionUncertain);
+    if (terminal) {
+      finish(terminal, requestCode);
+      return false;
+    }
+    const deadline = resolveDeviceLoginDeadlineMs(
+      result.expires_at,
+      result.seconds_remaining,
+      Date.now(),
+    );
+    if (deadline <= Date.now()) {
+      finish("expired", requestCode);
+      return false;
+    }
+    setPreview({ requested_profile: null, interval: 5, ...result });
+    setDeadline(deadline);
+    setNow(Date.now());
+    return true;
+  }
+  function refreshRequest(automatic = false): number | Promise<void> {
+    if (actionBusy.current) return 750;
+    const delay = Math.max(
+      750 - (Date.now() - lastAction.current),
+      automatic ? previewCooldownMs() : 0,
+    );
+    if (delay > 0) return delay;
+    return act(
+      async () => {
+        const current = generation.current;
+        const requestCode = code;
+        const result = await previewLoginRequest(requestCode, flow, "agent-key");
+        if (
+          current === generation.current &&
+          currentCode.current === requestCode
+        )
+          refreshPreview(result);
+      },
+      false,
+      false,
+      automatic,
+    );
+  }
+  const uncertainPreview = useUncertainLoginPreview(
+    Boolean(
+      decisionUncertain &&
+        preview &&
+        !mint &&
+        !isTerminalStep(step) &&
+        !writing,
+    ),
+    `${generation.current}:${code}`,
+    () => refreshRequest(true),
+  );
+  useLoginRequestResume(Boolean(preview && !mint), () => {
+    if (actionBusy.current) return;
+    if (deadline !== null && deadline <= Date.now() && !decisionUncertain) {
+      finish("expired");
+      return;
+    }
+    const result = refreshRequest();
+    if (typeof result === "number") return result;
+  });
+
   async function loadOptions() {
-    if (expired) return;
+    if (expired) {
+      finish("expired");
+      return;
+    }
     const current = generation.current;
     const result = mint
       ? await loginCodeApi.options()
@@ -218,7 +465,10 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     }
   }
   async function decide(accept: boolean) {
-    if (expired) return;
+    if (expired) {
+      finish("expired");
+      return;
+    }
     const current = generation.current;
     if (mint) {
       if (accept && selection)
@@ -245,17 +495,30 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
           Date.parse(summary.expires_at)
       )
         throw new Error("Credential expiry cannot exceed key expiry.");
+      if (operation.current) {
+        operation.current.decision = "approve";
+        operation.current.dispatched = true;
+      }
       await agentKeyLoginApi.approve(parsed, flow);
-    } else if (!accept) await agentKeyLoginApi.deny(code, flow);
-    else return;
+    } else if (!accept) {
+      if (operation.current) {
+        operation.current.decision = "deny";
+        operation.current.dispatched = true;
+      }
+      await agentKeyLoginApi.deny(code, flow);
+    } else return;
     if (current === generation.current) finish(accept ? "approved" : "denied");
   }
   async function createCode(grant: LoginCodeGrant) {
     const current = generation.current;
+    if (operation.current) operation.current.dispatched = true;
     const result = await loginCodeApi.mint(grant);
     if (current === generation.current) setIssued(result);
   }
   const back = () => {
+    if (writing || operation.current?.criticalWrite) return;
+    if ((isTerminalStep(step) || decisionUncertain) && applyDeferredRoute())
+      return;
     if (navigation.canGoBack()) {
       navigation.goBack();
     } else if (isAuthenticated) {
@@ -264,6 +527,26 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       navigation.navigate("Auth");
     }
   };
+  const restart = () => {
+    if (writing || operation.current?.criticalWrite) return;
+    if (applyDeferredRoute()) return;
+    setDecisionUncertain(null);
+    generation.current += 1;
+    actionBusy.current = false;
+    setPending(false);
+    setWriting(false);
+    setStep("code");
+    setCode("");
+    setPreview(null);
+    setDeadline(null);
+    setError(null);
+    setOptions(null);
+    setSelection(null);
+    setSummary(null);
+    setCredentialExpiry("");
+    navigation.setParams({ user_code: undefined, flow: undefined });
+  };
+
   if (scanning)
     return (
       <DeviceCodeScanner
@@ -294,14 +577,23 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       ))}
     </View>
   );
-  const terminal =
-    step === "approved" || step === "denied" || step === "expired";
+  const terminal = isTerminalStep(step) ? step : null;
   const origin = preview
     ? formatDeviceLoginOriginValue(
         preview.initiating_origin_status,
         preview.initiating_origin,
       )
     : null;
+  if (terminal)
+    return (
+      <LoginRequestTerminalView
+        state={terminal}
+        inSheet={inWorkspaceSheet}
+        disabled={writing || pending}
+        onDone={back}
+        onRestart={restart}
+      />
+    );
   if (stepUp.prompt) {
     return (
       <ScreenContainer>
@@ -364,22 +656,15 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                 setCredentialExpiry("");
               }}
             />
-          ) : terminal ? (
-            <View style={styles.inputSection}>
-              <Text style={styles.terminalTitle}>
-                {step === "approved"
-                  ? "Approved - return to the requesting device"
-                  : step === "denied"
-                    ? "Login rejected"
-                    : "Login request expired"}
-              </Text>
-              <AuthSubmitButton label="Done" onPress={back} />
-            </View>
           ) : (
             <>
               {step === "code" && (
                 <View style={styles.inputSection}>
-                  <Text style={styles.inputLabel}>User code</Text>
+                  <Text style={styles.inputLabel}>
+                    {t(
+                      "Enter a device login or Agent Key login code from the requesting device.",
+                    )}
+                  </Text>
                   <AuthTextInput
                     accessibilityLabel="User code"
                     value={code}
@@ -387,14 +672,21 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     autoCapitalize="characters"
                     autoCorrect={false}
                     maxLength={11}
+                    returnKeyType="done"
+                    onSubmitEditing={() => void act(loadPreview)}
                     onChangeText={(value) =>
                       setCode(formatAuthDeviceUserCode(value))
                     }
                     style={styles.codeInput}
                   />
-                  <AuthSubmitButton loading={pending}
+                  <AuthSubmitButton
+                    loading={pending}
                     label="Continue"
-                    disabled={pending || !normalizeAuthDeviceUserCode(code)}
+                    disabled={
+                      pending ||
+                      cooldown.coolingDown ||
+                      !normalizeAuthDeviceUserCode(code)
+                    }
                     onPress={() => void act(loadPreview)}
                   />
                   <PrimaryButton
@@ -447,7 +739,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     ],
                     [
                       "Expires",
-                      `${new Date(preview.expires_at).toLocaleString()} (${remaining ?? 0}s)`,
+                      waitingForDecision
+                        ? t("Waiting for NyxID…")
+                        : `${new Date(preview.expires_at).toLocaleString()} (${remaining ?? 0}s)`,
                     ],
                   ].map(([label, value]) => (
                     <DetailRow
@@ -527,12 +821,15 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     credentials, and organization permissions. The session can
                     refresh until it expires or you revoke it.
                   </Text>
-                  <AuthSubmitButton loading={pending}
+                  <AuthSubmitButton
+                    loading={pending}
                     label="Generate account login code"
                     disabled={pending}
                     onPress={() =>
-                      void act(() =>
-                        createCode({ auth_kind: "account_session" }),
+                      void act(
+                        () => createCode({ auth_kind: "account_session" }),
+                        false,
+                        true,
                       )
                     }
                   />
@@ -546,7 +843,8 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               )}
               {step === "options" && options && (
                 <View style={styles.inputSection}>
-                  <WorkspaceSelectionField surfaceColors={colors}
+                  <WorkspaceSelectionField
+                    surfaceColors={colors}
                     label="Agent Key"
                     title="Choose an Agent Key"
                     description="Choose a key to review its full effective permissions before approving."
@@ -620,10 +918,11 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                       { textAlign: "left", fontSize: 14 },
                     ]}
                   />
-                  <AuthSubmitButton loading={pending}
+                  <AuthSubmitButton
+                    loading={pending}
                     label={mint ? "Generate restricted login code" : "Approve"}
                     disabled={pending || expired}
-                    onPress={() => void act(() => decide(true))}
+                    onPress={() => void act(() => decide(true), false, true)}
                   />
                   <PrimaryButton
                     label="Back to keys"
@@ -638,7 +937,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   label="Reject"
                   kind="danger"
                   disabled={pending || expired}
-                  onPress={() => void act(() => decide(false))}
+                  onPress={() => void act(() => decide(false), false, true)}
                 />
               )}
             </>
@@ -648,6 +947,22 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               {error}
             </Text>
           )}
+          {decisionUncertain ? (
+            <View style={{ gap: 16 }}>
+              <PrimaryButton
+                label={t("Done")}
+                kind="ghost"
+                disabled={writing}
+                onPress={back}
+              />
+              <PrimaryButton
+                label={t("Scan or enter another code")}
+                kind="ghost"
+                disabled={writing}
+                onPress={restart}
+              />
+            </View>
+          ) : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </ScreenContainer>

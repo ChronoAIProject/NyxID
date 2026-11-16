@@ -790,3 +790,35 @@ test("wide nested guarded Back uses only the content edge and never closes the s
   );
   x.harness.unmount();
 });
+
+
+test("a critical write blocks revealing but never swipe, sliver, Android Back or accessibility closing", () => {
+  for (const path of ["swipe", "sliver", "hardware", "escape"] as const) {
+    const env = setup(true);
+    env.set({ visible: true, presented: true });
+    env.reconcile();
+    env.set({ gestureEnabled: false });
+    assert.equal(
+      env.settings.enabled,
+      true,
+      "the presented close gesture stays enabled",
+    );
+    if (path === "swipe") {
+      env.handlers().onStart();
+      env.handlers().onUpdate({ translationX: -500 });
+      env.handlers().onEnd({ translationX: -500, velocityX: -500 });
+    } else if (path === "sliver")
+      env.find("workspace-sidebar-close-sliver").props.onPress();
+    else if (path === "hardware") assert.equal(env.hardwareBack(), true);
+    else env.all()[0]!.props.onAccessibilityEscape();
+    env.render();
+    assert.equal(env.changes.at(-1), false, path);
+    env.reconcile();
+    assert.equal(
+      env.settings.enabled,
+      false,
+      "closed drawer cannot be revealed while blocked",
+    );
+    env.harness.unmount();
+  }
+});

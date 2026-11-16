@@ -15,6 +15,7 @@ export class ApiError extends Error {
   readonly reason?: string;
   readonly requestId?: string;
   readonly traceId?: string;
+  readonly retryAfterMs?: number;
 
   constructor(opts: {
     errorKey: string;
@@ -25,6 +26,7 @@ export class ApiError extends Error {
     reason?: string;
     requestId?: string;
     traceId?: string;
+    retryAfterMs?: number;
   }) {
     super(opts.message);
     this.name = "ApiError";
@@ -35,6 +37,7 @@ export class ApiError extends Error {
     this.reason = opts.reason;
     this.requestId = opts.requestId;
     this.traceId = opts.traceId;
+    this.retryAfterMs = opts.retryAfterMs;
   }
 }
 

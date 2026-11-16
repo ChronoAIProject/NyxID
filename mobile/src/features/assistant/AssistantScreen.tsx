@@ -905,7 +905,9 @@ export function AssistantScreen({
     // contextual chats pushed from another screen have a native Back parent.
     active: false,
     defaultRole: contextual ? "back" : "menu",
-    disabled: headerDisabled,
+    disabled:
+      (assistant.sending || uploads.session.sending) &&
+      !assistant.conversationId,
     options: headerOptions,
     onBack: () => navigation.goBack(),
   });

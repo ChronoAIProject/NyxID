@@ -75,6 +75,7 @@ function setup({
   pendingAgents = false,
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
+  const saved: string[] = [];
   let latest = { ...plain(group), your_role: role };
   const original = { ...plain(group), your_role: role };
   if (missingAgent)
@@ -239,7 +240,7 @@ function setup({
     const wrapper = GroupEditorScreen({
       groupId: creating ? undefined : GROUP_ID,
       onBack: () => {},
-      onSaved: () => {},
+      onSaved: (id: string) => saved.push(id),
     });
     assert.equal(typeof wrapper.type, "function");
     return (wrapper.type as (props: unknown) => Element)(wrapper.props);
@@ -257,6 +258,7 @@ function setup({
   };
   return {
     harness,
+    saved,
     calls,
     all: () => elements(harness.flush()),
     closeGuard: () => {
@@ -524,4 +526,18 @@ test("the crew editor's first load shows a settings skeleton, not a spinner", ()
     false,
   );
   env.harness.unmount();
+});
+
+test("crew creation exits exactly once across callback changes and cannot create twice", async () => {
+  const env = setup({ creating: true });
+  env.name("New crew");
+  const save = env.button("Create crew");
+  save.onPress();
+  save.onPress();
+  await env.harness.settle();
+  for (let i = 0; i < 4; i++) env.harness.render();
+  save.onPress();
+  await env.harness.settle();
+  assert.deepEqual(env.saved, [GROUP_ID]);
+  assert.equal(env.calls.filter((call) => call.method === "create").length, 1);
 });

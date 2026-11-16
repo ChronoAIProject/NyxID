@@ -60,3 +60,29 @@ test("hidden keyboard, unmounted layout and invalid measurements reserve no spac
     0,
   );
 });
+
+test("visible keyboard intersection clips partially offscreen frames and rejects oversized or above-window frames", async () => {
+  const { visibleKeyboardFrame } = await import(
+    "./keyboardOverlap"
+  );
+  assert.equal(
+    visibleKeyboardFrame({ screenY: -20, height: 900 }, 852),
+    undefined,
+  );
+  assert.equal(
+    visibleKeyboardFrame({ screenY: 0, height: 1000 }, 852),
+    undefined,
+  );
+  assert.equal(
+    visibleKeyboardFrame({ screenY: 900, height: 300 }, 852),
+    undefined,
+  );
+  const clipped = visibleKeyboardFrame({ screenY: 700, height: 300 }, 852);
+  assert.deepEqual(clipped, { screenY: 700, height: 152 });
+  assert.equal(keyboardOverlap({ y: 92, height: 760 }, clipped), 152);
+  assert.equal(keyboardOverlap({ y: 0, height: 852 }, clipped), 152);
+  assert.equal(
+    keyboardOverlap({ y: 800, height: 52 }, { screenY: 500, height: 100 }),
+    0,
+  );
+});
