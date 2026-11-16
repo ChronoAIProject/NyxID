@@ -8,6 +8,8 @@ import { nyxAgentConversationSchema } from "@/schemas/assistant-nyxagent";
 import { ApiError } from "@/lib/api-client";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { ChatMessageBubble } from "./chat-message";
+import userEvent from "@testing-library/user-event";
+import type { KeyInfo } from "@/types/keys";
 
 const conversation = nyxAgentConversationSchema.parse({
   id: `nyxa-${"1".repeat(32)}`, title: "Thread", model: "nyxagent/chat", created_at: "2026-10-01T00:00:00Z",
@@ -23,7 +25,7 @@ const props = () => ({
 function mount(initial = props()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = render(<QueryClientProvider client={client}><NyxAgentComposer {...initial} /></QueryClientProvider>);
-  return { ...view, props: initial, rerenderProps: (next: typeof initial) => view.rerender(<QueryClientProvider client={client}><NyxAgentComposer {...next} /></QueryClientProvider>) };
+  return { ...view, client, props: initial, rerenderProps: (next: typeof initial) => view.rerender(<QueryClientProvider client={client}><NyxAgentComposer {...next} /></QueryClientProvider>) };
 }
 async function send(text = "Focus on the latest results") {
   await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
@@ -102,6 +104,27 @@ describe("NyxAgent web steering", () => {
   it("shows persisted steering outcome on its user message", () => {
     render(<ChatMessageBubble message={{ id: "steer", role: "user", content: "Guidance", timestamp: 1, status: "complete", steering: accepted }} />);
     expect(screen.getByRole("note")).toHaveTextContent("Steering · Guidance applied to this reply.");
+  });
+  it("guards the explicit send-as-new-message action after a selected connection becomes unavailable", async () => {
+    vi.mocked(nyxAgentTransport.steer).mockRejectedValue(refused(409, "no_active_turn"));
+    const view = mount();
+    await send();
+    await screen.findByRole("button", { name: "Send as new message" });
+    const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+    act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+    view.rerenderProps({ ...view.props, active: false, sending: false, conversation: { ...conversation, active_turn: null } });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add context" }));
+    await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+    await user.click(screen.getByRole("button", { name: /Work account/ }));
+    act(() => view.client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]));
+    await waitFor(() => expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Credential missing"));
+    await user.click(screen.getByRole("button", { name: "Send as new message" }));
+    expect(view.props.onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send as new message" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Remove connection for this message" }));
+    await user.click(screen.getByRole("button", { name: "Send as new message" }));
+    expect(view.props.onSend).toHaveBeenCalledExactlyOnceWith("Focus on the latest results");
   });
 });
 

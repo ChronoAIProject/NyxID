@@ -60,18 +60,26 @@ function mount(onSend = vi.fn().mockResolvedValue(undefined)) {
   );
   return {
     onSend,
-    rerender: (draftKey = props.draftKey) =>
+    rerender: (draftKey = props.draftKey, ownerUserId = props.ownerUserId) =>
       view.rerender(
         <QueryClientProvider client={query}>
-          <NyxAgentComposer {...props} draftKey={draftKey} />
+          <NyxAgentComposer
+            {...props}
+            draftKey={draftKey}
+            ownerUserId={ownerUserId}
+          />
         </QueryClientProvider>,
       ),
   };
 }
-async function choose() {
+async function openPicker() {
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Add context" }));
   await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  return user;
+}
+async function choose() {
+  const user = await openPicker();
   await user.click(
     screen.getByRole("button", { name: /Work documents.*Team/ }),
   );
@@ -174,7 +182,7 @@ describe("visible one-message connection context", () => {
       ).not.toBeInTheDocument(),
     );
   });
-  it("filters disabled and unauthorized accounts and searches by account", async () => {
+  it("shows disabled and unauthorized accounts with reasons and searches by account", async () => {
     state.data = [
       connection,
       {
@@ -203,12 +211,141 @@ describe("visible one-message connection context", () => {
       screen.getByRole("menuitem", { name: "Use a connection" }),
     );
     expect(
-      screen.queryByRole("button", { name: /Disabled account|Denied account/ }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: /Disabled account/ }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Disabled account/ }),
+    ).toHaveAccessibleDescription("Disabled");
+    expect(
+      screen.getByRole("button", { name: /Denied account/ }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Denied account/ }),
+    ).toHaveAccessibleDescription("No access");
     await user.type(
       screen.getByRole("textbox", { name: "Search connections" }),
       "no such account",
     );
     expect(screen.getByText("No matching connections.")).toBeVisible();
+  });
+
+  it("updates an open picker and skips unavailable options for pointer and keyboard selection", async () => {
+    state.data = [
+      connection,
+      {
+        ...connection,
+        id: "personal",
+        label: "Personal documents",
+        credential_source: { type: "personal" },
+      },
+    ];
+    const view = mount();
+    const user = await openPicker();
+    const work = screen.getByRole("button", { name: /Work documents/ });
+    work.focus();
+    state.data = [{ ...connection, credential_missing: true }, state.data[1]!];
+    view.rerender();
+    expect(work).toBeDisabled();
+    expect(work).toHaveAccessibleDescription("Credential missing");
+    await user.click(work);
+    await user.keyboard("{Enter} ");
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(
+      screen.queryByRole("group", { name: "Connection for this message" }),
+    ).not.toBeInTheDocument();
+    screen.getByRole("textbox", { name: "Search connections" }).focus();
+    await user.tab();
+    expect(
+      screen.getByRole("button", { name: /Personal documents/ }),
+    ).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    submit("Use personal");
+    await waitFor(() =>
+      expect(view.onSend).toHaveBeenCalledWith(
+        "/service personal\nUse personal",
+        undefined,
+        undefined,
+      ),
+    );
+  });
+
+  it.each<Partial<KeyInfo>>([
+    { credential_binding: "platform", platform_key_available: false },
+    { credential_missing: true },
+    { status: "refresh_failed" },
+    {
+      node_id: "node",
+      node_status: "offline",
+      execution_unavailable_reason: "node home offline",
+    },
+  ])(
+    "retains the selected ID and refuses both send paths after live invalidation: %j",
+    async (update) => {
+      const view = mount();
+      await choose();
+      state.data = [{ ...connection, ...update }];
+      view.rerender();
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Unavailable — choose another connection or remove",
+      );
+      submit("Do not switch accounts");
+      await waitFor(() =>
+        expect(screen.getByRole("textbox")).toHaveValue(
+          "Do not switch accounts",
+        ),
+      );
+      fireEvent.keyDown(screen.getByRole("textbox"), {
+        key: "Enter",
+        code: "Enter",
+      });
+      await waitFor(() =>
+        expect(screen.getByRole("textbox")).toHaveValue(
+          "Do not switch accounts",
+        ),
+      );
+      expect(view.onSend).not.toHaveBeenCalled();
+      expect(
+        screen.getByRole("group", { name: "Connection for this message" }),
+      ).toHaveTextContent("Work documents");
+    },
+  );
+
+  it("renders the live label and owner and only changes account on explicit selection", async () => {
+    const view = mount();
+    await choose();
+    state.data = [
+      {
+        ...connection,
+        label: "Updated documents",
+        credential_source: { type: "personal" },
+      },
+      { ...connection, id: "another", label: "Another account" },
+    ];
+    view.rerender();
+    const chip = screen.getByRole("group", {
+      name: "Connection for this message",
+    });
+    expect(chip).toHaveTextContent("Updated documents · Personal");
+    expect(chip).not.toHaveTextContent("Work documents");
+    const user = await openPicker();
+    await user.click(screen.getByRole("button", { name: /Another account/ }));
+    submit("Switch explicitly");
+    await waitFor(() =>
+      expect(view.onSend).toHaveBeenCalledWith(
+        "/service another\nSwitch explicitly",
+        undefined,
+        undefined,
+      ),
+    );
+  });
+
+  it("clears the selection on signed-in account change", async () => {
+    const view = mount();
+    await choose();
+    view.rerender("selection:test", "another-owner");
+    expect(
+      screen.queryByRole("group", { name: "Connection for this message" }),
+    ).not.toBeInTheDocument();
   });
 });

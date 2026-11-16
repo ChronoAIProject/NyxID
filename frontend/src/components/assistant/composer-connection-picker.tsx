@@ -1,6 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Check, Link2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { groupServiceConnections } from "@/lib/service-groups";
 import { connectionOwnerLabel } from "@/lib/assistant/connection-context";
+import { composerConnectionUnavailableReason } from "@/lib/assistant/composer-connection";
 import type { KeyInfo } from "@/types/keys";
 
 export function ComposerConnectionPicker({
@@ -37,6 +38,7 @@ export function ComposerConnectionPicker({
   readonly disabled: boolean;
 }) {
   useUiTranslation();
+  const reasonId = useId();
   const [search, setSearch] = useState("");
   const query = search.trim().toLocaleLowerCase();
   const groups = groupServiceConnections(connections)
@@ -60,8 +62,14 @@ export function ComposerConnectionPicker({
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{translateUi("Connection for this message")}</DialogTitle>
-          <DialogDescription>{translateUi("Choose the account to use for this message. Manage your saved connection order in Agent Details.")}</DialogDescription>
+          <DialogTitle>
+            {translateUi("Connection for this message")}
+          </DialogTitle>
+          <DialogDescription>
+            {translateUi(
+              "Choose the account to use for this message. Manage your saved connection order in Agent Details.",
+            )}
+          </DialogDescription>
         </DialogHeader>
         <Input
           aria-label={translateUi("Search connections")}
@@ -71,12 +79,16 @@ export function ComposerConnectionPicker({
         />
         <div className="assistant-scrollbar max-h-[50vh] space-y-4 overflow-y-auto">
           {loading && (
-            <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading connections…")}</p>
+            <p role="status" className="text-14 text-muted-foreground">
+              {translateUi("Loading connections…")}
+            </p>
           )}
           {error ? (
             <div role="alert" className="space-y-2 text-14">
               <p>{translateUi("Could not load connections.")}</p>
-              <Button type="button" onClick={onRetry}>{translateUi("Retry")}</Button>
+              <Button type="button" onClick={onRetry}>
+                {translateUi("Retry")}
+              </Button>
             </div>
           ) : (
             groups.map((group) => (
@@ -86,30 +98,49 @@ export function ComposerConnectionPicker({
                 className="space-y-1"
               >
                 <h3 className="type-body-strong">{group.name}</h3>
-                {group.connections.map((key) => (
-                  <button
-                    key={key.id}
-                    type="button"
-                    disabled={disabled}
-                    aria-pressed={value === key.id}
-                    className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-14 hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                    onClick={() => {
-                      onChange(key.id);
-                      onOpenChange(false);
-                      setSearch("");
-                    }}
-                  >
-                    <span className="min-w-0 flex-1 break-words">
-                      <span className="block font-medium">{key.label}</span>
-                      <span className="text-13 text-muted-foreground">
-                        {connectionOwnerLabel(key)} · {key.slug}
+                {group.connections.map((key) => {
+                  const reason = composerConnectionUnavailableReason(key);
+                  return (
+                    <button
+                      key={key.id}
+                      type="button"
+                      disabled={disabled || Boolean(reason)}
+                      aria-describedby={
+                        reason ? `${reasonId}-${key.id}` : undefined
+                      }
+                      aria-pressed={value === key.id}
+                      className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-14 enabled:hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:text-muted-foreground"
+                      onClick={() => {
+                        if (
+                          disabled ||
+                          composerConnectionUnavailableReason(key)
+                        )
+                          return;
+                        onChange(key.id);
+                        onOpenChange(false);
+                        setSearch("");
+                      }}
+                    >
+                      <span className="min-w-0 flex-1 break-words">
+                        <span className="block font-medium">{key.label}</span>
+                        <span className="text-13 text-muted-foreground">
+                          {connectionOwnerLabel(key)} · {key.slug}
+                        </span>
+                        {reason && (
+                          <span
+                            id={`${reasonId}-${key.id}`}
+                            className="block type-secondary text-destructive"
+                          >
+                            {translateUi(reason)}
+                          </span>
+                        )}
                       </span>
-                    </span>
-                    {value === key.id && (
-                      <Check aria-hidden className="size-4 shrink-0" />
-                    )}
-                  </button>
-                ))}
+                      {value === key.id && (
+                        <Check aria-hidden className="size-4 shrink-0" />
+                      )}
+                    </button>
+                  );
+                })}
               </section>
             ))
           )}
@@ -117,11 +148,15 @@ export function ComposerConnectionPicker({
             <p className="text-14 text-muted-foreground">
               {query
                 ? translateUi("No matching connections.")
-                : translateUi("No enabled connections are available.")}
+                : translateUi("No connections are available.")}
             </p>
           )}
         </div>
-        <p className="text-13 text-muted-foreground">{translateUi("Organization connections still require approval in Auto and Ask every time.")}</p>
+        <p className="text-13 text-muted-foreground">
+          {translateUi(
+            "Organization connections still require approval in Auto and Ask every time.",
+          )}
+        </p>
       </DialogContent>
     </Dialog>
   );
@@ -129,12 +164,12 @@ export function ComposerConnectionPicker({
 
 export function ComposerConnectionChip({
   connection,
-  unavailable,
+  unavailableReason,
   disabled,
   onRemove,
 }: {
-  readonly connection: KeyInfo;
-  readonly unavailable: boolean;
+  readonly connection?: KeyInfo;
+  readonly unavailableReason: string | null;
   readonly disabled: boolean;
   readonly onRemove: () => void;
 }) {
@@ -147,19 +182,36 @@ export function ComposerConnectionChip({
     >
       <Link2 aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 break-words">
-        <span className="font-medium">
-          {connection.catalog_service_name ?? connection.label}
-        </span>
-        {" · "}
-        {connection.label}
-        {" · "}
-        {connectionOwnerLabel(connection)}
+        {connection ? (
+          <>
+            <span className="font-medium">
+              {connection.catalog_service_name ?? connection.label}
+            </span>
+            {" · "}
+            {connection.label}
+            {" · "}
+            {connectionOwnerLabel(connection)}
+          </>
+        ) : (
+          translateUi("Selected connection")
+        )}
         <span
-          className={unavailable ? "text-destructive" : "text-muted-foreground"}
+          role="status"
+          className={
+            unavailableReason ? "text-destructive" : "text-muted-foreground"
+          }
         >
-          {unavailable
-            ? translateUi(" · Unavailable — choose another connection or remove")
-            : translateUi(" · This message")}
+          {unavailableReason ? (
+            <>
+              {translateUi(
+                " · Unavailable — choose another connection or remove",
+              )}
+              {" · "}
+              {translateUi(unavailableReason)}
+            </>
+          ) : (
+            translateUi(" · This message")
+          )}
         </span>
       </span>
       <Button

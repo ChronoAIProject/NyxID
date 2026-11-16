@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Link2 } from "lucide-react";
@@ -16,9 +16,8 @@ import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { ComposerSettings } from "./composer-settings";
 import { ComposerConnectionChip, ComposerConnectionPicker } from "./composer-connection-picker";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { connectionAvailable } from "@/lib/assistant/connection-context";
+import { composerConnectionUnavailableReason } from "@/lib/assistant/composer-connection";
 import { useKeys } from "@/hooks/use-keys";
-import type { KeyInfo } from "@/types/keys";
 import type { NyxAgentAccessMode, NyxAgentConversation } from "@/schemas/assistant-nyxagent";
 
 type UploadProps = ComponentProps<typeof UploadComposer>;
@@ -38,13 +37,20 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   const models = useNyxAgentModels(true, { conversationId: conversation?.id, agentId });
   const selectedModel = conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat";
   const cannotViewImages = modelCannotViewImages(models.data?.find((model) => model.id === selectedModel));
-  const [connection, setConnection] = useState<KeyInfo>();
+  const [connectionId, setConnectionId] = useState<string>();
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
   const connections = useKeys();
-  const availableConnections = (connections.data ?? []).filter(connectionAvailable);
-  const connectionUnavailable = Boolean(connection && (connections.isError ||
-    !availableConnections.some((key) => key.id === connection.id)));
-  useEffect(() => { setConnection(undefined); setConnectionPickerOpen(false); }, [props.ownerUserId, props.draftKey, conversation?.id]);
+  const connection = connections.data?.find((key) => key.id === connectionId);
+  const connectionUnavailableReason = connections.isError
+    ? "Could not load connections."
+    : connection ? composerConnectionUnavailableReason(connection) : "Connection unavailable";
+  // Model setup may await a request before sending. Recheck the latest keys
+  // and selection after that await rather than authorizing from its closure.
+  const liveSelection = useRef({ connectionId, connection, error: connections.isError });
+  useLayoutEffect(() => {
+    liveSelection.current = { connectionId, connection, error: connections.isError };
+  });
+  useEffect(() => { setConnectionId(undefined); setConnectionPickerOpen(false); }, [props.ownerUserId, props.draftKey, conversation?.id]);
   const capabilities = useQuery({
     queryKey: ["nyxagent-steer-capabilities", props.ownerUserId, conversation?.id],
     queryFn: () => nyxAgentTransport.capabilities(conversation!.id),
@@ -59,6 +65,16 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   const turn = conversation?.active_turn;
   const canSteer = Boolean(props.active && capabilities.data?.steer && turn?.steering_allowed && !turn.stop_requested);
   const connectionLocked = Boolean(props.active || props.sending || submitting || props.disabled);
+
+  function checkConnection() {
+    const live = liveSelection.current;
+    if (live.connectionId !== connectionId || (connectionId &&
+      (live.error || !live.connection || composerConnectionUnavailableReason(live.connection)))) {
+      const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
+      toast.error(translateErrorMessage(message));
+      throw new Error(message);
+    }
+  }
 
   return <UploadComposer {...props}
     imageWarning={cannotViewImages ? translateUi("This model can’t view images. You can still send, choose another model, or describe the image in text.") : undefined}
@@ -75,7 +91,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     />}
     attachmentMenuItems={<DropdownMenuItem disabled={connectionLocked} onSelect={() => setConnectionPickerOpen(true)}>
       <Link2 aria-hidden className="size-4" />{translateUi("Use a connection")}</DropdownMenuItem>}
-    onVoice={props.onVoice && !connection ? async (id, preparation) => {
+    onVoice={props.onVoice && !connectionId ? async (id, preparation) => {
       if (!conversation && draftModel) await nyxBotApi.changeModel(id, draftModel);
       await props.onVoice!(id, preparation);
     } : undefined}
@@ -85,12 +101,15 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     sendLabel={canSteer ? translateUi("Send guidance") : translateUi("Send message")}
     controls={<>{props.controls}
       <ComposerConnectionPicker open={connectionPickerOpen && !connectionLocked} onOpenChange={setConnectionPickerOpen}
-        connections={availableConnections} value={connection?.id ?? ""}
-        onChange={(id) => setConnection(availableConnections.find((key) => key.id === id))}
+        connections={connections.data ?? []} value={connectionId ?? ""}
+        onChange={(id) => {
+          const selected = connections.data?.find((key) => key.id === id);
+          if (selected && !connections.isError && !composerConnectionUnavailableReason(selected)) setConnectionId(id);
+        }}
         loading={connections.isPending} error={connections.isError} onRetry={() => void connections.refetch()}
         disabled={connectionLocked} />
-      {connection && <ComposerConnectionChip connection={connection} unavailable={connectionUnavailable}
-        disabled={connectionLocked} onRemove={() => setConnection(undefined)} />}
+      {connectionId && <ComposerConnectionChip connection={connection} unavailableReason={connectionUnavailableReason}
+        disabled={connectionLocked} onRemove={() => setConnectionId(undefined)} />}
       {notice && <div className="mb-2 ml-[30px] text-14 text-muted-foreground" role="status">
       <p>{translateUi(steeringNotice(notice.code, notice.outcome))}</p>
       {notice.code === "no_active_turn" && notice.text && <Button type="button" size="sm" variant="outline"
@@ -98,18 +117,18 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
         onClick={async () => {
           if (busy.current || props.active) return;
           busy.current = true; setSubmitting(true);
-          try { await props.onSend(notice.text!); setNotice(undefined); }
+          try {
+            checkConnection();
+            await props.onSend(connectionId ? `/service ${connectionId}\n${notice.text!}` : notice.text!);
+            setConnectionId(undefined); setNotice(undefined);
+          }
           catch { /* The ordinary send path reports its error and retains this action. */ }
           finally { busy.current = false; setSubmitting(false); }
         }}>{translateUi("Send as new message")}</Button>}
     </div>}</>}
     onSend={async (text, uploads) => {
       if (!props.active) {
-        if (connectionUnavailable) {
-          const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
-          toast.error(translateErrorMessage(message));
-          throw new Error(message);
-        }
+        checkConnection();
         setNotice(undefined);
         // Uploads already created a persisted draft; apply its selection before admission.
         if (!conversation && uploads?.conversationId && draftModel) {
@@ -126,8 +145,9 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
             setSubmitting(false);
           }
         }
-        await props.onSend(connection ? `/service ${connection.id}\n${text}` : text, uploads, draftModel);
-        setConnection(undefined);
+        checkConnection();
+        await props.onSend(connectionId ? `/service ${connectionId}\n${text}` : text, uploads, draftModel);
+        setConnectionId(undefined);
         return;
       }
       if (!canSteer || !conversation || !turn || busy.current) throw new Error("Wait for the current request.");

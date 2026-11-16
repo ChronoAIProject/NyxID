@@ -446,6 +446,30 @@ the leading `/service <UUID>` and actual newline; the server binds the choice
 to the admitted turn. Organization connections still require the existing action
 card in Auto and Ask every time.
 
+Composer 仅将明确不可执行的连接设为不可选，仍显示连接及不可用原因（包括
+screen reader 描述）。该判断复用 routing classifier，并优先采用后端
+`execution_unavailable_reason`；`unverified`、可刷新的 OAuth access token 和
+有 fallback 的离线节点不因此被禁用。Agent Details 与长期 grants 保持原有语义。
+
+The composer retains explicitly unavailable connections as disabled choices with
+visible and accessible reasons. Its execution predicate reuses the routing
+classifier and prioritizes the backend's `execution_unavailable_reason`.
+Unverified connections, refreshable OAuth access tokens and offline nodes with
+fallback remain selectable. Agent Details and durable grants keep their existing
+eligibility rules.
+
+选择只保存连接 ID；keys 刷新后，picker 和已选 chip 使用 live 数据。已选连接
+失效或从列表消失时，提示重新选择或移除，保留草稿并拒绝鼠标/键盘发送；不自动
+切换账号。异步 model 设置完成后、发送消息前，再次检查最新选择。服务端仍是最终
+执行授权的权威。回滚只需回退前端变更，无数据迁移。
+
+Selection stores only the connection ID; refreshed keys update both the picker
+and the selected chip. An unavailable or missing selected connection asks the
+owner to replace or remove it, retains the draft and refuses pointer/keyboard
+sends without switching accounts. The send path rechecks current selection after
+asynchronous model setup. Server admission remains authoritative. Rollback is a
+frontend revert with no data migration.
+
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses
 again when the text fits. In the expanded composer, the text occupies the full

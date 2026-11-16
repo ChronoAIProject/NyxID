@@ -16,6 +16,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { nyxAgentConversationSchema } from "@/schemas/assistant-nyxagent";
 import { createUploadDraft, uploadFile } from "@/lib/assistant/uploads";
+import type { KeyInfo } from "@/types/keys";
 
 const id = `nyxa-${"a".repeat(32)}`;
 vi.mock("@/lib/assistant/uploads", async (original) => ({
@@ -173,6 +174,34 @@ it("keeps text and attachments when the selected model is rejected before send",
     expect(screen.getByRole("textbox")).toHaveValue("Read my notes"),
   );
   expect(await screen.findByText("Ready")).toBeVisible();
+  expect(onSend).not.toHaveBeenCalled();
+});
+
+it("rechecks live connection state after pending model setup and retains the draft and upload", async () => {
+  const key = { id: "selected", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  client.setQueryData(["keys", "list", undefined], [key]);
+  let complete!: () => void;
+  const pending = new Promise<void>((resolve) => { complete = resolve; });
+  const change = vi.spyOn(nyxBotApi, "changeModel").mockImplementation(async () => {
+    await pending;
+    return nyxAgentConversationSchema.parse({
+      id, model: "nyxagent/research", title: "Draft", created_at: "2026-10-15T00:00:00Z",
+      last_message_at: "2026-10-15T00:00:00Z", message_count: 0,
+      active_turn: null, context_reset_at: null,
+    });
+  });
+  await draftWithUpload();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(change).toHaveBeenCalledOnce());
+  act(() => client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]));
+  await waitFor(() => expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Credential missing"));
+  await act(async () => complete());
+  await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue("Read my notes"));
+  expect(screen.getByText("Ready")).toBeVisible();
   expect(onSend).not.toHaveBeenCalled();
 });
 

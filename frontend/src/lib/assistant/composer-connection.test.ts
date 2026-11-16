@@ -1,0 +1,104 @@
+import { describe, expect, it } from "vitest";
+import type { KeyInfo } from "@/types/keys";
+import { connectionAvailable } from "./connection-context";
+import { composerConnectionUnavailableReason } from "./composer-connection";
+
+const connection = {
+  id: "connection",
+  is_active: true,
+  status: "active",
+  credential_type: "api_key",
+  api_key_id: "credential",
+  credential_source: { type: "personal" },
+} as KeyInfo;
+const now = Date.parse("2026-11-16");
+
+describe("composer execution availability", () => {
+  it.each<[Partial<KeyInfo>, string]>([
+    [{ is_active: false }, "Disabled"],
+    [
+      { credential_binding: "platform", platform_key_available: false },
+      "Platform unavailable",
+    ],
+    [
+      { auto_connected: true, platform_key_available: false },
+      "Platform unavailable",
+    ],
+    [{ credential_missing: true }, "Credential missing"],
+    [{ status: "revoked" }, "Reconnect needed"],
+    [{ status: "failed" }, "Reconnect needed"],
+    [{ status: "refresh_failed" }, "Reconnect needed"],
+    [{ status: "pending_auth" }, "Finish connecting"],
+    [{ requires_connection: true, connected: false }, "Finish connecting"],
+    [{ connection_status: "expired" }, "Reconnect needed"],
+    [{ status: "expired" }, "Reconnect needed"],
+    [{ expires_at: "2026-01-01" }, "Credential expired"],
+    [
+      {
+        credential_source: {
+          type: "org",
+          org_id: "org",
+          org_name: "Team",
+          allowed: false,
+          role: "viewer",
+        },
+      },
+      "No access",
+    ],
+    [
+      {
+        node_id: "node",
+        node_status: "offline",
+        execution_unavailable_reason: "node home offline",
+      },
+      "node home offline",
+    ],
+  ])("blocks explicit unavailable facts: %j", (overrides, reason) => {
+    expect(
+      composerConnectionUnavailableReason({ ...connection, ...overrides }, now),
+    ).toBe(reason);
+  });
+
+  it.each<Partial<KeyInfo>>([
+    {},
+    { credential_source: undefined, api_key_id: null },
+    { credential_binding: "platform", platform_key_available: true },
+    {
+      credential_binding: "user",
+      auto_connected: true,
+      platform_key_available: false,
+    },
+    {
+      credential_type: "oauth2",
+      expires_at: "2026-01-01",
+      connection_status: "active",
+    },
+    {
+      node_id: "node",
+      node_status: "offline",
+      execution_unavailable_reason: null,
+    },
+    { node_id: "node", node_status: "online" },
+  ])(
+    "keeps normal, unverified, refreshable and fallback connections selectable: %j",
+    (overrides) => {
+      expect(
+        composerConnectionUnavailableReason(
+          { ...connection, ...overrides },
+          now,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it("does not narrow the durable grant predicate", () => {
+    const offline = {
+      ...connection,
+      node_id: "node",
+      node_status: "offline",
+      execution_unavailable_reason: "node home offline",
+    };
+    expect(composerConnectionUnavailableReason(offline, now)).not.toBeNull();
+    expect(connectionAvailable(offline)).toBe(true);
+  });
+});
