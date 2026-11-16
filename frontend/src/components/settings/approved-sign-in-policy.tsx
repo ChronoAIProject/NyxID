@@ -1,3 +1,4 @@
+import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
@@ -61,7 +62,7 @@ export function ApprovedSignInPolicy() {
       >
         <GroupedRow className="items-start">
           <div className="min-w-0 flex-1 space-y-1">
-            <Label htmlFor="skip-approved-sign-in-mfa">{translateUi("Skip MFA for NyxID app sign-ins")}</Label>
+            <Label htmlFor="skip-approved-sign-in-mfa">{translateUi(ACCOUNT_FIELD_LABELS.skipMfaForApprovedSignins)}</Label>
             <p
               id="skip-approved-sign-in-description"
               className="text-13 text-text-tertiary"

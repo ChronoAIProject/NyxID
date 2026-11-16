@@ -103,14 +103,12 @@ export function GroupedDraftNavigation({ active }: { readonly active: boolean })
       blockerFn: async ({ action, currentLocation, nextLocation }) => {
         const current = new URLSearchParams(currentLocation.search);
         const next = new URLSearchParams(nextLocation.search);
-        // A bare agent link adopts its latest thread asynchronously. That
-        // canonical replacement retains this drawer and every draft in it.
+        // Same-agent tabs/sections and asynchronous latest-thread adoption
+        // retain this drawer and every draft. Detail Back guards its own owner.
         const sameDrawer = action === "REPLACE" &&
           currentLocation.pathname === nextLocation.pathname &&
-          current.get("agent") && current.get("details") &&
-          current.get("agent") === next.get("agent") &&
-          current.get("details") === next.get("details") &&
-          current.get("proposal") === next.get("proposal");
+          current.get("agent") && current.get("details") && next.get("details") &&
+          current.get("agent") === next.get("agent");
         // Account tabs and canonical chat adoption retain their mounted drafts.
         const sameSettings = action === "REPLACE" && currentLocation.pathname === nextLocation.pathname && (
           (currentLocation.pathname === "/settings" && current.get("tab") !== next.get("tab")) ||

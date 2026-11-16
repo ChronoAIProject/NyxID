@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { Tabs, TabsList, TabsTrigger } from "./tabs";
 import { GroupedDetailContext } from "@/lib/grouped-detail";
 import { GroupedDetail } from "./grouped-detail";
 import { GroupedDraftBoundary, GroupedDraftDialog } from "./grouped-drafts";
@@ -14,6 +15,32 @@ import {
 } from "./grouped-list";
 
 afterEach(cleanup);
+
+it("does not reactivate an inactive tab when a detail releases focus after history navigation", async () => {
+  const changeTab = vi.fn();
+  function TabbedPage({ tab, open }: { tab: string; open: boolean }) {
+    const [container, setContainer] = useState<HTMLDivElement | null>(null);
+    return <Tabs value={tab} onValueChange={changeTab}>
+      <TabsList><TabsTrigger value="billing">Billing</TabsTrigger><TabsTrigger value="usage">Usage</TabsTrigger></TabsList>
+      <div ref={setContainer}>
+        <GroupedDetailContext value={{ container, visible: true }}>
+          <GroupedDetail open={open} title="History" backLabel="Billing" onBack={() => undefined}>Details</GroupedDetail>
+        </GroupedDetailContext>
+      </div>
+    </Tabs>;
+  }
+  const user = userEvent.setup();
+  const view = render(<TabbedPage tab="usage" open={false} />);
+  const usage = screen.getByRole("tab", { name: "Usage" });
+  await user.click(usage);
+  expect(usage).toHaveFocus();
+  // A URL navigation selects Billing without moving focus off the old Usage tab.
+  view.rerender(<TabbedPage tab="billing" open />);
+  expect(screen.getByRole("heading", { name: "History" })).toHaveFocus();
+  view.rerender(<TabbedPage tab="billing" open={false} />);
+  expect(changeTab).not.toHaveBeenCalled();
+  expect(usage).not.toHaveFocus();
+});
 
 function Pages() {
   const [container, setContainer] = useState<HTMLDivElement | null>(null);

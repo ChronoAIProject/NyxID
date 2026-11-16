@@ -56,7 +56,7 @@ const staleCard: NyxAgentAcknowledgement = {
 vi.mock("@tanstack/react-router", async (original) => ({
   ...await original<typeof import("@tanstack/react-router")>(),
   useNavigate: () => vi.fn(),
-  useRouterState: ({ select }: { select: (value: unknown) => unknown }) => select({ location: { pathname: "/assistant", search: state.search } }),
+  useRouterState: ({ select }: { select: (value: unknown) => unknown }) => select({ location: { pathname: "/assistant", search: state.search, state: {} } }),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,

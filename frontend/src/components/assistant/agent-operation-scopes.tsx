@@ -14,7 +14,7 @@ import {
 import { useContext, useEffect, useId, useRef, useState } from "react";
 import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { createPortal } from "react-dom";
-import { coverGroupedContent } from "@/lib/grouped-detail";
+import { GroupedDetailContext, coverGroupedContent } from "@/lib/grouped-detail";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -63,6 +63,7 @@ export function AgentOperationScopes({
   readonly detailContainer?: HTMLElement | null;
 }) {
   useUiTranslation();
+  const level = (useContext(GroupedDetailContext).level ?? 0) + 1;
   const [active, setActive] = useState<string>();
   const guard = useGroupedDraftGuard();
   const parentOwner = useContext(GroupedDraftOwnerContext);
@@ -210,13 +211,13 @@ export function AgentOperationScopes({
             hidden={!visible || active !== service.service_id}
             style={
               !visible || active !== service.service_id
-                ? { display: "none" }
-                : undefined
+                ? { display: "none", zIndex: 10 + level }
+                : { zIndex: 10 + level }
             }
             data-operation-view={service.service_id}
-            data-grouped-level={1}
+            data-grouped-level={level}
             aria-label={guests ? translateUi("{{service}} guest operation details", { service: service.service_name }) : translateUi("{{service}} operation details", { service: service.service_name })}
-            className="absolute inset-0 z-10 flex flex-col bg-background p-4"
+            className="absolute inset-0 flex flex-col bg-background p-4"
           >
             <div className="relative shrink-0 pb-4 pr-6">
               {onClose ? (
@@ -249,7 +250,7 @@ export function AgentOperationScopes({
                 <SectionInfo title={`${service.service_name} · ${guests ? "Guest operations" : "Operations"}`}>{translateUi("Choose the allowed operations for this service. Permissions remain limited by the agent’s grant and save against the current service revision.")}</SectionInfo>
               </h2>
             </div>
-            <CompactScroll active={visible && active === service.service_id} level={1} className="assistant-scrollbar flex-1">
+            <CompactScroll active={visible && active === service.service_id} level={level} className="assistant-scrollbar flex-1">
               <GroupedFormScope inherit>
                 <GroupedDraftOwnerContext.Provider value={`${owner}/${service.service_id}`}>
                 <DrawerSearchRevealContext value={{ pages: [searchId(service.service_id)], reveal: () => setActive(service.service_id) }}>

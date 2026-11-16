@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
@@ -131,7 +132,7 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
                 <dd>{number(row.total_quantity ?? row.allowance.quantity)}</dd>
               </div>
               <div className="allowance-remaining">
-                <dt>{translateUi("Remaining")}</dt>
+                <dt>{translateUi(BILLING_FIELD_LABELS.remaining)}</dt>
                 <dd>{number(row.remaining_quantity)}</dd>
               </div>
               <div>

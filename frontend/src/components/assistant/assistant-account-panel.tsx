@@ -1,3 +1,5 @@
+import { accountSettingsSections, ACCOUNT_SETTINGS_TITLES } from "@/lib/account-settings-sections";
+import { billingSections, BILLING_SECTION_TITLES } from "@/lib/billing-sections";
 import { parseNyxBotSettingsSection, NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -9,7 +11,7 @@ import {
 import { DialogFocusReturnContext } from "@/components/ui/dialog-focus-return";
 import { lazy, Suspense, useEffect, useState } from "react";
 import {
-  Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+  DialogDescription, DialogTitle,
 } from "@/components/ui/dialog";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { accountPanelAllowed } from "@/lib/assistant/account-panel-availability";
@@ -59,39 +61,34 @@ export function AssistantAccountPanel() {
   }
   const panel = panels[current.panel];
   const section = current.panel === "nyxbot" ? parseNyxBotSettingsSection(current.panelTab) : undefined;
-  const dialogTitle = section ? NYXBOT_SETTINGS_TITLES[section] : panel.title;
-  const grouped = current.panel !== "billing";
-  const PanelDialog = grouped ? GroupedDialog : Dialog;
-  const PanelBody = grouped ? "div" : DialogBody;
-  const PanelContent =
-    grouped ? GroupedDialogContent : DialogContent;
+  const accountSection = current.panel === "settings" ? accountSettingsSections.parse(current.panelTab) : undefined;
+  const billingSection = current.panel === "billing" ? billingSections.parse(current.panelSection) : undefined;
+  const dialogTitle = section ? NYXBOT_SETTINGS_TITLES[section] : accountSection ? ACCOUNT_SETTINGS_TITLES[accountSection] : billingSection ? BILLING_SECTION_TITLES[billingSection] : panel.title;
   return (
-    <PanelDialog
+    <GroupedDialog
       open
       onOpenChange={(open) => { if (!open) void close(); }}
     >
-      <PanelContent
+      <GroupedDialogContent
         scrollMode="body"
-        className={`${panel.width}${current.panel === "settings" || current.panel === "nyxbot" ? " md:h-[min(48rem,85dvh)]" : ""}`}
+        className={`[&>button]:z-40 ${panel.width} md:h-[min(48rem,85dvh)]`}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           restorePanelFocus(opener());
         }}
       >
-        {current.panel === "nyxbot" && <><DialogTitle asChild><span className="sr-only">{translateUi(dialogTitle)}</span></DialogTitle><DialogDescription className="sr-only">{translateUi(panel.description)}</DialogDescription></>}
-        {current.panel !== "nyxbot" && <CompactChrome className="[[data-compact=true]]:border-b [[data-compact=true]]:border-border/50"><DialogHeader className="shrink-0 pr-6">
-          <DialogTitle className="[[data-compact=true]_&]:text-15">{translateUi(panel.title)}</DialogTitle>
-          <DialogDescription className="[[data-compact=true]_&]:hidden">{translateUi(panel.description)}</DialogDescription>
-        </DialogHeader></CompactChrome>}
-        <PanelBody className={grouped ? "flex min-h-0 flex-1 flex-col" : undefined} style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
+        <DialogTitle asChild><span className="sr-only">{translateUi(dialogTitle)}</span></DialogTitle>
+        <DialogDescription className="sr-only">{translateUi(panel.description)}</DialogDescription>
+        {current.panel !== "nyxbot" && !accountSection && !billingSection && <CompactChrome className="shrink-0 pr-6"><h2 className="type-card-title">{translateUi(panel.title)}</h2></CompactChrome>}
+        <div className="flex min-h-0 flex-1 flex-col" style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
           <DialogFocusReturnContext value={true}>
           <Suspense fallback={<p role="status" className="text-14 text-text-tertiary">{translateUi("Loading ")}{translateUi(panel.title)}...</p>}>
             {current.panel === "settings" ? <Settings presentation="panel" /> :
               current.panel === "billing" ? <Billing presentation="panel" /> : <NyxBot />}
           </Suspense>
           </DialogFocusReturnContext>
-        </PanelBody>
-      </PanelContent>
-    </PanelDialog>
+        </div>
+      </GroupedDialogContent>
+    </GroupedDialog>
   );
 }

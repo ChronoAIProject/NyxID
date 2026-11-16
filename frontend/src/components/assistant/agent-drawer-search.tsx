@@ -32,7 +32,9 @@ import { Button } from "@/components/ui/button";
 export function DrawerSearchProvider({
   children,
   query,
+  fallbackEntries = [],
 }: {
+  readonly fallbackEntries?: readonly DrawerSearchEntry[];
   readonly children: ReactNode;
   readonly query: string;
 }) {
@@ -72,7 +74,7 @@ export function DrawerSearchProvider({
       }}
     >
       <DrawerSearchResultsContext.Provider
-        value={{ entries: [...entries.values()].flat(), pages }}
+        value={{ entries: [...fallbackEntries, ...[...entries.values()].flat()], pages }}
       >
         {children}
       </DrawerSearchResultsContext.Provider>

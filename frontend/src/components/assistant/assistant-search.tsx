@@ -1,3 +1,7 @@
+import { ACCOUNT_SETTINGS_SECTIONS, ACCOUNT_SETTINGS_TITLES } from "@/lib/account-settings-sections";
+import { BILLING_SECTIONS, BILLING_SECTION_TITLES } from "@/lib/billing-sections";
+import { AGENT_DETAILS_SECTIONS, AGENT_DETAILS_TITLES, agentDetailsSections, agentDetailsAvailability } from "@/lib/assistant/agent-details-sections";
+import { accountSettingsSearchTerms, billingSearchTerms, agentDetailsSearchTerms } from "@/lib/settings-search";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, type ComponentType, type ReactNode } from "react";
@@ -35,7 +39,7 @@ import { nyxBotSettingsSearchTerms } from "@/lib/assistant/nyxbot-settings-searc
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { useNotificationsEnabled } from "@/hooks/use-assistant-notifications";
 import { useFeature } from "@/hooks/use-feature-flag";
-import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import { nyxBotQueryKeys, useNyxBotAgents, useNyxBotChannels } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import type { AccountPanel, AccountPanelParams } from "@/lib/assistant/account-panel-search";
@@ -117,6 +121,10 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
   useUiTranslation();
   const notificationsEnabled = useNotificationsEnabled();
   const adaptersEnabled = useFeature(FEATURE_FLAG.NYXBOT_ADAPTERS);
+  const voiceEnabled = useFeature(FEATURE_FLAG.VOICE_AGENT_KEY);
+  const learningEnabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
+  const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
+  const orgChannelsEnabled = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
   const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const [query, setQuery] = useState("");
   const typing = query.trim().length > 0;
@@ -124,10 +132,12 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
   const mock = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>).mock,
   });
+  const hasPassword = useAuthStore(state => state.user?.has_password);
   const userId = useAuthStore((state) => state.user?.id);
   const billingAvailable = useAuthStore((state) => isBillingAvailable(state.user));
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const agents = useNyxBotAgents(nyxagentEnabled);
+  const channels = useNyxBotChannels(nyxagentEnabled);
   const groups = useNyxBotGroups(nyxagentEnabled);
   const recent = useQuery({
     queryKey: [...nyxBotQueryKeys.threads(userId), "search-recent"],
@@ -198,20 +208,19 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
     { id: "page:logins", label: "Saved logins", icon: KeyRound, keywords: ["password", "machine"], run: () => go("/assistant/machines", { tab: "logins" }) },
   ];
   const settings: Entry[] = [
-    ...([
-      ["profile", "Profile", ["name", "email", "account"]],
-      ["security", "Security", ["password", "mfa", "two-factor", "passkey"]],
-      ["sessions", "Sessions", ["devices", "sign out"]],
-      ["mcp", "MCP", ["claude", "codex", "tools"]],
-      ["display", "Display", ["theme", "width", "text size", "sidebar", "motion"]],
-      ["privacy", "Privacy", ["data", "telemetry", "delete"]],
-    ] as const).map(([tab, label, keywords]) => ({
-      id: `settings:${tab}`,
-      label: `Settings: ${label}`,
-      icon: Settings,
-      keywords,
-      run: () => panel("settings", { panelTab: tab }),
+    { id: "settings", label: translateUi("Account Settings"), icon: Settings, run: () => panel("settings") },
+    ...ACCOUNT_SETTINGS_SECTIONS.filter(section => section !== "security/password" || hasPassword === true).map(section => ({
+      id: `settings:${section}`, label: translateUi(ACCOUNT_SETTINGS_TITLES[section]), hint: translateUi("Account Settings"), icon: Settings,
+      keywords: accountSettingsSearchTerms(section), run: () => panel("settings", { panelTab: section }),
     })),
+    ...agentList.flatMap(agent => {
+      const available = agentDetailsAvailability(agent, { orgChannels: orgChannelsEnabled, hasOrgChannel: channels.data?.some(channel => channel.agent_id === agent.id && channel.org_specialist), voice: voiceEnabled, learning: learningEnabled, owner: userId });
+      return AGENT_DETAILS_SECTIONS.filter(section => agentDetailsSections.available(section, available) === section).map(section => ({
+        id: `agent-details:${agent.id}:${section}`, label: translateUi(AGENT_DETAILS_TITLES[section]), hint: agentTitle(agent), icon: Bot,
+        keywords: agentDetailsSearchTerms(section, agent, advancedControls),
+        run: () => go("/assistant", { agent: agent.id, details: section }),
+      }));
+    }),
     ...(nyxagentEnabled
       ? [{ id: "nyxbot", label: "NyxBot settings", icon: Settings2, keywords: ["access mode", "channels", "bots"], run: () => panel("nyxbot") },
           ...NYXBOT_SETTINGS_SECTIONS
@@ -225,12 +234,10 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
               run: () => panel("nyxbot", { panelTab: section }),
             }))]
       : []),
-    ...(billingAvailable
-      ? [
-          { id: "billing", label: "Billing", icon: WalletCards, keywords: ["credits", "wallet", "top up"], run: () => panel("billing", { panelTab: "billing" }) },
-          { id: "usage", label: "Usage", icon: ChartNoAxesCombined, keywords: ["cost", "tokens"], run: () => panel("billing", { panelTab: "usage" }) },
-        ]
-      : []),
+    ...(billingAvailable ? BILLING_SECTIONS.map(section => ({
+      id: `billing:${section}`, label: translateUi(BILLING_SECTION_TITLES[section]), hint: translateUi("Billing & Usage"), icon: section.startsWith("usage") ? ChartNoAxesCombined : WalletCards,
+      keywords: billingSearchTerms(section), run: () => panel("billing", { panelTab: section.startsWith("usage") ? "usage" : "billing", panelSection: section.includes("/") ? section : undefined }),
+    })) : []),
     { id: "notifications", label: "Notification settings", icon: Bell, hint: "Studio", run: () => go("/approvals/settings") },
     { id: "studio", label: "Open Studio", icon: SlidersHorizontal, keywords: ["dashboard"], run: () => go("/dashboard") },
   ];

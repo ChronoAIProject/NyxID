@@ -1435,7 +1435,10 @@ pub fn pause_notice(reason: &str, frontend: &str) -> String {
         reason,
         "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
     ) {
-        AssistantPage::Billing { tab: "overview" }
+        AssistantPage::Billing {
+            tab: "overview",
+            section: None,
+        }
     } else {
         AssistantPage::NyxBotSettings { section: None }
     };

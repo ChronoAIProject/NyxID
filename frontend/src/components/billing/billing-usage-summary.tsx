@@ -1,10 +1,11 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Card } from "@/components/ui/card";
 import type { BillingUsageRow } from "@/schemas/billing";
 import { number, creditsLabel, creditsSumLabel } from "@/lib/billing-display";
 import { metricTotals } from "@/lib/billing-usage";
 
-export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
+export function BillingUsageSummary({ rows, compact = false }: { rows: BillingUsageRow[]; compact?: boolean }) {
   const { t } = useUiTranslation();
   const metrics = new Map(metricTotals(rows));
   const estimated = creditsLabel(rows, "estimated_credits_micros");
@@ -13,29 +14,33 @@ export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
     "allowance_credits_micros",
   ]);
   const tokenTotal = metrics.get("tokens");
+  if (compact) return <Card data-usage-summary="compact" className="flex flex-wrap gap-6 p-4">
+    <div><h3 className="type-secondary text-muted-foreground">{t(BILLING_FIELD_LABELS.spend)}</h3><p className="type-card-title tabular-nums">{estimated.text} {t("credits")}</p><p className="type-secondary text-text-tertiary">{t(BILLING_FIELD_LABELS.estimatedUsageCost)}{estimated.partial && t(" · lower bound, {{unknown}} {{value}} unpriced", { unknown: estimated.unknown, value: estimated.unknown === 1 ? t("record") : t("records") })}</p></div>
+    <div><h3 className="type-secondary text-muted-foreground">{t(BILLING_FIELD_LABELS.coveredByBenefits)}</h3><p className="type-card-title tabular-nums">{covered.text}</p></div>
+  </Card>;
   return (
     <Card className="tab-usage-summary">
       <div className="summary-family">
-        <h3>{t("Spend")}</h3>
+        <h3>{t(BILLING_FIELD_LABELS.spend)}</h3>
         <strong>
           {estimated.text} <small>{t("credits")}</small>
         </strong>
-        <p>{t("Estimated usage cost")}{estimated.partial &&
+        <p>{t(BILLING_FIELD_LABELS.estimatedUsageCost)}{estimated.partial &&
             t(" · lower bound, {{unknown}} {{value}} unpriced", { unknown: estimated.unknown, value: estimated.unknown === 1 ? t("record") : t("records") })}
         </p>
         <dl>
           <div>
-            <dt>{t("Covered by benefits")}</dt>
+            <dt>{t(BILLING_FIELD_LABELS.coveredByBenefits)}</dt>
             <dd>{covered.text}</dd>
           </div>
           <div>
-            <dt>{t("Wallet-funded")}</dt>
+            <dt>{t(BILLING_FIELD_LABELS.walletfunded)}</dt>
             <dd>{creditsLabel(rows, "wallet_credits_micros").text}</dd>
           </div>
         </dl>
       </div>
       <div className="summary-family">
-        <h3>{t("Activity")}</h3>
+        <h3>{t(BILLING_FIELD_LABELS.activity)}</h3>
         <strong>
           {number(metrics.get("requests") ?? 0)} <small>{t("requests")}</small>
         </strong>
@@ -59,7 +64,7 @@ export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
         </dl>
       </div>
       <div className="summary-family">
-        <h3>{t("Tokens")}</h3>
+        <h3>{t(BILLING_FIELD_LABELS.tokens)}</h3>
         <strong>
           {tokenTotal != null ? number(tokenTotal) : "—"}{" "}
           <small>{tokenTotal != null ? t("tokens") : t("No total metered")}</small>
@@ -67,7 +72,7 @@ export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
         <p>{t("Metered token usage")}</p>
         <dl>
           <div>
-            <dt>{t("Input · Output")}</dt>
+            <dt>{t(BILLING_FIELD_LABELS.inputOutput)}</dt>
             <dd>
               {metrics.has("input_tokens")
                 ? number(metrics.get("input_tokens")!)
@@ -79,7 +84,7 @@ export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
             </dd>
           </div>
           <div>
-            <dt>{t("Cache read · write")}</dt>
+            <dt>{t(BILLING_FIELD_LABELS.cacheReadWrite)}</dt>
             <dd>
               {metrics.has("cache_read_tokens")
                 ? number(metrics.get("cache_read_tokens")!)

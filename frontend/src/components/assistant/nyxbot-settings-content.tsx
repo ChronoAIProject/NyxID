@@ -1,3 +1,5 @@
+import { useSectionSearchParam } from "@/hooks/use-section-search-param";
+import { radioKeys } from "@/lib/radio-group";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactScroll } from "@/components/ui/compact-title";
@@ -9,7 +11,7 @@ import { ChannelAdapterBindings } from "./channel-adapter-bindings";
 import { AutomationPreferences, AutomationRow } from "./automation-preferences";
 import { NotificationPreferences } from "./notification-preferences";
 import { PlatformPersonalBindings } from "./platform-personal-bindings";
-import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   AlertTriangle,
@@ -30,7 +32,7 @@ import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { useChannelBots } from "@/hooks/use-channel-bots";
 import { useTriggers } from "@/hooks/use-triggers";
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { GroupedDisclosure } from "@/components/ui/grouped-list";
 import {
   availableNyxBotSettingsSection,
@@ -104,10 +106,7 @@ export function NyxBotSettingsContent() {
   useNyxAgentLive(true);
   const settings = useNyxBotSettings();
   const bots = useChannelBots({ scope: "all" });
-  const rawSection = useRouterState({
-    select: (state) =>
-      new URLSearchParams(state.location.searchStr).get("panelTab"),
-  });
+  const { value: rawSection, settled } = useSectionSearchParam("panelTab");
   const triggers = useTriggers();
   const adapters = useAuthStore((s) =>
     userHasFeature(s.user, FEATURE_FLAG.NYXBOT_ADAPTERS),
@@ -119,12 +118,12 @@ export function NyxBotSettingsContent() {
   const ancestry = nyxBotSettingsAncestry(selected);
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (
+    if (settled && (
       requested !== selected ||
-      (rawSection !== null && rawSection !== selected)
-    )
+      (rawSection !== undefined && rawSection !== selected)
+    ))
       void panel.update({ panelTab: selected }, "replace", { force: true });
-  }, [requested, selected, rawSection, panel]);
+  }, [requested, selected, rawSection, settled, panel]);
   const navigate = (section?: NyxBotSettingsSection) =>
     void panel.update({ panelTab: section }, "replace");
   const summaries: Partial<Record<NyxBotSettingsSection, ReactNode>> = {};
@@ -317,18 +316,6 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
     max_group_handoffs_per_hour: settings.max_group_handoffs_per_hour,
     specialist_access_requests: settings.specialist_access_requests ?? "denied",
   };
-}
-
-function radioKeys(event: KeyboardEvent<HTMLButtonElement>) {
-  const keys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"];
-  if (!keys.includes(event.key)) return;
-  event.preventDefault();
-  const rows = [...(event.currentTarget.closest('[role="radiogroup"]')?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? [])];
-  const index = rows.indexOf(event.currentTarget);
-  const next = event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1
-    : (index + (event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1) + rows.length) % rows.length;
-  rows[next]?.focus();
-  rows[next]?.click();
 }
 
 function SettingsForm({

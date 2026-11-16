@@ -95,6 +95,8 @@ pub const SETTINGS_AREAS: &[&str] = &[
     "service_pools",
     "channel_bots",
     "nyxbot_settings",
+    "account_settings",
+    "agent_details",
     "nodes",
     "approvals",
     "approval_history",
@@ -115,6 +117,36 @@ pub const SETTINGS_AREAS: &[&str] = &[
     "ai_setup",
 ];
 
+/// Closed section vocabularies, also enforced in dispatch before producing a link.
+pub fn settings_section_allowed(area: &str, section: &str) -> bool {
+    use super::assistant_links::*;
+    match area {
+        "nyxbot_settings" => NYXBOT_SETTINGS_SECTIONS.contains(&section),
+        "account_settings" => ACCOUNT_SETTINGS_SECTIONS.contains(&section),
+        "profile" | "security" | "sessions" | "mcp" | "display" | "privacy" => {
+            ACCOUNT_SETTINGS_SECTIONS.contains(&section) && section.split('/').next() == Some(area)
+        }
+        "billing" | "usage" => {
+            BILLING_SECTIONS.contains(&section) && section.split('/').next() == Some(area)
+        }
+        "agent_details" => AGENT_DETAILS_SECTIONS.contains(&section),
+        _ => false,
+    }
+}
+pub fn settings_sections() -> Vec<&'static str> {
+    use super::assistant_links::*;
+    let mut sections: Vec<_> = NYXBOT_SETTINGS_SECTIONS
+        .iter()
+        .chain(ACCOUNT_SETTINGS_SECTIONS)
+        .chain(BILLING_SECTIONS)
+        .chain(AGENT_DETAILS_SECTIONS)
+        .copied()
+        .collect();
+    sections.sort_unstable();
+    sections.dedup();
+    sections
+}
+
 /// The frontend path (with query) for a settings area.
 pub fn settings_path(area: &str, _service: Option<&str>, org_id: Option<&str>) -> Option<String> {
     let encode =
@@ -126,6 +158,12 @@ pub fn settings_path(area: &str, _service: Option<&str>, org_id: Option<&str>) -
         "services" => "/keys?tab=services".into(),
         "service_pools" => "/keys?tab=pools".into(),
         "channel_bots" => "/channel-bots".into(),
+        "account_settings" => "/assistant?panel=settings".into(),
+        "agent_details" => AssistantPage::AgentDetails {
+            agent: "nyxbot",
+            tab: "overview",
+        }
+        .path(),
         "nyxbot_settings" => AssistantPage::NyxBotSettings { section: None }.path(),
         "nodes" => "/nodes".into(),
         "approvals" | "notifications" => "/approvals/settings".into(),
@@ -141,7 +179,11 @@ pub fn settings_path(area: &str, _service: Option<&str>, org_id: Option<&str>) -
             agent: None,
         }
         .path(),
-        "billing" | "usage" => AssistantPage::Billing { tab: area }.path(),
+        "billing" | "usage" => AssistantPage::Billing {
+            tab: area,
+            section: None,
+        }
+        .path(),
         "organizations" => match org_id {
             Some(id) => format!("/orgs/{}", encode(id)),
             None => "/orgs".into(),
@@ -551,7 +593,7 @@ pub fn schema(name: &str) -> Value {
         "update_settings" => (settings_properties(), vec![]),
         "settings_link" => (
             json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
-                "section": {"type":"string", "enum": crate::services::assistant_links::NYXBOT_SETTINGS_SECTIONS, "description":"Only with nyxbot_settings; omit for the root"},
+                "section": {"type":"string", "enum": settings_sections(), "description":"Exact section path for nyxbot_settings, account_settings, an account tab area, billing, usage or agent_details. Omit for the area root. agent_details accepts agent."},
                 "agent": string(64), "label":string(128), "instruction":string(8192),
                 "service": {"type": "string", "minLength": 1, "maxLength": 100,
                     "description": "add_service only: authorized catalog slug or UUID; returns nyx__connect_service guidance, never a Studio connection URL"},
@@ -815,7 +857,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change NyxBot preferences only when the owner asks: task limits, automation timezone/budgets and push kinds. Higher limits may spend credits faster. Access mode may only tighten (Full access -> Auto -> Ask every time); specialist access requests may change only to denied. Equal authority values are no-ops. To relax approvals or newly route requests to NyxBot, give the returned owner-only page. Agent access_mode_override and voice are human-only and excluded. Omitted fields stay unchanged; returns updated preferences and changed section URLs."
         }
         "settings_link" => {
-            "For NyxBot push preferences use area nyxbot_settings, section notifications; for automation budgets use section automations/budgets; for channel configuration use section channels. Other areas notifications, automations and channel_bots retain their separate destinations. Optional section is only valid with nyxbot_settings. add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
+            "For NyxBot push preferences use area nyxbot_settings, section notifications; for automation budgets use section automations/budgets; for channel configuration use section channels. Other areas notifications, automations and channel_bots retain their separate destinations. Optional section targets an exact page within nyxbot_settings, account_settings, profile/security/sessions/mcp/display/privacy, billing/usage, or agent_details (with agent). Account security, profile, billing and agent access modes remain human-only; give the page link. add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
             and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
@@ -1058,7 +1100,10 @@ pub fn validate_against(name: &str, args: &Value, schema: &Value) -> AppResult<(
     }
     if name == "settings_link"
         && object.contains_key("section")
-        && args["area"] != "nyxbot_settings"
+        && !settings_section_allowed(
+            args["area"].as_str().unwrap_or_default(),
+            args["section"].as_str().unwrap_or_default(),
+        )
     {
         return Err(invalid());
     }
@@ -1296,6 +1341,57 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_link_sections_are_validated_per_area_without_new_write_authority() {
+        use crate::services::assistant_links::*;
+        for (area, sections) in [
+            ("account_settings", ACCOUNT_SETTINGS_SECTIONS),
+            ("agent_details", AGENT_DETAILS_SECTIONS),
+            ("billing", BILLING_SECTIONS),
+        ] {
+            for section in sections {
+                let area = if area == "billing" {
+                    section.split('/').next().unwrap()
+                } else {
+                    area
+                };
+                assert!(
+                    validate("settings_link", &json!({"area": area, "section": section})).is_ok(),
+                    "{area}: {section}"
+                );
+            }
+        }
+        for args in [
+            json!({"area":"security", "section":"display/text"}),
+            json!({"area":"billing", "section":"usage/charts"}),
+            json!({"area":"usage", "section":"billing/bill"}),
+            json!({"area":"agent_details", "section":"overview/unknown"}),
+            json!({"area":"account_settings", "section":null}),
+            json!({"area":"account_settings", "section":["security"]}),
+            json!({"area":"nodes", "section":"security/mfa"}),
+        ] {
+            assert!(validate("settings_link", &args).is_err(), "{args}");
+        }
+        assert!(
+            validate(
+                "settings_link",
+                &json!({"area":"security", "section":"security/mfa"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "update_settings",
+                &json!({"access_mode_override":"ask_every_time"})
+            )
+            .is_err()
+        );
+        assert!(validate("update_settings", &json!({"mfa_enabled":true})).is_err());
+        let sections = settings_sections();
+        let unique: std::collections::HashSet<_> = sections.iter().collect();
+        assert_eq!(sections.len(), unique.len());
+    }
 
     #[test]
     fn notification_digest_arguments_are_bounded_and_read_only() {

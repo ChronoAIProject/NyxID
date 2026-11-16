@@ -2663,9 +2663,12 @@ NyxBot alone exposes `nyxid__get_settings`, `nyxid__update_settings` and
 `nyxid__settings_link`; specialists and guests cannot use this owner lane.
 `get_settings` is Read and returns panel settings, numeric server bounds and
 section URLs, without voice preferences or the legacy approval switch. The
-`settings_link` optional `section` is accepted only for `area: nyxbot_settings`;
-its enum matches the frontend section vocabulary with a cross-language test.
-Omitting it opens the root. Other areas or unknown sections reject validation.
+`settings_link` accepts optional `section` for NyxBot settings, Account Settings
+(and its existing category areas), agent details, Billing and Usage. Each area has
+a closed vocabulary drift-tested against the frontend; cross-area and unknown
+sections reject validation. Omitting it preserves the existing destination.
+Sections add links only: account security, profile, billing and agent overrides
+keep their existing human actions. See the frontend navigation contract.
 
 `update_settings` is a Change under the existing permission classifier. It
 accepts a nonempty partial panel patch, uses REST validation and server bounds,

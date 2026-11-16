@@ -1,9 +1,9 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { BillingAllowanceBenefits } from "./billing-allowance-benefits";
-import { useId, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { BillingWalletBreakdown } from "./billing-wallet-card";
 import { useBillingBenefits } from "@/hooks/use-billing-benefits";
 import { useBillingWallet } from "@/hooks/use-billing";
@@ -34,21 +34,32 @@ function grantState(g: CreditGrant) {
   return "active";
 }
 
-export function AvailableBenefits({
-  catalog = [],
-  ownerId,
-  actions,
-}: {
-  catalog?: BillingCatalog;
-  ownerId?: string;
-  actions?: ReactNode;
-}) {
-  useUiTranslation();
-  const breakdownId = useId();
-  const [expanded, setExpanded] = useState(false);
+const BenefitsContext = createContext<{
+  benefits: ReturnType<typeof useBillingBenefits>;
+  wallet: ReturnType<typeof useBillingWallet>;
+  page: number;
+  setPage: (page: number) => void;
+} | null>(null);
+
+/** A single query owner for all retained benefit pages, including pagination and polling. */
+export function AvailableBenefitsProvider({ ownerId, children }: { ownerId?: string; children: ReactNode }) {
   const [page, setPage] = useState(1);
   const benefits = useBillingBenefits(page, ownerId);
   const wallet = useBillingWallet(ownerId);
+  return <BenefitsContext value={{ benefits, wallet, page, setPage }}>{children}</BenefitsContext>;
+}
+
+export function AvailableBenefits({
+  catalog = [],
+  actions,
+  view,
+}: {
+  catalog?: BillingCatalog;
+  actions?: ReactNode;
+  view: "summary" | "wallet" | "grants" | "allowances";
+}) {
+  useUiTranslation();
+  const { benefits, wallet, page, setPage } = useContext(BenefitsContext)!;
   if (benefits.isLoading || wallet.isLoading)
     return (
       <Card
@@ -102,9 +113,9 @@ export function AvailableBenefits({
       aria-busy={benefits.isFetching || wallet.isFetching}
     >
       <CardContent className="p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        {view === "summary" && <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="type-secondary text-muted-foreground">{translateUi("Available credits")}</h2>
+            <h2 className="type-secondary text-muted-foreground">{translateUi(BILLING_FIELD_LABELS.availableCredits)}</h2>
             <p
               className="mt-1 break-words font-display type-metric tabular-nums"
               title={total ?? undefined}
@@ -120,24 +131,10 @@ export function AvailableBenefits({
                 </>
               )}
             </p>
-            {data && (
-              <button
-                type="button"
-                aria-expanded={expanded}
-                aria-controls={breakdownId}
-                onClick={() => setExpanded(!expanded)}
-                className="mt-2 flex min-h-6 items-center gap-1 type-row-title text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {expanded ? translateUi("Hide breakdown") : translateUi("View breakdown")}
-                <ChevronDown
-                  aria-hidden="true"
-                  className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
-                />
-              </button>
-            )}
+
           </div>
           {actions}
-        </div>
+        </div>}
         {noWallet && (
           <p role="status" className="mt-2 type-secondary text-warning">{translateUi("No wallet provisioned. Provision a wallet to use your credits and free usage.")}</p>
         )}
@@ -158,14 +155,12 @@ export function AvailableBenefits({
           <p role="status" className="type-secondary text-text-tertiary">{translateUi("Updating balances…")}</p>
         )}
 
-        {data && (
+        {data && view !== "summary" && (
           <div
-            id={breakdownId}
-            hidden={!expanded}
-            className="mt-4 space-y-4 border-t border-border pt-4"
+            className="space-y-4"
           >
             <p className="type-secondary text-muted-foreground">{translateUi("Wallet and eligible grants contribute to available credits. Free allowances are additional usage in their own units. Current balances are independent of usage filters.")}</p>
-            {complete && blocked && (
+            {view === "wallet" && complete && blocked && (
               <p className="type-secondary text-muted-foreground">{translateUi("Balance before billing restrictions:")}{" "}
                 {money(
                   availableCreditTotal(
@@ -176,7 +171,8 @@ export function AvailableBenefits({
                 .
               </p>
             )}
-            {wallet.data && <BillingWalletBreakdown wallet={wallet.data} />}
+            {view === "wallet" && wallet.data && <BillingWalletBreakdown wallet={wallet.data} />}
+            {view === "grants" && <>
             <section aria-label={translateUi("Grant balances")}>
               <h3 className="type-secondary-strong">{translateUi("Billing grants")}</h3>
               <p className="mt-1 type-secondary">{translateUi("Available: ")}{money(data.summary.unreserved)}
@@ -184,15 +180,15 @@ export function AvailableBenefits({
               <dl className="my-3 grid gap-2 type-secondary sm:grid-cols-2">
                 {(
                   [
-                    ["Held grants", data.summary.held],
-                    ["Pending activation", data.summary.pending_activation],
-                    ["Pending reclaim", data.summary.pending_reclaim],
+                    [BILLING_FIELD_LABELS.heldGrants, data.summary.held],
+                    [BILLING_FIELD_LABELS.pendingActivation, data.summary.pending_activation],
+                    [BILLING_FIELD_LABELS.pendingReclaim, data.summary.pending_reclaim],
                     [
-                      "Expired, awaiting cleanup",
+                      BILLING_FIELD_LABELS.expiredAwaitingCleanup,
                       data.summary.expired_awaiting_cleanup,
                     ],
                     [
-                      "Available with service restrictions",
+                      BILLING_FIELD_LABELS.availableWithServiceRestrictions,
                       data.summary.restricted,
                     ],
                   ] as const
@@ -204,7 +200,7 @@ export function AvailableBenefits({
                 ))}
               </dl>
             </section>
-            <h3 className="type-secondary-strong">{translateUi("Individual grants")}</h3>
+            <h3 className="type-secondary-strong">{translateUi(BILLING_FIELD_LABELS.individualGrants)}</h3>
             <p className="my-1 type-secondary text-text-tertiary">
               {data.total_grants.toLocaleString(getFormattingLocale())}{" "}
               {data.total_grants === 1 ? translateUi("credit grant") : translateUi("credit grants")}{translateUi(" · page ")}{data.page}{translateUi(". The available total includes every eligible grant, across all pages. ")}</p>
@@ -284,14 +280,17 @@ export function AvailableBenefits({
                 >{translateUi("Next grants")}</Button>
               </div>
             )}
-            <h3 className="mt-4 type-secondary-strong">{translateUi("Free allowances")}</h3>
+            </>}
+            {view === "allowances" && <>
+            <h3 className="mt-4 type-secondary-strong">{translateUi(BILLING_FIELD_LABELS.freeAllowances)}</h3>
             <BillingAllowanceBenefits
               allowances={data.allowances}
               catalog={catalog}
-            />
-            <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}{translateUi(". Allowances apply first, then eligible grants, then wallet credits. ")}</p>
+            /></>}
+
           </div>
         )}
+        {view === "allowances" && data && <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}{translateUi(". Allowances apply first, then eligible grants, then wallet credits. ")}</p>}
       </CardContent>
     </Card>
   );

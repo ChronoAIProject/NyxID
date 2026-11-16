@@ -1,3 +1,10 @@
+import { useSectionSearchParam } from "@/hooks/use-section-search-param";
+import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
+import { SectionPages } from "@/components/ui/section-pages";
+import { GroupedDetailContext } from "@/lib/grouped-detail";
+import { ACCOUNT_SETTINGS_SECTIONS, ACCOUNT_SETTINGS_TITLES, accountSettingsSections, type AccountSettingsSection } from "@/lib/account-settings-sections";
+import { useThemeStore } from "@/stores/theme-store";
+import { UserRound, ShieldCheck, Monitor, Plug, Palette, LockKeyhole } from "lucide-react";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -6,7 +13,7 @@ import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
@@ -35,20 +42,15 @@ import {
 } from "@/components/ui/form";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
-import { SETTINGS_TABS, SETTINGS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
+
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { ApprovedSignInPolicy } from "@/components/settings/approved-sign-in-policy";
 import { DisplaySettings } from "@/components/settings/display-settings";
 import { LanguageSettings } from "@/components/settings/language-settings";
 import {
-  SegmentedControl,
-  SegmentedControlContent,
-  SegmentedControlList,
-  SegmentedControlTrigger,
-} from "@/components/ui/segmented-control";
-import {
   GroupedList,
+  GroupedDisclosure,
   GroupedRow,
   GroupedInput as Input,
 } from "@/components/ui/grouped-list";
@@ -69,7 +71,7 @@ import {
   GroupedDecisionDraft,
 } from "@/components/ui/grouped-dialog";
 import { FormViewport } from "@/components/ui/form-viewport";
-import { CompactChrome, CompactScroll } from "@/components/ui/compact-title";
+import { CompactScroll } from "@/components/ui/compact-title";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import {
   DialogDescription,
@@ -132,118 +134,58 @@ function SettingsContent({
   });
   const navigate = useNavigate();
   const account = useAccountPanel();
-  const currentTab = parseTab(
-    presentation === "panel" ? account.current.panelTab : searchParams.tab,
-    SETTINGS_TABS,
-    SETTINGS_TAB_DEFAULT,
-  );
-  const [visited, setVisited] = useState(() => new Set([currentTab]));
-  if (!visited.has(currentTab)) setVisited(new Set([...visited, currentTab]));
-  const panels = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (presentation !== "panel") return;
-    const frame = requestAnimationFrame(() =>
-      panels.current
-        ?.querySelector<HTMLElement>(`[data-settings-tab="${currentTab}"] h2`)
-        ?.focus({ preventScroll: true }),
-    );
-    return () => cancelAnimationFrame(frame);
-  }, [currentTab, presentation]);
-
-  function handleTabChange(value: string) {
-    if (presentation === "panel") void account.update({ panelTab: value });
-    else
-      void navigate({ to: "/settings", search: { tab: value }, replace: true });
+  const { value: raw, settled } = useSectionSearchParam(presentation === "panel" ? "panelTab" : "tab");
+  const selected = accountSettingsSections.normalize(raw);
+  const user = useUser();
+  const mode = useThemeStore(state => state.mode);
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => api.get<readonly Session[]>("/sessions") });
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  const availability = { "security/password": user.isSuccess ? user.data.has_password === true : true };
+  const current = accountSettingsSections.available(selected, availability);
+  function go(section?: AccountSettingsSection) {
+    if (presentation === "panel") void account.update({ panelTab: section }, "replace", { force: true });
+    else void navigate({ to: "/settings", search: { ...searchParams, tab: section }, replace: true });
   }
-
-  return (
-    <GroupedFormScope viewport={presentation === "panel"}>
-      <section
-        aria-label={translateUi("Account settings")}
-        className={
-          presentation === "panel"
-            ? "flex min-h-0 flex-1 flex-col"
-            : "space-y-8"
-        }
-      >
-        {presentation === "page" && (
-          <PageHeader
-            title={translateUi("Account Settings")}
-            description={translateUi("Manage your account settings and preferences.")}
-          />
-        )}
-        <SegmentedControl
-          value={currentTab}
-          onValueChange={handleTabChange}
-          className="flex min-h-0 flex-1 flex-col gap-6"
-        >
-          <CompactChrome>
-            <SegmentedControlList aria-label={translateUi("Account settings")}>
-              {SETTINGS_TABS.map((tab) => (
-                <SegmentedControlTrigger key={tab} value={tab}>
-                  {tab === "mcp"
-                    ? translateUi("MCP")
-                    : translateUi(tab.charAt(0).toUpperCase() + tab.slice(1))}
-                </SegmentedControlTrigger>
-              ))}
-            </SegmentedControlList>
-          </CompactChrome>
-          <div
-            ref={panels}
-            className={
-              presentation === "panel"
-                ? "flex min-h-0 flex-1 flex-col"
-                : undefined
-            }
-          >
-            {SETTINGS_TABS.filter((tab) => visited.has(tab)).map((tab) => (
-              <SegmentedControlContent
-                key={tab}
-                value={tab}
-                forceMount
-                hidden={currentTab !== tab}
-                data-settings-tab={tab}
-                className="min-h-0 flex-1 flex-col space-y-0 data-[state=active]:flex data-[state=inactive]:hidden"
-              >
-                <h2 tabIndex={-1} className="sr-only outline-none">
-                  {tab === "mcp"
-                    ? translateUi("MCP")
-                    : translateUi(tab.charAt(0).toUpperCase() + tab.slice(1))}
-                </h2>
-                <FormViewport className="flex min-h-0 flex-1 flex-col">
-                  <CompactScroll
-                    active={currentTab === tab}
-                    className="assistant-scrollbar flex-1 space-y-6 pb-6"
-                  >
-                    {tab === "profile" ? (
-                      <>
-                        <ProfileTab />
-                        <LanguageSettings />
-                      </>
-                    ) : tab === "security" ? (
-                      <>
-                        <SecurityTab />
-                        <OwnedOnboardingBindings />
-                      </>
-                    ) : tab === "sessions" ? (
-                      <SessionsTab />
-                    ) : tab === "mcp" ? (
-                      <McpTab />
-                    ) : tab === "display" ? (
-                      <DisplaySettings />
-                    ) : (
-                      <PrivacyTab />
-                    )}
-                  </CompactScroll>
-                </FormViewport>
-              </SegmentedControlContent>
-            ))}
-          </div>
-        </SegmentedControl>
-        <GroupedFormBar viewport={presentation === "panel"} />
-      </section>
-    </GroupedFormScope>
-  );
+  useEffect(() => {
+    if (settled && raw !== current) go(current);
+  });
+  const icons = { profile: UserRound, security: ShieldCheck, sessions: Monitor, mcp: Plug, display: Palette, privacy: LockKeyhole };
+  function disclosures(parent?: AccountSettingsSection) {
+    return <GroupedList>{ACCOUNT_SETTINGS_SECTIONS.filter(section => accountSettingsSections.parent(section) === parent && availability[section as keyof typeof availability] !== false).map(section => {
+      const Icon = icons[section.split("/")[0] as keyof typeof icons];
+      const summary = section === "display" || section === "display/appearance" ? translateUi(mode === "system" ? "System" : mode === "light" ? "Light" : "Dark")
+        : section === "security" && user.isSuccess && !user.error ? translateUi(user.data.mfa_enabled ? "MFA on" : "MFA off")
+        : section === "profile" && user.isSuccess && !user.error ? user.data.display_name || user.data.email
+        : section === "sessions" && sessions.isSuccess && !sessions.error ? String(sessions.data.length) : undefined;
+      return <GroupedDisclosure key={section} leading={parent ? undefined : <Icon aria-hidden />} accessory={summary ? <span className="text-13 text-text-tertiary">{summary}</span> : undefined} data-drawer-page-trigger={section} onClick={() => go(section)}>{translateUi(ACCOUNT_SETTINGS_TITLES[section])}</GroupedDisclosure>;
+    })}</GroupedList>;
+  }
+  function page(section: AccountSettingsSection) {
+    if (["security", "mcp", "display", "display/colors"].includes(section)) return disclosures(section);
+    if (section === "profile") return <><ProfileTab /><LanguageSettings /></>;
+    if (section === "sessions") return <SessionsTab />;
+    if (section === "privacy") return <PrivacyTab />;
+    if (section === "security/linked-accounts") return <OwnedOnboardingBindings />;
+    if (section.startsWith("security/")) return <SecurityTab section={section} />;
+    if (section.startsWith("mcp/")) return <McpTab section={section} />;
+    return <DisplaySettings section={section} />;
+  }
+  return <GroupedFormScope viewport>
+    <section aria-label={translateUi("Account settings")} className="flex min-h-0 flex-1 flex-col">
+      {presentation === "page" && <PageHeader title={translateUi("Account Settings")} description={translateUi("Manage your account settings and preferences.")} />}
+      <FormViewport className="flex min-h-0 flex-1 flex-col">
+        <div ref={setContainer} className={`relative flex min-h-0 flex-1 flex-col${presentation === "page" ? " h-[min(48rem,80dvh)] min-h-96" : ""}`}>
+          <GroupedDetailContext.Provider value={{ container, visible: true }}>
+            <CompactScroll active={!current} hidden={Boolean(current)} style={current ? { display: "none" } : undefined} className="assistant-scrollbar flex-1 space-y-6 pb-6">
+              {disclosures()}
+            </CompactScroll>
+            <SectionPages sections={ACCOUNT_SETTINGS_SECTIONS} titles={ACCOUNT_SETTINGS_TITLES} selected={current} rootTitle="Account Settings" available={availability} navigate={go} render={page} />
+          </GroupedDetailContext.Provider>
+        </div>
+      </FormViewport>
+      <GroupedFormBar viewport />
+    </section>
+  </GroupedFormScope>;
 }
 
 function ProfileTab() {
@@ -305,7 +247,7 @@ function ProfileForm({ user }: { readonly user: User }) {
             rules={{ required: "Name is required" }}
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{translateUi("Name")}</FormLabel>
+                <FormLabel>{translateUi(ACCOUNT_FIELD_LABELS.name)}</FormLabel>
                 <div className="relative">
                   <FormControl>
                     <Input
@@ -325,7 +267,7 @@ function ProfileForm({ user }: { readonly user: User }) {
           />
           <GroupedRow className="block space-y-0.5">
             <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="profile-email">{translateUi("Email")}</Label>
+              <Label htmlFor="profile-email">{translateUi(ACCOUNT_FIELD_LABELS.email)}</Label>
               <Badge variant={user.email_verified ? "success" : "warning"}>
                 {user.email_verified ? translateUi("Verified") : translateUi("Not verified")}
               </Badge>
@@ -370,7 +312,7 @@ function ProfileForm({ user }: { readonly user: User }) {
   );
 }
 
-function SecurityTab() {
+function SecurityTab({ section }: { readonly section: string }) {
   useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
@@ -515,8 +457,8 @@ function SecurityTab() {
 
   return (
     <div className="space-y-6">
-      <GroupedList
-        title={translateUi("Two-factor authentication")}
+      {section === "security/mfa" && <GroupedList
+        title={translateUi(ACCOUNT_FIELD_LABELS.twofactorAuthentication)}
         footer={
           user?.mfa_enabled
             ? translateUi("Your account is protected with two-factor authentication.")
@@ -524,7 +466,7 @@ function SecurityTab() {
         }
       >
         <GroupedRow
-          title={translateUi("Two-factor authentication")}
+          title={translateUi(ACCOUNT_FIELD_LABELS.twofactorAuthentication)}
           accessory={
             <Switch
               checked={user?.mfa_enabled ?? false}
@@ -538,8 +480,8 @@ function SecurityTab() {
           }
           description={user?.mfa_enabled ? translateUi("Enabled") : translateUi("Disabled")}
         />
-      </GroupedList>
-      <ApprovedSignInPolicy key={user?.id} />
+      </GroupedList>}
+      {section === "security/mfa" && <ApprovedSignInPolicy key={user?.id} />}
 
       <MfaSetupDialog open={mfaDialogOpen} onOpenChange={setMfaDialogOpen} />
 
@@ -614,7 +556,7 @@ function SecurityTab() {
         </DialogContent>
       </Dialog>
 
-      {user?.has_password === true && (
+      {section === "security/password" && user?.has_password === true && (
         <Form {...passwordForm}>
           <form
             aria-label={translateUi("Change password")}
@@ -622,7 +564,7 @@ function SecurityTab() {
             className="space-y-6"
           >
             <GroupedList
-              title={translateUi("Change password")}
+              title={undefined}
               footer={
                 <>
                   <p>{translateUi("Use 8–128 UTF-8 bytes. Existing sessions remain signed in.")}</p>
@@ -638,21 +580,21 @@ function SecurityTab() {
                 [
                   [
                     "currentPassword",
-                    "Current Password",
+                    ACCOUNT_FIELD_LABELS.currentPassword,
                     showCurrentPw,
                     setShowCurrentPw,
                     "current-password",
                   ],
                   [
                     "newPassword",
-                    "New Password",
+                    ACCOUNT_FIELD_LABELS.newPassword,
                     showNewPw,
                     setShowNewPw,
                     "new-password",
                   ],
                   [
                     "confirmNewPassword",
-                    "Confirm New Password",
+                    ACCOUNT_FIELD_LABELS.confirmNewPassword,
                     showConfirmPw,
                     setShowConfirmPw,
                     "new-password",
@@ -723,7 +665,7 @@ function SecurityTab() {
         </Form>
       )}
 
-      <GroupedList
+      {section === "security/delete" && <GroupedList
         title={translateUi("Delete account")}
         footer={translateUi("Permanently delete your account and queue managed Machine workspace cleanup. Necessary security and financial records are retained.")}
       >
@@ -733,9 +675,9 @@ function SecurityTab() {
             className="text-destructive"
             onClick={() => setDeleteAccountOpen(true)}
           >
-            <Trash2 aria-hidden className="size-[1.125em]" />{translateUi("Delete My Account")}</button>
+            <Trash2 aria-hidden className="size-[1.125em]" />{translateUi(ACCOUNT_FIELD_LABELS.deleteMyAccount)}</button>
         </GroupedRow>
-      </GroupedList>
+      </GroupedList>}
 
       <Dialog open={deleteAccountOpen} onOpenChange={handleDeleteAccountDialog}>
         <DialogContent>
@@ -759,7 +701,7 @@ function SecurityTab() {
             }
           >
             <GroupedRow className="block space-y-1">
-              <Label htmlFor="delete-account-email">{translateUi("Email")}</Label>
+              <Label htmlFor="delete-account-email">{translateUi(ACCOUNT_FIELD_LABELS.email)}</Label>
               <Input
                 id="delete-account-email"
                 value={deleteConfirmEmail}
@@ -828,7 +770,7 @@ function CopyInlineButton({
   );
 }
 
-function McpTab() {
+function McpTab({ section }: { readonly section: string }) {
   useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
 
@@ -847,8 +789,8 @@ function McpTab() {
   return (
     <div className="space-y-6">
       <p className="px-4 text-13 text-text-tertiary">{translateUi("Install NyxID as an MCP (Model Context Protocol) server in your client of choice.")}</p>
-      <GroupedList
-        title={translateUi("Install to Cursor")}
+      {section === "mcp/cursor" && <GroupedList
+        title={translateUi(ACCOUNT_FIELD_LABELS.installToCursor)}
         footer={translateUi("One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.")}
       >
         <GroupedRow asChild interactive>
@@ -856,16 +798,16 @@ function McpTab() {
             type="button"
             onClick={() => void openExternal(cursorDeeplink)}
           >
-            <ExternalLink aria-hidden className="size-[1.125em]" />{translateUi("Install to Cursor")}</button>
+            <ExternalLink aria-hidden className="size-[1.125em]" />{translateUi(ACCOUNT_FIELD_LABELS.installToCursor)}</button>
         </GroupedRow>
         <McpCode
           title={translateUi("Or copy manually · .cursor/mcp.json")}
           text={cursorConfig}
           label={translateUi("Cursor config")}
         />
-      </GroupedList>
-      <GroupedList
-        title={translateUi("Install to Claude Code")}
+      </GroupedList>}
+      {section === "mcp/claude-code" && <GroupedList
+        title={translateUi(ACCOUNT_FIELD_LABELS.installToClaudeCode)}
         footer={translateUi("Run this command in your terminal to add NyxID as an MCP server in Claude Code.")}
       >
         <McpCode
@@ -878,9 +820,9 @@ function McpTab() {
           text={claudeConfig}
           label={translateUi("Claude Code config")}
         />
-      </GroupedList>
-      <GroupedList
-        title={translateUi("Install to Codex")}
+      </GroupedList>}
+      {section === "mcp/codex" && <GroupedList
+        title={translateUi(ACCOUNT_FIELD_LABELS.installToCodex)}
         footer={translateUi("Run this command in your terminal to add NyxID as an MCP server in Codex CLI.")}
       >
         <McpCode
@@ -893,7 +835,7 @@ function McpTab() {
           text={codexConfig}
           label={translateUi("Codex config")}
         />
-      </GroupedList>
+      </GroupedList>}
       <GroupedList
         title={translateUi("How it works")}
         footer={translateUi("When your MCP client connects for the first time, NyxID will open an OAuth flow in your browser to authenticate. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.")}
@@ -969,7 +911,7 @@ function SessionsTab() {
   return (
     <div className="space-y-6">
       <GroupedList
-        title={translateUi("Active sessions")}
+        title={translateUi(ACCOUNT_FIELD_LABELS.activeSessions)}
         footer={translateUi("Manage your active sessions across devices.")}
       >
         <GroupedRow asChild interactive>
@@ -1059,7 +1001,7 @@ function SessionsTab() {
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
             >
-              {revokeTarget?.is_current ? translateUi("Revoke and sign out") : translateUi("Revoke")}
+              {revokeTarget?.is_current ? translateUi("Revoke and sign out") : translateUi(ACCOUNT_FIELD_LABELS.revoke)}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1123,7 +1065,7 @@ function PrivacyTab() {
       }
     >
       <GroupedRow
-        title={translateUi("Allow account usage analytics")}
+        title={translateUi(ACCOUNT_FIELD_LABELS.allowAccountUsageAnalytics)}
         description={
           <span role="status">
             {permission.isFetching
@@ -1155,13 +1097,13 @@ function PrivacyTab() {
                 permission.isFetching
               }
               onCheckedChange={(next) => void handleToggle(next)}
-              aria-label={translateUi("Allow account usage analytics")}
+              aria-label={translateUi(ACCOUNT_FIELD_LABELS.allowAccountUsageAnalytics)}
             />
           </>
         }
       />
       <GroupedRow
-        title={translateUi("Allow on this browser")}
+        title={translateUi(ACCOUNT_FIELD_LABELS.allowOnThisBrowser)}
         accessory={
           <Switch
             checked={consentEnabled}

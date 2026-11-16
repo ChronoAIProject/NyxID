@@ -4,6 +4,9 @@ import { openAssistant } from "./helpers";
 for (const width of [1280, 320]) {
   test(`Agent Details groups saved accounts by service at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
+    await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", route => route.fulfill({ json: { sessions: [] } }));
+    await page.route("**/api/v1/assistant/nyxagent/machines?**", route => route.fulfill({ json: [] }));
+    await page.route("**/api/v1/saved-logins?**", route => route.fulfill({ json: { logins: [] } }));
     await page.route("**/api/v1/triggers", route => route.fulfill({ json: { triggers: [] } }));
     await page.route("**/api/v1/service-preferences", (route) => route.fulfill({
       json: { groups: [], version: 0, updated_at: null },
@@ -12,8 +15,9 @@ for (const width of [1280, 320]) {
     await page.getByRole("region", { name: "What NyxBot remembers" }).getByRole("button", { name: "Manage" }).click();
     const sheet = page.getByRole("dialog", { name: "Agent details" });
     await sheet.getByRole("tab", { name: "Access", exact: true }).click();
+    await sheet.locator('[data-drawer-page-trigger="grants/connections"]').click();
     const connections = sheet.getByRole("region", { name: "Connections", exact: true })
-      .filter({ has: page.getByRole("list", { name: "OpenAI connections", exact: true }) });
+      .filter({ has: page.getByRole("list", { name: "OpenAI connections", exact: true }) }).last();
     await connections.scrollIntoViewIfNeeded();
     await expect(connections).toContainText("Your saved connection order applies across your agents");
     const accounts = connections.getByRole("list", { name: "OpenAI connections" });

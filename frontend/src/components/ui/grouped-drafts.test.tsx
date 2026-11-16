@@ -77,6 +77,7 @@ it("retains dirty drafts without prompting during the same drawer's latest-threa
 });
 
 it.each([
+  ["/assistant?agent=researcher&details=overview/persona", "/assistant?agent=researcher&details=grants", "/assistant?agent=another&details=grants"],
   ["/settings?tab=profile", "/settings?tab=security", "/keys"],
   ["/assistant?panel=settings&panelTab=profile", "/assistant?panel=settings&panelTab=security&c=adopted", "/assistant?c=adopted"],
 ])("retains settings drafts across tab replacement and guards leaving %s", async (initial, tab, leave) => {

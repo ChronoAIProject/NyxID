@@ -1,3 +1,13 @@
+import { useSectionSearchParam } from "@/hooks/use-section-search-param";
+import { GroupedFormScope, GroupedFormBar } from "@/components/ui/grouped-form";
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
+import { Button } from "@/components/ui/button";
+import { SectionPages } from "@/components/ui/section-pages";
+import { GroupedDetailContext } from "@/lib/grouped-detail";
+import { CompactScroll } from "@/components/ui/compact-title";
+import { GroupedList, GroupedDisclosure } from "@/components/ui/grouped-list";
+import { BILLING_SECTIONS, BILLING_SECTION_TITLES, billingSections, type BillingSection } from "@/lib/billing-sections";
+import { Wallet, Gift, ReceiptText, Activity, Monitor, ChartNoAxesCombined, Search, Gauge } from "lucide-react";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -30,7 +40,7 @@ import {
   useTopUpBilling,
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
-import { AvailableBenefits } from "@/components/billing/available-benefits";
+import { AvailableBenefits, AvailableBenefitsProvider } from "@/components/billing/available-benefits";
 import { BillingMachines } from "@/components/billing/billing-machines";
 import { BillingWalletActions } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
@@ -39,7 +49,7 @@ import { BillingUsageExplorer } from "@/components/billing/billing-usage-explore
 import { BillingActivity } from "@/components/billing/billing-activity";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { periods } from "@/lib/billing-display";
 import { groupRows } from "@/lib/billing-usage";
@@ -98,7 +108,7 @@ export function BillingPage({
     }
   }
   return (
-    <div className="billing-page space-y-6">
+    <div className="billing-page flex min-h-0 flex-1 flex-col gap-6">
       {presentation === "page" && (
         <PageHeader
           title={translateUi("Billing & Usage")}
@@ -159,6 +169,11 @@ function BillingContent({
   const search = normalizeBillingSearch(rawSearch);
   const navigate = useNavigate();
   const { tab, period } = search;
+  const availability = { "billing/machines": !ownerId, "billing/activity": !ownerId };
+  const { value: rawSection, settled } = useSectionSearchParam(presentation === "panel" ? "panelSection" : "section");
+  const requested = billingSections.available(search.section, availability);
+  const section = requested?.startsWith(`${tab}/`) ? requested : undefined;
+  const [pageContainer, setPageContainer] = useState<HTMLDivElement | null>(null);
   const [topUpOpen, setTopUpOpen] = useState(false);
   const walletQuery = useBillingWallet(ownerId);
   const actorId = useAuthStore((state) => state.user?.id);
@@ -192,10 +207,11 @@ function BillingContent({
   // settles before the wallet cannot swallow the deep link. A user-initiated
   // (pushed) navigation abandons a pending top-up: it is consumed in the
   // current entry first and never copied forward, so Back cannot replay it.
-  function updateSearch(patch: Partial<BillingSearch>, replace = false) {
+  function updateSearch(patch: Partial<BillingSearch>, replace = false, userAction = !replace) {
     if (presentation === "panel") {
       const params: AccountPanelParams = {
         ...("tab" in patch ? { panelTab: patch.tab } : {}),
+        ...("section" in patch ? { panelSection: patch.section } : {}),
         ...("period" in patch ? { panelPeriod: patch.period } : {}),
         ...("services" in patch
           ? {
@@ -205,9 +221,10 @@ function BillingContent({
               panelService: undefined,
             }
           : {}),
+        ...(userAction ? { panelAction: undefined } : {}),
         ...("action" in patch ? { panelAction: patch.action } : {}),
       };
-      void account.update(params, replace ? "replace" : "push");
+      void account.update(params, replace ? "replace" : "push", { force: replace });
       return;
     }
     if (!replace && search.action) {
@@ -221,7 +238,7 @@ function BillingContent({
       to: "/billing",
       search: billingUrlSearch({
         ...search,
-        ...(replace ? {} : { action: undefined }),
+        ...(userAction ? { action: undefined } : {}),
         ...patch,
       }),
       replace,
@@ -261,7 +278,7 @@ function BillingContent({
     setTopUpHandled(false);
   }
   const consumeTopUp = useEffectEvent(() =>
-    updateSearch({ tab: "billing", action: undefined }, true),
+    updateSearch({ tab: "billing", section: undefined, action: undefined }, true),
   );
   useEffect(() => {
     if (wantsTopUp) consumeTopUp();
@@ -289,109 +306,59 @@ function BillingContent({
     }
   }
 
-  return (
-    <div className="billing-page space-y-6">
-      <Tabs
-        value={tab}
-        onValueChange={(value) =>
-          updateSearch({ tab: value === "usage" ? "usage" : "billing" })
-        }
-        className="tabbed-billing"
-      >
-        <TabsList aria-label={translateUi("Billing and usage")}>
-          <TabsTrigger value="billing">{translateUi("Billing")}</TabsTrigger>
-          <TabsTrigger value="usage">{translateUi("Usage")}</TabsTrigger>
-        </TabsList>
-        <AvailableBenefits
-          key={ownerId ?? "personal"}
-          catalog={catalog}
-          ownerId={ownerId}
-          actions={
-            <BillingWalletActions
-              wallet={wallet}
-              loading={walletQuery.isLoading}
-              unavailable={walletUnavailable}
-              error={walletQuery.error}
-              onRetry={() => void walletQuery.refetch()}
-              onProvision={() => void handleProvisionWallet()}
-              provisioning={provisionWallet.isPending}
-              billingReady={billingReady}
-              needsSubscription={needsSubscription}
-              onTopUp={handleTopUp}
-              topUpPending={topUpBilling.isPending}
-              topUpOpen={topUpOpen}
-              onTopUpOpenChange={setTopUpOpen}
-            />
-          }
-        />
-        {billingCapability && !billingReady && (
-          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-14 text-warning">{translateUi("Billing is not available on this deployment.")}</div>
-        )}
-        {catalogQuery.isError && (
-          <div className="mt-6">
-            <ErrorBanner
-              message={translateUi("Service display names could not be loaded.")}
-              onRetry={() => void catalogQuery.refetch()}
-            />
-          </div>
-        )}
-        <TabsContent value="billing" className="mt-6 space-y-6">
-          {usageQuery.isError && (
-            <ErrorBanner
-              message={translateUi("Billing availability could not be verified. Retry to enable wallet actions.")}
-              onRetry={() => void usageQuery.refetch()}
-            />
-          )}
-          {!ownerId && <BillingMachines />}
-          <BillingBill
-            enabled={
-              billingReady &&
-              (!ownerId || Boolean(wallet?.lago_subscription_id))
-            }
-            ownerId={ownerId}
-          />
-          <BillingTopUpHistory ownerId={ownerId} presentation={presentation} />
-        </TabsContent>
-        <TabsContent value="usage" className="mt-6 space-y-6">
-          <p className="text-14 text-text-tertiary">{translateUi("Credit usage includes voice calls, dictation, and assistant tasks. Explore a service below for its recorded usage and charges.")}</p>
-          <UsageFilters
-            services={services}
-            values={selected}
-            disabled={usageQuery.isLoading || usageQuery.isError}
-            onServicesChange={(values) => updateSearch({ services: values })}
-            period={period}
-            onPeriodChange={(value) => updateSearch({ period: value })}
-          />
-          {usageQuery.isError ? (
-            <ErrorBanner
-              message={errorMessage(
-                usageQuery.error,
-                "Failed to load billing usage.",
-              )}
-              onRetry={() => void usageQuery.refetch()}
-            />
-          ) : usageQuery.isLoading ? (
-            <Skeleton className="h-[320px] w-full" />
-          ) : (
-            <>
-              <BillingUsageSummary rows={rows} />
-              {!ownerId && <BillingActivity />}
-              <BillingUsageExplorer
-                catalog={catalog}
-                rows={rows}
-                totals={selected.length ? undefined : usageQuery.data?.totals}
-              />
-            </>
-          )}
-        </TabsContent>
-      </Tabs>
-    </div>
-  );
+  function go(next?: BillingSection) {
+    updateSearch({ section: next === tab ? undefined : next }, true, true);
+  }
+  useEffect(() => {
+    if (settled && rawSection !== section) updateSearch({ section }, true);
+  });
+  const walletActions = <BillingWalletActions
+    wallet={wallet} loading={walletQuery.isLoading} unavailable={walletUnavailable} error={walletQuery.error}
+    onRetry={() => void walletQuery.refetch()} onProvision={() => void handleProvisionWallet()} provisioning={provisionWallet.isPending}
+    billingReady={billingReady} needsSubscription={needsSubscription} onTopUp={handleTopUp} topUpPending={topUpBilling.isPending}
+    topUpOpen={topUpOpen} onTopUpOpenChange={setTopUpOpen}
+  />;
+  function disclosures(root: BillingSection) {
+    return <GroupedList>{BILLING_SECTIONS.filter(child => billingSections.parent(child) === root && availability[child as keyof typeof availability] !== false).map(child => {
+      const Icon = child.endsWith("topup") ? Wallet : child.includes("benefits") ? Gift : child.endsWith("bill") ? ReceiptText : child.endsWith("machines") ? Monitor : child.endsWith("activity") ? Activity : child.endsWith("explorer") ? Search : child.endsWith("summary") ? Gauge : ChartNoAxesCombined;
+      return <GroupedDisclosure key={child} leading={root === "billing" || root === "usage" ? <Icon aria-hidden /> : undefined} data-drawer-page-trigger={child} onClick={() => go(child)}>{translateUi(BILLING_SECTION_TITLES[child])}</GroupedDisclosure>;
+    })}</GroupedList>;
+  }
+  const filters = <UsageFilters services={services} values={selected} disabled={usageQuery.isLoading || usageQuery.isError} onServicesChange={values => updateSearch({ services: values })} period={period} onPeriodChange={value => updateSearch({ period: value })} />;
+  function detailPage(value: BillingSection) {
+    if (value === "billing/topup") return <><Button disabled={!topUpReady} onClick={() => setTopUpOpen(true)}>{translateUi(BILLING_FIELD_LABELS.addCredits)}</Button><BillingTopUpHistory ownerId={ownerId} presentation={presentation} /></>;
+    if (value === "billing/benefits" || value === "usage/charts") return disclosures(value);
+    if (value.startsWith("billing/benefits/")) return <AvailableBenefits catalog={catalog} view={value.endsWith("wallet") ? "wallet" : value.endsWith("grants") ? "grants" : "allowances"} />;
+    if (value === "billing/bill") return <BillingBill enabled={billingReady && (!ownerId || Boolean(wallet?.lago_subscription_id))} ownerId={ownerId} />;
+    if (value === "billing/machines") return <BillingMachines />;
+    if (value === "billing/activity") return <BillingActivity />;
+    return <>{filters}{usageQuery.isError ? <ErrorBanner message={errorMessage(usageQuery.error, "Failed to load billing usage.")} onRetry={() => void usageQuery.refetch()} /> : usageQuery.isLoading ? <Skeleton className="h-[320px] w-full" /> : value === "usage/summary" ? <BillingUsageSummary rows={rows} /> : <BillingUsageExplorer catalog={catalog} rows={rows} totals={selected.length ? undefined : usageQuery.data?.totals} view={value === "usage/charts/quantities" ? "quantities" : value === "usage/charts/funding" ? "funding" : "explorer"} />}</>;
+  }
+  return <AvailableBenefitsProvider key={ownerId ?? "personal"} ownerId={ownerId}><GroupedFormScope viewport><div className="billing-page flex min-h-0 flex-1 flex-col gap-6">
+    <Tabs value={tab} onValueChange={value => updateSearch({ tab: value === "usage" ? "usage" : "billing", section: undefined })} className="tabbed-billing flex min-h-0 flex-1 flex-col">
+      <TabsList aria-label={translateUi("Billing and usage")}><TabsTrigger value="billing">{translateUi("Billing")}</TabsTrigger><TabsTrigger value="usage">{translateUi("Usage")}</TabsTrigger></TabsList>
+      <div ref={setPageContainer} className={`relative flex min-h-0 flex-1 flex-col${presentation === "page" ? " h-[min(48rem,80dvh)] min-h-96" : ""}`}>
+        <GroupedDetailContext.Provider value={{ container: pageContainer, visible: true }}>
+          <CompactScroll active={!section} hidden={Boolean(section)} style={section ? { display: "none" } : undefined} className="assistant-scrollbar flex-1 space-y-6 pb-6">
+            {filters}
+            <AvailableBenefits catalog={catalog} view="summary" actions={walletActions} />
+            {billingCapability && !billingReady && <GroupedList footer={translateUi("Billing is not available on this deployment.")} />}
+            {catalogQuery.isError && <ErrorBanner message={translateUi("Service display names could not be loaded.")} onRetry={() => void catalogQuery.refetch()} />}
+            {usageQuery.isError ? <ErrorBanner message={translateUi("Billing availability could not be verified. Retry to enable wallet actions.")} onRetry={() => void usageQuery.refetch()} /> : usageQuery.isSuccess && <BillingUsageSummary rows={rows} compact />}
+            {disclosures(tab)}
+          </CompactScroll>
+          {(["billing", "usage"] as const).map(root => <SectionPages key={root} sections={BILLING_SECTIONS} titles={BILLING_SECTION_TITLES} root={root} rootTitle={BILLING_SECTION_TITLES[root]} selected={tab === root ? section : undefined} navigate={go} available={availability} render={detailPage} />)}
+        </GroupedDetailContext.Provider>
+      </div>
+    </Tabs>
+    <GroupedFormBar viewport />
+  </div></GroupedFormScope></AvailableBenefitsProvider>;
 }
 
 function billingUrlSearch(search: BillingSearch) {
   return {
     tab: search.tab,
+    section: search.section,
     period: search.period,
     services: search.services.length ? search.services : undefined,
     action: search.action,
@@ -417,7 +384,7 @@ function UsageFilters({
   useUiTranslation();
   return (
     <BillingMultiSelect
-      label={translateUi("Services")}
+      label={translateUi(BILLING_FIELD_LABELS.services)}
       itemLabel={translateUi("Service")}
       emptyLabel={translateUi("All")}
       description={translateUi("Services with recorded usage in this period.")}

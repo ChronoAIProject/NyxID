@@ -29,7 +29,10 @@ vi.mock("@/components/assistant/blocks/tool-image", () => ({
   ),
 }));
 
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
+  useRouterState: ({ select }: { select: (state: { location: { search: object; state: object } }) => unknown }) => select({ location: { search: {}, state: {} } }),
+}));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (select: (state: { user: { id: string } }) => unknown) =>
     select({ user: { id: "owner" } }),

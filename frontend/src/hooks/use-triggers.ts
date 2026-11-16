@@ -23,9 +23,10 @@ function triggerPath(id: string): string {
   return `/triggers/${encodeURIComponent(id)}`;
 }
 
-export function useTriggers(orgId?: string) {
+export function useTriggers(orgId?: string, enabled = true) {
   return useQuery({
     queryKey: [...triggerQueryKey, { orgId: orgId ?? null }],
+    enabled,
     queryFn: async (): Promise<ListTriggersResponse> => {
       const path = orgId
         ? `/triggers?org_id=${encodeURIComponent(orgId)}`

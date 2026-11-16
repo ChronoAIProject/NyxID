@@ -90,7 +90,7 @@ async function open(enabled = false) {
   const router = createRouter({
     routeTree: root.addChildren([route]),
     history: createMemoryHistory({
-      initialEntries: ["/settings?tab=security"],
+      initialEntries: ["/settings?tab=security%2Fmfa"],
     }),
   });
   client = new QueryClient({
@@ -110,7 +110,6 @@ async function open(enabled = false) {
   await waitFor(() =>
     expect(toggle).toHaveAttribute("aria-checked", String(enabled)),
   );
-  await screen.findByText(/No active onboarding bindings/);
   return toggle;
 }
 async function beginVerification(toggle: HTMLElement) {

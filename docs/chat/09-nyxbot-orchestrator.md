@@ -2343,13 +2343,22 @@ information beyond REST GET, excludes voice and the legacy approval switch, and
 accepts no owner selector. Cite the relevant section URL when answering a settings
 question. Specialists and guests are refused before settings access.
 
-`nyxid__settings_link` accepts optional `section` only with
+`nyxid__settings_link` accepts optional `section` with
 `area: "nyxbot_settings"`. Allowed values are `permissions`,
 `permissions/specialists`, `tasks`, `tasks/specialists`, `tasks/groups`,
 `automations`, `automations/budgets`, `notifications`, `channels`,
 `channels/adapters`, `channels/links`. It emits `panelTab` only when supplied;
-missing section retains the existing root link. Unknown values and sections on
-other areas are validation errors. The UI normalizes unavailable pages to their
+missing section retains the existing root link. It also accepts `account_settings`
+with any Account Settings section, the existing `profile`, `security`, `sessions`,
+`mcp`, `display` and `privacy` areas with sections under that category,
+`agent_details` with an optional authorized `agent` selector and details section,
+and `billing`/`usage` with sections under that tab. Billing uses `panelSection`;
+agent details uses the slash path in `details`. The closed lists in
+`assistant_links.rs` are drift-tested against frontend vocabulary modules.
+Unknown or cross-area sections reject validation. Omitting section preserves
+existing destinations; `account_settings` opens the root and `agent_details` opens
+Overview. These links grant no new write authority for profile, security, billing
+or per-agent access mode. The UI normalizes unavailable pages to their
 nearest available ancestor.
 
 `nyxid__update_settings` accepts at least one panel field, rejects unknown

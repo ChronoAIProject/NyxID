@@ -1,6 +1,6 @@
+import { accountSettingsSections } from "@/lib/account-settings-sections";
 import { parseNyxBotSettingsSection } from "./nyxbot-settings-sections";
 import { billingSearchSchema } from "@/schemas/billing";
-import { parseTab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT } from "@/lib/url-tabs";
 import { notificationFilter } from "@/schemas/assistant-notifications";
 
 export { ASSISTANT_SHELL_ROUTES, isAssistantShellRoute, type AssistantShellRoute } from "./shell-routes";
@@ -9,6 +9,7 @@ export type AccountPanel = "settings" | "billing" | "nyxbot" | "notifications";
 export interface AccountPanelSearch {
   panel?: AccountPanel;
   panelTab?: string;
+  panelSection?: string;
   panelPeriod?: ReturnType<typeof billingSearchSchema.parse>["period"];
   panelService?: string;
   panelServices?: string[];
@@ -17,7 +18,7 @@ export interface AccountPanelSearch {
 }
 export type AccountPanelParams = Omit<AccountPanelSearch, "panel">;
 export const ACCOUNT_PANEL_KEYS = [
-  "panel", "panelTab", "panelPeriod", "panelService", "panelServices", "panelAction", "panelOwnerId",
+  "panel", "panelTab", "panelSection", "panelPeriod", "panelService", "panelServices", "panelAction", "panelOwnerId",
 ] as const;
 
 export const validateSettingsSearch = (search: Record<string, unknown>): { tab?: string } => ({
@@ -27,6 +28,7 @@ export const validateSettingsSearch = (search: Record<string, unknown>): { tab?:
 export function billingPanelSearch(search: AccountPanelSearch) {
   return billingSearchSchema.parse({
     tab: search.panelTab,
+    section: search.panelSection,
     period: search.panelPeriod,
     service: search.panelService,
     services: search.panelServices,
@@ -37,10 +39,8 @@ export function billingPanelSearch(search: AccountPanelSearch) {
 
 export function parseAccountPanelSearch(search: Record<string, unknown>): AccountPanelSearch {
   if (search.panel === "settings") {
-    const { tab } = validateSettingsSearch({ tab: search.panelTab });
-    return { panel: "settings", ...(tab !== undefined ? {
-      panelTab: parseTab(tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT),
-    } : {}) };
+    const section = accountSettingsSections.normalize(search.panelTab);
+    return { panel: "settings", ...(section ? { panelTab: section } : {}) };
   }
   if (search.panel === "nyxbot") {
     const section = parseNyxBotSettingsSection(search.panelTab);
@@ -52,12 +52,13 @@ export function parseAccountPanelSearch(search: Record<string, unknown>): Accoun
   }
   if (search.panel !== "billing") return {};
   const billing = billingSearchSchema.parse({
-    tab: search.panelTab, period: search.panelPeriod,
+    tab: search.panelTab, section: search.panelSection, period: search.panelPeriod,
     service: search.panelService, services: search.panelServices, action: search.panelAction, ownerId: search.panelOwnerId,
   });
   return {
     panel: "billing",
     ...(billing.ownerId !== undefined ? { panelOwnerId: billing.ownerId } : {}),
+    ...(billing.section !== undefined ? { panelSection: billing.section } : {}),
     ...(billing.tab !== undefined ? { panelTab: billing.tab } : {}),
     ...(billing.period !== undefined ? { panelPeriod: billing.period } : {}),
     ...(billing.service !== undefined ? { panelService: billing.service } : {}),

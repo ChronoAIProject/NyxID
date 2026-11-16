@@ -19,6 +19,71 @@ pub const NYXBOT_SETTINGS_SECTIONS: &[&str] = &[
     "channels/links",
 ];
 
+pub const AGENT_DETAILS_SECTIONS: &[&str] = &[
+    "overview",
+    "overview/persona",
+    "overview/access",
+    "overview/chat",
+    "overview/voice",
+    "overview/automations",
+    "overview/ownership",
+    "grants",
+    "grants/services",
+    "grants/operations",
+    "grants/guests",
+    "grants/machines",
+    "grants/connections",
+    "grants/voice",
+    "skills",
+    "skills/installed",
+    "skills/learning",
+    "memory",
+    "channels",
+];
+
+pub const ACCOUNT_SETTINGS_SECTIONS: &[&str] = &[
+    "profile",
+    "security",
+    "security/mfa",
+    "security/password",
+    "security/linked-accounts",
+    "security/delete",
+    "sessions",
+    "mcp",
+    "mcp/cursor",
+    "mcp/claude-code",
+    "mcp/codex",
+    "display",
+    "display/appearance",
+    "display/text",
+    "display/chat",
+    "display/sidebar",
+    "display/colors",
+    "display/colors/surfaces",
+    "display/colors/text",
+    "display/colors/controls",
+    "display/readability",
+    "privacy",
+];
+
+pub const BILLING_SECTIONS: &[&str] = &[
+    "billing",
+    "billing/topup",
+    "billing/benefits",
+    "billing/benefits/wallet",
+    "billing/benefits/grants",
+    "billing/benefits/allowances",
+    "billing/bill",
+    "billing/machines",
+    "billing/activity",
+    "usage",
+    "usage/summary",
+    "usage/charts",
+    "usage/charts/quantities",
+    "usage/charts/funding",
+    "usage/explorer",
+];
+
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
     Agent {
@@ -47,9 +112,10 @@ pub enum AssistantPage<'a> {
     },
     Billing {
         tab: &'a str,
+        section: Option<&'a str>,
     },
-    /// An agent's details sheet, opened on one section; the frontend ignores
-    /// other values and opens nothing.
+    /// An agent's details sheet, opened on a tab or slash-separated section.
+    /// The frontend normalizes unknown paths to their nearest known ancestor.
     AgentDetails {
         agent: &'a str,
         tab: &'a str,
@@ -123,10 +189,13 @@ impl AssistantPage<'_> {
                 }
                 "/assistant".into()
             }
-            Self::Billing { tab } => {
+            Self::Billing { tab, section } => {
                 query
                     .append_pair("panel", "billing")
                     .append_pair("panelTab", tab);
+                if let Some(section) = section {
+                    query.append_pair("panelSection", section);
+                }
                 "/assistant".into()
             }
             Self::AgentDetails { agent, tab } => {
@@ -258,11 +327,17 @@ mod tests {
             (NyxBotSettings { section: None }, "/assistant?panel=nyxbot"),
             (Approvals, "/assistant/approvals"),
             (
-                Billing { tab: "billing" },
+                Billing {
+                    tab: "billing",
+                    section: None,
+                },
                 "/assistant?panel=billing&panelTab=billing",
             ),
             (
-                Billing { tab: "usage" },
+                Billing {
+                    tab: "usage",
+                    section: None,
+                },
                 "/assistant?panel=billing&panelTab=usage",
             ),
             (
@@ -274,6 +349,7 @@ mod tests {
             (
                 Billing {
                     tab: "a&b c/中文+%",
+                    section: None,
                 },
                 "/assistant?panel=billing&panelTab=a%26b+c%2F%E4%B8%AD%E6%96%87%2B%25",
             ),
@@ -398,6 +474,88 @@ mod section_tests {
             assert_eq!(
                 url.query_pairs().find(|(k, _)| k == "panelTab").unwrap().1,
                 *section
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod clarity_section_tests {
+    use super::*;
+    fn frontend_sections(source: &str, name: &str) -> Vec<String> {
+        source
+            .split(&format!("export const {name} = ["))
+            .nth(1)
+            .unwrap()
+            .split("] as const;")
+            .next()
+            .unwrap()
+            .split(',')
+            .filter_map(|value| {
+                value
+                    .trim()
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+    #[test]
+    fn settings_section_vocabularies_match_frontend() {
+        assert_eq!(
+            AGENT_DETAILS_SECTIONS,
+            frontend_sections(
+                include_str!("../../../frontend/src/lib/assistant/agent-details-sections.ts"),
+                "AGENT_DETAILS_SECTIONS"
+            )
+        );
+        assert_eq!(
+            ACCOUNT_SETTINGS_SECTIONS,
+            frontend_sections(
+                include_str!("../../../frontend/src/lib/account-settings-sections.ts"),
+                "ACCOUNT_SETTINGS_SECTIONS"
+            )
+        );
+        assert_eq!(
+            BILLING_SECTIONS,
+            frontend_sections(
+                include_str!("../../../frontend/src/lib/billing-sections.ts"),
+                "BILLING_SECTIONS"
+            )
+        );
+    }
+    #[test]
+    fn detail_links_encode_sections_without_changing_legacy_tabs() {
+        for section in AGENT_DETAILS_SECTIONS {
+            let path = AssistantPage::AgentDetails {
+                agent: "a&b",
+                tab: section,
+            }
+            .path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "details" && value == *section)
+            );
+        }
+        for section in ACCOUNT_SETTINGS_SECTIONS {
+            let path = AssistantPage::Settings { tab: section }.path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "panelTab" && value == *section)
+            );
+        }
+        for section in BILLING_SECTIONS {
+            let path = AssistantPage::Billing {
+                tab: section.split('/').next().unwrap(),
+                section: Some(section),
+            }
+            .path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "panelSection" && value == *section)
             );
         }
     }

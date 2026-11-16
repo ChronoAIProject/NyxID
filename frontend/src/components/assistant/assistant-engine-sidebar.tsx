@@ -1,3 +1,4 @@
+import { useAgentDetailsNavigation } from "@/hooks/use-agent-details-navigation";
 import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
 import { GroupInviteDialog } from "./collaboration-group-controls";
 import { useConnectionDown } from "@/hooks/use-connection-down";
@@ -10,7 +11,6 @@ import {
   type SidebarGroups,
 } from "@/components/assistant/assistant-sidebar";
 import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
-import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { NewGroupDialog } from "@/components/assistant/nyxbot-group-forms";
 import { useFeature } from "@/hooks/use-feature-flag";
 import {
@@ -60,7 +60,6 @@ export function AssistantEngineSidebar({
     return () => window.removeEventListener("hashchange", change);
   }, []);
   const closeInvite = () => { clearGroupInvite(); setInviteToken(null); };
-  const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const openThread = search.draft ? undefined : search.c;
   const openGroup = onChatRoute ? search.g : undefined;
   const home = onChatRoute && !search.c && !search.draft && !search.agent && !search.g;
@@ -127,13 +126,14 @@ export function AssistantEngineSidebar({
     for (const row of props.conversations) rows.set(row.id, row);
   }
 
-  function goTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
+  function goTo(next: { c?: string; draft?: true; agent?: string; g?: string; details?: import("@/lib/assistant/agent-details-sections").AgentDetailsSection }) {
     void navigate({
       to: "/assistant" as never,
       search: { ...next, ...(search.mock ? { mock: 1 } : {}) } as never,
     });
   }
 
+  const { open: openAgentDetails } = useAgentDetailsNavigation();
   const agentsModel: SidebarAgents | undefined = nyxagentEnabled
     ? {
         agents: agents.data?.agents ?? [],
@@ -149,7 +149,7 @@ export function AssistantEngineSidebar({
         // An agent lands on its latest thread (or a new one when it has none).
         onSelectAgent: (agentId) => goTo({ agent: agentId }),
         onNewThread: (agentId) => goTo({ draft: true, agent: agentId }),
-        onAgentDetails: setDetailsAgentId,
+        onAgentDetails: openAgentDetails,
         onNewAgent: setCreatingAgent,
         canCreateOrgAgent: orgAgentsEnabled,
         homeActive: home,
@@ -232,18 +232,6 @@ export function AssistantEngineSidebar({
           }}
         />
       ) : null}
-      <AgentDetailsSheet
-        agentId={detailsAgentId}
-        agents={agents.data?.agents ?? []}
-        open={detailsAgentId !== undefined}
-        onOpenChange={(open) => {
-          if (!open) setDetailsAgentId(undefined);
-        }}
-        onDeleted={() => {
-          setDetailsAgentId(undefined);
-          goTo({});
-        }}
-      />
     </>
   );
 }

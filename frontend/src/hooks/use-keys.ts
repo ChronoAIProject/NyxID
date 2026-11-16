@@ -17,14 +17,14 @@ import type { WsFrameInjection } from "@/schemas/services";
 
 // -- Queries --
 
-export function useKeys(options: { includeTools?: boolean } = {}) {
+export function useKeys(options: { includeTools?: boolean; enabled?: boolean } = {}) {
   const identity = useAuthStore((state) => state.user?.id);
   const authority = modeAQueryIdentity() ?? identity;
   const query = useQuery({
     queryKey: options.includeTools
       ? ["keys", "list", authority, true]
       : ["keys", "list", authority],
-    enabled: Boolean(authority),
+    enabled: Boolean(authority) && options.enabled !== false,
     queryFn: async ({ queryKey }): Promise<readonly KeyInfo[]> => {
       const actor = queryKey[2];
       const authorityGuard = () => {

@@ -1,145 +1,12 @@
+import { billingSection } from "./settings-clarity-fixtures";
+import { billingApi, benefitPreview } from "./billing-api-fixtures";
 import { expect, test, type Page, type Locator } from "@playwright/test";
-import { mockDashboard } from "./managed-onboarding-fixtures";
 import {
-  billingAllowance,
-  billingCatalog,
-  billingGrant,
-  billingRow,
   billingUsage,
   billingWallet,
-  billingAgentUsage,
   billingExpandedAllowances,
   billingExpandedRows,
 } from "../src/test/billing-fixture";
-
-function benefitPreview(
-  allowances = [
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "images",
-  ].map((metric) =>
-    billingAllowance(metric as Parameters<typeof billingAllowance>[0]),
-  ),
-  page = 1,
-) {
-  return {
-    summary: {
-      remaining: "2",
-      unreserved: "1.5",
-      held: "0.5",
-      pending_activation: "0",
-      pending_reclaim: "0",
-      expired_awaiting_cleanup: "0",
-      restricted: "0",
-      generated_at: "2026-10-01T00:00:00Z",
-    },
-    grants: [
-      { ...billingGrant({ expires_at: null }), available: "1.5", held: "0.5" },
-    ],
-    allowances,
-    total_grants: 1,
-    page,
-    per_page: 50,
-  };
-}
-
-async function billingApi(page: Page) {
-  await mockDashboard(page);
-  await page.route("**/api/v1/users/me", (route) =>
-    route.fulfill({
-      json: {
-        id: "test-user",
-        email: "test@example.test",
-        display_name: "Billing test",
-        is_admin: false,
-        is_active: true,
-        email_verified: true,
-        created_at: "2026-09-01T00:00:00Z",
-        onboarding_completed: true,
-        capabilities: { billing_available: true },
-      },
-    }),
-  );
-  await page.route("**/api/v1/catalog?**", (route) =>
-    route.fulfill({ json: { entries: billingCatalog } }),
-  );
-  await page.route("**/api/v1/api-keys/usage?**", (route) =>
-    route.fulfill({
-      json: {
-        usage: [billingAgentUsage()],
-        days: 7,
-        since: "2026-10-01T00:00:00Z",
-      },
-    }),
-  );
-  await page.route("**/api/v1/billing/wallet", (route) =>
-    route.fulfill({ json: billingWallet() }),
-  );
-  await page.route("**/api/v1/billing/benefits?**", (route) =>
-    route.fulfill({ json: benefitPreview() }),
-  );
-  await page.route("**/api/v1/billing/grants", (route) =>
-    route.fulfill({
-      json: { grants: [billingGrant()], page: 1, per_page: 50, total: 1 },
-    }),
-  );
-  await page.route("**/api/v1/billing/allowances", (route) =>
-    route.fulfill({
-      json: {
-        allowances: (
-          [
-            "input_tokens",
-            "output_tokens",
-            "cache_read_tokens",
-            "cache_write_tokens",
-            "images",
-          ] as const
-        ).map((metric) => billingAllowance(metric)),
-      },
-    }),
-  );
-  await page.route("**/api/v1/billing/usage?**", (route) =>
-    route.fulfill({
-      json: billingUsage(
-        new URL(route.request().url()).searchParams.get("period") === "24h"
-          ? []
-          : [
-              billingRow(),
-              billingRow({
-                service_slug: "free-service",
-                billable: false,
-                estimated_credits_micros: 0,
-                grant_credits_micros: 0,
-              }),
-            ],
-      ),
-    }),
-  );
-  await page.route("**/api/v1/billing/topups?**", (route) =>
-    route.fulfill({
-      json: {
-        owner_id: "test-user",
-        topups: [
-          {
-            id: "purchase",
-            created_at: "2026-09-25T00:00:00Z",
-            amount_credits: 100,
-            status: "paid",
-            receipt_available: true,
-            lago_invoice_id: "invoice",
-            invoice_number: "INV-1",
-            credits_expire_at: "2027-09-25T00:00:00Z",
-          },
-        ],
-        page: 1,
-        per_page: 10,
-        total: 1,
-      },
-    }),
-  );
-}
 
 async function selectMetrics(page: Page, scope: Locator, names: RegExp[]) {
   await scope.getByRole("button", { name: "Filter metrics" }).click();
@@ -186,9 +53,7 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await page
-      .getByRole("button", { name: "View breakdown", exact: true })
-      .click();
+    await billingSection(page, "billing/benefits/allowances");
     const allowance = page.locator(".benefit-disclosure").filter({
       has: page.locator(".compact-benefit-label > strong", {
         hasText: "Example LLM",
@@ -247,13 +112,13 @@ for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 2200 });
     await page.mouse.move(0, 0);
     await allowance.screenshot({
-      path: `test-results/billing-allowances-expanded-${width}.png`,
+      path: `/tmp/settings-clarity-billing-billing-allowances-expanded-${width}.png`,
       animations: "disabled",
     });
     if (width === 1440) {
       await page.getByRole("button", { name: "Switch to dark mode" }).click();
       await allowance.screenshot({
-        path: "test-results/billing-allowances-expanded-dark.png",
+        path: "/tmp/settings-clarity-billing-billing-allowances-expanded-dark.png",
         animations: "disabled",
       });
       await page.getByRole("button", { name: "Switch to light mode" }).click();
@@ -265,16 +130,12 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Usage", exact: true }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await expect(page.locator(".usage-group-disclosure")).not.toHaveAttribute(
-      "open",
-    );
+    await billingSection(page, "usage/charts/quantities");
     await expect(
       page.locator(".usage-explorer .usage-quantity-chart").first(),
     ).toBeVisible();
     await expect(page.locator(".usage-explorer table")).toHaveCount(0);
-    await page
-      .getByText("Explore by service, model or agent", { exact: true })
-      .click();
+    await billingSection(page, "usage/explorer");
     const service = page.locator(".expandable-service").filter({
       has: page.locator(".expandable-name > strong", {
         hasText: "Example LLM",
@@ -300,7 +161,7 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(graph.locator(".recharts-line-curve")).toHaveCount(2);
     if (width === 1440) {
       await picker.screenshot({
-        path: "test-results/billing-metric-picker-light.png",
+        path: "/tmp/settings-clarity-billing-billing-metric-picker-light.png",
         animations: "disabled",
       });
     }
@@ -343,7 +204,7 @@ for (const width of [1440, 768, 390, 320]) {
     ).toBe(true);
     await page.mouse.move(0, 0);
     await service.screenshot({
-      path: `test-results/billing-quantities-expanded-${width}.png`,
+      path: `/tmp/settings-clarity-billing-billing-quantities-expanded-${width}.png`,
       animations: "disabled",
     });
     await tokens.getByRole("button", { name: "Next categories" }).click();
@@ -403,13 +264,13 @@ for (const width of [1440, 768, 390, 320]) {
     ).toBe(true);
     await page.mouse.move(0, 0);
     await graph.screenshot({
-      path: `test-results/billing-quantity-empty-${width}.png`,
+      path: `/tmp/settings-clarity-billing-billing-quantity-empty-${width}.png`,
       animations: "disabled",
     });
     if (width === 1440) {
       await page.getByRole("button", { name: "Switch to dark mode" }).click();
       await graph.screenshot({
-        path: "test-results/billing-quantity-empty-dark.png",
+        path: "/tmp/settings-clarity-billing-billing-quantity-empty-dark.png",
         animations: "disabled",
       });
       await page.getByRole("button", { name: "Switch to light mode" }).click();
@@ -457,12 +318,12 @@ for (const width of [1440, 768, 390, 320]) {
       await page.getByRole("button", { name: "Switch to dark mode" }).click();
       await page.mouse.move(0, 0);
       await service.screenshot({
-        path: "test-results/billing-quantities-expanded-dark.png",
+        path: "/tmp/settings-clarity-billing-billing-quantities-expanded-dark.png",
         animations: "disabled",
       });
       await graph.getByRole("button", { name: "Filter metrics" }).click();
       await page.getByRole("dialog").screenshot({
-        path: "test-results/billing-metric-picker-dark.png",
+        path: "/tmp/settings-clarity-billing-billing-metric-picker-dark.png",
         animations: "disabled",
       });
       await page
@@ -487,7 +348,7 @@ for (const width of [1440, 768, 390, 320]) {
       /Funding: Credit grants:/,
     );
     await service.screenshot({
-      path: `test-results/billing-visual-expanded-${width}.png`,
+      path: `/tmp/settings-clarity-billing-billing-visual-expanded-${width}.png`,
       animations: "disabled",
     });
     expect(
@@ -517,9 +378,7 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
     ).toHaveAttribute("data-state", "active");
-    const benefits = page.getByLabel("Current available benefits", {
-      exact: true,
-    });
+    const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
     await expect(benefits.locator('p[title="96.5"]')).toBeVisible();
     expect((await benefits.boundingBox())!.height).toBeLessThan(170);
     await expect(benefits.getByText("Individual grants")).not.toBeVisible();
@@ -529,13 +388,12 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       benefits.getByRole("button", { name: "Add credits", exact: true }),
     ).toBeVisible();
-    await benefits
-      .getByRole("button", { name: "View breakdown", exact: true })
-      .click();
+    await billingSection(page, "billing/benefits/grants");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
     await expect(
       benefits.getByText(/Available: 1.5 credits · Held:/),
     ).toBeVisible();
+    await billingSection(page, "billing/benefits/allowances");
     // #1673 replaced the image with a focusable stacked meter. Keyboard
     // focus exposes the full allowance breakdown for every viewport.
     await page
@@ -568,7 +426,8 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     await page.getByRole("tab", { name: "Usage", exact: true }).click();
     await expect(benefits).toContainText("96.5 credits");
-    await expect(benefits.getByText("Individual grants")).toBeVisible();
+    await expect(benefits.getByText("Individual grants")).toHaveCount(0);
+    await billingSection(page, "billing/activity");
     await expect(
       page.locator(".billing-activity .recharts-line-curve"),
     ).toHaveCount(2);
@@ -580,15 +439,14 @@ for (const width of [1440, 768, 390, 320]) {
     ).toBeVisible();
     await page
       .locator(".billing-activity")
-      .screenshot({ path: `test-results/billing-activity-${width}.png` });
+      .screenshot({ path: `/tmp/settings-clarity-billing-billing-activity-${width}.png` });
+    await billingSection(page, "usage/explorer");
     if (width < 480) await page.setViewportSize({ width, height: 1800 });
     await page
       .locator(".usage-explorer")
-      .screenshot({ path: `test-results/billing-usage-${width}.png` });
+      .screenshot({ path: `/tmp/settings-clarity-billing-billing-usage-${width}.png` });
     if (width < 480) await page.setViewportSize({ width, height: 1100 });
-    await page
-      .getByText("Explore by service, model or agent", { exact: true })
-      .click();
+    await billingSection(page, "usage/explorer");
     if (width === 1440) {
       await page.getByRole("button", { name: "Switch to dark mode" }).click();
       const foreground = await page
@@ -598,12 +456,12 @@ for (const width of [1440, 768, 390, 320]) {
         "color",
         foreground,
       );
-      await page
-        .locator(".billing-activity")
-        .screenshot({ path: "test-results/billing-activity-dark.png" });
+      await billingSection(page, "billing/activity");
+      await page.locator(".billing-activity").screenshot({ path: "/tmp/settings-clarity-billing-billing-activity-dark.png" });
+      await billingSection(page, "usage/explorer");
       await page
         .locator(".usage-explorer")
-        .screenshot({ path: "test-results/billing-usage-dark.png" });
+        .screenshot({ path: "/tmp/settings-clarity-billing-billing-usage-dark.png" });
       await page.getByRole("button", { name: "Switch to light mode" }).click();
     }
     const serviceSummary = page
@@ -666,7 +524,7 @@ for (const width of [1440, 768, 390, 320]) {
     ).toBeVisible();
     if (width === 1440) {
       await page.getByRole("dialog").screenshot({
-        path: "test-results/billing-services-picker-light.png",
+        path: "/tmp/settings-clarity-billing-billing-services-picker-light.png",
         animations: "disabled",
       });
     }
@@ -737,6 +595,7 @@ test("top-up and receipt buttons use the real API actions", async ({
     }),
   );
   await page.goto("/billing");
+  await billingSection(page, "billing/topup");
   const popupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Download receipt" }).click();
   const receipt = await popupPromise;
@@ -783,7 +642,7 @@ test("top-up history pages on the server and resumes a pending payment", async (
   await page.route("https://billing.example.test/resume", (route) =>
     route.fulfill({ body: "Payment provider response" }),
   );
-  await page.goto("/billing?period=90d");
+  await page.goto("/billing?period=90d&section=billing%2Ftopup");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await expect(page.getByText("Page 2 of 2")).toBeVisible();
   await expect(
@@ -823,26 +682,24 @@ for (const width of [1440, 390]) {
       return route.fulfill({ json: data });
     });
     await page.goto("/billing");
-    const benefits = page.getByLabel("Current available benefits", {
-      exact: true,
-    });
+    const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
     await expect(benefits).toContainText("96.5 credits");
-    await benefits
-      .getByRole("button", { name: "View breakdown", exact: true })
-      .click();
+    await billingSection(page, "billing/benefits/grants");
     await benefits.getByRole("button", { name: "Next grants" }).click();
     await expect(benefits).toContainText("51 grants · page 2");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
     await page.getByRole("tab", { name: "Usage", exact: true }).click();
     await expect(benefits).toContainText("96.5 credits");
+    await billingSection(page, "billing/benefits/grants");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
+    await expect(benefits).toContainText("51 grants · page 2");
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
     await benefits.screenshot({
-      path: `test-results/available-benefits-${width}.png`,
+      path: `/tmp/settings-clarity-billing-available-benefits-${width}.png`,
       animations: "disabled",
     });
   });
@@ -863,13 +720,9 @@ test("singular benefit amounts and grant history read correctly on mobile", asyn
     route.fulfill({ json: data }),
   );
   await page.goto("/billing");
-  const benefits = page.getByLabel("Current available benefits", {
-    exact: true,
-  });
+  const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
   await expect(benefits.locator('p[title="1"]')).toHaveText("1 credit");
-  await benefits
-    .getByRole("button", { name: "View breakdown", exact: true })
-    .click();
+  await billingSection(page, "billing/benefits/grants");
   await expect(benefits).toContainText("1 grant · page 1.");
   await expect(benefits).toContainText("Granted 1 credit ·");
   await page.getByRole("tab", { name: "Usage", exact: true }).click();
@@ -884,9 +737,7 @@ test("suspended grants remain visible but cannot appear spendable on either tab"
     route.fulfill({ json: { ...billingWallet(), suspended: true } }),
   );
   await page.goto("/billing");
-  const benefits = page.getByLabel("Current available benefits", {
-    exact: true,
-  });
+  const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
   await expect(benefits.getByRole("alert")).toContainText("Usage is suspended");
   await expect(benefits.locator('p[title="0"]')).toHaveText("0 credits");
   await page.getByRole("tab", { name: "Usage", exact: true }).click();
@@ -919,24 +770,13 @@ for (const theme of ["light", "dark"] as const) {
       route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
     );
     await page.goto("/billing");
-    const benefits = page.getByLabel("Current available benefits", {
-      exact: true,
-    });
+    const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
     await expect(
       benefits.locator('p[title="123456790.623456789123"]'),
     ).toBeVisible();
-    const disclosure = benefits.getByRole("button", {
-      name: "View breakdown",
-      exact: true,
-    });
-    await disclosure.focus();
-    await page.keyboard.press("Enter");
-    await expect(
-      benefits.getByRole("button", { name: "Hide breakdown", exact: true }),
-    ).toHaveAttribute("aria-expanded", "true");
-    await expect(
-      benefits.getByText("123,456,789.123457 credits", { exact: true }),
-    ).toBeVisible();
+    await billingSection(page, "billing/benefits/wallet");
+    await expect(benefits.getByText("123,456,789.123457 credits", { exact: true })).toBeVisible();
+    await billingSection(page, "billing/benefits/allowances");
     const allowance = benefits
       .locator(".benefit-disclosure")
       .filter({

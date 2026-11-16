@@ -5827,6 +5827,28 @@ async fn nyxbot_panel_refuses_widening_atomically_and_denies_specialists_and_gue
             .unwrap()
             .ends_with("panelTab=tasks%2Fgroups")
     );
+    for (area, section, key) in [
+        ("account_settings", "display/colors/text", "panelTab"),
+        ("security", "security/mfa", "panelTab"),
+        ("billing", "billing/benefits/allowances", "panelSection"),
+        ("usage", "usage/explorer", "panelSection"),
+        ("agent_details", "overview/access", "details"),
+    ] {
+        let (link, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__settings_link",
+            &json!({"area":area, "section":section}),
+        )
+        .await;
+        assert!(!error, "{link}");
+        let url = url::Url::parse(link["url"].as_str().unwrap()).unwrap();
+        assert!(
+            url.query_pairs()
+                .any(|(name, value)| name == key && value == section),
+            "{url}"
+        );
+    }
     // Disabled admission must win over the authority preflight, including no-ops.
     use crate::services::feature_flag_service as flags;
     flags::set_platform_override(

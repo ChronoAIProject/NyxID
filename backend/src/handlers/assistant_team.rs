@@ -3106,22 +3106,48 @@ async fn dispatch_settings(
         }
         "settings_link" => {
             let area = text_arg(args, "area");
-            if let Some(section) = args.get("section") {
-                if area != "nyxbot_settings"
-                    || !section.as_str().is_some_and(|s| {
-                        crate::services::assistant_links::NYXBOT_SETTINGS_SECTIONS.contains(&s)
+            if area == "agent_details" || args.get("section").is_some() {
+                let section = args.get("section").and_then(Value::as_str);
+                if args.get("section").is_some()
+                    && !section.is_some_and(|section| {
+                        crate::services::assistant_team_tools::settings_section_allowed(
+                            area, section,
+                        )
                     })
                 {
                     return Err(AppError::ValidationError(
-                        "section requires nyxbot_settings and a known section".into(),
+                        "Unknown section for settings area".into(),
                     ));
                 }
+                let page = match area {
+                    "agent_details" => {
+                        let agent =
+                            Box::pin(target_agent(state, owner, args["agent"].as_str())).await?;
+                        let path = crate::services::assistant_links::AssistantPage::AgentDetails {
+                            agent: &agent.id,
+                            tab: section.unwrap_or("overview"),
+                        }
+                        .url(&state.config.frontend_url);
+                        return Ok((
+                            json!({"area": area, "url": path, "note": "Open this agent details page in NyxID; changes remain owner actions."}),
+                            false,
+                        ));
+                    }
+                    "nyxbot_settings" => {
+                        crate::services::assistant_links::AssistantPage::NyxBotSettings { section }
+                    }
+                    "billing" | "usage" => {
+                        crate::services::assistant_links::AssistantPage::Billing {
+                            tab: area,
+                            section,
+                        }
+                    }
+                    _ => crate::services::assistant_links::AssistantPage::Settings {
+                        tab: section.unwrap_or(area),
+                    },
+                };
                 return Ok((
-                    json!({
-                        "area": area,
-                        "note": "Open this NyxBot settings page in NyxID.",
-                        "url": settings_section_link(state, section.as_str().unwrap_or_default()).url,
-                    }),
+                    json!({"area": area, "url": page.url(&state.config.frontend_url), "note": "Open this settings page in NyxID; sign-in-only changes happen on the page."}),
                     false,
                 ));
             }

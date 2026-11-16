@@ -22,7 +22,7 @@ const { securityUser, mockDisable } = vi.hoisted(() => ({
   mockDisable: vi.fn(),
 }));
 vi.mock("@/hooks/use-auth", () => ({
-  useUser: () => ({ data: securityUser }),
+  useUser: () => ({ data: { ...securityUser, has_password: useAuthStore.getState().user?.has_password }, isSuccess: true }),
   useMfaDisable: () => ({ mutateAsync: mockDisable }),
   useRevokeSession: () => ({ mutateAsync: vi.fn() }),
 }));
@@ -67,6 +67,8 @@ afterEach(() => {
   expect(unexpectedRequests).toEqual([]);
 });
 
+let visit: (section?: string) => Promise<void>;
+
 async function open(
   route: "/settings" | "/assistant",
   tab = "profile",
@@ -95,9 +97,11 @@ async function open(
     </QueryClientProvider>,
   );
   await act(() => router.load());
-  await screen.findByRole("tab", { name: "Profile" });
-  if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-  return { router, history };
+  visit = async (section) => {
+    await act(() => router.navigate({ to: route, search: route === "/settings" ? { tab: section } : { c: "chat", mock: 1, panel: "settings", panelTab: section }, replace: true }));
+  };
+  await screen.findByRole("region", { name: "Account settings" });
+  return { router, history, client };
 }
 
 async function saveSettings() {
@@ -110,16 +114,38 @@ async function saveSettings() {
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
-    it("uses sibling groups across all six tabs with no nested cards or groups", async () => {
-      await open(route);
-      for (const label of ["Profile", "Security", "Sessions", "MCP", "Display", "Privacy"]) {
-        await userEvent.click(screen.getByRole("tab", { name: label }));
-        const panel = screen.getByRole("tabpanel");
-        await waitFor(() => expect(panel.querySelector("[data-grouped-list]")).not.toBeNull());
-        expect(panel.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
-        if (label === "security") await screen.findByText(/No active onboarding bindings/);
+    it("opens on six concise rows and retains sibling groups on focused pages", async () => {
+      await open(route, "");
+      expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+      for (const section of ["profile", "security", "security/mfa", "security/linked-accounts", "security/delete", "sessions", "mcp/cursor", "mcp/claude-code", "mcp/codex", "display/appearance", "display/text", "display/chat", "display/sidebar", "display/colors/surfaces", "display/colors/text", "display/colors/controls", "display/readability", "privacy"]) {
+        await visit(section);
+        const detail = document.querySelector(`[data-grouped-detail]:not([hidden])[aria-label]`)!;
+        expect(detail.querySelector("[data-grouped-list]")).not.toBeNull();
+        expect(detail.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
       }
       expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+    });
+
+    it("keeps loaded summaries during refresh and hides a failed summary", async () => {
+      const { client } = await open(route, "");
+      const sessions = screen.getByRole("button", { name: "Sessions 0" });
+      expect(screen.getByRole("button", { name: "Profile Reader" })).toBeVisible();
+      expect(screen.getByRole("button", { name: "Security MFA off" })).toBeVisible();
+      const query = client.getQueryCache().find({ queryKey: ["sessions"] })!;
+      act(() => query.setState({ fetchStatus: "fetching" }));
+      expect(sessions).toHaveAccessibleName("Sessions 0");
+      act(() => query.setState({ fetchStatus: "idle", status: "error", error: new Error("Unavailable") }));
+      await waitFor(() => expect(sessions).toHaveAccessibleName("Sessions"));
+    });
+
+    it("uses the profile email when no display name is set", async () => {
+      const name = securityUser.display_name;
+      Object.assign(securityUser, { display_name: "" });
+      try {
+        await open(route, "");
+        expect(screen.getByRole("button", { name: `Profile ${securityUser.email}` })).toBeVisible();
+      } finally { Object.assign(securityUser, { display_name: name }); }
     });
 
     it("identifies editable text fields and keeps long email addresses available", async () => {
@@ -132,7 +158,7 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(email).toHaveAttribute("title", securityUser.email);
       expect(email).toHaveClass("truncate");
       act(() => useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } }));
-      await userEvent.click(screen.getByRole("tab", { name: "Security" }));
+      await visit("security/password");
       for (const [label, placeholder] of [["Current Password", "Enter current password"], ["New Password", "Enter new password"], ["Confirm New Password", "Re-enter new password"]] as const) {
         const input = screen.getByLabelText(label, { exact: true });
         expect(input).toHaveAttribute("placeholder", placeholder);
@@ -155,10 +181,10 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.clear(name);
       await userEvent.type(name, "Updated Reader");
       expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
-      await userEvent.click(screen.getByRole("tab", { name: "MCP" }));
+      await visit("mcp");
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
-      await userEvent.click(screen.getByRole("tab", { name: "Profile" }));
+      await visit("profile");
       expect(name).toHaveValue("Updated Reader");
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
@@ -214,7 +240,7 @@ describe.each(["/settings", "/assistant"] as const)(
 
     it("keeps password validation and hides passwords from the change review", async () => {
       useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } });
-      await open(route, "security");
+      await open(route, "security/password");
       await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "short");
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
@@ -244,7 +270,7 @@ describe.each(["/settings", "/assistant"] as const)(
         }
         return original(url, options);
       });
-      await open(route, "security");
+      await open(route, "security/password");
       await userEvent.type(screen.getByLabelText("Current Password"), "old");
       await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "abcdefé");
       await userEvent.type(screen.getByLabelText("Confirm New Password"), "abcdefé");
@@ -263,7 +289,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/auth/password/change"
         ? new Response(JSON.stringify({ message: "Password changed successfully" }), { status: 200 })
         : original(url, options));
-      await open(route, "security");
+      await open(route, "security/password");
       for (const label of ["Current Password", "New Password", "Confirm New Password"]) {
         await userEvent.type(screen.getByLabelText(label, { exact: true }), "samepassword");
       }
@@ -278,7 +304,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
         : original(url, options));
-      await open(route, "security");
+      await open(route, "security/mfa");
       const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
       expect(toggle).toHaveAttribute("aria-checked", "false");
       await userEvent.click(toggle);
@@ -302,7 +328,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
         : original(url, options));
-      await open(route, "security");
+      await open(route, "security/mfa");
       const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
       expect(toggle).toHaveAttribute("aria-checked", "true");
       expect(screen.getByText(/Enabled by default/)).toBeInTheDocument();
@@ -320,7 +346,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
         : original(url, options));
-      await open(route, "security");
+      await open(route, "security/mfa");
       const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
       expect(toggle).toBeEnabled();
       expect(screen.getByText(/Takes effect when two-factor authentication is on/)).toBeInTheDocument();
@@ -337,7 +363,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(JSON.stringify({ error: "unavailable", error_code: 1000, message: "Try again later" }), { status: 503 })
         : original(url, options));
-      await open(route, "security");
+      await open(route, "security/mfa");
       await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
       await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
       expect(await screen.findByRole("alert")).toHaveTextContent("Try again later");
@@ -356,7 +382,7 @@ describe.each(["/settings", "/assistant"] as const)(
         if (url === "/api/v1/auth/mfa/step-up") return new Response("{}");
         return original(url, options);
       });
-      await open(route, "security");
+      await open(route, "security/mfa");
       await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
       await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
       const verify = await screen.findByRole("region", { name: "Verify this session" });
@@ -368,7 +394,7 @@ describe.each(["/settings", "/assistant"] as const)(
 
     it("disables the unsupported setting for older servers", async () => {
       useAuthStore.setState({ user: { ...useAuthStore.getState().user!, profile_config: undefined } });
-      await open(route, "security");
+      await open(route, "security/mfa");
       expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toBeDisabled();
       expect(screen.queryByText("Always enabled")).not.toBeInTheDocument();
     });
@@ -379,7 +405,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Promise<Response>((resolve) => { finish = resolve; })
         : original(url, options));
-      await open(route, "security");
+      await open(route, "security/mfa");
       await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
       await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
       await waitFor(() => expect(finish).toBeDefined());
@@ -402,7 +428,7 @@ describe.each(["/settings", "/assistant"] as const)(
         useAuthStore.setState({
           user: { ...useAuthStore.getState().user!, ...credentials },
         });
-        await open(route, "security");
+        await open(route, "security/password");
         if (credentials.has_password) {
           expect(
             screen.getByRole("heading", { name: "Change password" }),
@@ -448,7 +474,7 @@ describe.each(["/settings", "/assistant"] as const)(
     });
 
     it("discloses deletion of every managed Machine and paused workspace in the actual confirmation", async () => {
-      await open(route, "security");
+      await open(route, "security/delete");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
       const dialog = screen.getByRole("dialog", { name: "Delete Account" });
       expect(dialog).toHaveTextContent(/all (?:of your )?managed Machines/i);
@@ -466,24 +492,22 @@ describe.each(["/settings", "/assistant"] as const)(
     });
 
     it("binds the displayed deletion policy only after the owner types the account email", async () => {
-      await open(route, "security");
-      const bindingsRequest = ["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })];
+      await open(route, "security/delete");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
       const dialog = screen.getByRole("dialog", { name: "Delete Account" });
       const confirm = within(dialog).getByRole("button", { name: "Permanently Delete" });
       expect(confirm).toBeDisabled();
-      expect(transport.mock.calls).toEqual([bindingsRequest]);
+      expect(transport.mock.calls).toEqual([]);
       await userEvent.type(within(dialog).getByLabelText("Email"), "wrong@example.com");
       expect(confirm).toBeDisabled();
       await userEvent.click(confirm);
-      expect(transport.mock.calls).toEqual([bindingsRequest]);
+      expect(transport.mock.calls).toEqual([]);
       await userEvent.clear(within(dialog).getByLabelText("Email"));
       await userEvent.type(within(dialog).getByLabelText("Email"), "reader@example.com");
       expect(confirm).toBeEnabled();
-      expect(transport.mock.calls).toEqual([bindingsRequest]);
+      expect(transport.mock.calls).toEqual([]);
       await userEvent.click(confirm);
       await waitFor(() => expect(transport.mock.calls).toEqual([
-        bindingsRequest,
         ["/api/v1/users/me", expect.objectContaining({
           method: "DELETE",
           credentials: "include",
@@ -493,38 +517,45 @@ describe.each(["/settings", "/assistant"] as const)(
       await waitFor(() => expect(confirm).toBeEnabled());
     });
 
-    it("replaces tab state on the supplied route for every account tab", async () => {
-      const { router, history } = await open(route);
+    it("replaces sections on the supplied route and keeps legacy tab addresses", async () => {
+      const { router, history } = await open(route, "");
       for (const tab of SETTINGS_TABS) {
-        const trigger = screen.getByRole("tab", {
-          name:
-            tab === "mcp" ? "MCP" : tab.charAt(0).toUpperCase() + tab.slice(1),
-        });
-        await userEvent.click(trigger);
+        await visit(tab);
         expect(router.state.location.pathname).toBe(route);
         expect(router.state.location.search).toEqual(route === "/settings" ? { tab } : { c: "chat", mock: 1, panel: "settings", panelTab: tab });
-        expect(trigger).toHaveAttribute("data-state", "active");
         expect(history.length).toBe(1);
-        if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-        if (tab === "sessions")
-          expect(
-            screen.getByRole("link", { name: "Generate terminal login code" }),
-          ).toHaveAttribute("href", "/login/code");
-        if (tab === "privacy")
-          expect(
-            screen.getByRole("link", { name: "privacy policy" }),
-          ).toHaveAttribute("href", "/privacy");
+        if (tab === "sessions") expect(screen.getByRole("link", { name: "Generate terminal login code" })).toHaveAttribute("href", "/login/code");
+        if (tab === "privacy") expect(screen.getByRole("link", { name: "privacy policy" })).toHaveAttribute("href", "/privacy");
       }
       if (route === "/settings") expect(screen.getByRole("heading", { name: "Account Settings" })).toHaveClass("type-compact-page-title", "sm:type-page-title");
       else expect(screen.queryByRole("heading", { name: "Account Settings" })).not.toBeInTheDocument();
+      await visit("display/colors/text");
+      expect(screen.getByRole("heading", { name: "Text colors" })).toHaveFocus();
+      await userEvent.click(screen.getByRole("button", { name: "Colors" }));
+      expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/colors" } : { panelTab: "display/colors" });
     });
 
-    it("defaults invalid tab deep links to Profile", async () => {
-      await open(route, "unknown");
-      expect(screen.getByRole("tab", { name: "Profile" })).toHaveAttribute(
-        "data-state",
-        "active",
-      );
+    it("replaces root-row navigation, nested pages and parent Back", async () => {
+      const { history } = await open(route, "");
+      await userEvent.click(screen.getByRole("button", { name: /^Display/ }));
+      await userEvent.click(screen.getByRole("button", { name: "Colors" }));
+      await userEvent.click(screen.getByRole("button", { name: "Text colors" }));
+      expect(history.length).toBe(1);
+      await userEvent.click(screen.getByRole("button", { name: "Colors" }));
+      expect(history.length).toBe(1);
+      expect(new URLSearchParams(history.location.search).get(route === "/settings" ? "tab" : "panelTab")).toBe("display/colors");
+      await userEvent.click(screen.getByRole("button", { name: "Display" }));
+      await userEvent.click(screen.getByRole("button", { name: "Account Settings" }));
+      await userEvent.click(screen.getByRole("button", { name: /^Security/ }));
+      expect(history.length).toBe(1);
+      expect(new URLSearchParams(history.location.search).get(route === "/settings" ? "tab" : "panelTab")).toBe("security");
+    });
+    it("normalizes unknown sections to the root and unknown descendants to the nearest parent", async () => {
+      const { router, history } = await open(route, "unknown");
+      expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
+      await visit("display/colors/unknown");
+      await waitFor(() => expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/colors" } : { panelTab: "display/colors" }));
+      expect(history.length).toBe(1);
     });
   },
 );
@@ -534,14 +565,14 @@ describe("MFA security settings", () => {
   it("offers social-only enrollment while email authentication is disabled", async () => {
     securityUser.social_provider = "google"; securityUser.has_password = false;
     useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
-    const user = userEvent.setup(); await open("/settings", "security");
+    const user = userEvent.setup(); await open("/settings", "security/mfa");
     await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
     expect(screen.getByTestId("mfa-setup")).toBeInTheDocument();
   });
   it.each([{ provider: "google", hasPassword: false }, { provider: null, hasPassword: true }, { provider: "github", hasPassword: true }])("requires code and the actual password availability: $provider / $hasPassword", async ({ provider, hasPassword }) => {
     Object.assign(securityUser, { mfa_enabled: true, social_provider: provider, has_password: hasPassword });
     useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
-    const user = userEvent.setup(); await open("/settings", "security");
+    const user = userEvent.setup(); await open("/settings", "security/mfa");
     await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).queryByLabelText("Password") !== null).toBe(hasPassword);

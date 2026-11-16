@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
@@ -20,10 +21,12 @@ export function BillingUsageExplorer({
   catalog,
   rows,
   totals,
+  view,
 }: {
   catalog: BillingCatalog;
   rows: BillingUsageRow[];
   totals?: BillingUsageTotals;
+  view: "quantities" | "funding" | "explorer";
 }) {
   useUiTranslation();
   const [dimension, setDimension] = useState<Dimension>("service");
@@ -37,7 +40,7 @@ export function BillingUsageExplorer({
     : rows;
   return (
     <Card className="usage-results usage-explorer">
-      <CardHeader className="usage-explorer-heading">
+      {view === "explorer" && <CardHeader className="usage-explorer-heading">
         <div>
           <CardTitle>{translateUi("Usage overview")}</CardTitle>
           <p className="text-14 text-muted-foreground">{translateUi("Compare metered quantities and see how your usage is funded.")}</p>
@@ -48,22 +51,22 @@ export function BillingUsageExplorer({
             {groups.length === 1 ? "" : "s"}
           </span>
         )}
-      </CardHeader>
+      </CardHeader>}
       <CardContent>
         {rows.length === 0 && (
           <p className="empty-inline">{translateUi("No usage in this period.")}</p>
         )}
-        {rows.length > 0 && (
+        {rows.length > 0 && view !== "explorer" && (
           <div className="usage-overview-visuals">
-            <BillingQuantityChart rows={rows} catalog={catalog} overview />
-            <BillingFundingChart rows={rows} />
+            {view !== "funding" && <BillingQuantityChart rows={rows} catalog={catalog} overview />}
+            {view !== "quantities" && <BillingFundingChart rows={rows} />}
           </div>
         )}
-        {rows.length > 0 && (
+        {rows.length > 0 && view === "explorer" && (
           <UsageMetricsDisclosure rows={rows} totals={totals} />
         )}
-        {rows.length > 0 && (
-          <details className="usage-group-disclosure">
+        {rows.length > 0 && view === "explorer" && (
+          <details open className="usage-group-disclosure">
             <summary>
               <ChevronDown
                 size={14}
@@ -73,7 +76,7 @@ export function BillingUsageExplorer({
             {rows.length > 0 && (
               <div className="usage-explorer-controls">
                 <AnalyticsSelect
-                  label={translateUi("Group by")}
+                  label={translateUi(BILLING_FIELD_LABELS.groupBy)}
                   inline
                   value={dimension}
                   onChange={(value) => {
@@ -88,7 +91,7 @@ export function BillingUsageExplorer({
                 <div className="usage-search">
                   <Search size={14} aria-hidden="true" />
                   <Input
-                    aria-label={translateUi("Search usage groups")}
+                    aria-label={translateUi(BILLING_FIELD_LABELS.searchUsageGroups)}
                     placeholder={translateUi("Search {{value1}}s", { value1: dimensions[dimension].toLowerCase() })}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}

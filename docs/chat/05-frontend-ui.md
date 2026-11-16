@@ -761,3 +761,71 @@ query: pristine fields refresh and dirty fields retain the owner's draft. Load
 errors leave existing drafts mounted. Drill-in focuses the page title; Back
 returns focus to its originating disclosure. Shared compact headers and scroll
 viewports work in the desktop dialog and full-width mobile sheet.
+
+## Account, agent and billing section navigation
+
+Account Settings opens at `?panel=settings` with six icon disclosures: Profile,
+Security, Sessions, MCP, Display and Privacy. Profile shows the loaded display name (email when absent),
+Security the loaded MFA state, Sessions the loaded active-session count, and
+Display the local theme. Keep loaded summaries during background refreshes;
+omit remote summaries before first load and on error. The Studio `/settings`
+page keeps its header and uses the same tree with `tab` instead of `panelTab`.
+Existing category URLs remain valid. Sections are:
+
+- `profile`, `sessions`, `privacy`: the existing short editors/lists.
+- `security`: `security/mfa`, `security/password` (only password accounts),
+  `security/linked-accounts`, `security/delete`.
+- `mcp`: `mcp/cursor`, `mcp/claude-code`, `mcp/codex`.
+- `display`: `display/appearance` (theme, motion and reset), `display/text`,
+  `display/chat`, `display/sidebar`, `display/colors`, `display/readability`.
+  Colors opens `display/colors/surfaces`, `display/colors/text` and
+  `display/colors/controls`.
+
+Agent details keeps Overview, Access (`grants`), Skills, Memory and Channels tabs.
+`?agent=<id>&details=<section>` extends the existing tab contract. Overview has
+`overview/persona`, `overview/access`, `overview/chat`, `overview/voice`,
+`overview/automations` and `overview/ownership`; Ownership retains existing share
+and lifecycle actions with the read-only owner identity. Access has
+`grants/services`, `grants/operations`, `grants/guests`, `grants/machines`,
+`grants/connections`, `grants/voice`. Skills has `skills/installed` and
+`skills/learning`; Memory and Channels retain their existing lists and drill-ins.
+Visibility, editability, feature gates and legacy organisation channel access
+follow the original editors. The Overview access summary includes the effective workspace mode when inherited; automations counts use cached data only. Shared profile/grants forms retain one draft and
+mutation across their pages; operation/machine forms retain independent revision
+fences. Tab changes preserve drafts; Back and search leaving an editor use its
+discard guard. Existing channel connection/proposal links remain supported.
+
+Billing retains Billing and Usage tabs. Assistant URLs add
+`panelSection=<section>` alongside `panelTab=billing|usage`; Studio `/billing`
+uses `section` alongside `tab`. Both roots show existing available credits,
+period spend and benefits figures plus rows. Billing sections are
+`billing/topup`, `billing/benefits`, `billing/bill`, `billing/machines`,
+`billing/activity`. Benefits splits into `billing/benefits/wallet`,
+`billing/benefits/grants`, `billing/benefits/allowances`. Usage sections are
+`usage/summary`, `usage/charts`, `usage/explorer`; charts split into
+`usage/charts/quantities` and `usage/charts/funding`. Organisation billing omits
+personal machine/activity pages. Figures, tax, rounding, owner and service/period
+filters keep their original computations. Root reads are limited to wallet, benefits, period usage, catalogue and the existing owner selector. History, bill/invoices and activity fetch on first visit; benefit pages share one query owner and section navigation does not refetch. Compact spend/benefits values appear only at the root. Top-up history retains its
+independent period selector. `panelAction=topup`/`action=topup` remain one-shot;
+a user navigation consumes a pending action before moving. Lago still returns to
+Studio `/billing`, including checkout started from an assistant panel.
+
+Opening an account panel pushes; Account Settings root rows, nested pages and
+in-panel Back replace, as its former tabs did. Billing/Usage tab switches, owner,
+period and service-filter changes retain push in both shells. Only new Billing
+drill-ins, their parent Back and automatic cleanup replace. Browser Back after
+opening (or only drilling in) closes the panel; Back after an explicit close
+reopens it with any pending top-up already consumed. Studio retains the same
+tab/filter/cleanup rules, and Back/Forward cannot replay a consumed checkout.
+Agent buttons that formerly opened local sheets now replace the URL on open and
+close, preserving the originating workspace search and adding no history entry.
+Existing linked sheet closes still push; tabs and new drill-ins replace. Slash paths
+derive parents and mount ancestors for deep links. Unknown descendants and
+unavailable pages replace to the nearest valid available ancestor (or root).
+Canonicalization waits for navigation to settle. One viewport form scope/save bar
+owns the retained editors. Only visited editors mount; labels remain searchable before visiting without fetching their data. Account roots read the user for name/MFA and sessions for the count; MFA needs no extra endpoint. Agent roots read the agent and workspace settings, including linked-route metadata for legacy organisation tab availability. Distinct icons mark first-level categories only. Review, dirty-field payloads, immediate controls, MFA
+step-up, password handling and dismissal guards are unchanged. Workspace search
+indexes the available pages using their rendered field/option labels in the
+current locale from shared definitions, plus existing synonyms. NyxBot's
+`nyxid__settings_link` validates per-area sections against backend lists with
+frontend drift guards; this adds link destinations and no new write authority.

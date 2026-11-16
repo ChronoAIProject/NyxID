@@ -1,3 +1,4 @@
+import { settingsApi, accountSection } from "./settings-clarity-fixtures";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -37,116 +38,9 @@ async function theme(page: Page, mode: "light" | "dark") {
 async function settings(page: Page) {
   await openAccountMenu(page);
   await page.getByRole("menuitem", { name: "Settings", exact: true }).click();
-  const panel = page.getByRole("dialog", {
-    name: "Account Settings",
-    exact: true,
-  });
+  const panel = page.locator('[role="dialog"]').filter({ has: page.locator('[aria-label="Account settings"]') });
   await expect(panel).toBeVisible();
   return panel;
-}
-async function settingsApi(page: Page) {
-  const writes: { method: string; path: string; body: unknown }[] = [];
-  let user = {
-    id: "d4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f60718",
-    display_name: "Reader",
-    email:
-      "reader.account-settings-review+long-address-for-verification@international-research-department.example.com",
-    email_verified: true,
-    has_password: true,
-    mfa_enabled: false,
-    is_admin: false,
-    is_active: true,
-    created_at: "2026-01-01T00:00:00Z",
-    capabilities: { enabled_features: ["assistant:nyxagent-engine"] },
-    profile_config: {
-      security: { skip_mfa_for_approved_sign_ins: true },
-      onboarding: { ai_services_completed_at: "2026-01-01T00:00:00Z" },
-    },
-  };
-  await page.route("**/src/lib/mock-data.ts*", async (route) => {
-    const response = await route.fetch();
-    const source = await response.text();
-    const signature =
-      'export function getMockResponse(endpoint, method = "GET", body) {';
-    expect(source).toContain(signature);
-    await route.fulfill({
-      response,
-      body: source.replace(
-        signature,
-        `${signature}
-      if (["/users/me", "/auth/password/change", "/sessions"].includes(endpoint.split("?")[0]) || endpoint.startsWith("/auth/mfa/")) return undefined;`,
-      ),
-    });
-  });
-  await page.route("**/api/v1/users/me", async (route) => {
-    if (route.request().method() === "PUT") {
-      const body = route.request().postDataJSON();
-      writes.push({ method: "PUT", path: "/users/me", body });
-      user = { ...user, ...body };
-    }
-    await route.fulfill({ json: user });
-  });
-  await page.route("**/api/v1/auth/password/change", async (route) => {
-    writes.push({
-      method: route.request().method(),
-      path: "/auth/password/change",
-      body: route.request().postDataJSON(),
-    });
-    await route.fulfill({ json: {} });
-  });
-  await page.route("**/api/v1/sessions", (route) =>
-    route.fulfill({
-      json: [
-        {
-          id: "current",
-          is_current: true,
-          user_agent:
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/128",
-          ip_address: "203.0.113.1",
-          created_at: "2026-11-01T00:00:00Z",
-          expires_at: "2026-12-01T00:00:00Z",
-        },
-        {
-          id: "phone",
-          is_current: false,
-          user_agent:
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Mobile Safari/604.1",
-          ip_address: "203.0.113.2",
-          created_at: "2026-11-02T00:00:00Z",
-          expires_at: "2026-12-02T00:00:00Z",
-        },
-      ],
-    }),
-  );
-  await page.route("**/api/v1/auth/mfa/setup", (route) =>
-    route.fulfill({
-      json: {
-        secret: "JBSWY3DPEHPK3PXP",
-        qr_code_url: "otpauth://totp/NyxID?secret=JBSWY3DPEHPK3PXP",
-      },
-    }),
-  );
-  await page.route("**/api/v1/auth/mfa/confirm", (route) => {
-    writes.push({
-      method: route.request().method(),
-      path: "/auth/mfa/confirm",
-      body: route.request().postDataJSON(),
-    });
-    user = { ...user, mfa_enabled: true };
-    return route.fulfill({
-      json: { recovery_codes: ["recovery-one", "recovery-two"] },
-    });
-  });
-  await page.route("**/api/v1/auth/mfa/disable", (route) => {
-    writes.push({
-      method: route.request().method(),
-      path: "/auth/mfa/disable",
-      body: route.request().postDataJSON(),
-    });
-    user = { ...user, mfa_enabled: false };
-    return route.fulfill({ json: {} });
-  });
-  return writes;
 }
 
 test.beforeEach(async ({ page }) => {
@@ -196,12 +90,12 @@ for (const mode of ["light", "dark"] as const) {
       await content
         .getByRole("textbox", { name: "Name", exact: true })
         .fill("Studio Reader");
-      await content.getByRole("tab", { name: "Security", exact: true }).click();
+      await accountSection(page, "security/password");
       await expect(page).toHaveURL(/tab=security/);
       await expect(
         page.getByRole("dialog", { name: "Discard unsaved changes?" }),
       ).toHaveCount(0);
-      await content.getByRole("tab", { name: "Profile", exact: true }).click();
+      await accountSection(page, "profile");
       await expect(
         content.getByRole("textbox", { name: "Name", exact: true }),
       ).toHaveValue("Studio Reader");
@@ -242,8 +136,8 @@ for (const mode of ["light", "dark"] as const) {
       await theme(page, mode);
       const writes = await settingsApi(page);
       await openAssistant(page, { faults: { nyxagentEnabled: true } });
-      const panel = await settings(page);
-      await panel.getByRole("tab", { name: "Security", exact: true }).click();
+      await settings(page);
+      await accountSection(page, "security/mfa");
       const toggle = page.getByRole("switch", {
         name: "Toggle two-factor authentication",
         includeHidden: true,
@@ -344,9 +238,9 @@ for (const mode of ["light", "dark"] as const) {
         "Display",
         "Privacy",
       ]) {
-        await panel.getByRole("tab", { name: label, exact: true }).click();
-        const tab = panel.getByRole("tabpanel");
-        await expect(tab.locator("[data-grouped-list]").first()).toBeVisible();
+        await accountSection(page, label === "Security" ? "security/password" : label === "Display" ? "display/text" : label.toLowerCase());
+        const tab = panel;
+        await expect(tab.locator("[data-grouped-list]:visible").first()).toBeVisible();
         await expect(
           tab.locator(
             "[data-grouped-list] [data-grouped-list], [data-slot=card]",
@@ -390,6 +284,7 @@ for (const mode of ["light", "dark"] as const) {
         }
         if (label === "Display") {
           for (const title of ["Text size", "Spacing", "Chat content width"]) {
+            await accountSection(page, title === "Chat content width" ? "display/chat" : "display/text");
             const slider = tab.getByRole("slider", {
               name: title,
               exact: true,
@@ -422,11 +317,11 @@ for (const mode of ["light", "dark"] as const) {
           await capture(page, `settings-${mode}-${width}-display-layout`);
         }
       }
-      await panel.getByRole("tab", { name: "Profile", exact: true }).click();
+      await accountSection(page, "profile");
       await panel
         .getByRole("textbox", { name: "Name", exact: true })
         .fill("Updated Reader");
-      await panel.getByRole("tab", { name: "Security", exact: true }).click();
+      await accountSection(page, "security/password");
       await expect(
         page.getByRole("dialog", { name: "Discard unsaved changes?" }),
       ).toHaveCount(0);
@@ -439,7 +334,7 @@ for (const mode of ["light", "dark"] as const) {
       await panel
         .getByLabel("Confirm New Password", { exact: true })
         .fill("new-password");
-      await panel.getByRole("tab", { name: "Display", exact: true }).click();
+      await accountSection(page, "display/text");
       const bar = panel.getByRole("region", { name: "Unsaved changes" });
       await expect(bar).toBeVisible();
       expect(
@@ -481,7 +376,7 @@ for (const mode of ["light", "dark"] as const) {
           },
         },
       ]);
-      await panel.getByRole("tab", { name: "Profile", exact: true }).click();
+      await accountSection(page, "profile");
       await expect(
         panel.getByRole("textbox", { name: "Name", exact: true }),
       ).toHaveValue("Updated Reader");
@@ -672,10 +567,10 @@ for (const mode of ["light", "dark"] as const) {
     expect((await userTick.boundingBox())!.width).toBeCloseTo(8, 1);
     expect((await assistantTick.boundingBox())!.width).toBeCloseTo(16, 1);
     const slots = rail.locator("button");
-    expect(
-      (await slots.nth(1).boundingBox())!.y -
-        (await slots.nth(0).boundingBox())!.y,
-    ).toBeCloseTo(7, 1);
+    // Read both positions in one frame while keyboard scrolling settles.
+    expect(await slots.evaluateAll(elements =>
+      elements[1]!.getBoundingClientRect().y - elements[0]!.getBoundingClientRect().y,
+    )).toBeCloseTo(7, 1);
     await page.keyboard.press("ArrowDown");
     await expect(assistantTick).toHaveClass(/text-nyx-secondary-400/);
     expect((await userTick.boundingBox())!.width).toBeCloseTo(8, 1);

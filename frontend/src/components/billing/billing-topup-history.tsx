@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -97,13 +98,13 @@ function TopUpHistory({
             toast.error(translateErrorMessage(error instanceof Error ? error.message : "Unable to resume payment"));
           }
         }}
-      >{translateUi("Resume payment")}</Button>
+      >{translateUi(BILLING_FIELD_LABELS.resumePayment)}</Button>
     ) : payment.receipt_available && !!payment.lago_invoice_id ? (
       <Button
         variant="outline"
         size="sm"
         onClick={() => void handleReceipt(payment.lago_invoice_id!)}
-      >{translateUi("Download receipt")}</Button>
+      >{translateUi(BILLING_FIELD_LABELS.downloadReceipt)}</Button>
     ) : (
       <span className="text-muted-foreground">—</span>
     );
@@ -127,7 +128,7 @@ function TopUpHistory({
     <Card className="topup-history-card">
       <CardHeader className="history-heading">
         <div>
-          <CardTitle>{translateUi("Top-up history")}</CardTitle>
+          <CardTitle>{translateUi(BILLING_FIELD_LABELS.topupHistory)}</CardTitle>
           <p className="mt-1 text-14 text-muted-foreground">{translateUi("Payments, their status, and downloadable receipts.")}</p>
         </div>
         <Select

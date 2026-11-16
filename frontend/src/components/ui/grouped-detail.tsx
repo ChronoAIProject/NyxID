@@ -25,6 +25,8 @@ import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-dr
 export function GroupedDetail({
   open,
   compactHeader = false,
+  forceMount = false,
+  draftOwner,
   searchPage,
   title,
   info,
@@ -36,6 +38,8 @@ export function GroupedDetail({
 }: {
   readonly open: boolean;
   readonly compactHeader?: boolean;
+  readonly forceMount?: boolean;
+  readonly draftOwner?: string;
   readonly searchPage?: string;
   readonly title: string;
   readonly info?: string;
@@ -50,7 +54,8 @@ export function GroupedDetail({
   const context = useContext(GroupedDetailContext);
   const parentOwner = useContext(GroupedDraftOwnerContext);
   const id = useId();
-  const owner = `${parentOwner}/${id}`;
+  const owner = `${parentOwner}/${draftOwner ?? id}`;
+  const parentSearch = useContext(DrawerSearchRevealContext);
   const guard = useGroupedDraftGuard();
   const level = requestedLevel ?? (context.level ?? 0) + 1;
   const page = useRef<HTMLElement>(null);
@@ -104,21 +109,25 @@ export function GroupedDetail({
       if (!activePage.contains(document.activeElement)) return;
       const trigger = searchPage ? [...(container?.querySelectorAll<HTMLElement>("[data-drawer-page-trigger]") ?? [])]
         .find((element) => element.dataset.drawerPageTrigger === searchPage && !element.closest("[hidden], [inert]")) : null;
-      const destination = previous?.isConnected && previous !== document.body && !previous.closest("[hidden], [inert]") ? previous : trigger;
+      // Focusing an inactive automatic tab would select it and navigate again.
+      const previousAvailable = previous?.isConnected && previous !== document.body &&
+        !previous.closest("[hidden], [inert]") && !previous.matches('[role="tab"][aria-selected="false"]');
+      const destination = trigger ?? (previousAvailable ? previous : null);
       destination?.focus({ preventScroll: true });
     };
   }, [active, container, level, searchPage]);
-  const content = visited ? (
+  const content = visited || forceMount ? (
     <section
       ref={page}
       hidden={!active}
       style={{ display: active ? undefined : "none", zIndex: 10 + level }}
       aria-label={title}
       data-grouped-detail=""
+      data-grouped-section={searchPage}
       data-grouped-level={level}
       className={`${container === document.body ? "fixed" : "absolute"} inset-0 z-10 flex flex-col bg-background p-4`}
     >
-      <CompactChrome enabled={compactHeader && active} className={`shrink-0 pb-4${compactHeader ? " [[data-compact=true]]:pb-2" : ""}`}>
+      <CompactChrome enabled={compactHeader && active} className={`shrink-0 pb-4${compactHeader ? " pr-6 [[data-compact=true]]:pb-2" : ""}`}>
         <Button variant="ghost" onClick={async () => { if (!guard || await guard.confirmDiscard(owner)) onBack(); }}>
           <ChevronLeft aria-hidden />
           {backLabel}
@@ -136,7 +145,7 @@ export function GroupedDetail({
           value={{ container, visible: active, level }}
         >
           <GroupedDraftOwnerContext.Provider value={owner}>
-            <DrawerSearchRevealContext value={searchPage ? { pages: [searchPage], reveal: onReveal } : null}>{children}</DrawerSearchRevealContext>
+            <DrawerSearchRevealContext value={searchPage ? { pages: [...(parentSearch?.pages ?? []), searchPage], reveal: () => { parentSearch?.reveal?.(); onReveal?.(); } } : null}>{children}</DrawerSearchRevealContext>
           </GroupedDraftOwnerContext.Provider>
         </GroupedDetailContext.Provider>
       </CompactScroll>

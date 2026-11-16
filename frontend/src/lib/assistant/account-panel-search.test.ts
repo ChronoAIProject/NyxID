@@ -7,9 +7,9 @@ describe("account panel search", () => {
   it.each([undefined, null, "invalid", ["billing"], 1])("ignores invalid panel %s", (panel) => {
     expect(parseAccountPanelSearch({ panel, panelTab: "security" })).toEqual({});
   });
-  it("uses shared settings validation and defaults invalid tabs", () => {
+  it("uses shared settings validation and drops unknown sections", () => {
     expect(parseAccountPanelSearch({ panel: "settings", panelTab: "security", tab: "logins" })).toEqual({ panel: "settings", panelTab: "security" });
-    expect(parseAccountPanelSearch({ panel: "settings", panelTab: "invalid" })).toEqual({ panel: "settings", panelTab: "profile" });
+    expect(parseAccountPanelSearch({ panel: "settings", panelTab: "invalid" })).toEqual({ panel: "settings" });
     expect(parseAccountPanelSearch({ panel: "settings", panelTab: ["security"] })).toEqual({ panel: "settings" });
   });
   it("delegates every billing field to its schema exactly", () => {

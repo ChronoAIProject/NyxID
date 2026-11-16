@@ -162,6 +162,9 @@ jobs:
               - 'shared/native-app-links.json'
             backend:
               - 'frontend/src/lib/assistant/nyxbot-settings-sections.ts'
+              - 'frontend/src/lib/assistant/agent-details-sections.ts'
+              - 'frontend/src/lib/account-settings-sections.ts'
+              - 'frontend/src/lib/billing-sections.ts'
               - 'scripts/docker-dependency-recipe.py'
               - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/**'

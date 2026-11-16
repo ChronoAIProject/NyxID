@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -117,7 +118,7 @@ export function BillingBill({ enabled, ownerId }: { enabled: boolean; ownerId?: 
                 )}
                 <dl className="ml-auto max-w-sm space-y-2">
                   <Amount
-                    label={translateUi("Subtotal")}
+                    label={translateUi(BILLING_FIELD_LABELS.subtotal)}
                     amount={currentBill.subtotal}
                     currency={currentBill.currency}
                   />
@@ -140,13 +141,13 @@ export function BillingBill({ enabled, ownerId }: { enabled: boolean; ownerId?: 
                     )}
                   <Amount
                     label={
-                      currentBill.tax_breakdown_available ? translateUi("Total tax") : translateUi("Tax")
+                      currentBill.tax_breakdown_available ? translateUi("Total tax") : translateUi(BILLING_FIELD_LABELS.tax)
                     }
                     amount={currentBill.tax_total}
                     currency={currentBill.currency}
                   />
                   <Amount
-                    label={translateUi("Total so far")}
+                    label={translateUi(BILLING_FIELD_LABELS.total)}
                     amount={currentBill.total}
                     currency={currentBill.currency}
                     strong
@@ -161,7 +162,7 @@ export function BillingBill({ enabled, ownerId }: { enabled: boolean; ownerId?: 
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>{translateUi("Past usage invoices")}</CardTitle>
+          <CardTitle>{translateUi(BILLING_FIELD_LABELS.downloadInvoice)}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4 text-14">
           {history.isLoading ? (
@@ -193,11 +194,11 @@ export function BillingBill({ enabled, ownerId }: { enabled: boolean; ownerId?: 
                     isLoading={downloading === invoice.id}
                     disabled={downloading !== null}
                     onClick={() => void receipt(invoice)}
-                  >{translateUi("Download receipt")}</Button>
+                  >{translateUi(BILLING_FIELD_LABELS.downloadReceipt)}</Button>
                 </div>
                 <dl className="mt-3 space-y-2">
                   <Amount
-                    label={translateUi("Subtotal")}
+                    label={translateUi(BILLING_FIELD_LABELS.subtotal)}
                     amount={invoice.subtotal}
                     currency={invoice.currency}
                   />

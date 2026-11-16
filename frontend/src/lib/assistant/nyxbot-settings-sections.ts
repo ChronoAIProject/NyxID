@@ -1,3 +1,4 @@
+import { sectionNavigation } from "@/lib/section-navigation";
 /** URL vocabulary shared by navigation, search and the backend drift guard. */
 export const NYXBOT_SETTINGS_SECTIONS = [
   "permissions",
@@ -26,32 +27,11 @@ export const NYXBOT_SETTINGS_TITLES: Record<NyxBotSettingsSection, string> = {
   "channels/adapters": "Adapter bindings",
   "channels/links": "Personal links",
 };
-export function parseNyxBotSettingsSection(
-  value: unknown,
-): NyxBotSettingsSection | undefined {
-  return typeof value === "string" &&
-    NYXBOT_SETTINGS_SECTIONS.includes(value as NyxBotSettingsSection)
-    ? (value as NyxBotSettingsSection)
-    : undefined;
-}
-export function nyxBotSettingsParent(
-  section: NyxBotSettingsSection,
-): NyxBotSettingsSection | undefined {
-  return parseNyxBotSettingsSection(section.split("/").slice(0, -1).join("/"));
-}
-export function nyxBotSettingsAncestry(
-  section?: NyxBotSettingsSection,
-): NyxBotSettingsSection[] {
-  if (!section) return [];
-  return [...nyxBotSettingsAncestry(nyxBotSettingsParent(section)), section];
-}
-export function availableNyxBotSettingsSection(
-  section: NyxBotSettingsSection | undefined,
-  available: Partial<Record<NyxBotSettingsSection, boolean>>,
-): NyxBotSettingsSection | undefined {
-  if (!section || available[section] !== false) return section;
-  return availableNyxBotSettingsSection(nyxBotSettingsParent(section), available);
-}
+const navigation = sectionNavigation(NYXBOT_SETTINGS_SECTIONS);
+export const parseNyxBotSettingsSection = navigation.parse;
+export const nyxBotSettingsParent = navigation.parent;
+export const nyxBotSettingsAncestry = navigation.ancestry;
+export const availableNyxBotSettingsSection = navigation.available;
 
 export const NYXBOT_SETTINGS_KEYWORDS: Record<NyxBotSettingsSection, readonly string[]> = {
   permissions: ["access mode", "Auto", "Full access", "approvals"],

@@ -1,3 +1,5 @@
+import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
+import { DISPLAY_COLOR_GROUPS } from "@/lib/account-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { RangeControl } from "@/components/ui/range-control";
@@ -52,14 +54,14 @@ const THEME_OPTIONS: readonly {
   label: string;
   icon: LucideIcon;
 }[] = [
-  { value: "system", get label() { return translateUi("System"); }, icon: Monitor },
-  { value: "light", get label() { return translateUi("Light"); }, icon: Sun },
-  { value: "dark", get label() { return translateUi("Dark"); }, icon: Moon },
+  { value: "system", get label() { return translateUi(ACCOUNT_FIELD_LABELS.system); }, icon: Monitor },
+  { value: "light", get label() { return translateUi(ACCOUNT_FIELD_LABELS.light); }, icon: Sun },
+  { value: "dark", get label() { return translateUi(ACCOUNT_FIELD_LABELS.dark); }, icon: Moon },
 ];
 
 const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
-  { value: "system", get label() { return translateUi("Follow system"); } },
-  { value: "reduce", get label() { return translateUi("Reduce"); } },
+  { value: "system", get label() { return translateUi(ACCOUNT_FIELD_LABELS.followSystem); } },
+  { value: "reduce", get label() { return translateUi(ACCOUNT_FIELD_LABELS.reduce); } },
 ];
 
 const COLOR_MODE_OPTIONS: readonly {
@@ -67,8 +69,8 @@ const COLOR_MODE_OPTIONS: readonly {
   label: string;
   icon: LucideIcon;
 }[] = [
-  { value: "light", get label() { return translateUi("Light"); }, icon: Sun },
-  { value: "dark", get label() { return translateUi("Dark"); }, icon: Moon },
+  { value: "light", get label() { return translateUi(ACCOUNT_FIELD_LABELS.light); }, icon: Sun },
+  { value: "dark", get label() { return translateUi(ACCOUNT_FIELD_LABELS.dark); }, icon: Moon },
 ];
 
 function SegmentedChoice<T extends string | number>({
@@ -205,9 +207,9 @@ function HexField({
 }
 
 const SIDEBAR_MODE_OPTIONS: readonly { value: SidebarMode; label: string }[] = [
-  { value: "expanded", get label() { return translateUi("Expanded"); } },
-  { value: "collapsed", get label() { return translateUi("Collapsed"); } },
-  { value: "hover", get label() { return translateUi("Expand on hover"); } },
+  { value: "expanded", get label() { return translateUi(ACCOUNT_FIELD_LABELS.expanded); } },
+  { value: "collapsed", get label() { return translateUi(ACCOUNT_FIELD_LABELS.collapsed); } },
+  { value: "hover", get label() { return translateUi(ACCOUNT_FIELD_LABELS.expandOnHover); } },
 ];
 
 function SidebarWidthControl({
@@ -276,30 +278,30 @@ function SidebarSettings() {
       footer={translateUi("Choose how navigation opens and how much space it uses. You can also drag a sidebar’s edge to resize it.")}
     >
       <SettingRow
-        title={translateUi("Main sidebar")}
+        title={translateUi(ACCOUNT_FIELD_LABELS.mainSidebar)}
         description={translateUi("Expanded, icons only, or icons that expand on hover.")}
       >
         <SegmentedChoice
-          label={translateUi("Main sidebar")}
+          label={translateUi(ACCOUNT_FIELD_LABELS.mainSidebar)}
           options={SIDEBAR_MODE_OPTIONS}
           value={sidebarMode}
           onChange={setSidebarMode}
         />
       </SettingRow>
       <GroupedRow>
-        <SidebarWidthControl sidebar="dashboard" label={translateUi("Main sidebar width")} />
+        <SidebarWidthControl sidebar="dashboard" label={translateUi(ACCOUNT_FIELD_LABELS.mainSidebarWidth)} />
       </GroupedRow>
       <GroupedRow>
         <SidebarWidthControl
           sidebar="assistant"
-          label={translateUi("Assistant sidebar width")}
+          label={translateUi(ACCOUNT_FIELD_LABELS.assistantSidebarWidth)}
         />
       </GroupedRow>
     </GroupedList>
   );
 }
 
-function ColorEditor() {
+function ColorEditor({ section = "all" }: { readonly section?: string }) {
   useUiTranslation();
   const resolved = useResolvedTheme();
   const setMode = useThemeStore((s) => s.setMode);
@@ -331,7 +333,7 @@ function ColorEditor() {
         </GroupedRow>
       </GroupedList>
 
-      <section
+      {section !== "display/readability" && <section
         aria-label={translateUi("Chat appearance preview")}
         className="space-y-3 rounded-xl border p-4"
         style={{
@@ -349,13 +351,13 @@ function ColorEditor() {
           }}
         >{translateUi("Show me the services I have connected.")}</UserMessageBubble>
         <p className="text-16">{translateUi("You can manage your connected services in Plugins.")}</p>
-      </section>
+      </section>}
 
-      <GroupedList
+      {section !== "display/readability" && <GroupedList
         title={editMode === "light" ? translateUi("Light theme colors") : translateUi("Dark theme colors")}
       >
         <ul aria-label={translateUi("{{value1}} theme colors", { value1: editMode })}>
-          {EDITABLE_COLORS.map(({ key, label }) => {
+          {EDITABLE_COLORS.filter(color => section === "all" || DISPLAY_COLOR_GROUPS[section]?.includes(color.key)).map(({ key, label }) => {
             const value = color(key);
             const customized = key in overrides;
             return (
@@ -399,9 +401,9 @@ function ColorEditor() {
             );
           })}
         </ul>
-      </GroupedList>
+      </GroupedList>}
 
-      <GroupedList title={translateUi("Readability")}>
+      {(section === "all" || section === "display/readability") && <GroupedList title={translateUi("Readability")}>
         <ul aria-label={translateUi("Contrast checks")}>
           {CONTRAST_CHECKS.map((check) => {
             const ratio = contrastRatio(color(check.fg), color(check.bg));
@@ -438,7 +440,7 @@ function ColorEditor() {
             );
           })}
         </ul>
-      </GroupedList>
+      </GroupedList>}
 
       <GroupedList>
         <GroupedRow className="justify-end">
@@ -455,7 +457,7 @@ function ColorEditor() {
   );
 }
 
-export function DisplaySettings() {
+export function DisplaySettings({ section = "all" }: { readonly section?: string }) {
   useUiTranslation();
   const mode = useThemeStore((s) => s.mode);
   const setMode = useThemeStore((s) => s.setMode);
@@ -469,24 +471,25 @@ export function DisplaySettings() {
 
   return (
     <div className="space-y-6">
-      <GroupedList
-        title={translateUi("Display")}
+      {(section === "all" || section === "display/appearance" || section === "display/text") && <GroupedList
+        title={undefined}
         footer={translateUi("Make NyxID comfortable to read. Your choices are saved in this browser.")}
       >
-        <SettingRow
-          title={translateUi("Theme")}
+        {section !== "display/text" && <SettingRow
+          title={translateUi(ACCOUNT_FIELD_LABELS.theme)}
           description={translateUi("System follows your device's light or dark setting.")}
         >
           <SegmentedChoice
-            label={translateUi("Theme")}
+            label={translateUi(ACCOUNT_FIELD_LABELS.theme)}
             options={THEME_OPTIONS}
             value={mode}
             onChange={setMode}
           />
-        </SettingRow>
+        </SettingRow>}
+        {section !== "display/appearance" && <>
         <GroupedRow>
           <ScaleControl
-            label={translateUi("Text size")}
+            label={translateUi(ACCOUNT_FIELD_LABELS.textSize)}
             description={translateUi("Resize text and icons together. Controls adapt to keep them readable.")}
             scale={textScale}
             onChange={setTextScale}
@@ -494,18 +497,20 @@ export function DisplaySettings() {
         </GroupedRow>
         <GroupedRow>
           <ScaleControl
-            label={translateUi("Spacing")}
+            label={translateUi(ACCOUNT_FIELD_LABELS.spacing)}
             description={translateUi("Choose how much room sits between controls and content.")}
             scale={density}
             onChange={setDensity}
           />
         </GroupedRow>
+        </>}
+        {section !== "display/text" && <>
         <SettingRow
-          title={translateUi("Motion")}
+          title={translateUi(ACCOUNT_FIELD_LABELS.motion)}
           description={translateUi("Follow your device preference or use fewer animations.")}
         >
           <SegmentedChoice
-            label={translateUi("Motion")}
+            label={translateUi(ACCOUNT_FIELD_LABELS.motion)}
             options={MOTION_OPTIONS}
             value={motion}
             onChange={setMotion}
@@ -513,10 +518,11 @@ export function DisplaySettings() {
         </SettingRow>
         <GroupedRow className="justify-end">
           <Button variant="ghost" size="sm" onClick={resetDisplay}>
-            <RotateCcw className="size-3" />{translateUi("Reset display settings")}</Button>
+            <RotateCcw className="size-3" />{translateUi(ACCOUNT_FIELD_LABELS.resetDisplaySettings)}</Button>
         </GroupedRow>
-      </GroupedList>
-      <GroupedList
+        </>}
+      </GroupedList>}
+      {(section === "all" || section === "display/chat") && <GroupedList
         title={translateUi("Chat layout")}
         footer={translateUi("Set a comfortable reading width and writing area for all your chats.")}
       >
@@ -526,9 +532,9 @@ export function DisplaySettings() {
         <GroupedRow>
           <ComposerHeightControl />
         </GroupedRow>
-      </GroupedList>
-      <SidebarSettings />
-      <ColorEditor />
+      </GroupedList>}
+      {(section === "all" || section === "display/sidebar") && <SidebarSettings />}
+      {(section === "all" || section.startsWith("display/colors/") || section === "display/readability") && <ColorEditor section={section} />}
     </div>
   );
 }
