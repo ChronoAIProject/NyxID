@@ -258,8 +258,10 @@ export function legacyImportReplacement(file, specifier, legacy, aliases) {
 /**
  * Rewrite legacy catalog specifiers in `sources` ([file, text] pairs).
  * `specifiers(file, text)` lists module-specifier string literals as
- * `{ start, end, text, line }` (start/end include the quotes). Returns the
- * changed texts and one `{ file, line, from, to }` entry per rewrite.
+ * `{ start, end, text, line, attributes? }` (start/end include the quotes;
+ * `attributes` is the range of its import attributes clause). Returns the
+ * changed texts and one `{ file, line, from, to, removedAttributes }` entry per
+ * rewrite; attributes are removed when the replacement is no longer JSON.
  */
 export function rewriteLegacyImports(sources, specifiers, legacy, aliases) {
   const changed = [];
@@ -269,10 +271,15 @@ export function rewriteLegacyImports(sources, specifiers, legacy, aliases) {
     const found = specifiers(file, text)
       .map((literal) => ({ ...literal, to: legacyImportReplacement(file, literal.text, legacy, aliases) }))
       .filter((literal) => literal.to);
-    for (const literal of [...found].sort((a, b) => b.start - a.start)) {
-      next = `${next.slice(0, literal.start + 1)}${literal.to}${next.slice(literal.end - 1)}`;
+    const edits = found.flatMap((literal) => [
+      { start: literal.start + 1, end: literal.end - 1, text: literal.to },
+      // JSON import attributes (`with`/`assert { type: "json" }`) are invalid once the target is a module.
+      ...(literal.attributes && !literal.to.endsWith(".json") ? [{ ...literal.attributes, text: "" }] : []),
+    ]);
+    for (const edit of edits.sort((a, b) => b.start - a.start)) next = `${next.slice(0, edit.start)}${edit.text}${next.slice(edit.end)}`;
+    for (const literal of found) {
+      rewrites.push({ file, line: literal.line, from: literal.text, to: literal.to, removedAttributes: Boolean(literal.attributes && !literal.to.endsWith(".json")) });
     }
-    for (const literal of found) rewrites.push({ file, line: literal.line, from: literal.text, to: literal.to });
     if (found.length) changed.push([file, next]);
   }
   return { changed, rewrites };
@@ -293,7 +300,12 @@ export function moduleSpecifiers(file, source) {
   const found = [];
   const visit = (node) => {
     const literal = moduleSpecifierOf(node, ast);
-    if (literal) found.push({ start: literal.getStart(ast), end: literal.getEnd(), text: literal.text, line: ast.getLineAndCharacterOfPosition(literal.getStart(ast)).line + 1 });
+    if (literal) {
+      // The import attributes clause after the specifier, if any: ` with { ... }` / ` assert { ... }`, or import()'s options argument.
+      const attributes = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.attributes ? { start: literal.getEnd(), end: node.attributes.getEnd() } :
+        ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[1] ? { start: literal.getEnd(), end: node.arguments[1].getEnd() } : undefined;
+      found.push({ start: literal.getStart(ast), end: literal.getEnd(), text: literal.text, line: ast.getLineAndCharacterOfPosition(literal.getStart(ast)).line + 1, attributes });
+    }
     ts.forEachChild(node, visit);
   };
   visit(ast);

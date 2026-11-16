@@ -108,11 +108,12 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     const f = fixture();
     f.git("checkout", "split");
     const file = path.join(f.root, "src/pages/late.test.ts");
-    fs.writeFileSync(file, 'const en = await import("../i18n/locales/en.json");\n');
+    fs.writeFileSync(file, 'const en = await import("../i18n/locales/en.json");\nimport zh from "../i18n/locales/zh-CN.json" with { type: "json" };\n');
     const result = f.adopt("--imports-only");
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain("i18n: rewrote src/pages/late.test.ts:1 ../i18n/locales/en.json -> ../i18n/locales/app/en-full");
-    expect(fs.readFileSync(file, "utf8")).toBe('const en = await import("../i18n/locales/app/en-full");\n');
+    expect(result.stdout).toContain("i18n: rewrote src/pages/late.test.ts:1 ../i18n/locales/en.json -> ../i18n/locales/app/en-full\n");
+    expect(result.stdout).toContain("i18n: rewrote src/pages/late.test.ts:2 ../i18n/locales/zh-CN.json -> ../i18n/locales/app/zh-CN (removed its JSON import attributes)\n");
+    expect(fs.readFileSync(file, "utf8")).toBe('const en = await import("../i18n/locales/app/en-full");\nimport zh from "../i18n/locales/app/zh-CN";\n');
     expect(f.git("status", "--porcelain", "--", "frontend/src")).toBe("?? frontend/src/pages/late.test.ts");
   });
 

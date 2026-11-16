@@ -209,8 +209,10 @@ The tool also rewrites imports of the pre-split catalog files in every
 `frontend/src` `.ts`/`.tsx` file in the working tree, tests included. Static
 imports, `import type`, dynamic `import()`, `require()` and `vi.mock`-style
 calls are rewritten, and each specifier keeps its prefix style (`@/…` or
-relative). Each rewrite is printed as `file:line old -> new`, followed by the
-`git add` command for the rewritten files:
+relative). An import attributes clause (`with { type: "json" }` or `assert`)
+is removed when the new target is a module rather than JSON. Each rewrite is
+printed as `file:line old -> new`, followed by the `git add` command for the
+rewritten files:
 
 | Legacy import | Rewritten to |
 | --- | --- |

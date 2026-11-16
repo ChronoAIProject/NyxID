@@ -150,11 +150,11 @@ describe("legacy i18n delta adoption", () => {
     ].join("\n");
     const first = rewriteLegacyImports([["src/pages/a.test.tsx", source]], moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
     expect(first.rewrites).toEqual([
-      { file: "src/pages/a.test.tsx", line: 1, from: "@/i18n/locales/zh-CN.json", to: "@/i18n/locales/app/zh-CN" },
-      { file: "src/pages/a.test.tsx", line: 2, from: "../i18n/locales/en.json", to: "../i18n/locales/app/en-full" },
-      { file: "src/pages/a.test.tsx", line: 4, from: "@/i18n/locales/zh-TW.json", to: "@/i18n/locales/app/zh-TW" },
-      { file: "src/pages/a.test.tsx", line: 5, from: "@/i18n/locales/en-overrides.json", to: "@/i18n/locales/app/en-overrides.json" },
-      { file: "src/pages/a.test.tsx", line: 6, from: "../i18n/locales/zh-CN.json", to: "../i18n/locales/app/zh-CN" },
+      { file: "src/pages/a.test.tsx", line: 1, from: "@/i18n/locales/zh-CN.json", to: "@/i18n/locales/app/zh-CN", removedAttributes: false },
+      { file: "src/pages/a.test.tsx", line: 2, from: "../i18n/locales/en.json", to: "../i18n/locales/app/en-full", removedAttributes: false },
+      { file: "src/pages/a.test.tsx", line: 4, from: "@/i18n/locales/zh-TW.json", to: "@/i18n/locales/app/zh-TW", removedAttributes: false },
+      { file: "src/pages/a.test.tsx", line: 5, from: "@/i18n/locales/en-overrides.json", to: "@/i18n/locales/app/en-overrides.json", removedAttributes: false },
+      { file: "src/pages/a.test.tsx", line: 6, from: "../i18n/locales/zh-CN.json", to: "../i18n/locales/app/zh-CN", removedAttributes: false },
     ]);
     const [[, rewritten]] = first.changed;
     expect(rewritten.split("\n")).toEqual([
@@ -169,6 +169,27 @@ describe("legacy i18n delta adoption", () => {
     ]);
     const second = rewriteLegacyImports([["src/pages/a.test.tsx", rewritten]], moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
     expect(second).toEqual({ changed: [], rewrites: [] });
+  });
+
+  it("removes JSON import attributes when the replacement is a module, and keeps them for JSON targets", () => {
+    const source = [
+      'import zhCN from "@/i18n/locales/zh-CN.json" with { type: "json" };',
+      "import en from '../i18n/locales/en.json' assert { type: 'json' };",
+      'const tw = await import("@/i18n/locales/zh-TW.json", { with: { type: "json" } });',
+      'import overrides from "@/i18n/locales/en-overrides.json" with { type: "json" };',
+      'import data from "./data.json" with { type: "json" };',
+      "",
+    ].join("\n");
+    const { changed, rewrites } = rewriteLegacyImports([["src/pages/a.test.tsx", source]], moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+    expect(changed[0]?.[1].split("\n")).toEqual([
+      'import zhCN from "@/i18n/locales/app/zh-CN";',
+      "import en from '../i18n/locales/app/en-full';",
+      'const tw = await import("@/i18n/locales/app/zh-TW");',
+      'import overrides from "@/i18n/locales/app/en-overrides.json" with { type: "json" };',
+      'import data from "./data.json" with { type: "json" };',
+      "",
+    ]);
+    expect(rewrites.map(({ line, removedAttributes }) => [line, removedAttributes])).toEqual([[1, true], [2, true], [3, true], [4, false]]);
   });
 
   it("guards relative, alias, query-suffixed and full-English imports", () => {

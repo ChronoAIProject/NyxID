@@ -104,7 +104,7 @@ function rewriteImports() {
     .filter(([, text]) => mayImportLegacyCatalog(text, LEGACY_CATALOG_IMPORTS));
   const { changed, rewrites } = rewriteLegacyImports(sources, moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
   for (const [file, text] of changed) fs.writeFileSync(path.join(root, file), text);
-  for (const { file, line, from, to } of rewrites) console.log(`i18n: rewrote ${file}:${line} ${from} -> ${to}`);
+  for (const { file, line, from, to, removedAttributes } of rewrites) console.log(`i18n: rewrote ${file}:${line} ${from} -> ${to}${removedAttributes ? " (removed its JSON import attributes)" : ""}`);
   if (changed.length) {
     console.log(`i18n: stage the rewritten imports too: git add ${changed.map(([file]) => file).join(" ")}`);
     console.log("i18n: rewritten imports now load Record<string, string> catalogs, so indexing one with a literal key can be string | undefined; fix any such npx tsc -b error by hand.");
