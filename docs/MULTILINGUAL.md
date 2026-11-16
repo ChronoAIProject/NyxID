@@ -271,7 +271,9 @@ git add -A ../cli/src/wizard # only if you rebuilt the wizard bundle
 git rebase --continue
 ```
 
-The tool uses
+Rebase this way only a branch without merge commits, or only the commits after
+its last merge (`git rebase --onto origin/main <last merge>`); a rebase that
+drops or replays merge commits is refused (see the table below). The tool uses
 `REBASE_HEAD` as the old branch, `REBASE_HEAD^` as its base, and `HEAD` as the
 new portion-layout commit; a conflicted `git cherry-pick` of an old-layout
 commit works the same way with `CHERRY_PICK_HEAD`. `git am` patches carry no
@@ -301,12 +303,40 @@ legacy-fork route below reads the monoliths from the fork and the split areas
 and family catalogs from the last `main` the branch merged. A split-area edit
 was made against the newer `main`, so it takes precedence over a monolith edit
 of the same key; if the monoliths changed that key to something else, the
-branch contradicts itself and the key is reported. The tool refuses, writing
-nothing, when a layout the branch has has no such reference (for example split
-areas the branch made itself, or an `--onto` that shares no history with it),
-when only some monoliths exist, or when a value would be lost. A key that
-reaches the result only through the branch's split-area edits keeps the
+branch contradicts itself and the key is reported. A monolith change that
+equals the split areas' value at that reference is the change `main` already
+made (both sides made the same edit before the merge that kept the monoliths),
+so it is not a branch edit and a later split-area edit of that key wins. A key
+that reaches the result only through the branch's split-area edits keeps the
 branch's area unless `--onto` already places it or a plural sibling.
+
+`--base` must be an ancestor of `--branch` (or `empty`): measured from any other
+commit, `main`'s values would read as reverted by the branch. When the branch
+is already contained in `--onto` (a commit `main` merged before the split,
+reverted, and now re-lands with `git cherry-pick`, or the same commit passed
+explicitly as `--branch <commit> --base <commit>^`), the merge-base is the
+branch itself and says nothing about where its edits begin, so only `--base`
+is used and the commit's edits are applied again.
+
+The tool refuses as a whole, writing nothing and printing no command to run
+instead, every history it cannot model:
+
+| History | Why it is refused | What to do |
+| --- | --- | --- |
+| A rebase that drops merge commits (a plain `git rebase origin/main` of a branch that merged) or replays them (`--rebase-merges`) | A dropped merge's own changes and resolutions are lost; a replayed merge applies a resolution adoption cannot read | `git rebase --abort`, then merge `main`, or rebase only the commits after the branch's last merge (`git rebase --onto origin/main <last merge>`) |
+| `git cherry-pick -m` of a merge commit | Its changes are relative to the mainline parent you chose | Cherry-pick the commits the merge brought in, or merge the branch |
+| An octopus merge | Adoption reads one branch and one onto at a time | Merge one branch at a time |
+| A branch that made its own split areas, then merged `main`'s split areas into them | Its own area edits cannot be told apart from `main`'s, and a resolution that kept its copy would revert `main` | Port the catalog changes by hand onto a fresh branch from `main` |
+| Split areas without a reference (made by the branch itself, or an `--onto` sharing no history) | The branch's area edits cannot be told apart from `main`'s | Remove the branch's own areas, or pass an `--onto` that contains the `main` the branch merged |
+| A `--base` and merge-base that do not contain one another, for a branch that keeps the monoliths | The reference for its split areas is ambiguous | Pass the legacy fork or the adopted commit's parent |
+| A legacy merge commit adopted against one of its parents | The other side's history would read as the branch's own edits | Adopt the merged branch's commits, or the tip against its legacy fork |
+| A `--branch` without monoliths, or an `--onto` that still has monoliths or has no split areas | There is nothing to adopt, or nothing plain to adopt onto | Resolve split conflicts with git and run `npm run sync:i18n`; adopt onto a split `main` |
+| A family catalog the branch has but neither reference has | Its edits cannot be told apart from `main`'s | Pass a `--base` or `--onto` that shares that history |
+
+It also refuses, writing nothing, when only some monoliths exist, when a value
+would be lost (a key both sides changed differently), and when the result
+would break key parity (the branch added or removed a key in only some of
+`en`, `zh-CN` and `zh-TW`).
 
 When it refuses a branch that keeps the monoliths, it finds the branch's
 legacy fork (the newest pre-split commit the branch is based on through its own
