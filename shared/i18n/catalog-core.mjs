@@ -603,3 +603,124 @@ export function gitRepository(cwd) {
 
   return { root, prefix, git, readBlobs, snapshotFiles, resolveAdoptRefs, mergeBase, referenceOrder, legacyForks, baseLessAreaMerges, adoptionReferences };
 }
+
+/* ---------- Legacy catalog imports ---------- */
+
+/**
+ * Resolve a relative or aliased module specifier to a package-relative POSIX
+ * path, independently of the current machine. `aliases` is a list of
+ * `[prefix, replacement]` pairs (e.g. `["@/", "src/"]`). Bare package
+ * specifiers are returned unchanged.
+ */
+export function resolveSpecifier(file, specifier, aliases) {
+  const alias = aliases.find(([from]) => specifier.startsWith(from));
+  if (alias) return path.posix.normalize(`${alias[1]}${specifier.slice(alias[0].length)}`);
+  if (specifier.startsWith(".")) return path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+  return specifier;
+}
+
+/**
+ * The replacement for a specifier that names a legacy catalog file exactly
+ * (`legacy` maps package-relative legacy paths to their replacement modules),
+ * keeping its alias or relative prefix; null for anything else.
+ */
+export function legacyImportReplacement(file, specifier, legacy, aliases) {
+  const resolved = resolveSpecifier(file, specifier, aliases);
+  if (!Object.hasOwn(legacy, resolved)) return null;
+  const tail = path.posix.basename(resolved);
+  if (!specifier.endsWith(`/${tail}`)) return null;
+  return `${specifier.slice(0, -tail.length)}${path.posix.relative(path.posix.dirname(resolved), legacy[resolved])}`;
+}
+
+/** Cheap text filter: could this source import a legacy catalog? */
+export const mayImportLegacyCatalog = (source, legacy) =>
+  Object.keys(legacy).some((file) => source.includes(path.posix.basename(file)));
+
+/**
+ * Rewrite legacy catalog specifiers in `sources` ([file, text] pairs).
+ * `specifiers(file, text)` lists module-specifier string literals as
+ * `{ start, end, text, line, attributes? }` (start/end include the quotes;
+ * `attributes` is the range of its import attributes clause). Returns the
+ * changed texts and one `{ file, line, from, to, removedAttributes }` entry per
+ * rewrite; attributes are removed when the replacement is no longer JSON. With
+ * no writes it doubles as the check for remaining legacy imports.
+ */
+export function rewriteLegacyImports(sources, specifiers, legacy, aliases) {
+  const changed = [];
+  const rewrites = [];
+  for (const [file, text] of sources) {
+    let next = text;
+    const found = specifiers(file, text)
+      .map((literal) => ({ ...literal, to: legacyImportReplacement(file, literal.text, legacy, aliases) }))
+      .filter((literal) => literal.to);
+    const edits = found.flatMap((literal) => [
+      { start: literal.start + 1, end: literal.end - 1, text: literal.to },
+      // JSON import attributes (`with`/`assert { type: "json" }`) are invalid once the target is a module.
+      ...(literal.attributes && !literal.to.endsWith(".json") ? [{ ...literal.attributes, text: "" }] : []),
+    ]);
+    for (const edit of edits.sort((a, b) => b.start - a.start)) next = `${next.slice(0, edit.start)}${edit.text}${next.slice(edit.end)}`;
+    for (const literal of found) {
+      rewrites.push({ file, line: literal.line, from: literal.text, to: literal.to, removedAttributes: Boolean(literal.attributes && !literal.to.endsWith(".json")) });
+    }
+    if (found.length) changed.push([file, next]);
+  }
+  return { changed, rewrites };
+}
+
+const MODULE_CALLS = /^(?:require|require\.resolve|import\.meta\.glob|(?:vi|jest)\.(?:mock|doMock|unmock|importActual|importMock|requireActual|requireMock))$/;
+/**
+ * The module-specifier literal of an import/export, import type, import(),
+ * require() or vi/jest mock call. `ts` is the caller's TypeScript module.
+ */
+export function moduleSpecifierOf(ts, node, ast) {
+  const specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier :
+    ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || MODULE_CALLS.test(node.expression.getText(ast))) ? node.arguments[0] :
+    ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
+  return specifier && ts.isStringLiteralLike(specifier) ? specifier : undefined;
+}
+
+/** A `specifiers(file, source)` lister for rewriteLegacyImports, bound to the caller's TypeScript module. */
+export function moduleSpecifierLister(ts) {
+  return (file, source) => {
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const found = [];
+    const visit = (node) => {
+      const literal = moduleSpecifierOf(ts, node, ast);
+      if (literal) {
+        // The import attributes clause after the specifier, if any: ` with { ... }` / ` assert { ... }`, or import()'s options argument.
+        const attributes = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.attributes ? { start: literal.getEnd(), end: node.attributes.getEnd() } :
+          ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[1] ? { start: literal.getEnd(), end: node.arguments[1].getEnd() } : undefined;
+        found.push({ start: literal.getStart(ast), end: literal.getEnd(), text: literal.text, line: ast.getLineAndCharacterOfPosition(literal.getStart(ast)).line + 1, attributes });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    return found;
+  };
+}
+
+/** Package-relative `.ts`/`.tsx` sources under `root/dir` that might import a legacy catalog. */
+export function legacyImportCandidates(root, dir, legacy) {
+  return walkFiles(path.join(root, dir))
+    .map((file) => [path.relative(root, file).split(path.sep).join("/"), file])
+    .filter(([file]) => /\.tsx?$/.test(file))
+    .map(([file, absolute]) => [file, fs.readFileSync(absolute, "utf8")])
+    .filter(([, text]) => mayImportLegacyCatalog(text, legacy));
+}
+
+/**
+ * Rewrite legacy catalog imports in the working tree under `root/dir` (tests
+ * included), printing each rewrite, the files to stage, an optional type
+ * note and the package's type-check command. Returns the rewritten files.
+ */
+export function rewriteLegacyImportsInTree({ root, dir, specifiers, legacy, aliases, typecheck, typeNote, log = console.log }) {
+  const { changed, rewrites } = rewriteLegacyImports(legacyImportCandidates(root, dir, legacy), specifiers, legacy, aliases);
+  for (const [file, text] of changed) fs.writeFileSync(path.join(root, file), text);
+  for (const { file, line, from, to, removedAttributes } of rewrites) log(`i18n: rewrote ${file}:${line} ${from} -> ${to}${removedAttributes ? " (removed its JSON import attributes)" : ""}`);
+  if (changed.length) {
+    log(`i18n: stage the rewritten imports too: git add ${changed.map(([file]) => file).join(" ")}`);
+    if (typeNote) log(`i18n: ${typeNote}`);
+  }
+  log(`i18n: run ${typecheck} to type-check the result.`);
+  return changed.map(([file]) => file);
+}

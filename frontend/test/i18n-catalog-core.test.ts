@@ -5,8 +5,9 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import ts from "typescript";
 import {
-  catalogTools, gitRepository, scanUsage,
+  catalogTools, gitRepository, legacyImportReplacement, moduleSpecifierLister, rewriteLegacyImportsInTree, scanUsage,
 } from "../../shared/i18n/catalog-core.mjs";
 
 const corePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../shared/i18n/catalog-core.mjs");
@@ -108,5 +109,29 @@ describe("shared i18n catalog core", () => {
     expect(() => repository.resolveAdoptRefs(["--bogus", "HEAD"], "usage text")).toThrow("usage text");
     expect(() => repository.resolveAdoptRefs([], "usage")).toThrow("no merge, rebase or cherry-pick detected");
     expect(repository.resolveAdoptRefs(["--branch", "a", "--base", "empty", "--onto", "b"], "usage")).toEqual({ branch: "a", base: "empty", onto: "b" });
+  });
+
+  it("rewrites legacy imports for any package map, keeping relative prefixes, and logs each rewrite", () => {
+    const legacy = { "src/i18n/locales/zh-CN.json": "src/i18n/locales/zh-CN", "src/i18n/locales/zh-TW.json": "src/i18n/locales/zh-TW" };
+    expect(legacyImportReplacement("src/i18n/translate.ts", "./locales/zh-TW.json", legacy, [])).toBe("./locales/zh-TW");
+    expect(legacyImportReplacement("src/features/a/b.test.ts", "../../i18n/locales/zh-CN.json", legacy, [])).toBe("../../i18n/locales/zh-CN");
+    expect(legacyImportReplacement("src/features/a/b.test.ts", "@/i18n/locales/zh-CN.json", legacy, [])).toBeNull();
+    const root = temporaryDir();
+    fs.mkdirSync(path.join(root, "src/i18n"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/i18n/x.test.tsx"), 'import zh from "./locales/zh-CN.json";\njest.mock("./locales/zh-TW.json");\nimport other from "./other.json";\n');
+    fs.writeFileSync(path.join(root, "src/i18n/plain.ts"), "export const x = 1;\n");
+    const logs: string[] = [];
+    const run = () => rewriteLegacyImportsInTree({ root, dir: "src", specifiers: moduleSpecifierLister(ts), legacy, aliases: [], typecheck: "pnpm typecheck", log: (line: string) => logs.push(line) });
+    expect(run()).toEqual(["src/i18n/x.test.tsx"]);
+    expect(fs.readFileSync(path.join(root, "src/i18n/x.test.tsx"), "utf8")).toBe('import zh from "./locales/zh-CN";\njest.mock("./locales/zh-TW");\nimport other from "./other.json";\n');
+    expect(logs).toEqual([
+      "i18n: rewrote src/i18n/x.test.tsx:1 ./locales/zh-CN.json -> ./locales/zh-CN",
+      "i18n: rewrote src/i18n/x.test.tsx:2 ./locales/zh-TW.json -> ./locales/zh-TW",
+      "i18n: stage the rewritten imports too: git add src/i18n/x.test.tsx",
+      "i18n: run pnpm typecheck to type-check the result.",
+    ]);
+    logs.length = 0;
+    expect(run()).toEqual([]);
+    expect(logs).toEqual(["i18n: run pnpm typecheck to type-check the result."]);
   });
 });
