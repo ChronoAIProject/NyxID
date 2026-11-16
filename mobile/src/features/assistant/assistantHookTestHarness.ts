@@ -29,6 +29,17 @@ export function hookHarness<T>(
   mocks: Record<string, unknown>,
   globals: Record<string, unknown> = {},
 ) {
+  const webBrowserMock = (mocks["expo-web-browser"] ?? {}) as {
+    openBrowserAsync?: (url: string, options?: unknown) => unknown;
+  };
+  const inAppBrowserMock = {
+    openInAppBrowser: (url: string, options?: unknown) => {
+      const open = webBrowserMock.openBrowserAsync;
+      if (typeof open !== "function") return Promise.resolve();
+      return options === undefined ? open(url) : open(url, options);
+    },
+    inAppBrowserOptions: async <T>(extra?: T) => extra,
+  };
   const slots: unknown[] = [];
   const effects = new Map<number, Effect>();
   let pendingEffects: number[] = [];
@@ -139,17 +150,19 @@ export function hookHarness<T>(
                 ? mocks[name]
                 : name.endsWith("/deviceLanguages")
                   ? harness.load(require.resolve(name))
-                  : name.endsWith("/i18n/LanguageProvider")
-                    ? {
-                        useAppLanguage: () => ({
-                          language: "en",
-                          t: (
-                            phrase: string,
-                            values?: Record<string, string | number>,
-                          ) => translate("en", phrase, values),
-                        }),
-                      }
-                    : require(name),
+                  : name.endsWith("/lib/inAppBrowser")
+                    ? inAppBrowserMock
+                    : name.endsWith("/i18n/LanguageProvider")
+                      ? {
+                          useAppLanguage: () => ({
+                            language: "en",
+                            t: (
+                              phrase: string,
+                              values?: Record<string, string | number>,
+                            ) => translate("en", phrase, values),
+                          }),
+                        }
+                      : require(name),
           AbortController,
           URL,
           URLSearchParams,
