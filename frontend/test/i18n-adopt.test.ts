@@ -18,6 +18,12 @@ describe("legacy i18n delta adoption", () => {
     expect(result.conflicts).toEqual(["en: changed key diverged: Key"]);
   });
 
+  it("is idempotent when onto already contains the requested result", () => {
+    expect(applyDelta({ Key: "base" }, { Key: "branch" }, { Key: "branch" }).conflicts).toEqual([]);
+    expect(applyDelta({ Removed: "base" }, {}, {}).conflicts).toEqual([]);
+  });
+
+
   it("co-locates plural siblings and promotes keys used by several areas", () => {
     const usage = scanUsage(
       [

@@ -164,9 +164,12 @@ export function applyDelta(base, branch, onto, label = "catalog") {
       if (!current || onto[key] === branch[key]) result[key] = branch[key];
       else conflicts.push(`${label}: added key diverged: ${key}`);
     } else if (!after) {
-      if (current && onto[key] === base[key]) delete result[key];
+      if (!current || onto[key] === base[key]) delete result[key];
       else conflicts.push(`${label}: removed key diverged: ${key}`);
     } else if (current && onto[key] === base[key]) {
+      result[key] = branch[key];
+    } else if (current && onto[key] === branch[key]) {
+      // A rerun after the same delta has already been adopted is a no-op.
       result[key] = branch[key];
     } else {
       conflicts.push(`${label}: changed key diverged: ${key}`);
