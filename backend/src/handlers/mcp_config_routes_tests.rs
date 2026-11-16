@@ -608,7 +608,7 @@ async fn service_account_purpose_scope_and_revocation_match_mcp() {
         .update_one(doc! {"_id": &sa.id}, doc! {"$set": {"purpose": "general"}})
         .await
         .unwrap();
-    accounts::rotate_secret(&f.state.db, &sa.id, true)
+    accounts::rotate_secret(&f.state.db, &sa.id, true, None)
         .await
         .unwrap();
     assert_eq!(

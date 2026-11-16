@@ -607,6 +607,10 @@ All service account operations are logged:
 | `sa.token_issued` | Successful authentication |
 | `sa.auth_failed` | Failed authentication attempt |
 
+Administrator creation, settings/deactivation, deletion, secret rotation and bulk token revocation commit a bounded audit intent with the effective source change; the existing relay appends each event to the audit chain exactly once. The records preserve their existing metadata and omit secret hashes, prefixes, raw secrets and tokens; rotation and deletion still perform token-row cleanup after the generation change, so a later cleanup error can report failure after that change has committed with its audit evidence.
+
+Bulk administrator revocation commits its generation bump, token-row updates and the actual revoked-count audit together. Its measured operating range is 20,000 token rows per account with a writer offering 25 row updates per second; this is not a new input limit, and larger populations or heavier write load should use a quiet maintenance window. A definite transaction failure rolls back that unit and returns the existing error; an unconfirmed commit can already have committed the entire unit, as with other administrative transactions.
+
 ---
 
 ## Configuration Reference

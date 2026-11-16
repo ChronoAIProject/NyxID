@@ -10047,7 +10047,7 @@ mod curation_auth_regressions {
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         let fresh = token(&f, None).await;
         headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
-        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true)
+        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true, None)
             .await
             .unwrap();
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
