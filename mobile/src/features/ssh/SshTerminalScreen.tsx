@@ -323,6 +323,7 @@ export function SshTerminalScreen({
         );
         socket.current = ws;
         ws.binaryType = "arraybuffer";
+        let connected = false;
         let transportError = false;
         let terminalSettled = false;
         const fail = (status?: number) => {
@@ -352,6 +353,7 @@ export function SshTerminalScreen({
           try {
             const message = serverMessage.parse(JSON.parse(event.data));
             if (message.type === "connected") {
+              connected = true;
               resetForAttempt();
               send({ type: "reset" });
               setState("Connected");
@@ -393,6 +395,7 @@ export function SshTerminalScreen({
           const status = terminalUpgradeStatus(
             event as unknown as { message?: string; status?: number },
           );
+          if (connected && !status) return;
           transportError = true;
           // RN 0.83 emits an empty error Event, then a CloseEvent whose reason
           // contains the native upgrade failure. Preserve that second event.

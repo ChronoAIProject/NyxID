@@ -585,6 +585,95 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
   },
 );
 
+test("a connected Android transport error followed by close is a clean session close", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  const screen = await renderTerminal(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+  );
+  const view = screen.getByTestId("terminal-webview");
+  await message(view, { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
+  await act(async () => {
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "connected", cols: 80, rows: 24 }),
+    });
+    socket.onerror?.({});
+    socket.onclose?.({ code: 1006, reason: "" });
+  });
+  expect(screen.getByText("Disconnected")).toBeTruthy();
+  expect(screen.getByText("Reconnect")).toBeTruthy();
+  expect(
+    mockInject.mock.calls.some(
+      ([script]) =>
+        script.includes('"type":"session-ended"') &&
+        script.includes("Connection closed."),
+    ),
+  ).toBe(true);
+  expect(
+    screen.queryByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeNull();
+  await screen.unmount();
+});
+
+test("a pre-connect Android transport error still shows the network fallback", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  const screen = await renderTerminal(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
+  await act(async () => {
+    socket.onerror?.({});
+    socket.onclose?.({ code: 1006, reason: "" });
+  });
+  expect(
+    screen.getByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeTruthy();
+  await screen.unmount();
+});
+
+test("a clean close resets connected state before the next pre-connect attempt", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  const screen = await renderTerminal(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+  );
+  const view = screen.getByTestId("terminal-webview");
+  await message(view, { type: "ready" });
+  await waitForSocket();
+  const first = Socket.instances[0]!;
+  await act(async () => {
+    first.onmessage?.({
+      data: JSON.stringify({ type: "connected", cols: 80, rows: 24 }),
+    });
+    first.onclose?.({ code: 1000, reason: "" });
+  });
+  expect(screen.getByText("Disconnected")).toBeTruthy();
+  expect(
+    screen.queryByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeNull();
+  await fireEvent.press(screen.getByText("Reconnect"));
+  await waitFor(() => expect(Socket.instances).toHaveLength(2));
+  const second = Socket.instances[1]!;
+  await act(async () => {
+    second.onerror?.({});
+    second.onclose?.({ code: 1006, reason: "" });
+  });
+  expect(
+    screen.getByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeTruthy();
+  await screen.unmount();
+});
+
 test("remote close and invalid bridge data never replay shell input; resizing is debounced", async () => {
   jest.useFakeTimers();
   const screen = await renderTerminal(
