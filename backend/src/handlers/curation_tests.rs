@@ -630,7 +630,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
             None,
             None,
             false,
-            None
+            None,
+            None,
         )
         .await
         .is_err()
@@ -655,7 +656,7 @@ async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_f
     );
     let rotate = async {
         before.wait().await;
-        let result = accounts::rotate_secret(&f.state.db, &f.sa.id, true)
+        let result = accounts::rotate_secret(&f.state.db, &f.sa.id, true, None)
             .await
             .unwrap();
         resume.wait().await;
@@ -1348,7 +1349,7 @@ async fn curation_introspection_requires_current_persisted_token() {
         false
     );
     let fresh = token(&f, None).await;
-    accounts::rotate_secret(&f.state.db, &f.sa.id, true)
+    accounts::rotate_secret(&f.state.db, &f.sa.id, true, None)
         .await
         .unwrap();
     assert_eq!(
