@@ -112,24 +112,12 @@ function sourceFiles(dir) {
     return entry.isDirectory() ? sourceFiles(file) : entry.isFile() ? [file] : [];
   });
 }
-// The import boundary covers all non-test source, including fixtures and locale barrels.
-for (const file of sourceFiles("src").filter((file) => /\.tsx?$/.test(file) && !isTestSource(file))) {
-  const source = fs.readFileSync(path.join(root, file), "utf8");
-  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
-  function visit(node) {
-    const specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier :
-      ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || node.expression.getText(ast) === "require" || node.expression.getText(ast).startsWith("import.meta.glob")) ? node.arguments[0] :
-      ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
-    if (specifier && ts.isStringLiteralLike(specifier)) {
-      const issue = catalogImportIssue(file, specifier.text);
-      if (issue) issues.push(`${file}:${ast.getLineAndCharacterOfPosition(node.getStart()).line + 1}: ${issue}`);
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-}
-const files = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) &&
-    !FIXTURE_SOURCE.test(file) && !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
+// The import boundary covers all non-test source, including fixtures and locale barrels;
+// the copy audit covers a narrower list. Each file is parsed once for both.
+const guardedFiles = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) && !isTestSource(file));
+const isAuditFile = (file) => !FIXTURE_SOURCE.test(file) &&
+  !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file);
+const files = guardedFiles.filter(isAuditFile);
 let checkedKeys = 0;
 const errorHelperFiles = new Set([
   "src/lib/api-error.ts",
@@ -139,12 +127,22 @@ const errorHelperFiles = new Set([
 ]);
 const hasKey = (key) => [...catalogs.values()].some((catalog) => key in catalog);
 
-for (const file of files) {
+for (const file of guardedFiles) {
   const source = fs.readFileSync(path.join(root, file), "utf8");
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const audit = isAuditFile(file);
   const report = (node, message) => {
     const line = ast.getLineAndCharacterOfPosition(node.getStart()).line + 1;
     issues.push(`${file}:${line}: ${message}`);
+  };
+  const guardImport = (node) => {
+    const specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier :
+      ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || node.expression.getText(ast) === "require" || node.expression.getText(ast).startsWith("import.meta.glob")) ? node.arguments[0] :
+      ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
+    if (specifier && ts.isStringLiteralLike(specifier)) {
+      const issue = catalogImportIssue(file, specifier.text);
+      if (issue) report(node, issue);
+    }
   };
   const withinCode = (node) => {
     for (let parent = node.parent; parent; parent = parent.parent) {
@@ -152,7 +150,7 @@ for (const file of files) {
     }
     return false;
   };
-  const visit = (node) => {
+  const auditNode = (node) => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
       /^toLocale(?:Date|Time)?String$/.test(node.expression.name.text) &&
       (!node.arguments.length || node.arguments[0].getText(ast) === "undefined" ||
@@ -218,6 +216,10 @@ for (const file of files) {
       }
     }
     if (copy && isCopy(decodeEntities(copy)) && !withinCode(node)) report(node, `untranslated UI literal: ${copy}`);
+  };
+  const visit = (node) => {
+    guardImport(node);
+    if (audit) auditNode(node);
     ts.forEachChild(node, visit);
   };
   visit(ast);
