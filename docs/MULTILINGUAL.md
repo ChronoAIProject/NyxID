@@ -474,8 +474,11 @@ Chinese catalogs use the same structure as the web app catalogs:
   sorted, one directory per area. Each `src/features/<name>` directory has its
   own area, `navigation` covers the navigation shell in `src/app`, `shared` holds keys
   used by several areas plus shared components, hooks and libraries, and
-  `unattributed` holds phrases with no literal source reference. The ordered
-  map is `mobile/scripts/lib/i18n-portions.mjs`.
+  `unattributed` holds phrases with no literal source reference. Feature
+  areas are derived from the directory name, so a new feature directory gets
+  its own area automatically; it must not be named `navigation`, `shared` or
+  `unattributed` (the tools fail with a clear error). The map is
+  `mobile/scripts/lib/i18n-portions.mjs`.
 - `mobile/src/i18n/locales/zh-CN.ts` and `zh-TW.ts`: generated barrels that
   import every area JSON explicitly, in sorted order, and merge them. Metro,
   jest and `node:test` need no glob support. Import catalogs only through these

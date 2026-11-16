@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, test } from "node:test";
 import { canonicalText } from "../../shared/i18n/catalog-core.mjs";
 import { LANGUAGES, auditCatalogs, barrelText } from "./lib/i18n-catalogs.mjs";
+import { portionForPath } from "./lib/i18n-portions.mjs";
 
 const mobile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = [];
@@ -27,6 +28,23 @@ function catalogDir(areas) {
   for (const language of LANGUAGES) write(path.join(dir, `${language}.ts`), barrelText(Object.keys(areas), language));
   return dir;
 }
+
+describe("mobile area map", () => {
+  test("derives feature areas from the directory and keeps navigation and shared", () => {
+    assert.equal(portionForPath("src/features/account/Screen.tsx"), "account");
+    assert.equal(portionForPath("src/features/brand-new/deep/Thing.tsx"), "brand-new");
+    assert.equal(portionForPath("src/app/AppNavigator.tsx"), "navigation");
+    assert.equal(portionForPath("src/components/Button.tsx"), "shared");
+    assert.equal(portionForPath("src/lib/format.ts"), "shared");
+    assert.equal(portionForPath("src/features.ts"), "shared");
+  });
+
+  test("fails clearly when a feature directory collides with a reserved area", () => {
+    for (const name of ["shared", "unattributed", "navigation"]) {
+      assert.throws(() => portionForPath(`src/features/${name}/Screen.tsx`), new RegExp(`src/features/${name} collides with the reserved catalog area "${name}"`));
+    }
+  });
+});
 
 describe("mobile catalog audit", () => {
   test("accepts a valid split", () => {
@@ -141,6 +159,16 @@ describe("mobile adopt and sync tools", () => {
       assert.equal(fs.existsSync(path.join(r.locales, "unattributed")), false);
     });
   }
+
+  test("refuses to place keys when a feature directory uses a reserved area name", () => {
+    const r = repository();
+    write(path.join(r.root, "src/features/shared/Screen.tsx"), 'export const a = t("Remove me");\n');
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "reserved feature");
+    const result = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", "empty", "--onto", "HEAD");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /src\/features\/shared collides with the reserved catalog area "shared"/);
+    assert.equal(fs.existsSync(path.join(r.locales, "shared")), false);
+  });
 
   test("rejects a divergent value without writing files", () => {
     const r = repository();
