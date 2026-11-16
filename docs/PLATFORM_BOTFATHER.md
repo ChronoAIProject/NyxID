@@ -359,6 +359,8 @@ npx playwright test --config playwright.platform-setups.config.ts
 ```
 
 The browser suite owns strict port 4634 and refuses an already-running server.
+Its HTTP fixture serves empty Google Fonts CSS locally and blocks other external
+requests, so provider/network availability cannot consume the page-load deadline.
 It checks direct entry, reload, client-side links, back/forward, separate draft
 rows, one in-flight adoption POST, validation/errors and explicit retry. The
 router suite additionally checks binding-generation and account resets. Keep
@@ -370,6 +372,12 @@ The issue's production report (2026-11-13, source reference `31f3d89`) described
 token/import form. The regression reproduced the duplicate module on `e0c349a43`
 (frontend 0.78.0), whose flow is Linked chat → review → Adopt reviewed draft.
 These fixtures verify browser behavior, not production or live-provider delivery.
+
+The `Frontend` CI job runs the router/adoption regressions through `npm run test`.
+The six browser cases are a separate acceptance command shown above; they are not
+currently run by CI. They are excluded from the default Playwright suite because
+that suite boots Vite in `test` mode with the assistant's in-app fixtures. This
+suite needs its dedicated configuration to exercise the real HTTP client.
 
 ### External acceptance
 

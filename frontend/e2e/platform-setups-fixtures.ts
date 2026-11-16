@@ -22,6 +22,17 @@ export async function installSetupFixture(page: Page) {
     pageErrors: [] as string[],
   };
   page.on("pageerror", (error) => state.pageErrors.push(error.message));
+  // index.html loads Google Fonts before the app. A live font response can
+  // consume the test's whole deadline before reload even starts (#2437).
+  // Keep this HTTP fixture self-contained; system fonts suffice for DOM tests.
+  await page.route("**/*", (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin === "http://localhost:4634") return route.fallback();
+    if (url.origin === "https://fonts.googleapis.com")
+      return route.fulfill({ contentType: "text/css", body: "" });
+    state.unexpected.push(`External request: ${url.origin}${url.pathname}`);
+    return route.abort("blockedbyclient");
+  });
   await page.addInitScript((actor) => {
     localStorage.setItem("nyxid.language", "en");
     localStorage.setItem(
