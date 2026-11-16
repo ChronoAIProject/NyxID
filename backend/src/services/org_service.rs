@@ -30,6 +30,7 @@ use crate::services::org_slug;
 
 pub(crate) mod audit;
 pub(crate) mod membership;
+pub(crate) mod profile;
 
 /// Wall-clock timeout for the proxy fallback membership query.
 ///
@@ -44,10 +45,9 @@ pub const ORG_FALLBACK_TIMEOUT: Duration = Duration::from_millis(500);
 // Org user CRUD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Create the underlying `User` row for a new org and return its id.
-///
-/// Org users have `user_type = Org`, no password, no MFA, and cannot log in
-/// via any auth path -- those are blocked in `auth_service::ensure_person_user`.
+/// Fixture org rows use the same validation/default preparation as creation.
+/// Membership and audit behavior is exercised through the production handler.
+#[cfg(test)]
 pub async fn create_org_user(
     db: &mongodb::Database,
     display_name: &str,
@@ -55,15 +55,12 @@ pub async fn create_org_user(
     avatar_url: Option<&str>,
 ) -> AppResult<User> {
     let id = Uuid::new_v4().to_string();
-    create_org_user_with_id(db, &id, display_name, contact_email, avatar_url).await
+    let org = prepare_org_user(db, &id, display_name, contact_email, avatar_url).await?;
+    db.collection::<User>(USERS).insert_one(&org).await?;
+    Ok(org)
 }
 
-/// Create an org user with a caller-reserved identity.
-///
-/// Assistant action receipts reserve this id before attempting the multi-step
-/// org create, so a retry can prove that the org user insert committed even
-/// if membership creation or receipt completion was interrupted.
-pub async fn create_org_user_with_id(
+async fn prepare_org_user(
     db: &mongodb::Database,
     id: &str,
     display_name: &str,
@@ -122,19 +119,26 @@ pub async fn create_org_user_with_id(
         profile_config: Default::default(),
     };
 
-    db.collection::<User>(USERS).insert_one(&org).await?;
-    tracing::info!(org_user_id = %id, "Org user created");
     Ok(org)
 }
 
 /// Look up an org user by id. Returns `OrgNotFound` when missing or the
 /// user is not actually an org account.
 pub async fn get_org_user(db: &mongodb::Database, org_user_id: &str) -> AppResult<User> {
-    let user = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": org_user_id })
-        .await?
-        .ok_or_else(|| AppError::OrgNotFound(org_user_id.to_string()))?;
+    get_org_user_with_session(db, org_user_id, None).await
+}
+async fn get_org_user_with_session(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<User> {
+    let users = db.collection::<User>(USERS);
+    let user = users.find_one(doc! { "_id": org_user_id });
+    let user = match session {
+        Some(session) => user.session(session).await?,
+        None => user.await?,
+    }
+    .ok_or_else(|| AppError::OrgNotFound(org_user_id.to_string()))?;
     if !user.user_type.is_org() {
         return Err(AppError::OrgNotFound(org_user_id.to_string()));
     }
@@ -214,75 +218,6 @@ pub fn contact_email_for_display(user: &User) -> Option<String> {
         return None;
     }
     Some(email.to_string())
-}
-
-/// Update org metadata. Supports `display_name`, `avatar_url`, and
-/// `contact_email`. Pass `Some(value)` to set/clear each field; `None` leaves
-/// the field untouched. For `contact_email`, an empty string clears back to
-/// the synthetic placeholder so audit/admin surfaces stay legible.
-pub async fn update_org_user(
-    db: &mongodb::Database,
-    org_user_id: &str,
-    display_name: Option<&str>,
-    slug: Option<&str>,
-    avatar_url: Option<&str>,
-    contact_email: Option<&str>,
-    remote_credential_integrity_verification_opt_out: Option<bool>,
-) -> AppResult<User> {
-    // Verify it's an org first.
-    let existing = get_org_user(db, org_user_id).await?;
-
-    let mut update = doc! {};
-    if let Some(name) = display_name {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            return Err(AppError::ValidationError(
-                "Org display name cannot be empty".to_string(),
-            ));
-        }
-        update.insert("display_name", trimmed);
-    }
-    if let Some(slug) = slug {
-        update.insert("slug", slug);
-    }
-    if let Some(avatar) = avatar_url {
-        let trimmed = avatar.trim();
-        if trimmed.is_empty() {
-            update.insert("avatar_url", bson::Bson::Null);
-        } else {
-            update.insert("avatar_url", trimmed);
-        }
-    }
-    if let Some(email) = contact_email {
-        let trimmed = email.trim();
-        if trimmed.is_empty() {
-            // Restore the synthetic placeholder so admin/audit surfaces
-            // still show a stable, unique-looking identifier.
-            update.insert("email", synthetic_org_email(&existing.id));
-        } else {
-            // Defensive validation — handler-level validator already runs,
-            // but this keeps the service safe for direct callers.
-            if !trimmed.contains('@') {
-                return Err(AppError::ValidationError(
-                    "contact_email must be a valid email".to_string(),
-                ));
-            }
-            update.insert("email", trimmed.to_lowercase());
-        }
-    }
-    if let Some(opt_out) = remote_credential_integrity_verification_opt_out {
-        update.insert(
-            "profile_config.release_integrity.remote_credential_integrity_verification_opt_out",
-            opt_out,
-        );
-    }
-    update.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
-
-    db.collection::<User>(USERS)
-        .update_one(doc! { "_id": org_user_id }, doc! { "$set": update })
-        .await?;
-
-    get_org_user(db, org_user_id).await
 }
 
 pub fn remote_credential_integrity_verification_opt_out(user: &User) -> bool {
@@ -907,6 +842,7 @@ async fn delete_inactive_org_oauth_client(
 /// same pair: it resets `revoked_at` to null, refreshes `created_at` to the
 /// rejoin time, and applies the new role / scope. Active rows still return
 /// `Conflict` to surface the obvious mistake.
+#[cfg(test)]
 pub async fn create_membership(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -1891,3 +1827,6 @@ mod tests {
 
 #[cfg(test)]
 mod audit_tests;
+
+#[cfg(test)]
+mod lifecycle_tests;

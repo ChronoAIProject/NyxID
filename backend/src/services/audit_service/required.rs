@@ -1,4 +1,5 @@
 use mongodb::Database;
+use sha2::{Digest, Sha256};
 
 use crate::{
     errors::{AppError, AppResult},
@@ -14,6 +15,7 @@ use super::AuditActor;
 // These are forensic identifiers and bounded facts, never source documents.
 const MAX_INTENT_METADATA_BYTES: usize = 16 * 1024;
 const TRUNCATED: &str = "...[truncated]";
+pub(crate) const MAX_IDENTIFIER_LIST_BYTES: usize = 8 * 1024;
 
 /// Byte budgets include the visible marker. Input validation and source values
 /// are unchanged; only the audit representation is shortened.
@@ -49,6 +51,47 @@ pub(crate) fn text(field: TextField, value: &str) -> String {
         end -= 1;
     }
     format!("{}{TRUNCATED}", &value[..end])
+}
+
+/// Record the original-order prefix of an identifier list within 8 KiB of
+/// BSON array bytes, including element/index overhead. Source values and
+/// validation are unchanged; the digest covers all submitted IDs, before caps,
+/// separated by one newline with no trailing newline.
+pub(crate) fn identifier_list(
+    name: &'static str,
+    ids: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut kept = Vec::new();
+    let mut bytes = 5; // BSON document length and trailing zero.
+    for id in ids {
+        let value = text(TextField::Identifier, id);
+        // Type byte + decimal index cstring + string length + string terminator.
+        let element_bytes = 7 + kept.len().to_string().len() + value.len();
+        if bytes + element_bytes > MAX_IDENTIFIER_LIST_BYTES {
+            break;
+        }
+        bytes += element_bytes;
+        kept.push(value);
+    }
+    let shortened = kept.len() != ids.len();
+    let mut fields = serde_json::Map::new();
+    fields.insert(name.to_owned(), serde_json::json!(kept));
+    if shortened {
+        let mut digest = Sha256::new();
+        for (index, id) in ids.iter().enumerate() {
+            if index != 0 {
+                digest.update(b"\n");
+            }
+            digest.update(id.as_bytes());
+        }
+        fields.insert(format!("{name}_count"), ids.len().into());
+        fields.insert(format!("{name}_truncated"), true.into());
+        fields.insert(
+            format!("{name}_sha256"),
+            hex::encode(digest.finalize()).into(),
+        );
+    }
+    fields
 }
 
 fn optional_text(field: TextField, value: Option<&str>) -> Option<String> {
@@ -149,6 +192,29 @@ pub(crate) async fn append_intent(db: &Database, event: &AuditLog) -> AppResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_list_preserves_short_lists_and_hashes_uncapped_input_in_order() {
+        let ids = vec!["second".to_owned(), "first".to_owned(), "second".to_owned()];
+        assert_eq!(
+            serde_json::Value::Object(identifier_list("ids", &ids)),
+            serde_json::json!({"ids":ids})
+        );
+        let ids = vec!["界".repeat(512); 80];
+        let data = identifier_list("ids", &ids);
+        let kept = data["ids"].as_array().unwrap();
+        assert!(kept.len() < ids.len());
+        assert!(
+            kept.iter()
+                .all(|v| v.as_str().unwrap() == text(TextField::Identifier, &ids[0]))
+        );
+        assert_eq!(data["ids_count"], 80);
+        assert_eq!(data["ids_truncated"], true);
+        assert_eq!(
+            data["ids_sha256"],
+            hex::encode(Sha256::digest(ids.join("\n").as_bytes()))
+        );
+    }
 
     #[test]
     fn required_user_agent_is_bounded_marked_and_utf8_safe_at_every_entrypoint() {
