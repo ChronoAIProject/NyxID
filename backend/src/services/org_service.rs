@@ -29,7 +29,9 @@ use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::services::org_slug;
 
 pub(crate) mod audit;
+pub(crate) mod cascade;
 mod deletion;
+pub(crate) mod diagnostics;
 pub(crate) mod membership;
 pub(crate) mod profile;
 
@@ -502,53 +504,28 @@ pub async fn delete_org_user(
             ],
         })
         .await?;
-    // Service accounts: snapshot owned ids BEFORE deleting the SA rows
-    // so we can clean up `service_account_tokens` AND any SA-owned
-    // `user_provider_tokens` afterwards. The SA delete path only marks
-    // SA tokens as `revoked: true` and never touches provider tokens.
-    // SA-owned provider tokens are stored with `user_id == sa_id`
-    // (see `handlers/admin_sa_providers::store_api_key` etc.), so the
-    // snapshot is the only path back to them once the SA row is gone.
-    // Mirrors the cleanup that `admin_user_service::delete_user` does
-    // for person users.
-    let owned_sa_ids: Vec<String> = db
-        .collection::<bson::Document>(crate::models::service_account::COLLECTION_NAME)
-        .distinct("_id", doc! { "owner_user_id": org_user_id })
-        .await?
-        .into_iter()
-        .filter_map(|value| match value {
-            bson::Bson::String(id) => Some(id),
-            _ => None,
-        })
-        .collect();
-    db.collection::<bson::Document>(crate::models::service_account::COLLECTION_NAME)
-        .delete_many(doc! { "owner_user_id": org_user_id, "is_active": false })
-        .await?;
-    if !owned_sa_ids.is_empty() {
-        let sa_id_array: Vec<bson::Bson> = owned_sa_ids
-            .iter()
-            .cloned()
-            .map(bson::Bson::String)
-            .collect();
-        db.collection::<bson::Document>(crate::models::service_account_token::COLLECTION_NAME)
-            .delete_many(doc! { "service_account_id": { "$in": &sa_id_array } })
-            .await?;
-        // SA-owned provider tokens (user_provider_tokens.user_id is
-        // overloaded with the SA id for SA-owned connections).
-        db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
-            .delete_many(doc! { "user_id": { "$in": &sa_id_array } })
-            .await?;
-        // Same overload for any in-flight oauth states the SA may
-        // have started but never finished.
-        db.collection::<bson::Document>(crate::models::oauth_state::COLLECTION_NAME)
-            .delete_many(doc! {
-                "$or": [
-                    { "user_id": { "$in": &sa_id_array } },
-                    { "target_user_id": { "$in": &sa_id_array } },
-                ],
-            })
-            .await?;
-    }
+    // Keep each join parent until its children are gone. A fresh retry can
+    // rediscover the remainder even after any standalone delete is interrupted.
+    cascade::delete_inactive_parents(
+        db,
+        crate::models::service_account::COLLECTION_NAME,
+        doc! {"owner_user_id":org_user_id},
+        &[
+            (
+                crate::models::service_account_token::COLLECTION_NAME,
+                &["service_account_id"],
+            ),
+            (
+                crate::models::user_provider_token::COLLECTION_NAME,
+                &["user_id"],
+            ),
+            (
+                crate::models::oauth_state::COLLECTION_NAME,
+                &["user_id", "target_user_id"],
+            ),
+        ],
+    )
+    .await?;
     // Drop ALL provider tokens owned by the org, not just revoked ones.
     // The blocker check above already required no non-revoked tokens at
     // start time, so what's caught here is the union of (a) the revoked
@@ -581,17 +558,6 @@ pub async fn delete_org_user(
                 .get_str("_id")
                 .map_err(|_| AppError::Internal("OAuth client identity invalid".into()))?;
             delete_inactive_org_oauth_client(db, org_user_id, client_id).await?;
-            for collection in [
-                crate::models::refresh_token::COLLECTION_NAME,
-                crate::models::consent::COLLECTION_NAME,
-            ] {
-                db.collection::<bson::Document>(collection)
-                    .delete_many(doc! {"client_id":client_id})
-                    .await?;
-            }
-            db.collection::<bson::Document>(crate::models::authorization_code::COLLECTION_NAME)
-                .delete_many(doc! {"client_id":client_id,"used":false})
-                .await?;
         }
     }
     // Credential nodes. Active nodes are blocked above so what remains
@@ -632,48 +598,22 @@ pub async fn delete_org_user(
     db.collection::<bson::Document>(crate::models::user_provider_credentials::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
-    // Custom catalog services created via `POST /services` by an
-    // org-owned API key. Active rows are blocked above, so what's
-    // left here is soft-deleted tombstones plus their child
-    // `service_endpoints` and `service_provider_requirements` rows
-    // (which key off `service_id`, not `created_by`).
-    //
-    // Snapshot owned downstream service ids BEFORE deleting the
-    // tombstones, then use the snapshot to clean up the children.
-    // Without that ordering the children would lose their only path
-    // back to the org. Mirrors the `channel_event_logs` and
-    // `service_account_tokens` patterns above.
-    let owned_service_ids: Vec<String> = db
-        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .distinct(
-            "_id",
-            super::ownership_transfer_service::catalog_owner_filter(org_user_id),
-        )
-        .await?
-        .into_iter()
-        .filter_map(|value| match value {
-            bson::Bson::String(id) => Some(id),
-            _ => None,
-        })
-        .collect();
-    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .delete_many(doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": false }] })
-        .await?;
-    if !owned_service_ids.is_empty() {
-        let svc_id_array: Vec<bson::Bson> = owned_service_ids
-            .iter()
-            .cloned()
-            .map(bson::Bson::String)
-            .collect();
-        db.collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
-            .delete_many(doc! { "service_id": { "$in": &svc_id_array } })
-            .await?;
-        db.collection::<bson::Document>(
-            crate::models::service_provider_requirement::COLLECTION_NAME,
-        )
-        .delete_many(doc! { "service_id": { "$in": &svc_id_array } })
-        .await?;
-    }
+    cascade::delete_inactive_parents(
+        db,
+        crate::models::downstream_service::COLLECTION_NAME,
+        super::ownership_transfer_service::catalog_owner_filter(org_user_id),
+        &[
+            (
+                crate::models::service_endpoint::COLLECTION_NAME,
+                &["service_id"],
+            ),
+            (
+                crate::models::service_provider_requirement::COLLECTION_NAME,
+                &["service_id"],
+            ),
+        ],
+    )
+    .await?;
     // Channel relay state. Active rows are blocked above, so what's left
     // here is soft-deleted bot/conversation tombstones plus any
     // append-only message and event-log records that referenced them.
@@ -816,6 +756,19 @@ async fn delete_inactive_org_oauth_client(
                     session,
                 )
                 .await?;
+                for collection in [
+                    crate::models::refresh_token::COLLECTION_NAME,
+                    crate::models::consent::COLLECTION_NAME,
+                ] {
+                    db.collection::<bson::Document>(collection)
+                        .delete_many(doc! {"client_id":&client_id})
+                        .session(&mut *session)
+                        .await?;
+                }
+                db.collection::<bson::Document>(crate::models::authorization_code::COLLECTION_NAME)
+                    .delete_many(doc! {"client_id":&client_id,"used":false})
+                    .session(&mut *session)
+                    .await?;
                 let deleted = clients
                     .delete_one(doc! {"_id":&client_id,"created_by":&owner,"is_active":false})
                     .session(&mut *session)

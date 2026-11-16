@@ -116,6 +116,10 @@ async fn complete_in_session(context: &Completion<'_>, tx: &mut ClientSession) -
         marker,
         intent,
     } = context;
+    super::super::execution_permission_enrollment::jobs::delete_memberships_in_session(
+        db, org, false, tx,
+    )
+    .await?;
     let deleted = db
         .collection::<Document>(super::USERS)
         .delete_one(doc! {

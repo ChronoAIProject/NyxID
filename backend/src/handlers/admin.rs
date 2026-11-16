@@ -1674,6 +1674,15 @@ async fn active_startup_diagnostics(
                 detected_at: diagnostic.detected_at,
             }),
     );
+    if let Some(diagnostic) = crate::services::org_service::diagnostics::diagnostic(db).await? {
+        items.push(StartupDiagnosticItem {
+            code: diagnostic.code,
+            summary: diagnostic.summary,
+            detail: diagnostic.detail,
+            remediation: diagnostic.remediation,
+            detected_at: diagnostic.detected_at,
+        });
+    }
     Ok(items)
 }
 

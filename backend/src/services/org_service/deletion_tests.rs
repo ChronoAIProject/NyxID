@@ -32,6 +32,7 @@ enum Boundary {
 struct ProcessStopped;
 #[derive(Default)]
 struct Monitor {
+    units: retry::Units,
     stop: Option<Boundary>,
     transaction: Option<i64>,
     completions: HashSet<i32>,
@@ -53,6 +54,10 @@ async fn fixture() -> Fixture {
                 return;
             }
             let mut seen = seen.lock().unwrap();
+            if seen.units.observe(&event) {
+                drop(seen);
+                std::panic::resume_unwind(Box::new(ProcessStopped));
+            }
             match event {
                 CommandEvent::Started(e) => {
                     let collection = e.command.get_str(&e.command_name).unwrap_or("").to_owned();
@@ -240,7 +245,11 @@ async fn org_deletion_request_command_counts() {
         "ORG_DELETE_COMMANDS total={} commands={commands:?}",
         commands.len()
     );
-    assert_eq!(commands.len(), 74, "baseline 69 + start 3 + completion 2");
+    assert_eq!(
+        commands.len(),
+        75,
+        "retry-safe memberships and child-first discovery"
+    );
     f.state.db.drop().await.unwrap();
 }
 
@@ -299,7 +308,7 @@ async fn org_deletion_rejected_completion_intent_rolls_back_final_delete_only() 
     assert!(org.get_document("deletion_audit").is_ok());
     assert!(rows(&f, "approval_requests").await.is_empty());
     assert!(rows(&f, "user_service_connections").await.is_empty());
-    assert!(rows(&f, "org_memberships").await.is_empty());
+    assert_eq!(rows(&f, "org_memberships").await.len(), 1);
     assert_eq!(count(&f, INTENTS, REQUESTED).await, 1);
     assert_eq!(count(&f, INTENTS, COMPLETED).await, 0);
     relay_twice(&f).await;
@@ -334,7 +343,7 @@ async fn org_deletion_retry_reuses_relayed_marker_without_second_requested_event
     );
     assert_eq!(
         commands.len(),
-        73,
+        74,
         "existing marker omits requested intent insert"
     );
     relay_twice(&f).await;
@@ -624,3 +633,5 @@ async fn org_deletion_oversized_request_context_succeeds_and_relays_capped_value
     }
     f.state.db.drop().await.unwrap();
 }
+
+mod retry;
