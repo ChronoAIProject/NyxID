@@ -12,6 +12,8 @@
     "test:jest": "jest",
     "typecheck": "tsc --noEmit",
     "check:native-sync": "node scripts/check-native-sync.js",
+    "sync:i18n": "node scripts/sync-i18n.mjs",
+    "adopt:i18n": "node scripts/adopt-i18n.mjs",
     "build:ios": "APP_ENV=prod node scripts/build-ios.js",
     "build:ios:dev": "APP_ENV=dev node scripts/build-ios.js",
     "build:android": "APP_ENV=prod node scripts/build-android.js",
