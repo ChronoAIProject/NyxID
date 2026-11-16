@@ -4,8 +4,9 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  LANGUAGES, FAMILIES, analyzePortions, applyDelta, consolidateDuplicates,
-  emptyLanguages, englishOverrides, isPlacementSource, placeCatalogs, writeJson, writePortions,
+  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta,
+  consolidateDuplicates, emptyLanguages, englishOverrides, isPlacementSource, mayImportLegacyCatalog,
+  moduleSpecifiers, placeCatalogs, rewriteLegacyImports, walkFiles, writeJson, writePortions,
 } from "./lib/i18n-catalogs.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -18,7 +19,7 @@ const args = process.argv.slice(2);
 function resolveRefs() {
   const refs = {};
   for (let i = 0; i < args.length; i += 2) {
-    if (!["--branch", "--base", "--onto"].includes(args[i]) || !args[i + 1]) throw new Error("usage: npm run adopt:i18n -- --branch <ref> --base <ref|empty> --onto <ref>");
+    if (!["--branch", "--base", "--onto"].includes(args[i]) || !args[i + 1]) throw new Error("usage: npm run adopt:i18n -- --branch <ref> --base <ref|empty> --onto <ref> | --imports-only");
     refs[args[i].slice(2)] = args[i + 1];
   }
   if (Object.keys(refs).length) {
@@ -76,7 +77,31 @@ function snapshot(ref, { sources: withSources }) {
   return { app, portions, families, sources };
 }
 
+/**
+ * Point imports of the pre-split catalog files (tests included) at their
+ * replacements in the working tree, printing each rewrite.
+ */
+function rewriteImports() {
+  const sources = walkFiles(path.join(root, "src"))
+    .map((file) => [path.relative(root, file).split(path.sep).join("/"), file])
+    .filter(([file]) => /\.tsx?$/.test(file))
+    .map(([file, absolute]) => [file, fs.readFileSync(absolute, "utf8")])
+    .filter(([, text]) => mayImportLegacyCatalog(text, LEGACY_CATALOG_IMPORTS));
+  const { changed, rewrites } = rewriteLegacyImports(sources, moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+  for (const [file, text] of changed) fs.writeFileSync(path.join(root, file), text);
+  for (const { file, line, from, to } of rewrites) console.log(`i18n: rewrote ${file}:${line} ${from} -> ${to}`);
+  if (changed.length) {
+    console.log(`i18n: stage the rewritten imports too: git add ${changed.map(([file]) => file).join(" ")}`);
+    console.log("i18n: rewritten imports now load Record<string, string> catalogs, so indexing one with a literal key can be string | undefined; fix any such npx tsc -b error by hand.");
+  }
+  console.log("i18n: run npx tsc -b to type-check the result.");
+}
+
 try {
+  if (args.length === 1 && args[0] === "--imports-only") {
+    rewriteImports();
+    process.exit();
+  }
   const refs = resolveRefs();
   // Placement reads branch sources, plus onto sources unless adopting from an empty base.
   const base = snapshot(refs.base, { sources: false });
@@ -108,6 +133,7 @@ try {
     if (fs.existsSync(full)) fs.rmSync(full);
   }
   console.log(`i18n: adopted ${refs.branch} (base ${refs.base}) onto ${refs.onto}; ${Object.keys(merged.en).length} app keys. Stage the catalog files with git add -A src/i18n/locales.`);
+  rewriteImports();
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

@@ -216,12 +216,93 @@ export function writePortions(locales, portions) {
   }
 }
 
+export const SPECIFIER_ALIASES = [["@/", "src/"], ["/src/", "src/"]];
+
+/**
+ * Resolve a relative or aliased module specifier to a package-relative POSIX
+ * path, independently of the current machine. Bare package specifiers are
+ * returned unchanged.
+ */
+export function resolveSpecifier(file, specifier, aliases) {
+  const alias = aliases.find(([from]) => specifier.startsWith(from));
+  if (alias) return path.posix.normalize(`${alias[1]}${specifier.slice(alias[0].length)}`);
+  if (specifier.startsWith(".")) return path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
+  return specifier;
+}
+
+/** Pre-split catalog files and the module each import must use instead. */
+export const LEGACY_CATALOG_IMPORTS = {
+  "src/i18n/locales/zh-CN.json": "src/i18n/locales/app/zh-CN",
+  "src/i18n/locales/zh-TW.json": "src/i18n/locales/app/zh-TW",
+  "src/i18n/locales/en.json": "src/i18n/locales/app/en-full",
+  "src/i18n/locales/en-overrides.json": "src/i18n/locales/app/en-overrides.json",
+};
+
+/**
+ * The replacement for a specifier that names a legacy catalog exactly, keeping
+ * its prefix style (alias or relative); null for anything else.
+ */
+export function legacyImportReplacement(file, specifier, legacy, aliases) {
+  const resolved = resolveSpecifier(file, specifier, aliases);
+  if (!Object.hasOwn(legacy, resolved)) return null;
+  const tail = path.posix.basename(resolved);
+  if (!specifier.endsWith(`/${tail}`)) return null;
+  return `${specifier.slice(0, -tail.length)}${path.posix.relative(path.posix.dirname(resolved), legacy[resolved])}`;
+}
+
+/**
+ * Rewrite legacy catalog specifiers in `sources` ([file, text] pairs).
+ * `specifiers(file, text)` lists module-specifier string literals as
+ * `{ start, end, text, line }` (start/end include the quotes). Returns the
+ * changed texts and one `{ file, line, from, to }` entry per rewrite.
+ */
+export function rewriteLegacyImports(sources, specifiers, legacy, aliases) {
+  const changed = [];
+  const rewrites = [];
+  for (const [file, text] of sources) {
+    let next = text;
+    const found = specifiers(file, text)
+      .map((literal) => ({ ...literal, to: legacyImportReplacement(file, literal.text, legacy, aliases) }))
+      .filter((literal) => literal.to);
+    for (const literal of [...found].sort((a, b) => b.start - a.start)) {
+      next = `${next.slice(0, literal.start + 1)}${literal.to}${next.slice(literal.end - 1)}`;
+    }
+    for (const literal of found) rewrites.push({ file, line: literal.line, from: literal.text, to: literal.to });
+    if (found.length) changed.push([file, next]);
+  }
+  return { changed, rewrites };
+}
+
+const MODULE_CALLS = /^(?:require|require\.resolve|import\.meta\.glob|(?:vi|jest)\.(?:mock|doMock|unmock|importActual|importMock|requireActual|requireMock))$/;
+/** The module-specifier literal of an import/export, import type, import(), require() or vi/jest mock call. */
+export function moduleSpecifierOf(node, ast) {
+  const specifier = (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ? node.moduleSpecifier :
+    ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || MODULE_CALLS.test(node.expression.getText(ast))) ? node.arguments[0] :
+    ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
+  return specifier && ts.isStringLiteralLike(specifier) ? specifier : undefined;
+}
+
+/** Every module-specifier literal in a TypeScript source, for rewriteLegacyImports. */
+export function moduleSpecifiers(file, source) {
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const found = [];
+  const visit = (node) => {
+    const literal = moduleSpecifierOf(node, ast);
+    if (literal) found.push({ start: literal.getStart(ast), end: literal.getEnd(), text: literal.text, line: ast.getLineAndCharacterOfPosition(literal.getStart(ast)).line + 1 });
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return found;
+}
+
+/** Cheap text filter: could this source import a legacy catalog? */
+export const mayImportLegacyCatalog = (source, legacy) =>
+  Object.keys(legacy).some((file) => source.includes(path.posix.basename(file)));
+
 /** Resolve relative, @/ and src/ imports independently of the current machine. */
 export function catalogImportIssue(file, specifier) {
   if (isTestSource(file)) return null;
-  const cleanSpecifier = specifier.split(/[?#]/)[0];
-  const resolved = path.posix.normalize(cleanSpecifier.startsWith("@/") ? `src/${cleanSpecifier.slice(2)}` :
-    cleanSpecifier.startsWith(".") ? path.posix.join(path.posix.dirname(file), cleanSpecifier) : cleanSpecifier.replace(/^\/src\//, "src/"));
+  const resolved = resolveSpecifier(file, specifier.split(/[?#]/)[0], SPECIFIER_ALIASES);
   if (!resolved.startsWith("src/i18n/locales/")) return null;
   const isBarrel = /^src\/i18n\/locales\/app\/(?:en-full|zh-CN|zh-TW)\.ts$/.test(file);
   if (/\/en-full(?:\.[cm]?[jt]s)?$/.test(resolved)) return "full English catalog is test-only";

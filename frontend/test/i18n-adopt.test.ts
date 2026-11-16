@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, legacyImportReplacement, moduleSpecifiers, rewriteLegacyImports,
   analyzePortions, applyDelta, canonicalText, catalogImportIssue,
   consolidateDuplicates, emptyLanguages, isPlacementSource, placeCatalogs, scanUsage, stripPluralSuffix,
 } from "../scripts/lib/i18n-catalogs.mjs";
@@ -103,6 +104,54 @@ describe("legacy i18n delta adoption", () => {
     expect(canonicalText({ z: "last", A: "first", a: "middle" })).toBe('{\n  "A": "first",\n  "a": "middle",\n  "z": "last"\n}\n');
     const duplicate = '{\n  "A": "first",\n  "A": "second"\n}\n';
     expect(canonicalText(JSON.parse(duplicate))).not.toBe(duplicate);
+  });
+
+  it("maps all four legacy catalog paths, keeping alias and relative prefixes", () => {
+    const replace = (file: string, specifier: string) => legacyImportReplacement(file, specifier, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+    expect(replace("src/pages/a.test.tsx", "@/i18n/locales/zh-CN.json")).toBe("@/i18n/locales/app/zh-CN");
+    expect(replace("src/pages/a.test.tsx", "@/i18n/locales/zh-TW.json")).toBe("@/i18n/locales/app/zh-TW");
+    expect(replace("src/pages/a.test.tsx", "@/i18n/locales/en.json")).toBe("@/i18n/locales/app/en-full");
+    expect(replace("src/pages/a.test.tsx", "@/i18n/locales/en-overrides.json")).toBe("@/i18n/locales/app/en-overrides.json");
+    expect(replace("src/pages/nested/a.test.tsx", "../../i18n/locales/zh-TW.json")).toBe("../../i18n/locales/app/zh-TW");
+    expect(replace("src/i18n/index.ts", "./locales/en-overrides.json")).toBe("./locales/app/en-overrides.json");
+    expect(replace("src/i18n/locales/x.ts", "./en.json")).toBe("./app/en-full");
+    for (const specifier of ["@/i18n/locales/common-en.json", "@/i18n/locales/app/zh-CN", "./data/zh-CN.json", "zh-CN.json", "@/i18n/locales/zh-CN.json?raw"]) {
+      expect(replace("src/pages/a.test.tsx", specifier), specifier).toBeNull();
+    }
+  });
+
+  it("rewrites imports, import(), vi.mock and require specifiers only, and is idempotent", () => {
+    const source = [
+      'import zhCN from "@/i18n/locales/zh-CN.json";',
+      "import type en from '../i18n/locales/en.json';",
+      'import common from "@/i18n/locales/common-en.json";',
+      'const tw = await import("@/i18n/locales/zh-TW.json");',
+      'vi.mock("@/i18n/locales/en-overrides.json", () => ({ default: {} }));',
+      'const raw = require("../i18n/locales/zh-CN.json");',
+      'const label = "@/i18n/locales/zh-CN.json";',
+      "",
+    ].join("\n");
+    const first = rewriteLegacyImports([["src/pages/a.test.tsx", source]], moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+    expect(first.rewrites).toEqual([
+      { file: "src/pages/a.test.tsx", line: 1, from: "@/i18n/locales/zh-CN.json", to: "@/i18n/locales/app/zh-CN" },
+      { file: "src/pages/a.test.tsx", line: 2, from: "../i18n/locales/en.json", to: "../i18n/locales/app/en-full" },
+      { file: "src/pages/a.test.tsx", line: 4, from: "@/i18n/locales/zh-TW.json", to: "@/i18n/locales/app/zh-TW" },
+      { file: "src/pages/a.test.tsx", line: 5, from: "@/i18n/locales/en-overrides.json", to: "@/i18n/locales/app/en-overrides.json" },
+      { file: "src/pages/a.test.tsx", line: 6, from: "../i18n/locales/zh-CN.json", to: "../i18n/locales/app/zh-CN" },
+    ]);
+    const [[, rewritten]] = first.changed;
+    expect(rewritten.split("\n")).toEqual([
+      'import zhCN from "@/i18n/locales/app/zh-CN";',
+      "import type en from '../i18n/locales/app/en-full';",
+      'import common from "@/i18n/locales/common-en.json";',
+      'const tw = await import("@/i18n/locales/app/zh-TW");',
+      'vi.mock("@/i18n/locales/app/en-overrides.json", () => ({ default: {} }));',
+      'const raw = require("../i18n/locales/app/zh-CN");',
+      'const label = "@/i18n/locales/zh-CN.json";',
+      "",
+    ]);
+    const second = rewriteLegacyImports([["src/pages/a.test.tsx", rewritten]], moduleSpecifiers, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+    expect(second).toEqual({ changed: [], rewrites: [] });
   });
 
   it("guards relative, alias, query-suffixed and full-English imports", () => {

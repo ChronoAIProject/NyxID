@@ -38,7 +38,14 @@ function fixture() {
   }
   catalog(path.join(locales, "en-overrides.json"), { "Change me": "old en" });
   write(path.join(root, "src/pages/billing.ts"), 'const copy = "Kept";\n');
-  git("add", "frontend/scripts", "frontend/package.json", "frontend/src");
+  write(path.join(root, "tsconfig.json"), `${JSON.stringify({
+    compilerOptions: {
+      target: "ES2022", module: "ESNext", moduleResolution: "bundler", resolveJsonModule: true, types: ["vite/client"],
+      strict: true, noUncheckedIndexedAccess: true, noEmit: true, skipLibCheck: true, baseUrl: ".", paths: { "@/*": ["./src/*"] },
+    },
+    include: ["src"],
+  }, null, 2)}\n`);
+  git("add", "frontend/scripts", "frontend/package.json", "frontend/tsconfig.json", "frontend/src");
   git("commit", "-m", "base old layout");
   const base = git("rev-parse", "HEAD");
   const adopt = (...args: string[]) => spawnSync(process.execPath, [path.join(root, "scripts/adopt-legacy-i18n.mjs"), ...args], { cwd: root, encoding: "utf8" });
@@ -47,6 +54,7 @@ function fixture() {
   expect(initial.status, initial.stderr).toBe(0);
   expect(fs.existsSync(path.join(locales, "en-overrides.json"))).toBe(false);
   expect(fs.existsSync(path.join(locales, "app/en-overrides.json"))).toBe(true);
+  for (const barrel of ["en-full.ts", "zh-CN.ts", "zh-TW.ts"]) fs.copyFileSync(path.join(frontend, "src/i18n/locales/app", barrel), path.join(locales, "app", barrel));
   git("add", "frontend/src"); git("commit", "-m", "split layout");
   const onto = git("rev-parse", "HEAD");
   git("checkout", "legacy");
@@ -55,6 +63,8 @@ function fixture() {
     for (const family of FAMILIES) catalog(path.join(locales, `${family}-${language}.json`), { Kept: `kept ${language}`, "Change me": `new ${language}`, "Added key": `added ${language}` });
   }
   write(path.join(root, "src/pages/billing.ts"), 'const copy = ["Kept", "Added key"];\n');
+  // An in-flight test that imports a pre-split catalog path.
+  write(path.join(root, "src/pages/billing-copy.test.ts"), 'import zhCN from "@/i18n/locales/zh-CN.json";\n\nexport const kept: string = zhCN["Kept"] ?? "Kept";\n');
   git("add", "frontend/src"); git("commit", "-m", "legacy catalog delta");
   const branch = git("rev-parse", "HEAD");
   const verify = () => {
@@ -73,7 +83,7 @@ function fixture() {
 }
 
 describe("adopt legacy catalogs using real Git snapshots", () => {
-  it.each(["merge", "rebase"])("resolves a real %s and stages every catalog family", (mode) => {
+  it.each(["merge", "rebase"])("resolves a real %s, stages every catalog family and rewrites legacy imports so they type-check", (mode) => {
     const f = fixture();
     const args = mode === "merge" ? ["merge", "--no-commit", "split"] : ["rebase", "split"];
     const merge = spawnSync("git", args, { cwd: f.repo, encoding: "utf8" });
@@ -81,11 +91,29 @@ describe("adopt legacy catalogs using real Git snapshots", () => {
     const adopted = f.adopt();
     expect(adopted.status, adopted.stderr).toBe(0);
     f.verify();
-    f.git("add", "-A", "frontend/src/i18n/locales");
+    expect(adopted.stdout).toContain("i18n: rewrote src/pages/billing-copy.test.ts:1 @/i18n/locales/zh-CN.json -> @/i18n/locales/app/zh-CN");
+    expect(adopted.stdout).toContain("git add src/pages/billing-copy.test.ts");
+    expect(adopted.stdout).toContain("run npx tsc -b");
+    expect(fs.readFileSync(path.join(f.root, "src/pages/billing-copy.test.ts"), "utf8")).toBe('import zhCN from "@/i18n/locales/app/zh-CN";\n\nexport const kept: string = zhCN["Kept"] ?? "Kept";\n');
+    const typecheck = spawnSync(process.execPath, [path.join(f.root, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.json"], { cwd: f.root, encoding: "utf8" });
+    expect(typecheck.status, typecheck.stdout).toBe(0);
+    f.git("add", "-A", "frontend/src/i18n/locales", "frontend/src/pages/billing-copy.test.ts");
     expect(f.git("diff", "--name-only", "--diff-filter=U")).toBe("");
     if (mode === "rebase") f.git("-c", "core.editor=true", "rebase", "--continue");
     else f.git("commit", "-m", "resolved merge");
     f.verify();
+  });
+
+  it("rewrites legacy imports outside a merge or rebase with --imports-only", () => {
+    const f = fixture();
+    f.git("checkout", "split");
+    const file = path.join(f.root, "src/pages/late.test.ts");
+    fs.writeFileSync(file, 'const en = await import("../i18n/locales/en.json");\n');
+    const result = f.adopt("--imports-only");
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("i18n: rewrote src/pages/late.test.ts:1 ../i18n/locales/en.json -> ../i18n/locales/app/en-full");
+    expect(fs.readFileSync(file, "utf8")).toBe('const en = await import("../i18n/locales/app/en-full");\n');
+    expect(f.git("status", "--porcelain", "--", "frontend/src")).toBe("?? frontend/src/pages/late.test.ts");
   });
 
   it("rejects divergence in a later language without writing any files", () => {
