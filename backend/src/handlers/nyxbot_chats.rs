@@ -3120,8 +3120,64 @@ pub async fn list_channel_chats(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    let row = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id":&id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Channel not found".into()))?;
+    if let Some(binding) = &row.org_specialist {
+        let access =
+            crate::services::org_agent_service::access(&state.db, &owner, &binding.org_id).await?;
+        if !crate::services::org_agent_service::can_use(&access) && row.user_id != owner {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        if matches!(access, crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } if role.can_proxy())
+        {
+            return Ok(Json(member_chat_settings(&state, &row).await?));
+        }
+    }
     let chats = list_chats(&state, &owner, Some(&id)).await?;
-    Ok(Json(json!({"chats": chats})))
+    Ok(Json(json!({"chats": chats, "can_manage":true})))
+}
+
+// Filter before sorting/limiting. The bounded list has no total, cursor or
+// has-more computed from hidden records. Single-chat routes keep load_chat's admin gate.
+async fn member_chat_settings(state: &AppState, row: &NyxbotChannel) -> AppResult<Value> {
+    let chats: Vec<NyxbotThread> = state.db.collection(THREADS)
+        .find(doc! {"channel_id":&row.id,"kind":{"$in":["group","channel"]},"record_scope":{"$ne":"platform_thread"}})
+        .sort(doc! {"_id":1}).limit(LIST_LIMIT).await?.try_collect().await?;
+    let on = super::thread_follow::enabled(state, &row.user_id).await?;
+    let mut views = Vec::new();
+    for chat in chats {
+        let dto = follow_response(state, row, &chat, on, 0);
+        let mut view = serde_json::to_value(dto).map_err(|e| AppError::Internal(e.to_string()))?;
+        let allowed = [
+            "id",
+            "channel_agent_id",
+            "platform",
+            "bot_label",
+            "kind",
+            "title",
+            "agent_id",
+            "reply_mode",
+            "members",
+            "members_setting",
+            "owner_seen",
+            "allow_posts",
+            "threads",
+            "threads_setting",
+            "thread_capabilities",
+            "follow_readiness",
+            "follow_guidance",
+        ];
+        view.as_object_mut()
+            .expect("chat DTO")
+            .retain(|k, _| allowed.contains(&k.as_str()));
+        view["can_manage"] = json!(false);
+        views.push(view);
+    }
+    Ok(json!({"chats":views,"can_manage":false}))
 }
 
 pub async fn update_channel_chat(

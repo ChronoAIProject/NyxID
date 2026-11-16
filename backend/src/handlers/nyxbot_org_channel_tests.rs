@@ -163,7 +163,7 @@ async fn org_channel_human_connect_and_disconnect_keep_same_org_transport_author
     assert_eq!(body["channel_agent"]["org_specialist"]["org_id"], org_id);
     assert_eq!(
         body["channel_agent"]["org_specialist"]["guest_enabled"],
-        false
+        true
     );
     let row = active_for_bot(&state, OWNER, &bot_id)
         .await
@@ -311,6 +311,16 @@ pub(super) async fn org_channel(
 ) {
     crate::services::security_readiness_service::ready_test_replica(&state.db).await;
     org::ensure_indexes(&state.db).await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>("audit_log")
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"event_type":1,"created_at":-1})
+                .build(),
+        )
+        .await
+        .unwrap();
     for flag in [org::FLAG, "assistant:org-agents"] {
         flags::set_platform_override(&state.db, flag, &flags::FlagTarget::Global, true, OWNER)
             .await
@@ -373,10 +383,13 @@ pub(super) async fn org_channel(
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
         .await
         .unwrap();
-    let binding = org::link_target(&state.db, OWNER, &bot, &agent)
+    let mut binding = org::link_target(&state.db, OWNER, &bot, &agent)
         .await
         .unwrap()
         .unwrap();
+    // These protocol fixtures model an existing binding before the new default.
+    binding.guests.enabled = false;
+    binding.guests.revision.clear();
     state
         .db
         .collection::<bson::Document>("api_keys")
@@ -415,7 +428,6 @@ async fn ensure_org_partition(state: &AppState, key: &str) {
 
 #[tokio::test]
 async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_the_org() {
-    use crate::models::credits::Credits;
     use tower::ServiceExt;
     let (mut state, _, old) = setup("org_channel_cold_model").await;
     old.abort();
@@ -427,7 +439,6 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         Arc::new(crate::billing_integration_tests::FakeLago::default()),
         1000,
     ));
-    state.billing.ensure_wallet(&org_id).await.unwrap();
     for metric in ["platform_tokens", "platform_requests", "platform_bytes"] {
         let mut rate = crate::billing_integration_tests::rate(metric, Utc::now());
         // A realistic model price leaves room for setup plus the first answer
@@ -470,19 +481,6 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
     .await;
     state.db.collection::<bson::Document>("user_services").update_one(doc!{"_id":&connection},doc!{"$set":{
         "catalog_service_id":&catalog.id,"credential_binding":"platform","auth_method":"bearer","source":"manual"}}).await.unwrap();
-    org::management::update(
-        &state.db,
-        OWNER,
-        &row,
-        org::management::GuestSettings {
-            expected_revision: None,
-            enabled: true,
-            service_ids: Some(vec![]),
-            daily_credits: Some(Credits::from_whole(1)),
-        },
-    )
-    .await
-    .unwrap();
     state
         .db
         .collection::<bson::Document>(CHANNELS)
@@ -507,6 +505,9 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
         let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();
         async move {
+            // Setup may stop its engine response as soon as model admission succeeds.
+            // Let the simulated provider finish and record settlement after that disconnect.
+            tokio::spawn(async move {
             let bearer=headers["authorization"].clone();
             let (_,key,_)=key_service::validate_api_key(&db,bearer.to_str().unwrap().strip_prefix("Bearer ").unwrap()).await.unwrap();
             let conversation=db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc!{"credential_api_key_id":&key.id}).await.unwrap().unwrap();
@@ -521,6 +522,7 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
             let event=json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
                 "conversation":{"id":session},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
             axum::response::Sse::new(futures::stream::iter([Ok::<_,Infallible>(Event::default().data(event.to_string()))])).into_response()
+            }).await.unwrap()
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -549,6 +551,38 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         StatusCode::OK
     );
     ensure_org_partition(&state, &key).await;
+    // A historical untouched binding is enabled without requiring a wallet.
+    state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&row.id},
+        doc! {"$set":{"org_specialist.guests.enabled":false,"org_specialist.guests.revision":""}}).await.unwrap();
+    org::defaults::sweep(&state.db).await.unwrap();
+    let migrated = org::management::load(&state.db, OWNER, &row.id, true)
+        .await
+        .unwrap();
+    assert!(migrated.org_specialist.as_ref().unwrap().guests.enabled);
+    let settings = org::management::view(&state.db, OWNER, &migrated)
+        .await
+        .unwrap();
+    assert_eq!(settings["health"]["action"], "enable_billing");
+    let unavailable = event("Hello without billing", "7", "org-default-no-wallet");
+    let reply = body_text(respond(&state, &key, &unavailable, "org-default-no-wallet").await).await;
+    assert!(reply.contains(org::UNAVAILABLE), "{reply}");
+    assert!(observations.lock().await.is_empty());
+    assert!(provider.received_requests().await.unwrap().is_empty());
+    for collection in [
+        crate::models::org_channel::HOLDS,
+        crate::models::usage_meter::COLLECTION_NAME,
+    ] {
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    state.billing.ensure_wallet(&org_id).await.unwrap();
     let body = event("Hello, first visitor", "7", "org-cold-first");
     let response = body_text(respond(&state, &key, &body, "org-cold-first").await).await;
     assert!(
@@ -556,7 +590,18 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         "{response}; callbacks={:?}",
         observations.lock().await
     );
-    let seen = observations.lock().await.clone();
+    let mut seen = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let seen = observations.lock().await.clone();
+            if seen.len() >= 2 {
+                break seen;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("setup and guest model callbacks must finish");
+    seen.sort_by_key(|call| call["setup"].as_bool() != Some(true));
     assert_eq!(
         seen.len(),
         2,
@@ -792,10 +837,20 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
         .with_state(state.clone());
     let observations: Calls = Default::default();
     let sink = observations.clone();
+    let (completed_calls, mut completed) = tokio::sync::watch::channel(0_usize);
+    async fn await_callbacks(completed: &mut tokio::sync::watch::Receiver<usize>, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while *completed.borrow_and_update() < expected {
+                completed.changed().await.expect("mock callback sender");
+            }
+        })
+        .await
+        .expect("model callback settlement and observation must complete");
+    }
     let db = state.db.clone();
     let drifted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
-        let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let drifted=drifted.clone();
+        let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let drifted=drifted.clone();let completed_calls=completed_calls.clone();
         async move {
             let bearer=headers["authorization"].clone();
             let (_,key,_)=key_service::validate_api_key(&db,bearer.to_str().unwrap().strip_prefix("Bearer ").unwrap()).await.unwrap();
@@ -809,19 +864,28 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
                 db.collection::<bson::Document>("assistant_agents").update_one(doc! {"_id":&conversation.agent_id},
                     doc! {"$set":{"owner_model_route.execution":"stale-execution"}}).await.unwrap();
             }
+            // Setup can be cancelled after model acceptance while this callback
+            // is still settling. Record invocation order and await completion below.
+            let observation_index = {
+                let mut observations = sink.lock().await;
+                let index = observations.len();
+                observations.push(Value::Null);
+                index
+            };
             let response=callbacks.oneshot(axum::http::Request::builder().method("POST").uri("/api/v1/proxy/s/fixture-model/responses")
                 .header("authorization",bearer).header("content-type","application/json").header("accept","*/*")
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
-            sink.lock().await.push(json!({"conversation_id":conversation.id,"api_key_id":key.id,"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
+            sink.lock().await[observation_index] = json!({"conversation_id":conversation.id,"api_key_id":key.id,"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
-                "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
+                "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context});
+            completed_calls.send_modify(|count| *count += 1);
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":if status.is_success(){"response.completed"}else{"response.failed"},"sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
                 "conversation":{"id":session},"status":if status.is_success(){"completed"}else{"failed"},"error":if status.is_success(){Value::Null}else{json!({"code":"model_error","message":"Model callback refused"})},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
             let setup = conversation.guest_model_setup;
             axum::response::Sse::new(futures::stream::once(async move {
-                if setup {tokio::time::sleep(std::time::Duration::from_millis(350)).await;}
+                if setup {futures::future::pending::<()>().await;}
                 Ok::<_,Infallible>(Event::default().data(event.to_string()))
             })).into_response()
         }
@@ -1217,6 +1281,7 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             );
         }
         if phase == 0 {
+            await_callbacks(&mut completed, if route_retry { 4 } else { 2 }).await;
             assert_eq!(
                 observations.lock().await.len(),
                 if route_retry { 4 } else { 2 },
@@ -1224,6 +1289,7 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             );
         }
     }
+    await_callbacks(&mut completed, if route_retry { 6 } else { 4 }).await;
     let seen = observations.lock().await.clone();
     assert_eq!(
         seen.len(),
@@ -1705,5 +1771,69 @@ async fn supplemental_org_specialist_uses_org_route_and_admitted_member() {
         deliver_to_for(&state,&conversation,&origin,"revoked",None,supplemental::Purpose::MachineDesktopNotice).await;
         assert_eq!(platform.received_requests().await.unwrap().len(),1);
         server.abort();state.db.drop().await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn org_guest_defaults_running_member_turn_survives_policy_switch_and_delivers() {
+    Box::pin(async {
+        let (state, _, old_server) = setup("org_defaults_member_in_flight").await;
+        let (row, key, agent, org_id) = org_channel(&state, false).await;
+        let member = Uuid::new_v4().to_string();
+        state.db.collection(USERS).insert_one(test_user(&member, UserType::Person)).await.unwrap();
+        state.db.collection("org_memberships").insert_one(crate::test_utils::test_membership(
+            &org_id, &member, crate::models::org_membership::OrgRole::Member, None
+        )).await.unwrap();
+        let challenge = org::links::issue(&state.db, &member, &row).await.unwrap();
+        assert!(org::links::receive(&state.db, &row, "member-sender", challenge["code"].as_str().unwrap(), None).await.unwrap());
+        org::links::confirm(&state.db, &member, &row, challenge["id"].as_str().unwrap()).await.unwrap();
+        assert_eq!(put_binding(State(state.clone()), Path("bnd_turns".into()), bearer(&key), Json(binding_body(&key, OWNER))).await.status(), StatusCode::OK);
+        ensure_org_partition(&state, &key).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let reached = entered.clone();
+        let release = resume.clone();
+        let upstream = Router::new().route("/v1/responses", post(move || {
+            let reached = reached.clone(); let release = release.clone();
+            async move {
+                reached.notify_one();
+                release.notified().await;
+                let session = format!("conv_{}",Uuid::new_v4().simple());
+                axum::response::Sse::new(futures::stream::once(async move {
+                    Ok::<_,Infallible>(Event::default().data(json!({"type":"response.completed","sequence_number":1,
+                        "response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),"conversation":{"id":session},"status":"completed",
+                        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Member work survived the default"}]}]}}).to_string()))
+                })).into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener,upstream).await.unwrap(); });
+        state.db.collection::<bson::Document>(SERVICES).update_one(doc! {"slug":engine::SERVICE_SLUG},doc! {"$set":{"base_url":format!("http://{address}")}}).await.unwrap();
+        state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&row.id},doc! {"$unset":{"private_chats":""}}).await.unwrap();
+        let run_state = state.clone();
+        let request = tokio::spawn(Box::pin(async move {
+            body_text(respond(&run_state,&key,&event("Keep working","member-sender","member-across-default"),"member-across-default").await).await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10),entered.notified()).await.unwrap();
+        let before:AssistantConversation = state.db.collection(CONVERSATIONS).find_one(doc! {"user_id":&member,"agent_id":&agent.id,"active_turn":{"$type":"object"}}).await.unwrap().unwrap();
+        let origin = before.reply_channel.as_ref().or(before.channel.as_ref()).unwrap();
+        org::defaults::sweep(&state.db).await.unwrap();
+        let changed = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert!(changed.org_specialist.as_ref().unwrap().guests.enabled);
+        assert_eq!(changed.private_chats.as_deref(),Some("everyone"));
+        assert!(changed.execution_policy_revision > row.execution_policy_revision);
+        assert_eq!(changed.org_specialist.as_ref().unwrap().revision,row.org_specialist.as_ref().unwrap().revision);
+        org::validate(&state.db,origin,&member,&agent.id).await.unwrap();
+        let after:AssistantConversation = state.db.collection(CONVERSATIONS).find_one(doc! {"_id":&before.id}).await.unwrap().unwrap();
+        assert_eq!(after.active_turn.as_ref().unwrap().turn_id,before.active_turn.as_ref().unwrap().turn_id);
+        assert!(!after.active_turn.as_ref().unwrap().stop_requested);
+        assert_eq!(after.credential_api_key_id,before.credential_api_key_id);
+        resume.notify_one();
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(10),request).await.unwrap().unwrap();
+        assert!(answer.contains("Member work survived the default"),"{answer}");
+        let settled:AssistantConversation = state.db.collection(CONVERSATIONS).find_one(doc! {"_id":&before.id}).await.unwrap().unwrap();
+        assert!(settled.active_turn.is_none());
+        server.abort(); old_server.abort(); state.db.drop().await.unwrap();
     }).await;
 }

@@ -320,7 +320,8 @@ async fn cutover_new_binding_is_off_and_uses_grants_on_enable_old_put_is_inert()
         .await
         .unwrap()
         .unwrap();
-    assert!(!binding.guests.enabled);
+    assert!(binding.guests.enabled);
+    assert!(!binding.guests.revision.is_empty());
     assert!(binding.guests.follows_agent_grants);
     let db = f.org.state.db.clone();
     db.collection::<Document>("nyxbot_channels")

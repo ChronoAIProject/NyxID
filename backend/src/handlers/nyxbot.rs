@@ -748,13 +748,7 @@ async fn active_for_bot(
     owner: &str,
     bot_id: &str,
 ) -> AppResult<Option<NyxbotChannel>> {
-    Ok(state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .find_one(doc! {"user_id": owner, "channel_bot_id": bot_id,
-        "status": {"$in": ["pending", "active"]}})
-        .sort(doc! {"created_at": -1, "_id": -1})
-        .await?)
+    crate::services::nyxbot_channel_query_service::active_for_bot(&state.db, owner, bot_id).await
 }
 
 /// Owner-verified senders from NyxID's own Telegram notification link.
@@ -899,38 +893,14 @@ async fn connect_inner(
                 "This bot already has a selected agent".into(),
             ));
         }
-        let keys_alive =
-            key_service::get_api_key(&state.db, bot_owner(&existing), &existing.route_api_key_id)
-                .await
-                .is_ok_and(|key| key.is_active)
-                && match existing.agent_api_key_id.as_deref() {
-                    Some(agent) => key_service::get_api_key(&state.db, owner, agent)
-                        .await
-                        .is_ok_and(|key| key.is_active),
-                    None => true,
-                };
-        // A channel whose messages stopped arriving, whose bot changed owner,
-        // or whose route is gone is rebuilt from scratch.
-        let route_alive = match existing.route_id.as_deref() {
-            Some(route_id) => {
-                state
-                    .db
-                    .collection::<bson::Document>(
-                        crate::models::channel_conversation::COLLECTION_NAME,
-                    )
-                    .count_documents(doc! {"_id": route_id, "user_id": &bot_owner_id,
-                    "is_active": true})
-                    .await?
-                    > 0
-            }
-            None => false,
-        };
-        // A working bot keeps its transport here; `switch_to_gateway` moves
-        // bots onto the gateway without tearing them down.
-        let healthy = existing.delivery_status.as_deref() != Some("failing")
-            && bot_owner(&existing) == bot_owner_id
-            && route_alive;
-        if existing.status == "active" && keys_alive && healthy {
+        if crate::services::nyxbot_channel_query_service::reusable(
+            &state.db,
+            owner,
+            &bot_owner_id,
+            &existing,
+        )
+        .await?
+        {
             link(state, owner, &existing.id, agent).await?;
             let code = new_link_code();
             crate::services::nyxbot_channel_continuity_service::restore_existing(
@@ -1087,7 +1057,7 @@ async fn connect_inner(
         link_code_expires_at: None,
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
-        private_chats: None,
+        private_chats: org_binding.as_ref().map(|_| "everyone".to_owned()),
         private_chat_posts: None,
         delivery_status: None,
         delivery_error: None,
@@ -2447,7 +2417,9 @@ async fn connect_tool_inner(
         "channel_agent": ChannelAgentResponse::from(&row),
         "agent": agent.name,
         "link": link_json(&row, &link),
-        "note": if row.owner_sender_ids.is_empty() {
+        "note": if row.org_specialist.is_some() {
+            "Each organization member verifies their own chat account. Guest access follows the saved audience settings; the organization pays for guest messages and tool use."
+        } else if row.owner_sender_ids.is_empty() {
             "Give the user the link (or code). Until they use it, the bot answers nobody."
         } else {
             "The user's linked account already reaches the bot; the link adds another."
@@ -3367,6 +3339,18 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
+        if let Some(binding) = &row.org_specialist {
+            let access =
+                crate::services::org_agent_service::access(&state.db, owner, &binding.org_id)
+                    .await?;
+            if crate::services::org_agent_service::can_use(&access) {
+                let admin = matches!(
+                    access,
+                    crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+                );
+                value["can_manage"] = json!(admin);
+            }
+        }
         if let Some(intake) = intake.get(&row.channel_bot_id) {
             value["discord_intake"] = json!(intake);
             if let Some(advice) = crate::services::channel_bot_health::discord::advice(intake) {

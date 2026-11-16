@@ -2112,6 +2112,10 @@ mod tests {
         assert!(is_rate_limit_exempt("/mcp"));
         assert!(is_rate_limit_exempt("/api/v1/assistant/actions"));
         assert!(!is_rate_limit_exempt("/api/v1/assistant/actions/extra"));
+        assert!(!is_rate_limit_exempt(
+            "/api/v1/assistant/nyxagent/channels/preview"
+        ));
+        assert!(!is_rate_limit_exempt("/api/v1/assistant/nyxagent/channels"));
     }
 
     #[test]

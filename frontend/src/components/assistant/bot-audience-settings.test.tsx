@@ -158,7 +158,7 @@ function mount(status = "active", org = true, onReconnect = vi.fn()) {
 it("enables with a switch-only revision-bound request and shows Grants before enabling", async () => {
   mount();
   expect(await screen.findByText(/Enabling guests applies/)).toBeVisible();
-  expect(screen.getByText(/Guests can use/)).toHaveTextContent("Calendar");
+  expect(screen.getByText(/Calendar: Use, but not change or delete/)).toBeVisible();
   expect(
     screen.getByText(/The organization pays for their messages/),
   ).toBeVisible();
@@ -218,7 +218,7 @@ it("explains missing wallet and permits disabling during rollout loss", async ()
   settings.guest_enabled = true;
   mount();
   expect(
-    await screen.findByText(/Provision the organization billing wallet/),
+    await screen.findByText(/Set up organization billing to serve guests/),
   ).toBeVisible();
   expect(screen.getByText(/legacy daily cap still apply/)).toBeVisible();
   expect(
@@ -294,4 +294,18 @@ it("shows model setup and missing onboarding facts beside the immediate audience
     }),
   ).not.toBeDisabled();
   expect(screen.getByText(/Opening access is your choice/)).toBeTruthy();
+});
+
+it("keeps member controls disabled and omits the spend section when amounts are absent", async () => {
+  settings.can_manage = false;
+  delete settings.daily_credits;
+  delete settings.default_daily_credits;
+  delete settings.spent_today_credits;
+  delete settings.reserved_today_credits;
+  mount("active");
+  expect(await screen.findByText("An organization admin can change these settings.")).toBeVisible();
+  expect(screen.getByRole("switch", { name: "Allow guests" })).toBeDisabled();
+  expect(screen.getByRole("combobox", { name: "Private chats" })).toBeDisabled();
+  expect(screen.queryByText("Organization spend today")).not.toBeInTheDocument();
+  expect(writes).toEqual([]);
 });

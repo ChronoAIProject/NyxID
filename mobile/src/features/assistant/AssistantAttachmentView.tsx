@@ -1,16 +1,30 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import {
+  saveAttachmentImage,
+  IMAGE_SAVE_FAILED,
+  IMAGE_NOT_SAVED,
+} from "./saveAttachmentImage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
   Image,
+  findNodeHandle,
   Pressable,
+  Platform,
   StyleSheet,
   View,
 } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { Directory, File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
-import { Download, FileText, ImageIcon } from "lucide-react-native";
+import {
+  Download,
+  ExternalLink,
+  FileText,
+  ImageIcon,
+  RotateCcw,
+} from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { requestAuthenticatedBytes } from "../../lib/api/http";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -19,6 +33,7 @@ import { radius, TOUCH_TARGET } from "../../theme/designTokens";
 import { useAuthSession } from "../auth/AuthSessionContext";
 import type { AssistantAttachment } from "./assistantTypes";
 import { AssistantImagePreview } from "./AssistantImagePreview";
+import { ownAttachmentCache, sweepAttachmentCaches } from "./attachmentCache";
 import { assistantAttachmentPath } from "./assistantUploads";
 import {
   ATTACHMENT_EXPIRED_MESSAGE,
@@ -36,10 +51,13 @@ type CachedAttachment = {
   directory: Directory;
   created: boolean;
   file?: File;
+  release: () => void;
 };
 
 function deleteCache(cache: CachedAttachment | undefined) {
-  if (!cache?.created) return;
+  if (!cache) return;
+  cache.release();
+  if (!cache.created) return;
   try {
     if (cache.directory.exists) cache.directory.delete();
   } catch {
@@ -59,6 +77,7 @@ export function AssistantAttachmentView({
   groupId?: string;
   captionColor?: string;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const { isAuthenticated } = useAuthSession();
   const focused = useIsFocused();
@@ -77,16 +96,21 @@ export function AssistantAttachmentView({
   const operation = useRef(0);
   const downloading = useRef<AbortController | undefined>(undefined);
   const cached = useRef<CachedAttachment | undefined>(undefined);
+  const savingCache = useRef<CachedAttachment | undefined>(undefined);
+  const saveButton = useRef<View>(null);
   const sharingFile = useRef<
     | {
-        file: File;
+        file?: File;
         scope: string;
         epoch: number;
       }
     | undefined
   >(undefined);
   const busyRef = useRef(false);
+  const savingRef = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<string>();
   const [enlarged, setEnlarged] = useState(false);
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
@@ -111,16 +135,23 @@ export function AssistantAttachmentView({
     downloading.current?.abort();
     downloading.current = undefined;
     busyRef.current = false;
+    savingRef.current = false;
     removeCache();
+    deleteCache(savingCache.current);
+    savingCache.current = undefined;
+    sharingFile.current = undefined;
   }, [removeCache]);
 
   useEffect(() => {
     mounted.current = true;
+    sweepAttachmentCaches();
     setPreview(undefined);
     setEnlarged(false);
     setBusy(false);
     setError(undefined);
     setExpired(false);
+    setSaving(false);
+    setSaveStatus(undefined);
     return () => {
       mounted.current = false;
       cancel();
@@ -129,8 +160,8 @@ export function AssistantAttachmentView({
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      // An external share target can background this app before it finishes
-      // reading the file. Its own shareAsync completion owns that cleanup.
+      // Native share targets and Android's folder picker can background this
+      // app. Their completion owns cleanup while the same visible owner holds it.
       // Scope/account/navigation cleanup still deletes it immediately.
       setForeground(state === "active");
       if (state !== "background") return;
@@ -143,19 +174,22 @@ export function AssistantAttachmentView({
         current.current.isAuthenticated
       )
         return;
+      const wasSaving = savingRef.current;
       cancel();
       setPreview(undefined);
       setEnlarged(false);
       setBusy(false);
+      setSaving(false);
+      if (wasSaving) setSaveStatus(t(IMAGE_NOT_SAVED));
     });
     return () => subscription.remove();
-  }, [cancel]);
+  }, [cancel, t]);
 
   function closePreview() {
     setEnlarged(false);
   }
 
-  async function open() {
+  async function open(save = false) {
     if (
       busyRef.current ||
       !target ||
@@ -168,21 +202,25 @@ export function AssistantAttachmentView({
     const request = ++operation.current;
     const controller = new AbortController();
     downloading.current = controller;
-    const alive = () =>
+    const sameOperation = () =>
       mounted.current &&
       operation.current === request &&
       current.current.scope === scope &&
       current.current.focused &&
       current.current.isAuthenticated &&
       epoch === getAuthEpoch() &&
-      AppState.currentState === "active" &&
       !controller.signal.aborted;
+    const alive = () => sameOperation() && AppState.currentState === "active";
     busyRef.current = true;
     setBusy(true);
+    savingRef.current = save;
+    setSaving(save);
+    if (save) setSaveStatus(t("Saving image…"));
     setError(undefined);
     let openedCache: CachedAttachment | undefined;
     const removeOpenedCache = () => {
       if (cached.current === openedCache) cached.current = undefined;
+      if (savingCache.current === openedCache) savingCache.current = undefined;
       if (sharingFile.current?.file === openedCache?.file)
         sharingFile.current = undefined;
       deleteCache(openedCache);
@@ -193,27 +231,65 @@ export function AssistantAttachmentView({
         assistantAttachmentPath(target, attachment.id),
         controller.signal,
       );
-      if (!alive()) return;
+      if (!(save ? sameOperation() : alive())) return;
       assertReadableAttachment(attachment, bytes.byteLength);
-      removeCache();
+      if (save && Platform.OS === "android") {
+        const nativeSave = { scope, epoch };
+        sharingFile.current = nativeSave;
+        try {
+          const result = await saveAttachmentImage({
+            bytes,
+            name: attachmentCacheName(attachment),
+            contentType: attachment.content_type,
+            anchor: null,
+            alive: sameOperation,
+          });
+          if (sameOperation()) setSaveStatus(t(result.phrase, result.values));
+        } finally {
+          if (sharingFile.current === nativeSave)
+            sharingFile.current = undefined;
+        }
+        return;
+      }
+      if (!save) removeCache();
       const directory = new Directory(
         Paths.cache,
         `nyx-attachment-${Date.now()}-${++cacheSequence}-${Math.random().toString(36).slice(2)}`,
       );
-      const cache: CachedAttachment = { directory, created: false };
+      const cache: CachedAttachment = {
+        directory,
+        created: false,
+        release: ownAttachmentCache(directory),
+      };
       openedCache = cache;
-      cached.current = cache;
+      if (save) savingCache.current = cache;
+      else cached.current = cache;
       directory.create();
       cache.created = true;
       const file = new File(directory, attachmentCacheName(attachment));
       cache.file = file;
       file.create();
       file.write(bytes);
-      if (!alive()) {
+      if (!(save ? sameOperation() : alive())) {
         removeOpenedCache();
         return;
       }
-      if (image) setPreview(file.uri);
+      if (save) {
+        sharingFile.current = { file, scope, epoch };
+        try {
+          const result = await saveAttachmentImage({
+            file,
+            bytes,
+            name: attachmentCacheName(attachment),
+            contentType: attachment.content_type,
+            anchor: findNodeHandle(saveButton.current),
+            alive: sameOperation,
+          });
+          if (sameOperation()) setSaveStatus(t(result.phrase, result.values));
+        } finally {
+          removeOpenedCache();
+        }
+      } else if (image) setPreview(file.uri);
       else {
         const available = await Sharing.isAvailableAsync();
         if (!alive()) {
@@ -235,16 +311,21 @@ export function AssistantAttachmentView({
       }
     } catch (cause) {
       removeOpenedCache();
-      if (alive()) {
+      if (save ? sameOperation() : alive()) {
         const message = attachmentAccessError(cause);
-        setError(message);
+        if (save) setSaveStatus(t(IMAGE_SAVE_FAILED));
+        else setError(message);
         setExpired(message === ATTACHMENT_EXPIRED_MESSAGE);
       }
     } finally {
       if (operation.current === request) {
         downloading.current = undefined;
         busyRef.current = false;
-        if (mounted.current && current.current.scope === scope) setBusy(false);
+        savingRef.current = false;
+        if (mounted.current && current.current.scope === scope) {
+          setBusy(false);
+          setSaving(false);
+        }
       }
     }
   }
@@ -262,6 +343,9 @@ export function AssistantAttachmentView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, image, foreground, focused, isAuthenticated]);
 
+  const FileRow = image ? View : Pressable;
+  const FileAction = image ? Pressable : View;
+  const actionDisabled = busy || unavailable || !target;
   return (
     <View style={styles.container}>
       {image && preview && !unavailable ? (
@@ -284,38 +368,54 @@ export function AssistantAttachmentView({
           />
         </Pressable>
       ) : null}
-      {image && busy ? (
+      {image && busy && !saving ? (
         <Label muted accessibilityLiveRegion="polite">
           Loading image from {label}
         </Label>
       ) : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`${image ? "Preview" : "Open"} attachment ${label}`}
-        accessibilityState={{
-          disabled: busy || unavailable || !target,
-          busy,
-        }}
-        disabled={busy || unavailable || !target}
-        onPress={() => (preview ? setEnlarged(true) : void open())}
-        style={({ pressed }) => [
-          styles.file,
-          {
-            backgroundColor: colors.card,
-            borderColor: colors.border,
-            opacity: unavailable ? 0.5 : pressed ? 0.8 : 1,
-          },
-        ]}
+      <FileRow
+        accessibilityRole={image ? undefined : "button"}
+        accessibilityLabel={
+          image ? undefined : t("Open attachment {{name}}", { name: label })
+        }
+        accessibilityState={
+          image ? undefined : { disabled: actionDisabled, busy }
+        }
+        disabled={image ? undefined : actionDisabled}
+        onPress={image ? undefined : () => void open()}
+        style={
+          image
+            ? [
+                styles.file,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                  opacity: unavailable ? 0.5 : 1,
+                },
+              ]
+            : ({ pressed }) => [
+                styles.file,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                  opacity: actionDisabled ? 0.5 : pressed ? 0.8 : 1,
+                },
+              ]
+        }
       >
         {image ? (
-          <ImageIcon size={18} color={colors.textSecondary} />
+          <ImageIcon
+            size={18}
+            color={colors.textSecondary}
+            accessible={false}
+          />
         ) : (
-          <FileText size={18} color={colors.textSecondary} />
+          <FileText size={18} color={colors.textSecondary} accessible={false} />
         )}
         <View style={styles.metadata}>
           <Label numberOfLines={1}>{label}</Label>
           {!unavailable && (
-            <Label muted style={styles.detail}>
+            <Label muted numberOfLines={1} style={styles.detail}>
               {attachment.size < 1024
                 ? `${attachment.size} B`
                 : attachment.size < 1024 * 1024
@@ -327,12 +427,63 @@ export function AssistantAttachmentView({
             </Label>
           )}
         </View>
-        {busy ? (
-          <ActivityIndicator size="small" color={colors.primary} />
-        ) : !unavailable ? (
-          <Download size={16} color={colors.textMuted} />
-        ) : null}
-      </Pressable>
+        {!unavailable && (
+          <FileAction
+            ref={image ? saveButton : undefined}
+            accessibilityRole={image ? "button" : undefined}
+            accessibilityLabel={
+              image ? t(preview ? "Save image" : "Load image") : undefined
+            }
+            accessibilityState={
+              image ? { disabled: actionDisabled, busy } : undefined
+            }
+            disabled={image ? actionDisabled : undefined}
+            onPress={image ? () => void open(!!preview) : undefined}
+            style={
+              image
+                ? ({ pressed }) => [
+                    styles.action,
+                    {
+                      opacity: unavailable ? 0.5 : pressed ? 0.8 : 1,
+                    },
+                  ]
+                : styles.action
+            }
+          >
+            <Label>
+              {t(image ? (preview ? "Save image" : "Load image") : "Open")}
+            </Label>
+            {busy ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : image ? (
+              preview ? (
+                <Download
+                  size={16}
+                  color={colors.textMuted}
+                  accessible={false}
+                />
+              ) : (
+                <RotateCcw
+                  size={16}
+                  color={colors.textMuted}
+                  accessible={false}
+                />
+              )
+            ) : (
+              <ExternalLink
+                size={16}
+                color={colors.textMuted}
+                accessible={false}
+              />
+            )}
+          </FileAction>
+        )}
+      </FileRow>
+      {saveStatus && (
+        <Label muted accessibilityLiveRegion="polite" style={styles.detail}>
+          {saveStatus}
+        </Label>
+      )}
       {(unavailable || error) && (
         <Label
           muted
@@ -383,6 +534,7 @@ export function AssistantAttachmentView({
 const styles = StyleSheet.create({
   container: { gap: 4, width: "100%" },
   file: {
+    minWidth: TOUCH_TARGET,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -392,6 +544,15 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     minHeight: TOUCH_TARGET,
   },
-  metadata: { flex: 1, minWidth: 0 },
+  metadata: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
+  action: {
+    minHeight: 44,
+    minWidth: 44,
+    padding: 8,
+    gap: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    flexShrink: 1,
+  },
   detail: { fontSize: 11, lineHeight: 16 },
 });

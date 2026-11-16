@@ -1,3 +1,4 @@
+import { ChannelBotHealthCard } from "@/components/channels/channel-bot-health-card";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -1036,7 +1037,6 @@ export function ChannelBotDetailPage() {
 
   const { data: bot, isLoading, error, refetch } = useChannelBot(botId);
   const activityTypes = getPlatform(bot?.platform ?? "").activities;
-  const activitySummary = useChannelActivities("bot", botId, activityTypes.length > 0);
 
   // The bot's owner is an org when `bot.user_id` doesn't match the
   // current user's id. We pass that org id (a user_id in the backend
@@ -1047,7 +1047,12 @@ export function ChannelBotDetailPage() {
     ? bot.user_id
     : null;
 
-  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
+  const ownerOrg = ownerOrgId
+    ? (orgs ?? []).find((o) => o.id === ownerOrgId)
+    : undefined;
+  const memberReadOnly = ownerOrg?.your_role === "member";
+  const activitySummary = useChannelActivities("bot", botId, activityTypes.length > 0 && !memberReadOnly);
+  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId, enabled: Boolean(bot) && !memberReadOnly });
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot({ creditsOwnerId: bot?.user_id });
 
@@ -1061,9 +1066,6 @@ export function ChannelBotDetailPage() {
     (apiKeys ?? []).map((k) => [k.id, k.name]),
   );
 
-  const ownerOrg = ownerOrgId
-    ? (orgs ?? []).find((o) => o.id === ownerOrgId)
-    : undefined;
   const ownerLabel = ownerOrgId
     ? `Org: ${ownerOrg?.display_name ?? ownerOrgId}`
     : "Personal";
@@ -1127,6 +1129,17 @@ export function ChannelBotDetailPage() {
       </div>
     );
   }
+
+  if (memberReadOnly) return <div className="space-y-8">
+    <PageHeader title={bot.label} description={translateUi("An organization admin can change these settings.")} />
+    <DetailSection title={translateUi("Details")}>
+      <DetailRow label={translateUi("Bot name")} value={bot.label} />
+      <DetailRow label={translateUi("Platform")} value={getPlatform(bot.platform).label} />
+      <DetailRow label={translateUi("Bot Username")} value={bot.platform_bot_username || "-"} />
+      <DetailRow label={translateUi("Status")} value={statusLabel(bot.status)} />
+    </DetailSection>
+    <ChannelBotHealthCard botId={bot.id} />
+  </div>;
 
   return (
     <div className="space-y-8">

@@ -5018,6 +5018,29 @@ async fn org_channel_enabled_admin_tools_retain_confirmation_and_members_cannot_
     )
     .await
     .unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    let bot_id = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>("channel_bots").insert_one(doc! {
+        "_id":&bot_id,"user_id":&f.org,"platform":"lark","label":"test-bot",
+        "platform_bot_id":"123","platform_bot_username":"test-bot","bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
+        "webhook_secret_hash":"hash","webhook_registered":true,"status":"active","is_active":true,
+        "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+    }).await.unwrap();
+    f.state.db.collection::<bson::Document>("nyxbot_channels").insert_one(doc! {
+        "_id":"test-channel","channel_bot_id":&bot_id,"user_id":&f.admin,"bot_owner_id":&f.org,
+        "platform":"lark","bot_label":"test-bot","transport":"direct","status":"disconnected",
+        "route_api_key_id":"unused","agent_id":&agent.id,"private_chats":"everyone",
+        "org_specialist":{"version":1,"org_id":&f.org,"revision":"binding","guests":bson::to_bson(&org::new_guest_policy(true)).unwrap()},
+        "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+    }).await.unwrap();
     crate::services::assistant_settings_service::update(
         &f.state.db,
         &f.admin,
@@ -5048,6 +5071,23 @@ async fn org_channel_enabled_admin_tools_retain_confirmation_and_members_cannot_
                 value["error"], "acknowledgement_required",
                 "{tool}: {value}"
             );
+            if matches!(
+                tool,
+                "nyxid__connect_channel_bot" | "nyxid__link_channel_bot"
+            ) {
+                assert_eq!(value["channel_preview"]["guest_enabled"], true, "{value}");
+                assert!(
+                    value["channel_preview"]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("organization pays")
+                );
+                assert_eq!(
+                    value["channel_preview"]["health"]["action"],
+                    "enable_billing"
+                );
+                assert!(value["channel_preview"].get("audience_readiness").is_some());
+            }
             assert!(
                 preflight_channel_target(
                     &f.state,

@@ -55,6 +55,11 @@ pub(crate) fn classify(row: &Document, registry: Option<&Registry>) -> AppResult
     let request = row
         .get_str("billing_request_id")
         .map_err(|_| unavailable())?;
+    // Carrier calls have their own terminal-provider evidence, including old
+    // rows written before forwarded_owner existed.
+    if request.starts_with("adapter-call:") {
+        return Ok(classified("excluded_channel_outbound"));
+    }
     for (field, label) in [
         ("pool_attempt", "excluded_pool"),
         ("realtime_session", "excluded_realtime"),
@@ -184,6 +189,14 @@ fn request_blocker(rows: &[Document]) -> Option<&'static str> {
         }
     }
     for row in rows {
+        if row
+            .get_str("billing_request_id")
+            .ok()
+            .is_some_and(|id| id.starts_with("adapter-call:"))
+        {
+            return Some("excluded_channel_outbound");
+        }
+
         if voice::is_voice(row)
             && row
                 .get_str("billing_request_id")
@@ -227,3 +240,6 @@ use recovery_tests::{Phase, point as test_point};
 
 #[cfg(test)]
 pub(crate) mod voice_tests;
+
+#[cfg(test)]
+mod voice_component_tests;

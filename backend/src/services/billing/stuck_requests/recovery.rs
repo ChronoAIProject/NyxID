@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::billing::recovery_batch::{self, Failures};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -11,7 +12,8 @@ pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<()> {
     // A cancelled terminal transaction is atomic. A committed terminal quantity
     // resumes through ordinary settlement, including its financial lock bridges.
     let mut deferred = BTreeMap::new();
-    let result = match tokio::time::timeout(BUDGET, run(db, &mut deferred)).await {
+    let mut failures = Failures::default();
+    let result = match tokio::time::timeout(BUDGET, run(db, &mut deferred, &mut failures)).await {
         Ok(result) => result,
         Err(_) => {
             *deferred.entry("pass_time_budget").or_insert(0_u64) += 1;
@@ -26,9 +28,14 @@ pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<()> {
     if !deferred.is_empty() {
         log_deferred(&deferred);
     }
-    result
+    result?;
+    failures.finish(())
 }
-async fn run(db: &mongodb::Database, deferred: &mut BTreeMap<&'static str, u64>) -> AppResult<()> {
+async fn run(
+    db: &mongodb::Database,
+    deferred: &mut BTreeMap<&'static str, u64>,
+    failures: &mut Failures,
+) -> AppResult<()> {
     if !super::super::reconcile::continue_reconcile() {
         return Ok(());
     }
@@ -59,7 +66,7 @@ async fn run(db: &mongodb::Database, deferred: &mut BTreeMap<&'static str, u64>)
         .find(source.page_filter(after))
         .hint(mongodb::options::Hint::Name(source.index().to_owned()))
         .sort(doc! {"_id": 1})
-        .limit(BATCH_ROWS)
+        .limit(recovery_batch::limit(BATCH_ROWS))
         .max_time(Duration::from_secs(2))
         .await?
         .try_collect()
@@ -71,20 +78,28 @@ async fn run(db: &mongodb::Database, deferred: &mut BTreeMap<&'static str, u64>)
         if !super::super::reconcile::continue_reconcile() || seen.len() == BATCH_REQUESTS {
             break;
         }
-        cursor = row.get_str("_id").map_err(|_| unavailable())?.to_owned();
         visited += 1;
+        let Ok(id) = row.get_str("_id") else {
+            failures.note(unavailable());
+            *deferred.entry("meter_row_malformed").or_default() += 1;
+            continue;
+        };
+        cursor = id.to_owned();
         if !matches!(selection::has_reservation(row), Ok(true)) {
             continue;
         }
-        let request = row
-            .get_str("billing_request_id")
-            .map_err(|_| unavailable())?;
+        let Ok(request) = row.get_str("billing_request_id") else {
+            failures.note(unavailable());
+            *deferred.entry("meter_row_malformed").or_default() += 1;
+            continue;
+        };
         if !seen.insert(request.to_owned()) {
             continue;
         }
         let c = match classify(row, Some(&registry)) {
             Ok(c) => c,
-            Err(_) => {
+            Err(error) => {
+                failures.note(error);
                 *deferred
                     .entry(if voice::is_voice(row) {
                         "voice_malformed_evidence"
@@ -103,17 +118,28 @@ async fn run(db: &mongodb::Database, deferred: &mut BTreeMap<&'static str, u64>)
         }
         match terminal::publish_outcome(db, request).await {
             Ok(terminal::Outcome::Published(rows)) => {
-                super::super::meter::settle_persisted(db, rows).await?
+                if let Err(error) =
+                    recovery_batch::work(super::super::meter::settle_persisted(db, rows)).await
+                {
+                    failures.note(error);
+                    *deferred
+                        .entry("pass_read_or_settlement_failed")
+                        .or_default() += 1;
+                }
             }
             Ok(terminal::Outcome::Deferred(reason)) => {
                 *deferred.entry(reason).or_default() += 1;
             }
             Err(error) => {
-                *deferred.entry(publication_reason(&error)).or_default() += 1;
+                let reason = publication_reason(&error);
+                *deferred.entry(reason).or_default() += 1;
+                if reason != "publication_conflict" {
+                    failures.note(error);
+                }
             }
         }
     }
-    if visited == rows.len() && rows.len() < BATCH_ROWS as usize {
+    if visited == rows.len() && rows.len() < recovery_batch::limit(BATCH_ROWS) as usize {
         cursor.clear();
     }
     db.collection::<Document>(STATE)

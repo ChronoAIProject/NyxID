@@ -188,8 +188,12 @@ Existing group routes and management tools accept the B3a organization selector
 MUST NOT post into or follow organization groups. Channel links now have a
 separate default-off `nyxbot:org-specialist-channels` contract: only live admins
 link same-org bots and specialists, verified members use their own org-member
-lanes, and explicitly enabled guests use bounded org-wallet authority. This does
-not publish the agent as a shared agent or admit guests to org groups. See
+lanes, and guests use bounded org-wallet authority. New bindings enable guests,
+including private chats, with disclosure before confirmation; missing billing
+refuses guest execution without changing that choice. Admins change bot settings;
+Members read them without private-chat/history data. Existing amount and bot-detail
+responses stay compatible; clients tolerate future absent amounts. This does not
+publish the agent as a shared agent or admit guests to org groups. See
 [the channel contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
 Outside that enabled path, incompatible links retain
 `organization_agent_channel_unsupported`. Personal bots still cannot target org

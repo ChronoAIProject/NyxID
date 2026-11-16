@@ -42,6 +42,7 @@ import {
 } from "./AgentCollaborationPanel";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { fonts } from "../../theme/designTokens";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
@@ -99,6 +100,7 @@ export function AgentsScreen({
   initialCreate = false,
   onCreate,
   onCreated,
+  onSelectionKept,
 }: {
   agentId?: string;
   onOpenChat?: OpenChat;
@@ -112,7 +114,9 @@ export function AgentsScreen({
   initialCreate?: boolean;
   onCreate?: () => void;
   onCreated?: (agentId: string) => void;
+  onSelectionKept?: (agentId: string) => void;
 } = {}) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const queryClient = useQueryClient();
   const focused = useIsFocused();
@@ -123,6 +127,9 @@ export function AgentsScreen({
   const [selectedId, setSelectedId] = useState<string | undefined>(agentId);
   const [creating, setCreating] = useState(initialCreate);
   const [creationDirty, setCreationDirty] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState({ agentId, text: "" });
+  const memoryDirty =
+    memoryDraft.agentId === selectedId && !!memoryDraft.text.trim();
   const [createdId, setCreatedId] = useState<string>();
   const [search, setSearch] = useState("");
   const [includeDestroyed, setIncludeDestroyed] = useState(false);
@@ -191,9 +198,49 @@ export function AgentsScreen({
     }
   }, [list.refetch]);
 
+  const agentSwitch = useRef(0);
+  const requestedAgent = useRef(agentId);
+  const deferredAgent = useRef<{ id: string | undefined } | null>(null);
   useEffect(() => {
-    setSelectedId(agentId);
-  }, [agentId]);
+    const revision = ++agentSwitch.current;
+    if (requestedAgent.current !== agentId) {
+      requestedAgent.current = agentId;
+      deferredAgent.current = { id: agentId };
+    }
+    if (busy || !deferredAgent.current) return;
+    const target = deferredAgent.current.id;
+    deferredAgent.current = null;
+    if (target === selectedId) return;
+    if (memoryDirty) {
+      Alert.alert(
+        t("Discard memory draft?"),
+        t("Your unsaved memory draft will be lost."),
+        [
+          {
+            text: t("Keep editing"),
+            style: "cancel",
+            onPress: () => {
+              if (agentSwitch.current === revision && selectedId)
+                onSelectionKept?.(selectedId);
+            },
+          },
+          {
+            text: t("Discard"),
+            style: "destructive",
+            onPress: () => {
+              if (agentSwitch.current === revision) setSelectedId(target);
+            },
+          },
+        ],
+      );
+    } else setSelectedId(target);
+    return () => {
+      agentSwitch.current++;
+    };
+  }, [agentId, busy]);
+  useEffect(() => {
+    setMemoryDraft({ agentId: selectedId, text: "" });
+  }, [selectedId]);
   useEffect(() => {
     if (!focused) return;
     const subscription = AppState.addEventListener("change", (state) => {
@@ -203,6 +250,7 @@ export function AgentsScreen({
     return () => subscription.remove();
   }, [focused, reload]);
   function leave() {
+    setMemoryDraft({ agentId: selectedId, text: "" });
     if (onClose) {
       setCreationDirty(false);
       setCloseRequested(true);
@@ -214,7 +262,16 @@ export function AgentsScreen({
     setError(undefined);
   }
   function back() {
-    if (creating && creationDirty) {
+    if (memoryDirty) {
+      Alert.alert(
+        t("Discard memory draft?"),
+        t("Your unsaved memory draft will be lost."),
+        [
+          { text: t("Keep editing"), style: "cancel" },
+          { text: t("Discard"), style: "destructive", onPress: leave },
+        ],
+      );
+    } else if (creating && creationDirty) {
       Alert.alert("Discard new agent?", "Your agent has not been created.", [
         { text: "Keep editing", style: "cancel" },
         { text: "Discard", style: "destructive", onPress: leave },
@@ -223,7 +280,7 @@ export function AgentsScreen({
   }
   useWorkspaceBack({
     active: onClose
-      ? busy || (creating && creationDirty && !closeRequested)
+      ? busy || ((memoryDirty || (creating && creationDirty)) && !closeRequested)
       : Boolean(selectedId) || creating,
     defaultRole: onClose ? "back" : "menu",
     disabled: busy,
@@ -232,12 +289,17 @@ export function AgentsScreen({
       if (!lock.current) back();
     },
     discardOnClose:
-      creating && creationDirty && !closeRequested
+      memoryDirty && !closeRequested
         ? {
-            title: "Discard new agent?",
-            message: "Your agent has not been created.",
+            title: t("Discard memory draft?"),
+            message: t("Your unsaved memory draft will be lost."),
           }
-        : undefined,
+        : creating && creationDirty && !closeRequested
+          ? {
+              title: "Discard new agent?",
+              message: "Your agent has not been created.",
+            }
+          : undefined,
   });
   useEffect(() => {
     if (busy || !closeRequested) return;
@@ -674,6 +736,11 @@ export function AgentsScreen({
             )}
             {!agent.share_role && maintain && alive && (
               <RememberForm
+                key={agent.id}
+                text={memoryDraft.agentId === agent.id ? memoryDraft.text : ""}
+                onChangeText={(text) =>
+                  setMemoryDraft({ agentId: agent.id, text })
+                }
                 busy={busy}
                 onRemember={(text) =>
                   run(async () => {
@@ -1142,17 +1209,20 @@ function AgentGrantsForm({
 function RememberForm({
   busy,
   onRemember,
+  text,
+  onChangeText,
 }: {
   busy: boolean;
+  text: string;
+  onChangeText: (text: string) => void;
   onRemember: (text: string) => Promise<boolean>;
 }) {
-  const [text, setText] = useState("");
   return (
     <SettingsGroup inset={false} title="Add a memory">
       <SettingsTextField
         accessibilityLabel="Add a memory"
         value={text}
-        onChangeText={setText}
+        onChangeText={onChangeText}
         multiline
         clearButtonMode="never"
         editable={!busy}
@@ -1166,7 +1236,7 @@ function RememberForm({
         disabled={busy || !text.trim()}
         onPress={() => {
           void onRemember(text.trim()).then((saved) => {
-            if (saved) setText("");
+            if (saved) onChangeText("");
           });
         }}
       />

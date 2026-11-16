@@ -170,6 +170,18 @@ pub enum AppError {
     MonitoringNotConfigured,
     #[error("The failed invocation is still releasing capacity; retry this diagnostic once.")]
     DiagnosticNotReady,
+    /// A protocol wait tagged only inside one maintenance unit. Request callers
+    /// retain the original error; the batch consumes this before reporting.
+    #[error("{source}")]
+    BillingRecoveryWaiting { source: Box<AppError> },
+    /// A maintenance batch finished its independent units with some failures.
+    /// Preserve the first source's stable code; quantities never enter this error.
+    #[error("Billing recovery has {failed_units} failing units")]
+    BillingRecoveryFailed {
+        failed_units: u64,
+        #[source]
+        source: Box<AppError>,
+    },
     /// Response metadata, preserving the underlying error through handler layers.
     #[error("{source}")]
     InvocationDiagnostic {
@@ -894,6 +906,8 @@ impl AppError {
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.status_code(),
             Self::SkillRead(reason) => reason.legacy_error().status_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
             Self::RefreshRefused { source, .. } => source.status_code(),
@@ -1138,6 +1152,8 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.error_code(),
             Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
             Self::SkillRead(reason) => reason.legacy_error().error_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
@@ -1388,6 +1404,8 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.oauth_error_code(),
             Self::RefreshRefused { source, .. } => source.oauth_error_code(),
             Self::MfaRequired { .. } => "mfa_required",
             Self::MfaStepUpRequired => "mfa_step_up_required",
@@ -1412,6 +1430,8 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.oauth_status(),
             Self::RefreshRefused { source, .. } => source.oauth_status(),
             Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
@@ -1427,6 +1447,8 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.error_key(),
             Self::SkillRead(reason) => reason.error_key(),
             Self::MemoryWrite(reason) => reason.error_key(),
             Self::RefreshRefused { source, .. } => source.error_key(),
@@ -1683,6 +1705,8 @@ impl AppError {
 impl AppError {
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.retry_after_seconds(),
             Self::InvocationDiagnostic { source, .. } => source.retry_after_seconds(),
             Self::DiagnosticNotReady | Self::RateLimited => Some(1),
             Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
@@ -1692,6 +1716,11 @@ impl AppError {
 
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::BillingRecoveryFailed { source, .. }
+        | Self::BillingRecoveryWaiting { source } = self
+        {
+            return source.response_body();
+        }
         if let Self::InvocationDiagnostic { source, .. } = self {
             return source.response_body();
         }

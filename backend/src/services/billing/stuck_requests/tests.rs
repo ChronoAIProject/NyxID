@@ -76,10 +76,6 @@ async fn stuck_request_classification_ownership_and_protocol_matrix() {
             "excluded_runtime",
         ),
         (
-            doc! {"metric":"voice_seconds"},
-            "excluded_voice_unknown_shape",
-        ),
-        (
             doc! {"billing_request_id":"voice:legacy:1"},
             "excluded_voice_unknown_shape",
         ),
@@ -97,6 +93,9 @@ async fn stuck_request_classification_ownership_and_protocol_matrix() {
             "has_final_checkpoint",
         ),
     ] {
+        let mut component = raw.clone();
+        component.insert("metric", "voice_seconds");
+        assert!(classify(&component, Some(&r)).unwrap().eligible);
         let mut row = raw.clone();
         row.extend(change);
         let c = classify(&row, Some(&r)).unwrap();

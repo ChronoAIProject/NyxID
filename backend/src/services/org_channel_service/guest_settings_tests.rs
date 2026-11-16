@@ -333,8 +333,8 @@ async fn org_channel_guest_settings_restore_stops_at_latest_incompatible_predece
             .unwrap();
         rebuild(&mut f).await;
         assert!(
-            !f.channel.org_specialist.as_ref().unwrap().guests.enabled,
-            "{mismatch}"
+            f.channel.org_specialist.as_ref().unwrap().guests.enabled,
+            "{mismatch}: new bindings use the explicit default, never an older predecessor"
         );
         crate::handlers::nyxbot::disconnect(&f.org.state, &f.org.admin, &f.channel.id)
             .await

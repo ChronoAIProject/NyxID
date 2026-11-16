@@ -79,6 +79,14 @@ function setup(
     "./AuthSessionContext": {
       useAuthSession: () => ({ isAuthenticated: inSheet }),
     },
+    "./loginRequestResolver": { takeLoginRequest: () => null },
+    "./useUncertainLoginPreview": { useUncertainLoginPreview: () => ({ reset() {} }) },
+    "./useLoginRequestResume": { useLoginRequestResume: () => {} },
+    "./useLoginRequestHandoff": { useLoginRequestHandoff: () => () => {} },
+    "./useLoginPreviewCooldown": {
+      useLoginPreviewCooldown: () => ({ coolingDown: false }),
+    },
+    "./LoginRequestTerminalView": { LoginRequestTerminalView: "Terminal" },
     "./useMfaStepUp": {
       useMfaStepUp: () => ({ busy: false, prompt: mfa ? "MFA prompt" : null }),
     },

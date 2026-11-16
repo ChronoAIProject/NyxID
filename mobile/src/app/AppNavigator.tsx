@@ -214,7 +214,7 @@ function GroupEditorRoute({
       onBack={() => navigation.goBack()}
       onSaved={(groupId) => {
         if (route.params?.groupId) navigation.goBack();
-        else navigation.push("GroupChat", { groupId });
+        else navigation.replace("GroupChat", { groupId });
       }}
       onRemoved={() =>
         navigation.popTo("Agents", { tab: "groups" }, { merge: true })
@@ -231,6 +231,7 @@ function AgentDetailRoute({
   return (
     <AgentsScreen
       agentId={route.params.agentId}
+      onSelectionKept={(agentId) => navigation.setParams({ agentId })}
       onClose={() => navigation.goBack()}
       onOpenChat={openChat}
       onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}

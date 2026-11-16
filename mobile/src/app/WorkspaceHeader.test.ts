@@ -40,6 +40,7 @@ function setup({
   let cursor = 0;
   let dirty = false;
   let focused = true;
+  let sidebarOpen = false;
   let localBacks = 0;
   let nativeBacks = 0;
   let menuOpens = 0;
@@ -160,12 +161,16 @@ function setup({
   });
   const mocks: Record<string, unknown> = {
     react,
+    "../i18n/LanguageProvider": {
+      useAppLanguage: () => ({ t: (phrase: string) => phrase }),
+    },
     "../lib/accessibility/WorkspaceInteractionSurface": {
       WorkspaceInteractionSurface: "WorkspaceInteractionSurface",
     },
     "../lib/accessibility/workspaceAccessibility": {
       useWorkspaceAccessibility: () => ({
         sheetOpen: inSheet,
+        sidebarOpen,
         primaryKey: "chat",
       }),
     },
@@ -190,7 +195,7 @@ function setup({
         },
       },
       Pressable: "Pressable",
-      StyleSheet: { create: <T>(styles: T) => styles },
+      StyleSheet: { create: <T,>(styles: T) => styles },
     },
     "lucide-react-native": { ChevronLeft: "ChevronLeft", Menu: "Menu", X: "X" },
     "../theme/ThemeContext": {
@@ -205,7 +210,7 @@ function setup({
       }),
     },
     "use-latest-callback": {
-      default: <T>(callback: T) => {
+      default: <T,>(callback: T) => {
         const current = react.useRef(callback);
         current.current = callback;
         return react.useCallback(
@@ -339,6 +344,9 @@ function setup({
   dirty = true;
   flush();
   return {
+    sidebar: (open: boolean) => {
+      sidebarOpen = open;
+    },
     preflight: async () => {
       for (const guard of dismissGuards.values())
         if (!(await guard())) return false;
@@ -878,4 +886,42 @@ test("the real dirty leave guard reports Keep editing to the sidebar but never c
   assert.equal(x.cancelled(), 1);
   assert.deepEqual(x.dispatched.at(-1), x.rootAction);
   x.unmount();
+});
+
+
+test("critical guard releases on settle, blur, session loss and unmount even when a dirty editor remains", () => {
+  for (const boundary of ["settle", "blur", "signout", "unmount"] as const) {
+    const env = setup({
+      inSheet: false,
+      disabled: true,
+      discardOnClose: { title: "Discard?", message: "Draft" },
+    });
+    assert.equal(env.criticalChanges.at(-1), true);
+    if (boundary === "settle") env.update({ disabled: false });
+    else if (boundary === "blur") env.focus(false);
+    else if (boundary === "signout") env.setSessionActive(false);
+    else env.unmount();
+    assert.equal(env.criticalChanges.at(-1), false, boundary);
+    if (boundary === "settle" || boundary === "blur") {
+      assert.equal(
+        env.guardChanges.at(-1),
+        true,
+        "unsaved changes retain noncritical protection",
+      );
+    } else assert.equal(env.guardChanges.at(-1), false);
+    if (boundary !== "unmount") env.unmount();
+    assert.equal(env.guardChanges.at(-1), false);
+  }
+});
+
+test("a blocked Home menu button can close an already presented sidebar", () => {
+  const env = setup({ inSheet: false, active: false, disabled: true });
+  assert.equal(env.button("left")?.props.disabled, true);
+  env.sidebar(true);
+  const menu = env.button("left");
+  assert.equal(menu?.props.disabled, false);
+  assert.equal(menu?.props.accessibilityState.disabled, false);
+  menu?.props.onPress();
+  assert.equal(env.counts().menuOpens, 1);
+  env.unmount();
 });

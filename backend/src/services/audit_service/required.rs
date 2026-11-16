@@ -13,10 +13,46 @@ use super::AuditActor;
 
 // These are forensic identifiers and bounded facts, never source documents.
 const MAX_INTENT_METADATA_BYTES: usize = 16 * 1024;
-const MAX_ACTOR_FIELD_BYTES: usize = 1024;
+const TRUNCATED: &str = "...[truncated]";
 
-fn bounded(value: Option<&String>) -> Option<String> {
-    value.map(|value| value.chars().take(MAX_ACTOR_FIELD_BYTES / 4).collect())
+/// Byte budgets include the visible marker. Input validation and source values
+/// are unchanged; only the audit representation is shortened.
+#[derive(Clone, Copy)]
+pub(crate) enum TextField {
+    Identifier,
+    ForwardedIp,
+    KeyName,
+    UserAgent,
+    Email,
+    DisplayName,
+    AvatarUrl,
+}
+
+impl TextField {
+    fn byte_limit(self) -> usize {
+        match self {
+            Self::Identifier | Self::ForwardedIp | Self::KeyName => 256,
+            Self::UserAgent => 1024,
+            Self::Email | Self::DisplayName => 512,
+            Self::AvatarUrl => 4096,
+        }
+    }
+}
+
+pub(crate) fn text(field: TextField, value: &str) -> String {
+    let limit = field.byte_limit();
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    let mut end = limit - TRUNCATED.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{TRUNCATED}", &value[..end])
+}
+
+fn optional_text(field: TextField, value: Option<&str>) -> Option<String> {
+    value.map(|value| text(field, value))
 }
 
 /// Callers select metadata explicitly; serializing a request/model/provider
@@ -27,15 +63,37 @@ pub fn intent(
     metadata: Option<serde_json::Value>,
 ) -> AppResult<SecurityEffectIntent> {
     let event = super::build_audit_entry(
-        actor.map(|actor| actor.user_id.clone()),
+        actor.map(|actor| text(TextField::Identifier, &actor.user_id)),
         event_type.to_owned(),
         metadata,
-        bounded(actor.and_then(|actor| actor.ip_address.as_ref())),
-        bounded(actor.and_then(|actor| actor.user_agent.as_ref())),
-        actor.and_then(|actor| actor.api_key_id.clone()),
-        bounded(actor.and_then(|actor| actor.api_key_name.as_ref())),
+        optional_text(
+            TextField::ForwardedIp,
+            actor.and_then(|actor| actor.ip_address.as_deref()),
+        ),
+        optional_text(
+            TextField::UserAgent,
+            actor.and_then(|actor| actor.user_agent.as_deref()),
+        ),
+        optional_text(
+            TextField::Identifier,
+            actor.and_then(|actor| actor.api_key_id.as_deref()),
+        ),
+        optional_text(
+            TextField::KeyName,
+            actor.and_then(|actor| actor.api_key_name.as_deref()),
+        ),
     );
     checked_intent(event)
+}
+
+/// Preserve ordinary actor facts during a durability migration. Values above
+/// their audit byte budget retain a prefix and a visible truncation marker.
+pub fn intent_preserving_actor(
+    actor: &AuditActor,
+    event_type: &str,
+    metadata: Option<serde_json::Value>,
+) -> AppResult<SecurityEffectIntent> {
+    intent(Some(actor), event_type, metadata)
 }
 
 /// OAuth client requests have network context but no human acting user.
@@ -49,8 +107,8 @@ pub fn client_intent(
         None,
         event_type.into(),
         metadata,
-        ip_address.map(|v| v.chars().take(MAX_ACTOR_FIELD_BYTES / 4).collect()),
-        user_agent.map(|v| v.chars().take(MAX_ACTOR_FIELD_BYTES / 4).collect()),
+        optional_text(TextField::ForwardedIp, ip_address),
+        optional_text(TextField::UserAgent, user_agent),
         None,
         None,
     ))
@@ -86,4 +144,194 @@ pub(crate) async fn append_intent(db: &Database, event: &AuditLog) -> AppResult<
     #[cfg(not(test))]
     let _ = inserted;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_user_agent_is_bounded_marked_and_utf8_safe_at_every_entrypoint() {
+        for agent in ["a".repeat(1024), "a".repeat(1025), "界".repeat(1024)] {
+            let actor = AuditActor {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                ip_address: None,
+                user_agent: Some(agent.clone()),
+                api_key_id: None,
+                api_key_name: None,
+            };
+            for result in [
+                intent(Some(&actor), "event", None),
+                intent_preserving_actor(&actor, "event", None),
+                client_intent("event", None, None, Some(&agent)),
+            ] {
+                let SecurityEffect::Audit { event } = result.unwrap().effect else {
+                    panic!("expected audit");
+                };
+                let stored = event.user_agent.unwrap();
+                assert!(stored.len() <= TextField::UserAgent.byte_limit());
+                if agent.len() <= TextField::UserAgent.byte_limit() {
+                    assert_eq!(stored, agent);
+                } else {
+                    let prefix = stored.strip_suffix(TRUNCATED).unwrap();
+                    assert!(agent.starts_with(prefix));
+                    assert!(TextField::UserAgent.byte_limit() - stored.len() < 4);
+                }
+            }
+        }
+    }
+    #[test]
+    fn required_text_caps_preserve_short_values_and_mark_utf8_truncation() {
+        for field in [
+            TextField::Identifier,
+            TextField::ForwardedIp,
+            TextField::KeyName,
+            TextField::UserAgent,
+            TextField::Email,
+            TextField::DisplayName,
+            TextField::AvatarUrl,
+        ] {
+            let limit = field.byte_limit();
+            for value in ["a".repeat(limit), "a".repeat(limit + 1), "界".repeat(limit)] {
+                let stored = text(field, &value);
+                assert!(stored.len() <= limit);
+                if value.len() <= limit {
+                    assert_eq!(stored, value);
+                } else {
+                    let prefix = stored.strip_suffix(TRUNCATED).unwrap();
+                    assert!(value.starts_with(prefix));
+                    assert!(limit - stored.len() < 4);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn required_audit_maximum_capped_occurrences_fit_backstop() {
+        use serde_json::json;
+        let max = |field| text(field, &"x".repeat(64 * 1024));
+        let actor = AuditActor {
+            user_id: max(TextField::Identifier),
+            ip_address: Some(max(TextField::ForwardedIp)),
+            user_agent: Some(max(TextField::UserAgent)),
+            api_key_id: Some(max(TextField::Identifier)),
+            api_key_name: Some(max(TextField::KeyName)),
+        };
+        let id = max(TextField::Identifier);
+        let rows = [
+            (
+                "admin.user.created",
+                json!({"target_user_id":id,"target_email":max(TextField::Email),"role":"operator"}),
+            ),
+            (
+                "admin.user.updated",
+                json!({"target_user_id":id,"target_email":max(TextField::Email),"changes":{
+                "display_name":max(TextField::DisplayName),"email":max(TextField::Email),"avatar_url":max(TextField::AvatarUrl)}}),
+            ),
+            (
+                "admin.user.role_changed",
+                json!({"target_user_id":id,"role":"operator"}),
+            ),
+            (
+                "admin.user.status_changed",
+                json!({"target_user_id":id,"is_active":false}),
+            ),
+            ("admin.user.password_reset", json!({"target_user_id":id})),
+            ("admin.user.email_verified", json!({"target_user_id":id})),
+            (
+                "admin.user.sessions_revoked",
+                json!({"target_user_id":id,"revoked_count":i64::MAX}),
+            ),
+            (
+                "oauth_consent_revoked",
+                json!({"client_id":id,"revoked_refresh_tokens":i64::MAX,"revoked_broker_bindings":i64::MAX}),
+            ),
+            (
+                "oauth_broker_binding_revoked",
+                json!({"client_id":id,"revoke_source":"client","binding_hash":"h".repeat(16),"reason":"client_revoked"}),
+            ),
+            (
+                "oauth_broker_binding_reuse_detected",
+                json!({"client_id":id,"binding_hash":"h".repeat(16),"cascade_revoke_count":i64::MAX}),
+            ),
+        ];
+        for (name, metadata) in rows {
+            let turn = uuid::Uuid::new_v4().to_string();
+            let result =
+                crate::turn_trace::scope(crate::turn_trace::TurnContext::for_turn(&turn), async {
+                    intent_preserving_actor(&actor, name, Some(metadata.clone()))
+                })
+                .await
+                .unwrap();
+            let SecurityEffect::Audit { event } = result.effect else {
+                panic!("expected audit");
+            };
+            let bytes = bson::to_vec(&event).unwrap().len();
+            assert!(bytes < MAX_INTENT_METADATA_BYTES);
+            println!(
+                "REQUIRED_AUDIT_MAX {name} bytes={bytes} margin={}",
+                MAX_INTENT_METADATA_BYTES - bytes
+            );
+            for result in [
+                intent(Some(&actor), name, Some(metadata.clone())),
+                client_intent(
+                    name,
+                    Some(metadata),
+                    actor.ip_address.as_deref(),
+                    actor.user_agent.as_deref(),
+                ),
+            ] {
+                let SecurityEffect::Audit { event } = result.unwrap().effect else {
+                    panic!("expected audit");
+                };
+                assert!(bson::to_vec(&event).unwrap().len() <= bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn required_actor_caps_apply_at_every_entrypoint() {
+        let raw = "a".repeat(64 * 1024);
+        let actor = AuditActor {
+            user_id: raw.clone(),
+            ip_address: Some(raw.clone()),
+            user_agent: Some(raw.clone()),
+            api_key_id: Some(raw.clone()),
+            api_key_name: Some(raw.clone()),
+        };
+        for result in [
+            intent(Some(&actor), "event", None),
+            intent_preserving_actor(&actor, "event", None),
+        ] {
+            let SecurityEffect::Audit { event } = result.unwrap().effect else {
+                panic!("expected audit");
+            };
+            for value in [
+                event.user_id,
+                event.ip_address,
+                event.api_key_id,
+                event.api_key_name,
+            ] {
+                assert_eq!(value.unwrap(), format!("{}...[truncated]", "a".repeat(242)));
+            }
+            assert_eq!(
+                event.user_agent.unwrap(),
+                format!("{}...[truncated]", "a".repeat(1010))
+            );
+        }
+        let SecurityEffect::Audit { event } = client_intent("event", None, Some(&raw), Some(&raw))
+            .unwrap()
+            .effect
+        else {
+            panic!("expected audit");
+        };
+        assert_eq!(
+            event.ip_address.unwrap(),
+            format!("{}...[truncated]", "a".repeat(242))
+        );
+        assert_eq!(
+            event.user_agent.unwrap(),
+            format!("{}...[truncated]", "a".repeat(1010))
+        );
+    }
 }
