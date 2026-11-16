@@ -319,6 +319,7 @@ pub async fn ssh_exec(
                     &service_id,
                     &user_id,
                     &principal,
+                    false,
                 )
                 .await?,
             )

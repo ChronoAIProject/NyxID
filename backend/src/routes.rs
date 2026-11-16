@@ -3794,6 +3794,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/apple-app-site-association",
             get(handlers::oidc_discovery::apple_app_site_association),
+        )
+        .route(
+            "/assetlinks.json",
+            get(handlers::oidc_discovery::android_asset_links),
         );
 
     let public_oauth = Router::new()

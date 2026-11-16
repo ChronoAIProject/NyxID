@@ -1049,6 +1049,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
@@ -1090,6 +1091,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) voice_parent_conversation_id: Option<String>,
     pub(crate) platform_model_context: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) execution_group_id: Option<String>,
@@ -1702,6 +1704,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        voice_parent_conversation_id: conversation.voice_parent_conversation_id.clone(),
         platform_model_context: live.and_then(|t| t.platform_model_context.clone()),
         automation_work: live.and_then(|t| t.automation_work.clone()),
         execution_group_id: conversation
@@ -3346,6 +3349,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        voice_parent_conversation_id: target.voice_parent_conversation_id.clone(),
         platform_model_context: None,
         automation_work: None,
         execution_group_id: target

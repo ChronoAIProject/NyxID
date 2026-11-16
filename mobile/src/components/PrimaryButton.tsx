@@ -21,6 +21,7 @@ type PrimaryButtonProps = {
    */
   kind?: "primary" | "ghost" | "danger";
   disabled?: boolean;
+  accessibilityLabel?: string;
   refreshLabelOnFontScaleChange?: boolean;
 };
 
@@ -29,6 +30,7 @@ export function PrimaryButton({
   onPress,
   kind = "primary",
   disabled = false,
+  accessibilityLabel,
   refreshLabelOnFontScaleChange = false,
 }: PrimaryButtonProps) {
   const { colors } = useTheme();
@@ -39,7 +41,7 @@ export function PrimaryButton({
     return (
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={label}
+        accessibilityLabel={accessibilityLabel ?? label}
         accessibilityState={{ disabled }}
         onPress={onPress}
         disabled={disabled}
@@ -72,7 +74,7 @@ export function PrimaryButton({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={accessibilityLabel ?? label}
       accessibilityState={{ disabled }}
       onPress={onPress}
       disabled={disabled}

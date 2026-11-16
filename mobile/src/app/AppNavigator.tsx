@@ -75,6 +75,7 @@ import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnect
 import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
 import { AssistantScreen } from "../features/assistant/AssistantScreen";
 import { AssistantLinkHost } from "../features/assistant/AssistantLinkHost";
+import { SshTerminalScreen } from "../features/ssh/SshTerminalScreen";
 import { ServicesScreen } from "../features/services/ServicesScreen";
 import { AgentsScreen } from "../features/agents/AgentsScreen";
 import { AgentsGroupsScreen } from "../features/agents/AgentsGroupsScreen";
@@ -93,6 +94,7 @@ import {
 } from "../features/plugins/PluginsScreen";
 import { TermsOfServiceScreen } from "../features/legal/TermsOfServiceScreen";
 import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
+import { OpenSourceNoticesScreen } from "../features/account/OpenSourceNoticesScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
 import { useReducedMotion } from "../lib/accessibility/useReducedMotion";
 import {
@@ -465,6 +467,7 @@ function WorkspaceNavigator() {
           title: route.params?.groupId ? t("Crew settings") : t("New crew"),
         })}
       />
+      <ContentStack.Screen name="SshTerminal" component={SshTerminalScreen} options={{ title: t("SSH terminal") }} />
       <ContentStack.Screen
         name="ServiceSetup"
         component={ServiceSetupRoute}
@@ -498,6 +501,11 @@ function WorkspaceNavigator() {
         name="ActiveGrants"
         component={ActivityScreen}
         options={{ title: t("Active grants") }}
+      />
+      <ContentStack.Screen
+        name="ActivityReview"
+        component={ActivityScreen}
+        options={{ title: t("Activity") }}
       />
       <ContentStack.Screen
         name="MachinePolicy"
@@ -785,6 +793,11 @@ function SettingsSheetRoute({
             name="PrivacyPolicy"
             component={PrivacyPolicyScreen}
             options={{ title: t("Privacy Policy") }}
+          />
+          <SheetStack.Screen
+            name="OpenSourceNotices"
+            component={OpenSourceNoticesScreen}
+            options={{ title: t("Open-source notices") }}
           />
           <SheetStack.Screen
             name="DeviceLogin"

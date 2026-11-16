@@ -419,6 +419,25 @@ pub async fn control(
     .await
 }
 
+/// Internal End for the exact start whose response was not consumed. Like a
+/// caller End, intent survives lease transfer and must not overwrite another End.
+pub(super) async fn end_undelivered_start(
+    db: &Database,
+    row: &VoiceSession,
+) -> AppResult<Option<VoiceSession>> {
+    Ok(db
+        .collection::<VoiceSession>(COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id":&row.id,"user_id":&row.user_id,
+            "conversation_id":&row.conversation_id,"client_request_id":&row.client_request_id,
+            "live_slot":true,"end_requested":false},
+            doc! {"$set":{"end_requested":true,"state":"closing","end_reason":"client_lost"},
+            "$inc":{"control_revision":1}},
+        )
+        .return_document(ReturnDocument::After)
+        .await?)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn control_for_caller(
     db: &Database,

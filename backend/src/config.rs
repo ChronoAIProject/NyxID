@@ -449,6 +449,13 @@ pub struct AppConfig {
     /// APNs topic (bundle ID of the iOS app, e.g. "dev.nyxid.app").
     pub apns_topic: Option<String>,
 
+    /// Public Android Digital Asset Links identity (optional).
+    pub android_app_package: Option<String>,
+    pub android_app_sha256_cert_fingerprints: Vec<String>,
+    /// Additional lowercase URL schemes accepted for mobile OAuth returns.
+    /// `nyxid` is always accepted implicitly.
+    pub mobile_app_return_schemes: Vec<String>,
+
     /// Use APNs sandbox instead of production.
     /// Default: true in development, false otherwise.
     pub apns_sandbox: bool,
@@ -1047,6 +1054,103 @@ fn shutdown_drain_timeout(value: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS)
 }
 
+fn parse_android_package(raw: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.split('.').count() < 2
+        || !value.split('.').all(|part| {
+            part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    {
+        return Err("expected an Android application package");
+    }
+    Ok(Some(value.into()))
+}
+
+fn parse_android_fingerprints(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let bytes: Vec<_> = value.split(':').collect();
+        if bytes.len() != 32
+            || !bytes
+                .iter()
+                .all(|byte| byte.len() == 2 && byte.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err("expected comma-separated 32-byte colon-delimited SHA-256 fingerprints");
+        }
+        let normalized = value.to_ascii_uppercase();
+        if !result.contains(&normalized) {
+            result.push(normalized);
+        }
+    }
+    Ok(result)
+}
+
+fn parse_mobile_app_return_schemes(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    const RESERVED: &[&str] = &[
+        "http",
+        "https",
+        "ws",
+        "wss",
+        "ftp",
+        "file",
+        "data",
+        "javascript",
+        "vbscript",
+        "blob",
+        "about",
+        "intent",
+        "content",
+        "exp",
+        "exps",
+        "mailto",
+        "tel",
+        "sms",
+    ];
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut schemes = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let value = value.to_ascii_lowercase();
+        if value.len() > 32
+            || !value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte)
+            })
+            || RESERVED.contains(&value.as_str())
+        {
+            return Err("expected non-web mobile URL schemes");
+        }
+        if !schemes.iter().any(|existing| existing == &value) {
+            schemes.push(value);
+        }
+    }
+    Ok(schemes)
+}
+
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
@@ -1307,6 +1411,9 @@ impl AppConfig {
             apns_key_id: env::var("APNS_KEY_ID").ok().filter(|s| !s.is_empty()),
             apns_team_id: env::var("APNS_TEAM_ID").ok().filter(|s| !s.is_empty()),
             apns_topic: env::var("APNS_TOPIC").ok().filter(|s| !s.is_empty()),
+            android_app_package: parse_android_package(env::var("ANDROID_APP_PACKAGE").ok().as_deref()).expect("invalid ANDROID_APP_PACKAGE"),
+            android_app_sha256_cert_fingerprints: parse_android_fingerprints(env::var("ANDROID_APP_SHA256_CERT_FINGERPRINTS").ok().as_deref()).expect("invalid ANDROID_APP_SHA256_CERT_FINGERPRINTS"),
+            mobile_app_return_schemes: parse_mobile_app_return_schemes(env::var("MOBILE_APP_RETURN_SCHEMES").ok().as_deref()).expect("invalid MOBILE_APP_RETURN_SCHEMES"),
             apns_sandbox: env::var("APNS_SANDBOX")
                 .ok()
                 .map(|v| v == "true" || v == "1")
@@ -2050,6 +2157,9 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -2560,5 +2670,92 @@ mod contextual_cutover_tests {
         }
         assert!(mode(Some("invalid"), Some("true"), Some("true")).is_err());
         assert_eq!(mode(Some("false"), Some("1"), Some("1")), Ok((false, true)));
+    }
+}
+
+#[cfg(test)]
+mod android_app_link_tests {
+    #[test]
+    fn android_app_link_identity_validation() {
+        use super::{parse_android_fingerprints, parse_android_package};
+        assert_eq!(parse_android_package(None).unwrap(), None);
+        assert_eq!(
+            parse_android_package(Some("fun.chronoai.nyxid"))
+                .unwrap()
+                .as_deref(),
+            Some("fun.chronoai.nyxid")
+        );
+        for invalid in ["package", "a..b", "a.-b", "a.1b", "a.b/path"] {
+            assert!(parse_android_package(Some(invalid)).is_err());
+        }
+        let lower = ["ab"; 32].join(":");
+        let fingerprints =
+            parse_android_fingerprints(Some(&format!(" {lower},{} ", lower.to_ascii_uppercase())))
+                .unwrap();
+        assert_eq!(fingerprints, vec![lower.to_ascii_uppercase()]);
+        assert!(parse_android_fingerprints(None).unwrap().is_empty());
+        for value in [
+            format!("{lower},"),
+            format!(",{lower}"),
+            format!(", {lower}, ,{},", lower.to_ascii_uppercase()),
+        ] {
+            assert_eq!(
+                parse_android_fingerprints(Some(&value)).unwrap(),
+                vec![lower.to_ascii_uppercase()]
+            );
+        }
+        assert!(parse_android_fingerprints(Some(", ,,")).unwrap().is_empty());
+        for invalid in [
+            "AA:BB",
+            "aa".repeat(32).as_str(),
+            &format!("{}:GG", ["AA"; 31].join(":")),
+        ] {
+            assert!(parse_android_fingerprints(Some(invalid)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mobile_app_return_scheme_tests {
+    use super::parse_mobile_app_return_schemes;
+
+    #[test]
+    fn mobile_return_schemes_validate_lowercase_custom_schemes() {
+        assert_eq!(
+            parse_mobile_app_return_schemes(Some(",acme-nyx,,ACME-NYX,")).unwrap(),
+            ["acme-nyx"]
+        );
+        for empty in ["", " ", ", ,,"] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(empty))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            parse_mobile_app_return_schemes(Some(" acme-nyx,foo+bar,acme-nyx ")).unwrap(),
+            ["acme-nyx", "foo+bar"]
+        );
+        assert!(parse_mobile_app_return_schemes(None).unwrap().is_empty());
+        assert!(
+            parse_mobile_app_return_schemes(Some(" "))
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            "HTTPS",
+            "1acme",
+            "acme_nyx",
+            "https",
+            "exp",
+            "javascript",
+            "acme nyx",
+            "abcdefghijklmnopqrstuvwxyzabcdefg",
+        ] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }

@@ -46,6 +46,8 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (accepted - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        voice_link_publication: None,
+        links_in_chat: None,
         artifact_recovery_target: None,
         artifact_delivery: None,
         work: None,

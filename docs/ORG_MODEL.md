@@ -765,6 +765,8 @@ Org-policy decisions include `policy_owner_user_id: "<org_user_id>"` in the audi
 
 `DELETE /orgs/{id}` (admin only) refuses to proceed while the org still owns *live* resources, then cascade-deletes dead state.
 
+After those checks, a metadata-only `deletion_audit` marker and `org_deletion_requested` audit intent commit together before cleanup; retries reuse the marker, which grants no authority and does not schedule recovery. The final org-row delete and `org_deleted` intent commit together, so an interrupted cascade retains requested evidence without claiming completion; earlier cleanup is not rolled back if a later step fails, and the cascade is not automatically resumable.
+
 ### Live blockers (must be empty)
 
 Each blocker filter uses the same live-state semantics as the corresponding API delete path. Soft-deleted rows (those that linger in the collection with `is_active = false` or `status = "revoked"`) are NOT counted as blockers — otherwise an org that ever held a service would be permanently undeletable.

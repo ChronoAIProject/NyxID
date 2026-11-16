@@ -47,9 +47,12 @@ import {
   describeConnection,
   isSavedCredential,
   isOAuthConnection,
-  reconnectScopeOverride,
 } from "./connectionPresentation";
 import { PluginConnectionHistory } from "../plugins/PluginConnectionHistory";
+
+import { useServiceOAuth } from "./useServiceOAuth";
+import { oauthOutcomeCopy } from "./serviceOAuthModel";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 
 const ROOT = ["workspace", "services"] as const;
 const MANAGEMENT_TABS = ["overview", "advanced", "history"] as const;
@@ -68,6 +71,7 @@ export function ServicesScreen({
   onClose?: () => void;
 } = {}) {
   const { colors } = useTheme();
+  const { t } = useAppLanguage();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
   const queryClient = useQueryClient();
@@ -204,7 +208,7 @@ export function ServicesScreen({
     try {
       await action();
     } catch (cause) {
-      setError(messageOf(cause));
+      setError(t(messageOf(cause)));
     } finally {
       actionLock.current = false;
       setBusy(false);
@@ -212,39 +216,43 @@ export function ServicesScreen({
     }
   }
 
-  async function authorize(
-    connection: ServiceConnection,
-    entry: CatalogEntry,
-    repairing = false,
-  ) {
-    if (!entry.provider_config_id)
-      throw new Error("This service has no OAuth provider configured.");
-    const org =
-      connection.credential_source?.type === "org"
-        ? connection.credential_source.org_id
-        : undefined;
-    const response = await servicesApi.initiateOAuth(
-      entry.provider_config_id,
-      connection.id,
-      org,
-      repairing ? reconnectScopeOverride(connection, entry) : undefined,
-    );
-    await WebBrowser.openBrowserAsync(
-      validateBrowserUrl(response.authorization_url),
-    );
-    await reload();
-    const latest = await servicesApi.connection(connection.id);
-    queryClient.setQueryData([...ROOT, "connection", connection.id], latest);
-    const authorized =
-      latest.status === "active" &&
-      (connection.status !== "active" ||
-        latest.last_authorized_at !== connection.last_authorized_at);
-    setNotice(
-      authorized
-        ? "Authorization completed. Your connection is ready."
-        : "Authorization has not completed yet. Finish it in the browser, then check again.",
-    );
-  }
+  const oauthFlow = useServiceOAuth(focused, reload);
+  const oauthBanner = oauthFlow.banner && (
+    <SettingsGroup
+      inset={false}
+      footer={t(oauthOutcomeCopy[oauthFlow.banner.outcome])}
+    >
+      <SettingsRow label={oauthFlow.banner.attempt.catalogName} />
+      {oauthFlow.banner.outcome === "success" ? (
+        <SettingsRow
+          label={t("Dismiss")}
+          tone="action"
+          onPress={() => void oauthFlow.dismiss()}
+        />
+      ) : (
+        <>
+          <SettingsRow
+            label={t("Check again")}
+            tone="action"
+            disabled={busy || oauthFlow.checking}
+            onPress={() => void run(oauthFlow.check)}
+          />
+          <SettingsRow
+            label={t(
+              oauthFlow.banner.outcome === "pending" ||
+                oauthFlow.banner.outcome === "unconfirmed"
+                ? "Continue authorization"
+                : "Retry authorization",
+            )}
+            tone="action"
+            disabled={busy || oauthFlow.checking}
+            onPress={() => void run(oauthFlow.retry)}
+          />
+        </>
+      )}
+    </SettingsGroup>
+  );
+  const authorize = oauthFlow.start;
 
   async function remove(connection: ServiceConnection) {
     try {
@@ -537,6 +545,41 @@ export function ServicesScreen({
             </SettingsGroup>
             {connection.error_message && (
               <Notice message={connection.error_message} tone="error" />
+            )}
+            {connection.service_type === "ssh" && (
+              <SettingsGroup
+                inset={false}
+                footer={
+                  connection.ssh_auth_mode === "node_key"
+                    ? t(
+                        "Certificate-mode services are required for the mobile terminal. Run nyxid ssh exec <service> from a computer.",
+                      )
+                    : connection.ssh_auth_mode === "proxy_only"
+                      ? t(
+                          "Certificate-mode services are required for the mobile terminal. Run nyxid ssh proxy from a computer.",
+                        )
+                      : connection.ssh_auth_mode === "cert" &&
+                          (!connection.is_active || connection.status !== "active")
+                        ? t("Enable this connection to open the terminal.")
+                        : undefined
+                }
+              >
+                {connection.ssh_auth_mode === "cert" &&
+                connection.is_active &&
+                connection.status === "active" ? (
+                  <SettingsRow
+                    label={t("Open terminal")}
+                    tone="action"
+                    onPress={() =>
+                      navigation.navigate("SshTerminal", {
+                        serviceId: connection.catalog_service_id ?? connection.id,
+                        connectionId: connection.id,
+                        autoConnect: true,
+                      })
+                    }
+                  />
+                ) : null}
+              </SettingsGroup>
             )}
             <SettingsGroup
               title="Use in Chat"
@@ -903,6 +946,7 @@ export function ServicesScreen({
       showHeading={false}
       contentStyle={styles.grouped}
     >
+      {oauthBanner}
       {notice && <Notice message={notice} tone="success" />}
       {error && <Notice message={error} tone="error" />}
       <View style={[styles.search, { backgroundColor: colors.card }]}>

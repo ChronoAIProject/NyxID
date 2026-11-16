@@ -549,11 +549,7 @@ function VoiceConversation({
   }, [restart]);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (
-        state === "background" ||
-        (state !== "active" && restartIntent.current?.phase === "disconnecting")
-      )
-        cancelRestart();
+      if (state === "background") cancelRestart();
     });
     return () => {
       subscription.remove();
@@ -1151,7 +1147,18 @@ function VoiceConversation({
             ) : null}
           </>
         ) : null}
-        {needsRetry && showPreCall ? (
+        {voice.microphonePermission && showPreCall ? (
+          <ActionButton
+            label={t("Open Settings")}
+            variant="secondary"
+            compact
+            onPress={voice.openSettings}
+          />
+        ) : null}
+        {needsRetry &&
+        showPreCall &&
+        (!voice.microphonePermission ||
+          voice.microphonePermission.canAskAgain) ? (
           <ActionButton
             label="Try again"
             variant="secondary"

@@ -2,6 +2,17 @@ import {
   getStateFromPath,
   type LinkingOptions,
 } from "@react-navigation/native";
+import * as WebBrowser from "expo-web-browser";
+import {
+  nativeWebFallback,
+  deduplicatedWebFallback,
+} from "../lib/nativeWebFallback";
+import {
+  isServiceOAuthReturn,
+  parseServiceOAuthReturn,
+  serviceOAuthReturnUri,
+} from "../features/services/serviceOAuthModel";
+import { recordServiceOAuthReturn } from "../features/services/serviceOAuthStore";
 import * as Notifications from "expo-notifications";
 import { Linking } from "react-native";
 import type { RootStackParamList } from "./navigationTypes";
@@ -10,6 +21,7 @@ import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
 import { capture } from "../lib/telemetry";
 import type { LinkType } from "../lib/telemetry-schema";
 import {
+  getFrontendUrl,
   IS_DEV_BUILD,
   NYXID_APP_SCHEME,
   NYXID_TRUSTED_API_BASE_URLS,
@@ -33,6 +45,34 @@ export const notificationLinkConfig = {
       : []),
   ],
 };
+
+function consumeServiceOAuthReturn(url: string): boolean {
+  const returnUri = serviceOAuthReturnUri();
+  const scheme = returnUri.slice(0, returnUri.indexOf("://"));
+  if (!isServiceOAuthReturn(url, scheme)) return false;
+  const result = parseServiceOAuthReturn(url, scheme);
+  if (result) recordServiceOAuthReturn(result);
+  return true;
+}
+
+const openFallback = deduplicatedWebFallback((url) =>
+  WebBrowser.openBrowserAsync(url),
+);
+function consumeWebFallback(url: string): boolean {
+  if (isSupportedDirectLink(url)) return false;
+  const target = nativeWebFallback(
+    url,
+    {
+      apiBaseUrls: NYXID_TRUSTED_API_BASE_URLS,
+      frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
+      universalLinkHost: NYXID_UNIVERSAL_LINK_HOST,
+    },
+    getFrontendUrl(),
+  );
+  if (!target) return false;
+  openFallback(target);
+  return true;
+}
 
 const directLinkListeners = new Set<() => void>();
 
@@ -181,6 +221,11 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
     try {
       const directUrl = await Linking.getInitialURL();
       if (directUrl) {
+        if (
+          consumeServiceOAuthReturn(directUrl) ||
+          consumeWebFallback(directUrl)
+        )
+          return null;
         reportDirectLinkOpened(directUrl);
         return rewriteChallengeUrl(directUrl);
       }
@@ -196,6 +241,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
 
     try {
       linkingSubscription = Linking.addEventListener("url", ({ url }) => {
+        if (consumeServiceOAuthReturn(url) || consumeWebFallback(url)) return;
         reportDirectLinkOpened(url);
         listener(rewriteChallengeUrl(url));
       });

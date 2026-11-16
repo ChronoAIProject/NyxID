@@ -2998,23 +2998,27 @@ async fn slug_names(
     Ok(names)
 }
 
-async fn last_reply(
+pub(crate) async fn last_reply(
     db: &Database,
     owner: &str,
     id: &str,
     chars: usize,
 ) -> AppResult<Option<ReplySummary>> {
-    Ok(db
+    let Some(message) = db
         .collection::<AssistantMessage>(MESSAGES)
-        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant"})
-        .sort(doc! {"seq": -1})
-        .await?
-        .map(|message| ReplySummary {
-            seq: message.seq,
-            status: message.status,
-            text: excerpt(&message.text, chars),
-            created_at: message.created_at,
-        }))
+        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant", "turn_metadata.voice_link_publication":{"$exists":false}})
+        .sort(doc! {"seq": -1}).await? else { return Ok(None); };
+    let mut text = super::voice::links::message_text(&message, &message.text).into_owned();
+    if text != super::voice::links::redact_tokens(&text) {
+        let hidden = super::voice::links::hidden_voice_thread(db, owner, id).await;
+        text = super::voice::links::thread_text(hidden, text);
+    }
+    Ok(Some(ReplySummary {
+        seq: message.seq,
+        status: message.status,
+        text: excerpt(&text, chars),
+        created_at: message.created_at,
+    }))
 }
 
 /// Agents with a live turn in any of their threads.
