@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { chooseCatalogViews, gitRepository } from "../../shared/i18n/catalog-core.mjs";
+import { chooseCatalogViews, gitRepository, refuseCatalogIssues } from "../../shared/i18n/catalog-core.mjs";
 import {
   LANGUAGES, analyzePortions, collectPortions, consolidateDuplicates, isPlacementSource,
   legacyFiles, mergeDeltas, placeCatalogs, rewriteLegacyCatalogImports, root, writeCatalogs,
 } from "./lib/i18n-catalogs.mjs";
 
+const AREA_FILE = /^src\/i18n\/locales\/([^/]+)\/([^/]+)\.json$/;
+
 function snapshot(repo, ref, { sources: withSources }) {
   const files = repo.snapshotFiles(ref, "src", (file) =>
     /^src\/i18n\/locales\/.*\.json$/.test(file) || withSources && isPlacementSource(file));
-  const portions = collectPortions(files, /^src\/i18n\/locales\/([^/]+)\/([^/]+)\.json$/);
+  const portions = collectPortions(files, AREA_FILE);
   const analysis = analyzePortions(portions);
   if (analysis.issues.length) throw new Error(`${ref}: ${analysis.issues.join("\n")}`);
   // Both layouts are reported; chooseCatalogViews decides which one each role uses.
@@ -35,12 +37,12 @@ try {
   const branch = snapshot(repo, refs.branch, { sources: true });
   const onto = snapshot(repo, refs.onto, { sources: !emptyBase });
   // Each branch layout is diffed against that layout at the newer of --base and merge-base(branch, onto).
-  const mergeBaseRef = emptyBase ? null : repo.mergeBase(refs.branch, refs.onto);
+  const { commitLocal, mergeBaseRef, order } = repo.adoptionReferences(refs, { branchHasAreas: Boolean(branch.areas) });
   const mergeBase = mergeBaseRef ? snapshot(repo, mergeBaseRef, { sources: false }) : null;
-  const order = !mergeBaseRef ? "base" : repo.referenceOrder(refs.base, mergeBaseRef);
   const chosen = chooseCatalogViews({ base, branch, onto }, refs, {
-    languages: LANGUAGES, adopt: "pnpm adopt:i18n", mergeBase, order,
+    languages: LANGUAGES, adopt: "pnpm adopt:i18n", mergeBase, order, commitLocal,
     legacyFork: () => repo.legacyForks(refs.branch, refs.onto, LANGUAGES.map((language) => `src/i18n/locales/${language}.json`)),
+    baseLessAreaMerges: () => repo.baseLessAreaMerges(refs.branch, refs.onto, AREA_FILE),
   });
   for (const role of ["base", "branch", "onto"]) ({ base, branch, onto })[role].catalogs.mobile = chosen[role];
   // Then a mixed branch's own edits to the split areas it inherited (mirrored edits are no-ops).
@@ -53,9 +55,15 @@ try {
   const preferred = new Map(chosen.areaDelta ? LANGUAGES.flatMap((language) => Object.keys({ ...chosen.areaDelta.base[language], ...chosen.areaDelta.branch[language] })
     .filter((key) => chosen.areaDelta.base[language][key] !== chosen.areaDelta.branch[language][key] && branchOwners.get(key)?.size === 1)
     .map((key) => [key, [...branchOwners.get(key)][0]])) : []);
-  const portions = consolidateDuplicates(placeCatalogs(result.mobile, sources, emptyBase ? {} : onto.portions, preferred));
+  const refuse = (issues) => refuseCatalogIssues(issues, { languages: LANGUAGES, label: "mobile" });
+  let portions;
+  try {
+    portions = consolidateDuplicates(placeCatalogs(result.mobile, sources, emptyBase ? {} : onto.portions, preferred));
+  } catch (error) {
+    refuse([error.message]);
+  }
   const analysis = analyzePortions(portions);
-  if (analysis.issues.length) throw new Error(`No files written. ${analysis.issues.join("\n")}`);
+  if (analysis.issues.length) refuse(analysis.issues);
   writeCatalogs(portions);
   for (const file of legacyFiles()) fs.rmSync(file);
   console.log(`i18n: adopted ${refs.branch} (base ${refs.base}) onto ${refs.onto}; ${Object.keys(result.mobile["zh-CN"]).length} mobile keys. Stage the catalog files with git add -A src/i18n/locales.`);

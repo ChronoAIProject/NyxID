@@ -518,4 +518,207 @@ describe("mobile adopt and sync tools", () => {
     write(path.join(r.locales, "zh-CN.json"), "{}\n");
     assert.match(r.run("sync-i18n.mjs").stderr, /legacy monolith src\/i18n\/locales\/zh-CN\.json is present; run pnpm adopt:i18n/);
   });
+
+  /** Apply `edit` to every monolith (or one language's) and commit. */
+  const editMonoliths = (r, message, edit, only) => {
+    for (const language of only ? [only] : LANGUAGES) {
+      const file = path.join(r.locales, `${language}.json`);
+      const next = JSON.parse(fs.readFileSync(file, "utf8"));
+      edit(next, language);
+      write(file, JSON.stringify(next, null, 2));
+    }
+    r.git("add", "-A"); r.git("commit", "-q", "-m", message);
+    return r.git("rev-parse", "HEAD");
+  };
+  /** A legacy merge commit: a side branch from the legacy tip edits the monoliths, legacy merges it with --no-ff. */
+  const legacyMergeCommit = (r) => {
+    r.git("checkout", "-q", "-b", "side", "legacy");
+    editMonoliths(r, "side edits the monoliths", (next, language) => { next["Side key"] = `side ${language}`; });
+    r.git("checkout", "-q", "legacy");
+    write(path.join(r.root, "src/features/auth/LegacyOnly.tsx"), "export const x = 1;\n");
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "legacy moves on");
+    r.git("merge", "-q", "--no-ff", "-m", "merge side", "side");
+    return r.git("rev-parse", "HEAD");
+  };
+  /** A refusal that writes nothing and prints no command to run instead. */
+  const expectRefused = (r, result, before, message) => {
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes("No files written."), result.stderr);
+    assert.ok(result.stderr.includes(message), result.stderr);
+    assert.ok(!result.stderr.includes("  pnpm adopt:i18n --branch"), result.stderr);
+    assert.equal(r.git("status", "--porcelain"), before);
+  };
+  const mergedCatalog = (r, language) => Object.assign({}, ...fs.readdirSync(r.locales, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()).map((entry) => readCatalog(r.locales, entry.name, language)));
+
+  for (const [name, flags, message] of [
+    ["drops a merge commit", [], "This rebase drops merge commit"],
+    ["replays merge commits", ["--rebase-merges"], "The rebase replays merge commits (--rebase-merges)"],
+  ]) {
+    test(`refuses a rebase that ${name}`, () => {
+      const r = repository();
+      splitThenLegacyDelta(r);
+      legacyMergeCommit(r);
+      assert.notEqual(spawnSync("git", ["rebase", ...flags, "split"], { cwd: r.repo, encoding: "utf8" }).status, 0);
+      const before = r.git("status", "--porcelain");
+      const result = r.run("adopt-i18n.mjs");
+      expectRefused(r, result, before, message);
+      assert.ok(result.stderr.includes("git rebase --abort") && result.stderr.includes("run pnpm adopt:i18n,"), result.stderr);
+    });
+  }
+
+  test("refuses cherry-picking a merge commit (cherry-pick -m) and an octopus merge", () => {
+    const r = repository();
+    splitThenLegacyDelta(r);
+    const merge = legacyMergeCommit(r);
+    r.git("checkout", "-q", "split");
+    assert.notEqual(spawnSync("git", ["cherry-pick", "-m", "1", merge], { cwd: r.repo, encoding: "utf8" }).status, 0);
+    let before = r.git("status", "--porcelain");
+    expectRefused(r, r.run("adopt-i18n.mjs"), before, "is a merge commit (cherry-pick -m)");
+    r.git("cherry-pick", "--abort");
+    for (const branch of ["one", "two"]) {
+      r.git("checkout", "-q", "-b", branch, "legacy");
+      write(path.join(r.root, `src/features/auth/${branch}.ts`), "export const x = 1;\n");
+      r.git("add", "-A"); r.git("commit", "-q", "-m", branch);
+    }
+    r.git("checkout", "-q", "legacy");
+    r.git("merge", "-q", "--no-commit", "one", "two");
+    before = r.git("status", "--porcelain");
+    expectRefused(r, r.run("adopt-i18n.mjs"), before, "MERGE_HEAD names 2 heads (an octopus merge)");
+  });
+
+  test("refuses a branch that merged main's split areas into areas it had made itself", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    for (const language of LANGUAGES) write(path.join(r.locales, "own", `${language}.json`), canonicalText({ "Own area": `own ${language}` }));
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "the branch makes its own split areas");
+    commitMergeKeepingMonoliths(r);
+    const before = r.git("status", "--porcelain");
+    const result = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
+    expectRefused(r, result, before, "merged split areas into split areas it had made itself");
+    assert.ok(result.stderr.includes("This history cannot be adopted automatically."), result.stderr);
+  });
+
+  test("refuses an --onto that is not plain split, a merge commit against its parent, and a --base off the branch", () => {
+    const r = repository();
+    const { onto, branch } = splitThenLegacyDelta(r);
+    const merge = legacyMergeCommit(r);
+    const before = r.git("status", "--porcelain");
+    expectRefused(r, r.run("adopt-i18n.mjs", "--branch", branch, "--base", r.base, "--onto", r.base), before, `${r.base} (--onto) still has legacy monoliths;`);
+    expectRefused(r, r.run("adopt-i18n.mjs", "--branch", merge, "--base", `${merge}^1`, "--onto", onto), before, "is a merge commit and");
+    expectRefused(r, r.run("adopt-i18n.mjs", "--branch", branch, "--base", onto, "--onto", onto), before, `${onto} (--base) is not an ancestor of ${branch} (--branch)`);
+    const mixed = commitMergeKeepingMonoliths(r);
+    expectRefused(r, r.run("adopt-i18n.mjs", "--branch", branch, "--base", r.base, "--onto", mixed), before, `${mixed} (--onto) still has legacy monoliths beside its split areas`);
+    r.git("checkout", "-q", "-b", "no-areas", "split");
+    r.git("rm", "-q", "-r", "mobile/src/i18n/locales");
+    r.git("commit", "-q", "-m", "no split areas");
+    const bare = r.git("rev-parse", "HEAD");
+    r.git("checkout", "-q", "legacy");
+    expectRefused(r, r.run("adopt-i18n.mjs", "--branch", branch, "--base", r.base, "--onto", bare), before, `${bare} (--onto) has no split catalogs to adopt onto`);
+  });
+
+  test("refuses a mixed branch whose --base and merge-base diverge", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    r.git("checkout", "-q", "-b", "side", r.base);
+    const side = editMonoliths(r, "side", (next, language) => { next["Side key"] = `side ${language}`; });
+    r.git("checkout", "-q", "legacy");
+    r.git("merge", "-q", "--no-ff", "-X", "theirs", "-m", "merge side", "side");
+    commitMergeKeepingMonoliths(r);
+    const before = r.git("status", "--porcelain");
+    expectRefused(r, r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", side, "--onto", onto), before,
+      "do not contain one another, so the reference for the branch's split areas is ambiguous");
+  });
+
+  for (const kind of ["add", "remove"]) {
+    test(`refuses a key the branch changed in one language only (${kind})`, () => {
+      const r = repository();
+      const { onto } = splitThenLegacyDelta(r);
+      editMonoliths(r, `one-language ${kind}`, (next) => { if (kind === "add") next["Only zh-CN"] = "仅"; else delete next["Sign in"]; }, "zh-CN");
+      const before = r.git("status", "--porcelain");
+      const result = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
+      expectRefused(r, result, before, ": key parity differs across zh-CN/zh-TW");
+      assert.ok(result.stderr.includes("Every mobile key needs a value in each of zh-CN and zh-TW"), result.stderr);
+    });
+  }
+
+  test("places a mixed branch's new key by its source file, after the key's area on onto (N11)", () => {
+    const r = repository();
+    const { onto } = splitThenLegacyDelta(r);
+    commitMergeKeepingMonoliths(r);
+    write(path.join(r.root, "src/features/settings/Screen.tsx"), 'export const a = [t("Settings key"), t("Change me")];\n');
+    editMonoliths(r, "settings copy", (next, language) => { next["Settings key"] = `settings ${language}`; next["Change me"] = `settings change ${language}`; });
+    const result = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(auditCatalogs(r.locales), []);
+    for (const language of LANGUAGES) {
+      assert.deepEqual(readCatalog(r.locales, "settings", language), { "Settings key": `settings ${language}` });
+      assert.equal(readCatalog(r.locales, "account", language)["Change me"], `settings change ${language}`);
+    }
+  });
+
+  test("cherry-picks a commit that deleted every split area file: its monolith edits land and main keeps every key", () => {
+    const r = repository();
+    splitThenLegacyDelta(r);
+    commitMergeKeepingMonoliths(r);
+    r.git("rm", "-q", ...fs.readdirSync(r.locales, { withFileTypes: true }).filter((entry) => entry.isDirectory())
+      .flatMap((entry) => LANGUAGES.map((language) => `mobile/src/i18n/locales/${entry.name}/${language}.json`)));
+    const deleted = editMonoliths(r, "delete the split areas and change Save", (next, language) => { next.Save = `save deleted ${language}`; });
+    r.git("checkout", "-q", "split");
+    assert.notEqual(spawnSync("git", ["cherry-pick", deleted], { cwd: r.repo, encoding: "utf8" }).status, 0);
+    const result = r.run("adopt-i18n.mjs");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(auditCatalogs(r.locales), []);
+    for (const language of LANGUAGES) {
+      assert.deepEqual(mergedCatalog(r, language), {
+        Save: `save deleted ${language}`, "Sign in": zh("Sign in", language), "Change me": zh("Change me", language), "Remove me": zh("Remove me", language),
+      });
+    }
+  });
+
+  test("re-lands a reverted commit with cherry-pick, and with explicit refs (N12)", () => {
+    const r = repository();
+    const { branch } = splitThenLegacyDelta(r);
+    r.git("checkout", "-q", "-b", "main3", r.base);
+    r.git("merge", "-q", "--no-ff", "-m", "land legacy", branch);
+    r.git("revert", "--no-edit", "-m", "1", "HEAD");
+    assert.equal(r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", "empty", "--onto", "HEAD").status, 0);
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "split main3");
+    const main3 = r.git("rev-parse", "HEAD");
+    assert.notEqual(spawnSync("git", ["cherry-pick", branch], { cwd: r.repo, encoding: "utf8" }).status, 0);
+    const picked = r.run("adopt-i18n.mjs");
+    assert.equal(picked.status, 0, picked.stderr);
+    expectDeltaAdopted(r);
+    r.git("reset", "-q", "--hard"); r.git("clean", "-fdq", "mobile/src"); r.git("cherry-pick", "--quit");
+    assert.equal(r.git("rev-parse", "HEAD"), main3);
+    const explicit = r.run("adopt-i18n.mjs", "--branch", branch, "--base", `${branch}^`, "--onto", "HEAD");
+    assert.equal(explicit.status, 0, explicit.stderr);
+    for (const language of LANGUAGES) {
+      assert.equal(mergedCatalog(r, language)["Change me"], `changed ${language}`);
+      assert.equal(mergedCatalog(r, language).Added, zh("Added", language));
+    }
+  });
+
+  test("applies a later area edit when the branch's monolith change matches the same change on main (N14)", () => {
+    const r = repository();
+    splitThenLegacyDelta(r);
+    r.git("checkout", "-q", "split");
+    for (const language of LANGUAGES) {
+      const file = path.join(r.locales, "shared", `${language}.json`);
+      write(file, canonicalText({ ...JSON.parse(fs.readFileSync(file, "utf8")), Save: `same ${language}` }));
+    }
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "main changes Save");
+    const onto = r.git("rev-parse", "HEAD");
+    r.git("checkout", "-q", "legacy");
+    editMonoliths(r, "the branch makes the same change", (next, language) => { next.Save = `same ${language}`; });
+    commitMergeKeepingMonoliths(r);
+    for (const language of LANGUAGES) {
+      const file = path.join(r.locales, "shared", `${language}.json`);
+      write(file, canonicalText({ ...JSON.parse(fs.readFileSync(file, "utf8")), Save: `area ${language}` }));
+    }
+    r.git("add", "-A"); r.git("commit", "-q", "-m", "the branch edits the area");
+    const result = r.run("adopt-i18n.mjs", "--branch", "HEAD", "--base", r.base, "--onto", onto);
+    assert.equal(result.status, 0, result.stderr);
+    for (const language of LANGUAGES) assert.equal(mergedCatalog(r, language).Save, `area ${language}`);
+  });
 });
