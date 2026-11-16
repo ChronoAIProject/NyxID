@@ -1,0 +1,96 @@
+import type { Page } from "@playwright/test";
+import {
+  platformSetup,
+  setupActor,
+  setupBinding,
+  setupTemplates,
+} from "../src/test/platform-setup-fixture";
+import type { PlatformSetup } from "../src/schemas/platform-onboarding";
+
+export async function installSetupFixture(page: Page) {
+  const state = {
+    actor: { ...setupActor },
+    bindings: [{ ...setupBinding }],
+    drafts: [platformSetup()],
+    saved: [] as PlatformSetup[],
+    invalidDraft: false,
+    draftError: false,
+    adoptError: false,
+    adoptionGate: Promise.resolve(),
+    writes: [] as { path: string; method: string; body: unknown }[],
+    unexpected: [] as string[],
+    pageErrors: [] as string[],
+  };
+  page.on("pageerror", (error) => state.pageErrors.push(error.message));
+  await page.addInitScript((actor) => {
+    localStorage.setItem("nyxid.language", "en");
+    localStorage.setItem(
+      `nyxid.telemetry_consent.v3.${actor}`,
+      JSON.stringify({ asked: true, enabled: false }),
+    );
+  }, setupActor.id);
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.replace("/api/v1", "");
+    const method = request.method();
+    if (method !== "GET") {
+      state.writes.push({ path, method, body: request.postDataJSON() });
+    }
+    if (method === "GET") {
+      if (path === "/users/me") return route.fulfill({ json: state.actor });
+      if (path === "/public/config")
+        return route.fulfill({ json: { telemetry_share_analytics: false } });
+      if (path === "/nodes") return route.fulfill({ json: { nodes: [] } });
+      if (path === "/onboarding/templates")
+        return route.fulfill({ json: setupTemplates });
+      if (path === "/onboarding/setups")
+        return route.fulfill({ json: state.saved });
+      if (path === "/onboarding/setups/archived")
+        return route.fulfill({
+          json: { setups: [], next_before_id: null, next_before_ms: null },
+        });
+      if (path === "/onboarding/bindings")
+        return route.fulfill({ json: state.bindings });
+      if (path === "/onboarding/anonymous-drafts") {
+        const binding = state.bindings.find(
+          (item) =>
+            item.id === url.searchParams.get("binding_id") &&
+            String(item.generation) ===
+              url.searchParams.get("binding_generation"),
+        );
+        if (state.draftError || !binding)
+          return route.fulfill({
+            status: 409,
+            json: { error: "conflict", message: "Binding changed." },
+          });
+        return route.fulfill({
+          json: state.invalidDraft ? [{ id: "malformed-draft" }] : state.drafts,
+        });
+      }
+    }
+    const draft = state.drafts.find(
+      (item) => path === `/onboarding/setups/${item.id}/adopt`,
+    );
+    if (method === "POST" && draft) {
+      await state.adoptionGate;
+      if (state.adoptError)
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: "conflict",
+            message: "Draft changed. Review it again.",
+          },
+        });
+      state.saved.push(draft);
+      state.drafts = state.drafts.filter((item) => item.id !== draft.id);
+      return route.fulfill({ json: draft });
+    }
+    state.unexpected.push(`${method} ${path}`);
+    return route.fulfill({
+      status: 501,
+      json: { message: "No fixture for this request" },
+    });
+  });
+  return state;
+}

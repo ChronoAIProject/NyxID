@@ -4,7 +4,7 @@ import { getFormattingLocale } from "@/lib/formatting-locale";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Label } from "@/components/ui/label";
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CopyableField } from "@/components/shared/copyable-field";
 import {
   captureOnboardingLink,
@@ -451,6 +451,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
   const query = useAnonymousDrafts(binding);
   const mutation = useAdoptAnonymousDraft(binding);
   const [review, setReview] = useState<PlatformSetup | null>(null);
+  const adoptionPending = useRef(false);
   return (
     <div className="space-y-3">
       {query.isPending && (
@@ -497,8 +498,13 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               mutation.isPending
             }
             onClick={() => {
-              if (review)
-                mutation.mutate(review, { onSuccess: () => setReview(null) });
+              // Block a second click before the mutation's pending render.
+              if (!review || adoptionPending.current) return;
+              adoptionPending.current = true;
+              mutation.mutate(review, {
+                onSuccess: () => setReview(null),
+                onSettled: () => { adoptionPending.current = false; },
+              });
             }}
           >{translateUi("Adopt reviewed draft")}</Button>
         </div>
@@ -607,8 +613,8 @@ export function PlatformSetupsPage() {
       {setups.data?.length === 0 && !template && (
         <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("Your saved setups will appear here. Choose a starter to begin.")}</p>
       )}
-      {actor && <AnonymousDrafts key={actor} />}
-      {actor && <ArchivedSetups key={actor} />}
+      {actor && <AnonymousDrafts key={`anonymous:${actor}`} />}
+      {actor && <ArchivedSetups key={`archives:${actor}`} />}
       <OwnedOnboardingBindings />
     </div>
   );

@@ -346,6 +346,33 @@ standalone Mongo compatibility. Runtime validation is tracked separately.
 
 ## Deployment and external acceptance
 
+### Bot Setups browser regression
+
+The Bot Setups regression runs the real app entry, Router, DashboardLayout and
+StrictMode against synthetic HTTP responses, without a backend or Telegram:
+
+```bash
+cd frontend
+npm ci
+npm run test -- src/pages/platform-setups.router.test.tsx src/pages/platform-anonymous-adoption.test.tsx
+npx playwright test --config playwright.platform-setups.config.ts
+```
+
+The browser suite owns strict port 4634 and refuses an already-running server.
+It checks direct entry, reload, client-side links, back/forward, separate draft
+rows, one in-flight adoption POST, validation/errors and explicit retry. The
+router suite additionally checks binding-generation and account resets. Keep
+distinct account-qualified keys for the sibling draft-import and archive
+modules: a shared account key caused React to retain duplicate import DOM when
+the asynchronous saved-setups query inserted its empty-state message (#2437).
+
+The issue's production report (2026-11-13, source reference `31f3d89`) described a
+token/import form. The regression reproduced the duplicate module on `e0c349a43`
+(frontend 0.78.0), whose flow is Linked chat → review → Adopt reviewed draft.
+These fixtures verify browser behavior, not production or live-provider delivery.
+
+### External acceptance
+
 No deployment or live enablement was performed for this implementation. Before a
 rollout, all replicas handling manager/child traffic must enforce the new markers,
 worker scopes and admission checks. Rolling back to a binary that ignores those

@@ -40,3 +40,15 @@ it("requires rereview when the draft revision changes", () => {
   ).toBeDisabled();
   expect(state.mutate).not.toHaveBeenCalled();
 });
+it("submits rapid clicks once and allows a retry after the request settles", () => {
+  render(<AnonymousDraftReview binding={binding} />);
+  fireEvent.click(screen.getByRole("checkbox"));
+  const adopt = screen.getByRole("button", { name: "Adopt reviewed draft" });
+  fireEvent.click(adopt);
+  fireEvent.click(adopt);
+  expect(state.mutate).toHaveBeenCalledTimes(1);
+  state.mutate.mock.calls[0]![1].onSettled();
+  fireEvent.click(adopt);
+  expect(state.mutate).toHaveBeenCalledTimes(2);
+  expect(state.mutate.mock.calls[1]![0]).toEqual(draft);
+});
