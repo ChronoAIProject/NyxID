@@ -3931,6 +3931,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     "/bindings/{binding_id}/conversations/{conversation_id}/events/{event_id}",
                     get(handlers::nyxbot::get_event_context),
                 )
+                .route("/dispatches", get(handlers::nyxbot::dispatches::get))
                 .route("/responses", post(handlers::nyxbot::responses_with_runtime))
                 .route("/responses/{response_id}", get(handlers::nyxbot::native_responses::snapshot))
                 .route("/responses/{response_id}/events", get(handlers::nyxbot::native_responses::events))

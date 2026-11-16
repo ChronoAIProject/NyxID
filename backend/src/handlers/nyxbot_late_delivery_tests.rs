@@ -1739,3 +1739,6 @@ async fn late_unscoped_direct_reply_uses_only_ordinary_delivery_records() {
     assert!(!counts.keys().any(|key| key.ends_with(":nyxbot_events")));
     assert_eq!(status(&f).await, "waiting");
 }
+
+#[path = "nyxbot_gateway_reply_tests.rs"]
+mod gateway_reply_tests;

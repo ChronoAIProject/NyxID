@@ -1478,6 +1478,37 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     }
     crate::services::nyxbot_gateway_release_service::ensure_indexes(db).await?;
     crate::services::nyxbot_response_recovery::ensure_indexes(db).await?;
+    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"dispatch_identity.keys":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("nyxbot_dispatch_keys".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"dispatch_identity.keys":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"delivery.receipt_due_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("nyxbot_receipt_due".to_owned())
+                        .partial_filter_expression(
+                            doc! {"delivery.receipt_due_at":{"$type":"date"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // Retire the prefix index only after its replacement has been created.
     let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
     let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};

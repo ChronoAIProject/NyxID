@@ -2844,6 +2844,25 @@ one loaded scheduled destination. This does not cache authority across effects:
 each attachment upload, text part and subsequent provider effect reads it again.
 A confirmed prefix never authorizes its suffix.
 
+Gateway reply-target receipt polling is the bounded exception to an uncertain
+send: only exact `409 routed_reply_in_progress` or
+`503 routed_reply_unavailable` permits the identical same-key re-ask. Only the
+409 proves admission. The event retains the existing preparation claim; there
+is no new delivery outbox. See the [gateway receipt and lookup contract](CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup).
+
+Bot Health uses the existing outbound diagnostics. `gateway_reply_unconfirmed`
+means the gateway accepted the reply but delivery is unconfirmed; its action is
+`none`, advising no action unless a later reply repeats the problem.
+`gateway_reply_unavailable` records a transient gateway failure without claiming
+acceptance. The admission/terminal event, diagnostic and chained audit commit
+together. Audit retains the HTTP status class and closed gateway code, never
+answer text, problem prose, keys or reply-target references. Terminal rows retain
+the five image counts from the frozen notice. First admission and terminal
+outcomes emit the Channel trace milestone; its enum has no pending value, so
+first admission uses `unknown`. Local pre-send refusals (missing key, expired
+target or event, changed authority) remain `refused` without a gateway Health
+entry or gateway rejection audit. Only a received status proves gateway refusal.
+
 ### Retrying a retained Discord release (#2323)
 
 The release sweep rechecks parked Discord obligations (`platform: "discord"`)
