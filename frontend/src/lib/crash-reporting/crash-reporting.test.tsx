@@ -393,3 +393,30 @@ it.each([500,503,429])("HTTP %s leaves the web session retryable",async(status)=
   s.api.mockRejectedValueOnce(new ApiError(status,{error:"security_readiness_unavailable",error_code:12900,message:"fixed"}));
   await r.reportCrash(failure(403)); await r.refreshCrashPermission(); await r.reportCrash(failure(404)); expect(s.api).toHaveBeenCalledTimes(2);
 });
+
+it.each([true, false])("React component stacks remain developer-visible only in development (DEV=%s)", async (dev) => {
+  await boot();
+  vi.stubEnv("DEV", dev);
+  const { crashRootOptions } = await import("./install");
+  const output = vi.spyOn(console, "error").mockImplementation(() => {});
+  const browser = vi.fn();
+  const descriptor = Object.getOwnPropertyDescriptor(window, "reportError");
+  Object.defineProperty(window, "reportError", { configurable: true, value: browser });
+  const error = failure();
+  const info = { componentStack: "\n    at SECRET_COMPONENT (private-path)" };
+  try {
+    for (const callback of [crashRootOptions.onCaughtError, crashRootOptions.onUncaughtError, crashRootOptions.onRecoverableError]) {
+      output.mockClear();
+      callback(error, info);
+      if (dev) expect(output).toHaveBeenCalledWith(error, info.componentStack);
+      else expect(JSON.stringify(output.mock.calls)).not.toContain("SECRET_COMPONENT");
+    }
+    expect(browser).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(s.api).toHaveBeenCalled());
+    expect(JSON.stringify(s.api.mock.calls)).not.toContain("SECRET_COMPONENT");
+  } finally {
+    if (descriptor) Object.defineProperty(window, "reportError", descriptor);
+    else Reflect.deleteProperty(window, "reportError");
+    vi.unstubAllEnvs();
+  }
+});

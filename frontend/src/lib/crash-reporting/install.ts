@@ -1,4 +1,5 @@
 import { reportCrash } from "./reporter";
+import type { ErrorInfo } from "react";
 /** Listeners observe without suppressing browser or React fallback behavior. */
 export function installCrashReporting(): () => void {
   const error = (event: ErrorEvent | Event) => {
@@ -35,17 +36,23 @@ function reportToBrowser(error: unknown): void {
     }, 0);
 }
 export const crashRootOptions = {
-  onUncaughtError(error: unknown) {
+  onUncaughtError(error: unknown, errorInfo?: ErrorInfo) {
     void reportCrash(error, "js_error");
+    if (import.meta.env.DEV && errorInfo?.componentStack)
+      console.error(error, errorInfo.componentStack);
     reportToBrowser(error);
   },
-  onCaughtError(error: unknown) {
+  onCaughtError(error: unknown, errorInfo?: ErrorInfo) {
     void reportCrash(error, "render_error");
     // Preserve React's default developer-visible caught-error behavior.
-    console.error(error);
+    if (import.meta.env.DEV && errorInfo?.componentStack)
+      console.error(error, errorInfo.componentStack);
+    else console.error(error);
   },
-  onRecoverableError(error: unknown) {
+  onRecoverableError(error: unknown, errorInfo?: ErrorInfo) {
     void reportCrash(error, "recoverable_error");
+    if (import.meta.env.DEV && errorInfo?.componentStack)
+      console.error(error, errorInfo.componentStack);
     reportToBrowser(error);
   },
 };
