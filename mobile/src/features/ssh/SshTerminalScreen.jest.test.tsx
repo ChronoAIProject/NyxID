@@ -363,7 +363,15 @@ test.each([
     mockAppHandlers.forEach((handler) => handler("active"));
   });
   expect(socket.close).toHaveBeenCalledTimes(closes ? 1 : 0);
-  if (!closes) expect(Socket.instances).toHaveLength(1);
+  if (closes) {
+    // Android pauses JS timers in the background; active-return wall-clock
+    // enforcement must still close the session with the normal code.
+    expect(socket.close).toHaveBeenCalledWith(1000);
+    expect(screen.getByText("Disconnected")).toBeTruthy();
+  } else {
+    expect(Socket.instances).toHaveLength(1);
+    expect(socket.close).not.toHaveBeenCalled();
+  }
   await screen.unmount();
   jest.useRealTimers();
 });
