@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, legacyImportReplacement, moduleSpecifiers, rewriteLegacyImports,
-  analyzePortions, applyDelta, applyMixedDelta, canonicalText, catalogImportIssue,
+  analyzePortions, applyDelta, applyMixedDelta, canonicalText, catalogImportIssue, layoutReference,
   consolidateDuplicates, emptyLanguages, isPlacementSource, loadPortions, placeCatalogs, scanUsage, stripPluralSuffix, writePortions,
 } from "../scripts/lib/i18n-catalogs.mjs";
 
@@ -37,6 +37,23 @@ describe("legacy i18n delta adoption", () => {
     expect(applyMixedDelta({ monolithBase: { K: "init" }, monolith: { K: "branch" }, areaBase: { K: "init" }, areas: { K: "init" }, onto: { K: "init", N: "main" }, labels }))
       .toEqual({ result: { K: "branch", N: "main" }, conflicts: [] });
   });
+
+  it("diffs each layout against the newer of --base and the merge-base that has it", () => {
+    const catalog = (value: string) => ({ en: { K: value } });
+    const fork = { monolith: catalog("fork"), areas: null, familyPresent: { common: true }, families: { common: catalog("fork family") } };
+    const merged = { monolith: null, areas: catalog("merged"), familyPresent: { common: true }, families: { common: catalog("merged family") } };
+    const parent = { monolith: catalog("parent"), areas: catalog("parent areas"), familyPresent: { common: true }, families: { common: catalog("parent family") } };
+    // The legacy-fork route: monoliths from the fork, areas and families from the newer merge-base.
+    expect(layoutReference("monolith", { base: fork, mergeBase: merged, order: "mergeBase" })).toEqual(catalog("fork"));
+    expect(layoutReference("areas", { base: fork, mergeBase: merged, order: "mergeBase" })).toEqual(catalog("merged"));
+    expect(layoutReference("common", { base: fork, mergeBase: merged, order: "mergeBase" })).toEqual(catalog("merged family"));
+    // A rebased or cherry-picked commit: its parent is newer than the merge-base for every layout.
+    for (const layout of ["monolith", "areas", "common"]) expect(layoutReference(layout, { base: parent, mergeBase: merged, order: "base" })).toBe(layout === "monolith" ? parent.monolith : layout === "areas" ? parent.areas : parent.families.common);
+    // A missing reference is null (refused by the caller), never an empty catalog.
+    expect(layoutReference("areas", { base: fork, mergeBase: null, order: "base" })).toBeNull();
+    expect(layoutReference("areas", { base: fork, mergeBase: merged, order: "diverged" })).toBeNull();
+  });
+
 
   it("is idempotent when onto already contains the requested result", () => {
     expect(applyDelta({ Key: "base" }, { Key: "branch" }, { Key: "branch" }).conflicts).toEqual([]);

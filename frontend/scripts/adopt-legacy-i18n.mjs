@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta, applyMixedDelta, chooseCatalogViews,
+  LANGUAGES, FAMILIES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, analyzePortions, applyDelta, applyMixedDelta, chooseCatalogViews, layoutReference,
   consolidateDuplicates, emptyLanguages, englishOverrides, isPlacementSource, mayImportLegacyCatalog,
   moduleSpecifiers, placeCatalogs, rewriteLegacyImports, walkFiles, writeJson, writePortions,
 } from "./lib/i18n-catalogs.mjs";
@@ -45,6 +45,13 @@ function resolveRefs() {
 }
 
 const tryGit = (...args) => { try { return git(...args); } catch { return null; } };
+
+/** Which of --base and the merge-base is newer: "base" (same or newer), "mergeBase", or "diverged". */
+function referenceOrder(baseRef, mergeBaseRef) {
+  if (tryGit("merge-base", "--is-ancestor", mergeBaseRef, baseRef) !== null) return "base";
+  if (tryGit("merge-base", "--is-ancestor", baseRef, mergeBaseRef) !== null) return "mergeBase";
+  return "diverged";
+}
 
 /**
  * The branch's legacy fork candidates: the newest pre-split commits it is based
@@ -88,7 +95,7 @@ function readBlobs(ref, files) {
 }
 
 function snapshot(ref, { sources: withSources }) {
-  if (ref === "empty") return { areas: null, monolith: null, monolithLanguages: [], portions: {}, families: Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()])), sources: [] };
+  if (ref === "empty") return { areas: null, monolith: null, monolithLanguages: [], portions: {}, families: Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()])), familyPresent: {}, sources: [] };
   const files = execFileSync("git", ["ls-tree", "-r", "-z", "--name-only", ref, "--", `${prefix}/src`], { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28 })
     .split("\0").filter(Boolean).map((file) => file.slice(prefix.length + 1));
   const catalogPaths = files.filter((file) => /^src\/i18n\/locales\/.*\.json$/.test(file));
@@ -110,8 +117,9 @@ function snapshot(ref, { sources: withSources }) {
   const monolithLanguages = LANGUAGES.filter((language) => blobs.has(`${prefix}/src/i18n/locales/${language}.json`));
   const monolith = monolithLanguages.length ? Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${language}.json`)])) : null;
   const families = Object.fromEntries(FAMILIES.map((family) => [family, Object.fromEntries(LANGUAGES.map((language) => [language, read(`src/i18n/locales/${family}-${language}.json`)]))]));
+  const familyPresent = Object.fromEntries(FAMILIES.map((family) => [family, LANGUAGES.every((language) => blobs.has(`${prefix}/src/i18n/locales/${family}-${language}.json`))]));
   const sources = sourcePaths.map((file) => [file, text(file)]);
-  return { areas, monolith, monolithLanguages, portions, families, sources };
+  return { areas, monolith, monolithLanguages, portions, families, familyPresent, sources };
 }
 
 /**
@@ -144,16 +152,22 @@ try {
   const base = snapshot(refs.base, { sources: false });
   const branch = snapshot(refs.branch, { sources: true });
   const onto = snapshot(refs.onto, { sources: refs.base !== "empty" });
-  // A mixed branch (monoliths kept beside split areas) already contains main up to the latest main it
-  // merged, the merge-base with onto: its split areas and its unsplit family files are diffed against that.
-  const mixed = Boolean(branch.areas && branch.monolith);
-  const mergeBase = mixed ? tryGit("merge-base", refs.branch, refs.onto) : null;
-  const latestMerged = mergeBase ? snapshot(mergeBase, { sources: false }) : null;
+  // Each branch layout is diffed against that layout at the newer of --base and merge-base(branch, onto).
+  const emptyBase = refs.base === "empty";
+  const mergeBaseRef = emptyBase ? null : tryGit("merge-base", refs.branch, refs.onto);
+  const mergeBase = mergeBaseRef ? snapshot(mergeBaseRef, { sources: false }) : null;
+  const order = !mergeBaseRef ? "base" : referenceOrder(refs.base, mergeBaseRef);
   const app = chooseCatalogViews({ base, branch, onto }, refs, {
-    languages: LANGUAGES, adopt: "npm run adopt:i18n --", inherited: latestMerged?.areas ?? null,
-    legacyFork: () => legacyForks(refs.branch, refs.onto),
+    languages: LANGUAGES, adopt: "npm run adopt:i18n --", mergeBase, order, legacyFork: () => legacyForks(refs.branch, refs.onto),
   });
-  const familyBase = mixed && latestMerged ? latestMerged.families : base.families;
+  const familyBase = Object.fromEntries(FAMILIES.map((family) => {
+    if (emptyBase) return [family, emptyLanguages()];
+    const reference = layoutReference(family, { base, mergeBase, order });
+    if (!reference && branch.familyPresent[family]) {
+      throw new Error(`No files written. Neither ${refs.base} (--base) nor the merge-base of ${refs.branch} and ${refs.onto} has the ${family} catalogs, so the branch's edits to them cannot be told apart from main's; pass a --base or --onto that shares that history.`);
+    }
+    return [family, reference ?? emptyLanguages()];
+  }));
   const conflicts = [];
   const merged = emptyLanguages();
   const families = Object.fromEntries(FAMILIES.map((family) => [family, emptyLanguages()]));

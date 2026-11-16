@@ -340,27 +340,38 @@ export function applyMixedDelta({ monolithBase, monolith, areaBase, areas, onto,
 }
 
 /**
- * Pick the app catalog of each adoption snapshot without losing data. A
- * snapshot may hold the split areas (`areas`, merged), the legacy monoliths
- * (`monolith`, with `monolithLanguages` present), or both, e.g. when a merge
- * that kept the monoliths was committed. The branch uses its monoliths (where
- * legacy edits live) and onto uses its areas. The base must be read from the
- * same layout as the branch: a commit's two layouts come from different points
- * in history, so comparing a stale monolith with newer areas would turn every
- * key main added or changed since the fork into a branch removal or revert.
- *
- * A branch's legacy edits are its monoliths compared with its legacy fork, the
- * newest pre-split commit it is based on. Split areas a mixed branch carries
- * were inherited from main up to `options.inherited` (the areas at the
- * merge-base of branch and onto); any change the branch made to them is
- * returned as `areaDelta` (inherited -> branch areas) for the caller to apply
- * after the monolith delta, so additions, changes and removals made only in
- * the areas are adopted too, and contradictory edits surface as conflicts.
- * `options.legacyFork()` returns the fork candidates (git-derived) for the
- * refusal guidance. Mismatched layouts, partial monoliths, and onto values that
- * would be lost are refused, with nothing written.
+ * The reference a branch layout is diffed against: that layout at the newer of `--base` and
+ * merge-base(branch, onto) that has it (`order`: "base" when the base is the same or newer or there
+ * is no merge-base, "mergeBase" when the merge-base is newer, "diverged" when neither contains the
+ * other, in which case only the base counts). Each layout is reconciled with main at different
+ * points, so the newest one that has it is where the branch's own edits to it begin: a rebased or
+ * cherry-picked commit is diffed against its parent, while the legacy-fork route reads the
+ * monoliths from the fork and the split areas and unsplit families from the merge-base. `layout` is
+ * "monolith", "areas" or a family name. Returns null when no reference has the layout.
  */
-export function chooseCatalogViews(snapshots, refs, { languages, adopt, inherited = null, legacyFork = () => [] }) {
+export function layoutReference(layout, { base, mergeBase, order }) {
+  const view = (snapshot) => !snapshot ? null : layout === "monolith" ? snapshot.monolith : layout === "areas" ? snapshot.areas
+    : snapshot.familyPresent?.[layout] ? snapshot.families[layout] : null;
+  const candidates = order === "mergeBase" ? [mergeBase, base] : order === "diverged" ? [base] : [base, mergeBase];
+  for (const snapshot of candidates) {
+    const catalog = view(snapshot);
+    if (catalog) return catalog;
+  }
+  return null;
+}
+
+/**
+ * Pick the app catalog of each adoption snapshot without losing data. A snapshot may hold the
+ * split areas (`areas`, merged), the legacy monoliths (`monolith`, with `monolithLanguages`
+ * present), or both, e.g. when a merge that kept the monoliths was committed. The branch uses its
+ * monoliths (where legacy edits live) and onto uses its areas; a branch read from its monoliths
+ * needs a base with monoliths, since a commit's two layouts come from different points in history.
+ * Each branch layout is diffed against its `layoutReference` (`options.mergeBase`, `options.order`).
+ * A mixed branch (monoliths beside split areas) also returns `areaDelta` (reference -> branch
+ * areas) for applyMixedDelta. A missing reference is refused, never treated as empty.
+ * `options.legacyFork()` returns the fork candidates (git-derived) for the refusal guidance.
+ */
+export function chooseCatalogViews(snapshots, refs, { languages, adopt, mergeBase = null, order = "base", legacyFork = () => [] }) {
   const fail = (lines) => { throw new Error(`No files written. ${[lines].flat().join("\n")}`); };
   /** The one route that adopts everything a monolith branch changed: its monoliths against its legacy fork. */
   const forkGuidance = () => {
@@ -388,12 +399,22 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt, inherite
   const mixed = Boolean(branch.monolith && branch.areas);
   const branchView = branch.monolith ? "monolith" : branch.areas ? "areas" : null;
   const baseHasCatalogs = Boolean(base.monolith || base.areas);
+  const reference = (layout) => layoutReference(layout, { base, mergeBase, order });
   const inheritedNote = `${refs.branch} (--branch) keeps the legacy monoliths beside split areas it inherited from main, so its own edits live in the monoliths (and any later edits to those areas).`;
   if (!branchView && baseHasCatalogs) {
     fail(`${refs.branch} (--branch) has no app catalogs, so every key of ${refs.base} (--base) would be removed; pass the commit that holds the branch's catalogs as --branch.`);
   }
   if (mixed && !baseHasCatalogs) {
     fail([`${inheritedNote} It cannot be adopted from an empty base.`, ...forkGuidance()]);
+  }
+  if (mixed && order === "diverged") {
+    fail(`${refs.base} (--base) and the merge-base of ${refs.branch} and ${refs.onto} do not contain one another, so the reference for the branch's split areas is ambiguous; pass a --base on the branch's own history (its legacy fork, or the parent of the commit being adopted).`);
+  }
+  if (mixed && !reference("areas")) {
+    fail([
+      `${refs.branch} (--branch) keeps the legacy monoliths beside split areas, but neither ${refs.base} (--base) nor the merge-base of ${refs.branch} and ${refs.onto} has split areas (the merge-base is missing or predates the split), so the branch's edits to those areas cannot be told apart from main's.`,
+      `Pass an --onto that contains the main the branch merged. If the branch created those areas itself instead of merging them from main, remove them from the branch (git rm -r the area directories), commit, and rerun.`,
+    ]);
   }
   if (branchView === "monolith" && baseHasCatalogs && !base.monolith) {
     fail([
@@ -408,7 +429,7 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt, inherite
   }
   const empty = () => Object.fromEntries(languages.map((language) => [language, {}]));
   const chosen = {
-    base: (branchView === "monolith" ? base.monolith : base.areas) ?? empty(),
+    base: (baseHasCatalogs && branchView ? reference(branchView) : null) ?? empty(),
     branch: (branch.monolith ?? branch.areas) ?? empty(),
     onto: (onto.areas ?? onto.monolith) ?? empty(),
   };
@@ -423,7 +444,7 @@ export function chooseCatalogViews(snapshots, refs, { languages, adopt, inherite
       ]);
     }
   }
-  return { ...chosen, areaDelta: mixed ? { base: inherited ?? empty(), branch: branch.areas } : null };
+  return { ...chosen, areaDelta: mixed ? { base: reference("areas"), branch: branch.areas } : null };
 }
 
 /** Resolve relative, @/ and src/ imports independently of the current machine. */

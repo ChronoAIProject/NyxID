@@ -286,19 +286,25 @@ If a commit holds both layouts (for example a merge whose modify/delete
 conflict was resolved by keeping the old monoliths, possibly followed by more
 monolith edits), its split areas were inherited from `main` and its own edits
 live in the monoliths. A `--branch` commit is therefore read from its
-monoliths and an `--onto` commit from its areas, and the base must be read from
-the same layout as the branch: a commit's monoliths and areas come from
-different points in history, so comparing a stale monolith with a newer split
-base would make every key `main` added or changed since the fork look removed
-or reverted by the branch. The tool refuses, writing nothing, when the base and
-branch layouts differ, when only some monoliths exist, or when a value would
-be lost. A mixed branch's split areas already contain `main` up to the last
-`main` it merged (its merge-base with `--onto`), so they are compared with that
-commit: any addition, change or removal the branch made to its areas is adopted.
-That edit was made against the newer `main`, so it takes precedence over the
-monoliths for that key; if the monoliths changed the same key to something
-else, the branch contradicts itself and the key is reported. Its unsplit `common`, `errors` and `wizard` files contain that `main`
-too, so they get an ordinary three-way merge against the same commit.
+monoliths and an `--onto` commit from its areas, and a branch read from its
+monoliths needs a `--base` with monoliths: a commit's monoliths and areas come
+from different points in history, so comparing a stale monolith with a newer
+split base would make every key `main` added or changed since the fork look
+removed or reverted by the branch.
+
+Each layout the branch has (its monoliths, its split areas, and each of the
+unsplit `common`, `errors` and `wizard` catalogs) is compared with that layout
+at the newer of `--base` and the merge-base of the branch and `--onto`. That is
+where the branch's own edits to it begin: a rebased or cherry-picked commit is
+compared with its parent, so only that commit's edits are adopted, while the
+legacy-fork route below reads the monoliths from the fork and the split areas
+and family catalogs from the last `main` the branch merged. A split-area edit
+was made against the newer `main`, so it takes precedence over a monolith edit
+of the same key; if the monoliths changed that key to something else, the
+branch contradicts itself and the key is reported. The tool refuses, writing
+nothing, when a layout the branch has has no such reference (for example split
+areas the branch made itself, or an `--onto` that shares no history with it),
+when only some monoliths exist, or when a value would be lost.
 
 When it refuses a branch that keeps the monoliths, it finds the branch's
 legacy fork (the newest pre-split commit the branch is based on through its own
