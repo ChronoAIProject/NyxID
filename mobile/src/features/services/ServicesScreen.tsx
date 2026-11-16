@@ -715,8 +715,12 @@ export function ServicesScreen({
                   value={connectionTime(connection.expires_at, "Not recorded")}
                 />
               ) : null}
-              {isSavedCredential(connection) && connection.credential_verification?.reason_code ? (
-                <SettingsRow label="Check result" value={connection.credential_verification.reason_code} />
+              {isSavedCredential(connection) &&
+              connection.credential_verification?.reason_code ? (
+                <SettingsRow
+                  label="Check result"
+                  value={connection.credential_verification.reason_code}
+                />
               ) : null}
               <SettingsRow
                 label="Refresh status"
