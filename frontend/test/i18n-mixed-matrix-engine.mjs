@@ -93,6 +93,28 @@ export function historyPoints(history) {
 }
 
 /**
+ * Main lands the legacy branch (before the split), one key across all languages (`sides`:
+ * { [language]: [base, main, branch] }): the branch's value where it changed the key, else main's.
+ * If that would leave the key in only some languages, the branch's values win in all of them (a
+ * user resolving the conflict keeps a translatable key whole). Returns { [language]: value }.
+ */
+export function landKey(sides) {
+  const result = Object.fromEntries(Object.entries(sides).map(([language, [base, main, branch]]) => [language, branch === base ? main : branch]));
+  const present = Object.values(result).map((value) => value !== undefined);
+  return present.every(Boolean) || !present.some(Boolean) ? result : Object.fromEntries(Object.entries(sides).map(([language, [, , branch]]) => [language, branch]));
+}
+
+/**
+ * Main reverts a commit, one key across all languages (`sides`: { [language]: [parent, commit,
+ * main] }): the parent's values only if main still has the commit's values in every language, else
+ * main keeps its own (git would conflict there). Returns { [language]: value }.
+ */
+export function revertKey(sides) {
+  const untouched = Object.values(sides).every(([, commit, main]) => main === commit);
+  return Object.fromEntries(Object.entries(sides).map(([language, [parent, , main]]) => [language, untouched ? parent : main]));
+}
+
+/**
  * Run-level facts: whether the branch ends mixed, and the refusal the whole run must end in, if any:
  * "unreferenced" (split areas without a reference), "selfMadeAreas" (main's areas merged into areas the
  * branch made itself), "droppedMerges" (a full rebase through merge commits), "mergeCherryPick".
@@ -209,17 +231,22 @@ export function simulateCase(history, testCase, languages) {
       record();
     } else if (step.t === "mainMerge") {
       // Main merges the legacy branch (before the split); a conflict keeps the branch's value.
-      const take = (base, mine, theirs) => { const result = blank(); for (const language of languages) for (const key of keys) { const [b, m, t] = [base[language][key], mine[language][key], theirs[language][key]]; const value = t === b ? m : t; if (value !== undefined) result[language][key] = value; } return result; };
+      const take = (base, mine, theirs) => {
+        const result = blank();
+        for (const key of keys) {
+          const landed = landKey(Object.fromEntries(languages.map((language) => [language, [base[language][key], mine[language][key], theirs[language][key]]])));
+          for (const language of languages) if (landed[language] !== undefined) result[language][key] = landed[language];
+        }
+        return result;
+      };
       const fork = branchStates[0];
       main = app ? take(fork.monolith, main, monolith) : take(fork.family, main, family);
     } else if (step.t === "revert") {
-      // Main reverts the branch's last commit: where main still has that commit's value, restore its parent's.
+      // Main reverts the branch's last commit, per key (revertKey).
       const [parent, commit] = branchStates.slice(-2).map((state) => app ? state.monolith : state.family);
-      for (const language of languages) {
-        for (const key of keys) {
-          if (parent[language][key] === commit[language][key] || main[language][key] !== commit[language][key]) continue;
-          if (parent[language][key] === undefined) delete main[language][key]; else main[language][key] = parent[language][key];
-        }
+      for (const key of keys) {
+        const reverted = revertKey(Object.fromEntries(languages.map((language) => [language, [parent[language][key], commit[language][key], main[language][key]]])));
+        for (const language of languages) { if (reverted[language] === undefined) delete main[language][key]; else main[language][key] = reverted[language]; }
       }
     } else if (step.t === "localAreas") {
       areas = copy(monolith); hasAreas = true; areaBase = null;
@@ -638,29 +665,31 @@ async function rehearseIn(repo, history, cases, pkg) {
       const [ours, theirs] = [await git("rev-parse", "HEAD"), await git("rev-parse", "legacy")];
       const base = await git("merge-base", ours, theirs);
       await exec("git", ["merge", "--no-ff", "--no-commit", "-q", "legacy"], { cwd: repo });
-      // A conflict keeps the branch's value (the branch lands on main).
+      // A conflict keeps the branch's value (the branch lands on main), per key (landKey).
       for (const fileOf of [monolithFile, ...pkg.families.map((family) => (language) => familyFile(family, language))]) {
-        for (const language of pkg.languages) {
-          const [b, o, t] = [await show(base, fileOf(language)) ?? {}, await show(ours, fileOf(language)) ?? {}, await show(theirs, fileOf(language)) ?? {}];
-          const result = { ...o };
-          for (const key of new Set([...Object.keys(b), ...Object.keys(t)])) { if (t[key] === b[key]) continue; if (t[key] === undefined) delete result[key]; else result[key] = t[key]; }
-          write(fileOf(language), canonical(result));
+        const sides = Object.fromEntries(await Promise.all(pkg.languages.map(async (language) =>
+          [language, [await show(base, fileOf(language)) ?? {}, await show(ours, fileOf(language)) ?? {}, await show(theirs, fileOf(language)) ?? {}]])));
+        const results = Object.fromEntries(pkg.languages.map((language) => [language, { ...sides[language][1] }]));
+        for (const key of new Set(Object.values(sides).flatMap((catalogs) => catalogs.flatMap(Object.keys)))) {
+          const landed = landKey(Object.fromEntries(pkg.languages.map((language) => [language, sides[language].map((catalog) => catalog[key])])));
+          for (const language of pkg.languages) { if (landed[language] === undefined) delete results[language][key]; else results[language][key] = landed[language]; }
         }
+        for (const language of pkg.languages) write(fileOf(language), canonical(results[language]));
       }
       await commit("main: merge the legacy branch");
     } else if (step.t === "revert") {
-      // Main reverts the branch's last commit where main still has that commit's values.
+      // Main reverts the branch's last commit, per key (revertKey).
       await git("checkout", "-q", "main");
       const [parent, last] = branchCommits.slice(-2);
       for (const fileOf of [monolithFile, ...pkg.families.map((family) => (language) => familyFile(family, language))]) {
-        for (const language of pkg.languages) {
-          const [p, c, m] = [await show(parent, fileOf(language)) ?? {}, await show(last, fileOf(language)) ?? {}, read(fileOf(language))];
-          for (const key of new Set([...Object.keys(p), ...Object.keys(c)])) {
-            if (p[key] === c[key] || m[key] !== c[key]) continue;
-            if (p[key] === undefined) delete m[key]; else m[key] = p[key];
-          }
-          write(fileOf(language), canonical(m));
+        const sides = Object.fromEntries(await Promise.all(pkg.languages.map(async (language) =>
+          [language, [await show(parent, fileOf(language)) ?? {}, await show(last, fileOf(language)) ?? {}, read(fileOf(language))]])));
+        const results = Object.fromEntries(pkg.languages.map((language) => [language, { ...sides[language][2] }]));
+        for (const key of new Set(Object.values(sides).flatMap((catalogs) => catalogs.flatMap(Object.keys)))) {
+          const reverted = revertKey(Object.fromEntries(pkg.languages.map((language) => [language, sides[language].map((catalog) => catalog[key])])));
+          for (const language of pkg.languages) { if (reverted[language] === undefined) delete results[language][key]; else results[language][key] = reverted[language]; }
         }
+        for (const language of pkg.languages) write(fileOf(language), canonical(results[language]));
       }
       await commit("main: revert the branch's commit");
     }

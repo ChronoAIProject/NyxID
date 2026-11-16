@@ -63,7 +63,8 @@ beforeAll(async () => {
   // Written past vitest's console capture so CI logs show it for passing runs too.
   process.stderr.write(`i18n adoption matrix: ${plans.length} histories rehearsed in ${((Date.now() - started) / 1000).toFixed(1)} s\n`);
 }, 600_000);
-afterAll(() => cleanupAll());
+// Removing hundreds of repositories (deep sweeps) takes longer than the default hook timeout.
+afterAll(() => cleanupAll(), 300_000);
 
 for (const plan of plans) {
   const facts = historyFacts(plan.history);
