@@ -335,10 +335,10 @@ All under `/api/v1` on the configured `*_API_BASE_URL`. The workspace API famili
 ## Deep links & push
 
 - Custom URL scheme: `{APP_SCHEME}://challenge/{challenge_id}` → opens the challenge detail screen
-- Device login scheme: `nyxid://login/device?user_code=...` -> prefills the confirmation screen without previewing or approving
+- Device login scheme: `nyxid://login/device?user_code=...` -> loads the public request review; approval requires a separate authenticated action
 - The QR scanner accepts HTTPS or `nyxid://` login URLs but extracts only `user_code`; API calls always use `*_API_BASE_URL`
 - Supported push payload fields: `deeplink`, `url`, `challenge_id`, `challengeId`
-- Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The host of `*_API_BASE_URL` is also auto-added to iOS `associatedDomains` so backend-issued links open in the app.
+- Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The configured host list and shared `shared/native-app-links.json` paths include device login. Android HTTPS filters remain profile-local opt-in through `*_ANDROID_HTTPS_APP_LINKS=true` after every selected host serves Asset Links. See [App links](docs/APP_LINKS.md) for the built-in login-link flow and server setup.
 - React Navigation accepts the configured app scheme and every embedded API/frontend origin plus the link host; the universal-link settings are the same for both domain sets (see [Domain migration](docs/DOMAIN_MIGRATION.md)).
 
 ## Session

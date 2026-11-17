@@ -20,7 +20,11 @@ vi.mock("@/components/auth/mfa-verify-form", () => ({
 }));
 
 vi.mock("@/components/auth/web-device-login", () => ({
-  WebDeviceLogin: () => <div>Continue with the NyxID app</div>,
+  WebDeviceLogin: (props: Record<string, unknown>) => (
+    <div data-testid="web-device-login" data-props={JSON.stringify(props)}>
+      Continue with the NyxID app
+    </div>
+  ),
 }));
 
 vi.mock("@/stores/auth-store", () => ({
@@ -45,6 +49,11 @@ describe("LoginPage", () => {
     render(<LoginPage />);
     expect(JSON.parse(screen.getByTestId("mfa-verify-form").dataset.props ?? "{}")).toEqual({ returnTo: "/dashboard", cookieChallenge: true });
     expect(screen.queryByTestId("auth-flow")).not.toBeInTheDocument();
+    expect(JSON.parse(screen.getByTestId("web-device-login").dataset.props ?? "{}")).toEqual({
+      allowAppHandoff: true,
+      returnTo: "/dashboard",
+      isOpen: false,
+    });
   });
 
   it("explains an expired social challenge before showing sign-in", () => {
@@ -65,6 +74,7 @@ describe("LoginPage", () => {
     expect(screen.queryByTestId("mfa-verify-form")).not.toBeInTheDocument();
     const flow = screen.getByTestId("auth-flow");
     expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({
+      allowAppHandoff: true,
       initialPanel: 0,
       enableEmailLogin: true,
       returnTo: "/dashboard",
@@ -86,6 +96,7 @@ describe("LoginPage", () => {
 
     const flow = screen.getByTestId("auth-flow");
     expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({
+      allowAppHandoff: true,
       initialPanel: 0,
     });
   });
@@ -96,7 +107,10 @@ describe("LoginPage", () => {
     render(<LoginPage />);
 
     const flow = screen.getByTestId("auth-flow");
-    expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({ initialPanel: 0 });
+    expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({
+      allowAppHandoff: true,
+      initialPanel: 0,
+    });
   });
 
   it("renders MfaVerifyForm (not AuthFlow) when mfaRequired is true, passing returnTo", () => {
@@ -110,6 +124,11 @@ describe("LoginPage", () => {
     expect(JSON.parse(form.dataset.props ?? "{}")).toEqual({
       returnTo: "/dashboard",
       cookieChallenge: false,
+    });
+    expect(JSON.parse(screen.getByTestId("web-device-login").dataset.props ?? "{}")).toEqual({
+      allowAppHandoff: true,
+      returnTo: "/dashboard",
+      isOpen: false,
     });
   });
 });

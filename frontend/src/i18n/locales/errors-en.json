@@ -13,6 +13,7 @@
   "All eligible pool members are cooling down": "All eligible pool members are cooling down",
   "Allow all cannot be combined with a restricted list": "Allow all cannot be combined with a restricted list",
   "An internal error occurred": "An internal error occurred",
+  "App verification links require HTTPS": "App verification links require HTTPS",
   "Application name is required": "Application name is required",
   "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.": "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.",
   "Applied {{length}}; failed: {{value}}. Review remaining changes before retrying.": "Applied {{length}}; failed: {{value}}. Review remaining changes before retrying.",

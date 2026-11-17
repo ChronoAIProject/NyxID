@@ -168,6 +168,8 @@
   "Retry sign-in options": "重試載入登入選項",
   "Retrying...": "正在重試…",
   "Return to the requesting device to continue.": "請返回請求裝置以繼續。",
+  "Return to where you started signing in.": "返回開始登入的位置以繼續。",
+  "Return to your browser to continue.": "返回瀏覽器以繼續。",
   "Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.": "已從註冊頁面返回。關閉瀏覽器不代表已完成註冊。請完成郵箱驗證後在下方登入。",
   "Review account login": "稽核賬戶登入請求",
   "Review permissions": "檢視權限",

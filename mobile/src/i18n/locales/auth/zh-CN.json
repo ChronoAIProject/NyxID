@@ -168,6 +168,8 @@
   "Retry sign-in options": "重试加载登录选项",
   "Retrying...": "正在重试…",
   "Return to the requesting device to continue.": "请返回请求设备以继续。",
+  "Return to where you started signing in.": "返回开始登录的位置以继续。",
+  "Return to your browser to continue.": "返回浏览器以继续。",
   "Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.": "已从注册页面返回。关闭浏览器不代表已完成注册。请完成邮箱验证后在下方登录。",
   "Review account login": "审核账户登录请求",
   "Review permissions": "查看权限",

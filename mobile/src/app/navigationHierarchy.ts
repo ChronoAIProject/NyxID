@@ -78,6 +78,17 @@ export function workspaceSharedEntryNavigationAction<
   const existing = state.routes.find(
     (route) => route.name === "WorkspaceSheet",
   );
+  if (!existing && !state.routes.some((route) => route.name === "Workspace"))
+    return {
+      ...CommonActions.reset({
+        routes: [
+          { name: "Workspace" },
+          { name: "WorkspaceSheet", params: { screen: name, params, initial: true } },
+        ],
+        index: 1,
+      }),
+      target: state.key,
+    };
   if (!existing)
     return {
       ...StackActions.replace("WorkspaceSheet", {
