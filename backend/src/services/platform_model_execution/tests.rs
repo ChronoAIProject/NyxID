@@ -856,6 +856,7 @@ async fn paid_provider_evidence(images: bool, family: bool, checkpoint_crash: bo
         .mount(&server)
         .await;
     let db = &state.db;
+    billing::usage_delivery::ensure_indexes(db).await.unwrap();
     // The shared test helper starts after cutover. This fixture seeds legacy
     // balances deliberately, so run the real migration and its opening ledger
     // postings before admission; a ready marker would leave grants unspendable.

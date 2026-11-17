@@ -362,8 +362,8 @@ async fn usage_comparison_round2_clean_pass_cost_is_bounded_and_provider_reads_o
             );
             assert_eq!(
                 commands.len() - 2,
-                9,
-                "one coverage check, four discovery reads, one due read"
+                10,
+                "one coverage check, four discovery reads, due and legacy-reason reads"
             );
             assert!(
                 !commands.iter().any(
@@ -461,4 +461,163 @@ async fn usage_comparison_round2_findings_backoff_and_human_diagnostics() {
             f.close().await;
         })
         .await;
+}
+
+#[tokio::test]
+async fn usage_comparison_round2_retired_shape_finding_is_due_without_bypassing_cap() {
+    TEST_NOW
+        .scope(std::cell::Cell::new(initial_now()), async {
+            let f = Fixture::new().await;
+            let coverage = coverage::refresh(&f.db).await.unwrap();
+            for n in 0..27 {
+                let id = format!("old-shape-{n:02}");
+                f.target(&id, 0).await;
+                let target =
+                    f.db.collection::<BillingUsageComparison>(COLLECTION_NAME)
+                        .find_one(doc! {"_id":&id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let reason = if n == 25 {
+                    "duplicate_metric"
+                } else {
+                    "unsupported_usage_shape"
+                };
+                let observation = observation::waiting(
+                    &target,
+                    &coverage,
+                    initial_now().to_chrono(),
+                    "old-pass",
+                    "unsupported",
+                    reason,
+                );
+                f.db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":&id},
+                doc! {"$set":{
+                    "comparison":bson::to_bson(&observation).unwrap(),
+                    "next_visit_at":at("2026-11-16T12:00:00Z"),
+                    "retired_at":if n == 26 { Bson::DateTime(initial_now()) } else { Bson::Null }
+                }}).await.unwrap();
+                if n == 26 {
+                    f.db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME)
+                        .delete_one(doc! {"_id":format!("wallet-{id}")})
+                        .await
+                        .unwrap();
+                }
+                let mut real = usage("0.0");
+                real["customer_usage"]["charges_usage"][0]["filters"] = serde_json::json!([]);
+                real["customer_usage"]["charges_usage"][0]["grouped_usage"] = serde_json::json!([]);
+                f.provider
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .insert(id, Reply::Usage(real));
+            }
+            assert_eq!(
+                schedule::select(&f.db, initial_now().to_chrono())
+                    .await
+                    .unwrap()
+                    .len(),
+                20
+            );
+            f.pass().await.1.unwrap();
+            assert_eq!(f.provider.calls.lock().unwrap().len(), 20);
+            for n in 0..20 {
+                assert_eq!(
+                    f.observation(&format!("old-shape-{n:02}")).await.status,
+                    "equal"
+                );
+            }
+            assert_eq!(
+                schedule::select(&f.db, initial_now().to_chrono())
+                    .await
+                    .unwrap()
+                    .len(),
+                5
+            );
+            f.pass().await.1.unwrap();
+            assert_eq!(
+                f.provider.calls.lock().unwrap().len(),
+                20,
+                "rolling budget still applies"
+            );
+            f.advance(300).await;
+            f.pass().await.1.unwrap();
+            assert_eq!(f.provider.calls.lock().unwrap().len(), 25);
+            for n in 20..25 {
+                assert_eq!(
+                    f.observation(&format!("old-shape-{n:02}")).await.status,
+                    "equal"
+                );
+            }
+            assert!(
+                schedule::select(&f.db, TEST_NOW.with(|now| now.get().to_chrono()))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            f.close().await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn usage_comparison_round2_parser_findings_are_stored_and_explained_without_payloads() {
+    TEST_NOW.scope(std::cell::Cell::new(initial_now()), async {
+        let f = Fixture::new().await;
+        let cases = [
+            ("missing_customer_usage", "the provider omitted customer_usage"),
+            ("missing_charges_usage", "the provider omitted charges_usage or returned it in a non-array form"),
+            ("charge_not_object", "a charges_usage entry is not an object"),
+            ("too_many_charges", "the provider returned more than 256 charges"),
+            ("non_sum_aggregation:count_agg", "a delivered metric has non-sum provider aggregation 'count_agg'"),
+            ("non_sum_aggregation:other", "a delivered metric has non-sum provider aggregation 'other'"),
+            ("breakdown_mismatch", "a provider usage breakdown does not add up to its charge total"),
+            ("duplicate_metric", "the provider returned the same metric more than once"),
+            ("missing_metric_code", "the provider omitted a metric code"),
+            ("unsupported_provider_units", "the quantities cannot be represented exactly"),
+            ("invalid_provider_period", "the provider period is invalid"),
+        ];
+        for (n, (reason, _)) in cases.iter().enumerate() {
+            let id = format!("finding-{n:02}");
+            let non_sum = reason.starts_with("non_sum_aggregation:");
+            f.target(&id, i64::from(non_sum)).await;
+            if non_sum {
+                f.receipt(&id, 1, initial_now().to_chrono().timestamp() - 3600, "1").await;
+            }
+            let mut raw = usage("1");
+            raw["customer_usage"]["charges_usage"][0]["charge"] = serde_json::json!({"lago_id":"fixture-payload-never-store"});
+            match *reason {
+                "missing_customer_usage" => { raw.as_object_mut().unwrap().remove("customer_usage"); }
+                "missing_charges_usage" => { raw["customer_usage"].as_object_mut().unwrap().remove("charges_usage"); }
+                "charge_not_object" => raw["customer_usage"]["charges_usage"][0] = serde_json::json!(17),
+                "too_many_charges" => raw["customer_usage"]["charges_usage"] = serde_json::json!(vec![raw["customer_usage"]["charges_usage"][0].clone(); 257]),
+                "non_sum_aggregation:count_agg" => raw["customer_usage"]["charges_usage"][0]["billable_metric"]["aggregation_type"] = serde_json::json!("count_agg"),
+                "non_sum_aggregation:other" => raw["customer_usage"]["charges_usage"][0]["billable_metric"]["aggregation_type"] = serde_json::json!("fixture-payload-never-store"),
+                "breakdown_mismatch" => raw["customer_usage"]["charges_usage"][0]["filters"] = serde_json::json!([{"units":"2"}]),
+                "duplicate_metric" => raw["customer_usage"]["charges_usage"] = serde_json::json!(vec![raw["customer_usage"]["charges_usage"][0].clone(); 2]),
+                "missing_metric_code" => raw["customer_usage"]["charges_usage"][0]["billable_metric"]["code"] = serde_json::Value::Null,
+                "unsupported_provider_units" => raw["customer_usage"]["charges_usage"][0]["units"] = serde_json::json!("fixture-payload-never-store"),
+                "invalid_provider_period" => raw["customer_usage"]["from_datetime"] = serde_json::json!("fixture-payload-never-store"),
+                _ => unreachable!(),
+            }
+            f.provider.replies.lock().unwrap().insert(id, Reply::Usage(raw));
+        }
+        let (stats, result) = f.pass().await;
+        result.unwrap();
+        assert_eq!(stats.drift_alerts, 0);
+        let items = diagnostics(&f.db).await.unwrap();
+        let detail = &items.iter().find(|item| item.code == "billing_usage_unsupported").unwrap().detail;
+        for (n, (reason, sentence)) in cases.iter().enumerate() {
+            let row = f.db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"_id":format!("finding-{n:02}")}).await.unwrap().unwrap();
+            let observation = row.get_document("comparison").unwrap();
+            assert_eq!(observation.get_str("status").unwrap(), "unsupported");
+            assert_eq!(observation.get_str("reason").unwrap(), *reason);
+            for key in ["local", "remote", "differences"] {
+                assert!(observation.get_document(key).unwrap().is_empty());
+            }
+            assert!(!serde_json::to_string(&row).unwrap().contains("fixture-payload-never-store"));
+            assert!(detail.contains(&format!("1 subscription cannot be compared: {sentence}.")), "{detail}");
+        }
+        f.close().await;
+    }).await;
 }

@@ -27,6 +27,7 @@ pub(super) struct UsageTarget {
 
 pub(super) const RESOLVED_RETENTION_DAYS: i64 = 100;
 const PREPARED_RECONCILE_BATCH: i64 = 64;
+pub(super) const LEGACY_USAGE_SHAPE_INDEX: &str = "usage_comparison_legacy_shape_due";
 
 pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     db.collection::<Document>(DELIVERIES).create_indexes([
@@ -52,6 +53,21 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"retired_at":1,"next_visit_at":1,"_id":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(COMPARISONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"next_visit_at":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name(LEGACY_USAGE_SHAPE_INDEX.to_owned())
+                        .partial_filter_expression(
+                            doc! {"retired_at":null,"comparison.reason":"unsupported_usage_shape"},
+                        )
+                        .build(),
+                )
                 .build(),
         )
         .await?;

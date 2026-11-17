@@ -135,10 +135,37 @@ pub(super) async fn discover(db: &Database) -> AppResult<Vec<AppError>> {
 }
 
 pub(super) async fn select(db: &Database, now: chrono::DateTime<Utc>) -> AppResult<Vec<Document>> {
-    db.collection(COLLECTION_NAME).find(doc! {"retired_at":Bson::Null,
+    let mut rows: Vec<Document> = db.collection(COLLECTION_NAME).find(doc! {"retired_at":Bson::Null,
         "$or":[{"next_visit_at":Bson::Null},{"next_visit_at":{"$lte":bson::DateTime::from_chrono(now)}}]})
         .sort(doc! {"next_visit_at":1,"_id":1}).limit(SUBSCRIPTIONS_PER_PASS as i64)
-        .await?.try_collect().await.map_err(Into::into)
+        .await?.try_collect().await?;
+    let remaining = SUBSCRIPTIONS_PER_PASS - rows.len();
+    if remaining > 0 {
+        let selected: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row.get("_id").cloned())
+            .collect();
+        let legacy: Result<Vec<Document>, mongodb::error::Error> = async { db.collection(COLLECTION_NAME)
+            .find(doc! {"retired_at":Bson::Null,"comparison.reason":"unsupported_usage_shape","next_visit_at":{"$gt":bson::DateTime::from_chrono(now)},"_id":{"$nin":selected}})
+            .sort(doc! {"next_visit_at":1,"_id":1})
+            .hint(mongodb::options::Hint::Name(super::super::usage_delivery::LEGACY_USAGE_SHAPE_INDEX.into()))
+            .limit(remaining as i64)
+            .await?.try_collect().await }.await;
+        match legacy {
+            Ok(legacy) => rows.extend(legacy),
+            Err(error) => {
+                if let Some(code) = missing_legacy_index_code(&error) {
+                    tracing::warn!(
+                        database_code = code,
+                        "Legacy usage lookup skipped because its index is unavailable"
+                    );
+                } else {
+                    return Err(error.into());
+                }
+            }
+        }
+    }
+    Ok(rows)
 }
 
 pub(super) async fn live_wallets(
@@ -188,4 +215,49 @@ pub(super) async fn reserve(db: &Database, requested: usize) -> AppResult<usize>
             .map_err(|_| invalid("Usage read reservation is malformed"))?,
     )
     .map_err(|_| invalid("Usage read reservation is negative"))
+}
+
+fn missing_legacy_index_code(error: &mongodb::error::Error) -> Option<i32> {
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command)
+            if command.code == 27
+                || (command.code == 2
+                    && command
+                        .message
+                        .contains("hint provided does not correspond to an existing index")) =>
+        {
+            Some(command.code)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_comparison_legacy_query_error_classification_is_narrow() {
+        for (code, message, expected) in [
+            (
+                2,
+                "planner: hint provided does not correspond to an existing index",
+                Some(2),
+            ),
+            (27, "index not found", Some(27)),
+            (2, "hint must be a string or an object", None),
+            (2, "invalid query", None),
+            (13, "unauthorized", None),
+            (26, "namespace not found", None),
+            (50, "query timed out", None),
+            (175, "query plan killed", None),
+        ] {
+            let command: mongodb::error::CommandError = bson::from_document(doc! {
+                "code":code, "codeName":"fixture", "errmsg":message,
+            })
+            .unwrap();
+            let error = mongodb::error::ErrorKind::Command(command).into();
+            assert_eq!(missing_legacy_index_code(&error), expected);
+        }
+    }
 }

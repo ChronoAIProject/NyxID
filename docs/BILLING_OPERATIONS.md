@@ -299,7 +299,7 @@ changed wallet bindings retire old targets; discovery reactivates a binding if
 it becomes current again. This also applies to captured runtime targets. Each
 visit folds at most 1,000 receipts; period/layout changes rebuild through the event
 index, then acknowledgements fold in sequence order. Incomplete projections stay
-visible. Responses are capped at 1 MiB and 256 metrics.
+visible. Responses are capped at 1 MiB and 256 charges.
 
 A nonzero difference becomes `billing_usage_drift` only after two complete
 observations in distinct passes at least ten database-time minutes apart, with
@@ -324,12 +324,90 @@ of additional differing metrics. Unsupported reasons have counts and up to five
 subscription ids. The retained prepared/rejected sample has at most five examples. A stale generation, changed
 sequence or elapsed period cannot display a live numeric finding.
 
-The response parser supports the nested plain per-metric shape used by the bill
-fixtures, exact decimal-string units, integer units, and inclusive final-second
-period bounds. Grouped/filtered usage, duplicate metrics, missing metrics,
-unsupported aggregation, invalid periods and unrepresentable quantities are
-explicit findings, never inferred totals. Published Lago v1.50 grouped/filtered
-schemas were unavailable offline; no partition semantics have been inferred.
+The provider contract is taken from lago-api tag `v1.50.0`,
+`app/serializers/v1/customers/charge_usage_serializer.rb` and
+`app/serializers/v1/customers/usage_serializer.rb`.
+`app/services/invoices/customer_usage_service.rb` formats the period bounds with
+`iso8601` without fractional seconds. The parser reads the inclusive whole-second
+`customer_usage.from_datetime` and `to_datetime` bounds and each
+`charges_usage` entry's `billable_metric.code`, `aggregation_type`, and `units`.
+The metric code must be bounded and non-blank. For sum metrics, units must be
+an exact, non-negative decimal string or integer representable in micro-units.
+
+For `sum_agg` metrics the charge-level `units` is the total over all fees in the
+charge. Non-empty `filters` and `grouped_usage` arrays each partition those same
+fees: their direct entries' units must add up to the charge total. Nested filters
+inside a group are not added again. Malformed breakdowns or entry units produce
+`breakdown_mismatch`; missing, null and empty breakdowns need no check.
+
+Other aggregations are omitted from the compared quantities and remembered only
+by metric code and a bounded aggregation name in the current read. Their units
+and breakdowns are skipped entirely, including absent or unrepresentable units. After local deliveries for the period have been
+folded, a delivered metric with a non-sum aggregation produces
+`non_sum_aggregation:<name>` instead of a numeric comparison. A non-sum metric
+without deliveries in that period does not block the sum metrics. Structural
+findings, including invalid sum-charge units and duplicate metric codes across
+any aggregations, still block the subscription. Duplicate codes are checked
+before aggregation or units, including duplicates across sum and non-sum charges.
+
+Every other key is ignored, whether absent, scalar, object, or array. v1.50.0
+already sends `presentation_breakdowns`, `pricing_unit_details`, and
+`total_aggregated_units`; none replaces or adds to the charge's `units`.
+`backend/src/services/billing/fixtures/lago_current_usage_v1_50_0.json` mirrors
+that tag's serializer keys with synthetic values: one charge has two filters,
+and one has grouped usage with nested filters. It includes the nested
+`presentation_breakdowns`, `invoice_display_name`, `values`, and `grouped_by`
+fields, and omits `amount_currency` inside breakdown entries as the serializer
+does. Smaller fixtures also cover absent metadata and exact `"12.0"`, `"0.0"`,
+`"0.000001"`, and integer units.
+
+Integrity records one bounded reason code per finding; only the code and a
+validated aggregation name can come from a response in a stored finding:
+
+| Reason code | Integrity sentence |
+| --- | --- |
+| `missing_customer_usage` | the provider omitted customer_usage |
+| `missing_charges_usage` | the provider omitted charges_usage or returned it in a non-array form |
+| `charge_not_object` | a charges_usage entry is not an object |
+| `too_many_charges` | the provider returned more than 256 charges |
+| `non_sum_aggregation:<name>` | a delivered metric has non-sum provider aggregation '{name}' |
+| `breakdown_mismatch` | a provider usage breakdown does not add up to its charge total |
+| `duplicate_metric` | the provider returned the same metric more than once |
+| `missing_metric_code` | the provider omitted a metric code |
+| `unsupported_provider_units` | the quantities cannot be represented exactly |
+| `invalid_provider_period` | the provider period is invalid |
+| `response_too_large` | the response exceeds the comparison size limit |
+| `subscription_unavailable` | the provider no longer exposes the subscription |
+| `provider_request_rejected` | the provider rejected the usage request |
+| `provider_target_mismatch` | the returned customer or subscription does not match |
+| `delivered_metric_missing` | a delivered metric is missing from provider usage |
+| `unsupported_usage_shape` (retired) | the previous release recorded an unsupported provider usage shape |
+
+For `non_sum_aggregation`, `<name>` is the provider enum only when it is at
+most 32 ASCII characters from `[a-z_]` and is nonempty; malformed or absent names
+are stored as `other`. Subscriptions carrying the retired
+`unsupported_usage_shape` finding can be re-read before their stored next visit.
+The original indexed due query runs first. If it returns fewer than 20 rows, a
+second query fills the remaining slots from non-retired, future-dated rows with
+that exact legacy reason, excluding rows already selected. The future-date bound
+avoids scanning legacy rows that were already due. It uses the named
+`usage_comparison_legacy_shape_due` index on `{next_visit_at, _id}`, partial on
+`{retired_at: null, comparison.reason: "unsupported_usage_shape"}`. Once those
+findings are replaced, the index is empty: the fallback examines no documents or
+keys, and the original due query still examines only due rows. Startup creates
+the additive index through the existing index setup; no migration or operator
+action is required. Old replicas' writes naturally repopulate it during rollout.
+If the legacy lookup's named index is missing, that lookup contributes no rows
+for the pass. A single warning records only the MongoDB error code; due rows
+still proceed. The old findings retain their schedule and become due within a
+day. Only IndexNotFound (27) or BadValue (2) with MongoDB's specific missing-hint
+message takes this fallback; other errors propagate. The due query is unchanged.
+
+The limits remain 20 subscriptions per pass, 20 reads per rolling five minutes,
+and 5,760 per UTC day. Ordinary due rows have priority. Successful publication
+replaces the old reason and resumes the ordinary schedule; existing coverage
+waits still apply. Both versions read the unchanged observation schema and string
+reasons.
 
 ## Reconcile ownership and verification status
 
