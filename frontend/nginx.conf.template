@@ -181,6 +181,18 @@ server {
         try_files /terms.html =404;
     }
 
+    location = /data-deletion {
+        default_type text/html;
+        etag off;
+        if_modified_since off;
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
+        add_header ETag $nyxid_legal_etag;
+        add_header Cache-Control "public, max-age=86400, must-revalidate";
+        include @@STATIC_HEADERS@@;
+        try_files /data-deletion.html =404;
+    }
+
     # SPA fallback -- serve index.html for all non-file routes.
     # Do NOT add `$uri/`: the build mirrors `docs/site/**` into `public/docs/`,
     # so a real `/docs/` directory exists. With `$uri/`, a request to `/docs`

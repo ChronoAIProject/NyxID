@@ -1,11 +1,11 @@
 ---
 title: Privacy Policy
-effective_date: 2026-11-12
+effective_date: 2026-11-17
 ---
 
 # Privacy Policy
 
-**Effective date: 2026-11-12**
+**Effective date: 2026-11-17**
 
 ## 1. Introduction
 
@@ -123,6 +123,18 @@ NyxID's use and transfer to any other app of information received from Google AP
 **Who receives it.** To carry out a request, the relevant Google data is sent to the assistant and model services that process that request, as described in the inventory above. We do not sell Google user data, use it for advertising, or transfer it to data brokers or information resellers. We do not use Google user data to develop, improve or train generalised or non-personalised AI or machine-learning models, and we do not transfer it to third parties for that purpose. People at NyxID do not read your Google user data unless you give us permission for specific data, it is necessary for security purposes such as investigating abuse, it is required to comply with applicable law, or it has been aggregated and anonymised for internal operations.
 
 **Your controls.** You can disable or delete a Google connection at any time in AI Services. Deleting a connection removes its stored tokens and asks Google to revoke NyxID's access. You can also remove NyxID's access from your [Google Account permissions](https://myaccount.google.com/permissions) page. Deleting a conversation removes the Google data saved in it. Notes an agent saved to its memory are separate and can be removed from that agent's memory. Account deletion is described in section 6.
+
+### Meta and WhatsApp data
+
+**What we access.** When a business connects a WhatsApp Business Account to NyxID, through Meta's Embedded Signup ("Connect with Meta") or with its own credentials, we receive an access token for that account with the WhatsApp permissions the business approves, and identifiers such as the WhatsApp Business Account ID, phone number ID and display phone number. When people message the business's number, Meta sends NyxID the sender's WhatsApp ID (phone number) and profile name, the message content and supported media, and delivery and read status for messages the business sends.
+
+**How we use it.** Only to provide the messaging features the business configures: receiving its customers' messages, delivering them to the agent, service or people it chooses, sending its replies and approved template messages, showing delivery status, and keeping the connection set up (phone-number registration, webhook subscription and status checks).
+
+**How we store and protect it.** Access tokens use application-layer AES-256 encryption. NyxID's message relay stores message metadata (identifiers, direction, content type, timestamps, attachment details and delivery status), not message text. If the business links the channel to a NyxID assistant, those conversations are stored in that assistant's history.
+
+**Who receives it.** Message content and sender identifiers go to the destination the business configures for the channel. Replies go to Meta, which delivers them under WhatsApp's terms and policies. We do not sell data received from Meta or use it for advertising.
+
+**Retention and deletion.** Ordinary message records are deleted after 30 days, and WhatsApp delivery receipts and duplicate-message markers are kept for 30 days. Conversation routes and some delivery-tracking records (message IDs, delivery states and timestamps, without message text) have no fixed retention period and are removed when the channel owner's account is deleted. Deleting a channel stops messaging through it immediately; its encrypted credentials stay deactivated until account deletion or a deletion request removes them. See our [Data Deletion Instructions](https://nyxid.ai/data-deletion).
 
 ## 6. Data Retention
 
