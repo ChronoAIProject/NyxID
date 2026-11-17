@@ -27,8 +27,10 @@ pub(crate) type ModelApprovalHook = std::sync::Arc<
 >;
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static MODEL_APPROVAL_ABORT_AFTER_BIND: bool;
     pub(crate) static MODEL_APPROVAL_DELAY: std::time::Duration;
     pub(crate) static MODEL_APPROVAL_PREPARE: ModelApprovalHook;
+    pub(crate) static MODEL_APPROVAL_SETTLED: Option<tokio::sync::watch::Receiver<()>>;
 }
 
 fn missing() -> AppError {
@@ -493,7 +495,7 @@ pub(super) async fn create(
     let result = async {
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db,chat,&request,snapshot),|session,(db,chat,request,snapshot)|Box::pin(async move {
-        let result:AppResult<ApprovalRequest>=async {
+        let result:AppResult<(ApprovalRequest, Option<crate::services::assistant_activity_decision::ActivityBinding>)>=async {
             require_enrolled(db,&chat.user_id,Some(session)).await?;
             let p=proposal(request)?;
             AssistantVersion::of(request)?.require_serving(db).await?;
@@ -508,7 +510,8 @@ pub(super) async fn create(
             crate::services::assistant_model_observer::before_approval_request(Some(&mut *session)).await?;
             if let Some(existing)=collection.find_one(assistant_selector(doc!{"execution_proposal.v1.gap_key":&p.gap_key})).sort(doc!{"created_at":-1}).session(&mut *session).await? {
                 // Denial is task-bound. A pending or dispatched effect is never queued twice.
-                return Ok(existing);
+                let activity = bind_proposal_activity(db, chat, &existing.id, session).await?;
+                return Ok((existing, activity));
             }
             if collection.count_documents(assistant_selector(doc!{"user_id":&chat.user_id,"execution_proposal.v1.task.task":bson::to_bson(&p.task.task).map_err(encoding)?})).session(&mut *session).await?>=32 {return Err(AppError::Forbidden("Too many permission requests for this task".into()));}
             #[cfg(test)]
@@ -518,11 +521,27 @@ pub(super) async fn create(
             }
             collection.insert_one(*request).session(&mut *session).await?;
             audit(db,session,&chat.user_id,"execution_permission_requested",&request.id).await?;
-            Ok((*request).clone())
+            // Settlement must see the recovery evidence with the refusal, even
+            // when the callback is cancelled immediately after commit.
+            let activity = bind_proposal_activity(db, chat, &request.id, session).await?;
+            Ok(((*request).clone(), activity))
         }.await;
         super::super::api_key_mutation_service::transaction_result(result)
     })).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
     }.await;
+    let result = result.map(|(request, activity)| {
+        if let Some(activity) = activity {
+            activity.publish_after_commit();
+        }
+        request
+    });
+    #[cfg(test)]
+    if result.is_ok()
+        && let Ok(Some(mut settled)) = MODEL_APPROVAL_SETTLED.try_with(Clone::clone)
+    {
+        // The test releases the callback only after observing real settlement.
+        let _ = settled.changed().await;
+    }
     if result.is_err() {
         // The transaction has ended: no approval can still commit behind this
         // refusal. Preserve the base's terminal model outcome on failure too.
@@ -538,6 +557,28 @@ pub(super) async fn create(
         }
     }
     result.map(Some)
+}
+
+async fn bind_proposal_activity(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    id: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Option<crate::services::assistant_activity_decision::ActivityBinding>> {
+    let binding = crate::services::assistant_activity_decision::bind_in_session(
+        db, chat, "approval", id, false, session,
+    )
+    .await?;
+    #[cfg(test)]
+    if MODEL_APPROVAL_ABORT_AFTER_BIND
+        .try_with(|abort| *abort)
+        .unwrap_or(false)
+    {
+        return Err(AppError::Internal(
+            "fixture: proposal aborted after activity writes".into(),
+        ));
+    }
+    Ok(binding)
 }
 
 pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&Proposal> {
