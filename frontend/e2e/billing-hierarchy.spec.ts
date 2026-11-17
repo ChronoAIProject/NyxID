@@ -5,6 +5,10 @@ import { BILLING_SECTIONS, BILLING_SECTION_TITLES } from "../src/lib/billing-sec
 
 // Each case captures every retained page as well as exercising navigation.
 test.setTimeout(90_000);
+test.use({ locale: "en-US", timezoneId: "UTC" });
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-10-15T12:00:00Z"));
+});
 
 for (const width of [1280, 390])
   for (const mode of ["light", "dark"] as const) {

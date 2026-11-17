@@ -1,3 +1,4 @@
+import { settingsReviewEnvironment, settleSettingsReviewQueries } from "@/test/settings-review-environment";
 import { AGENT_DETAILS_SECTIONS } from "@/lib/assistant/agent-details-sections";
 import { agentVisibilityCases, agentControls, sortedAgentControls, agentVisibilityFeatures, agentVisibilityResponse, agentReadOnlyRows } from "@/test/agent-visibility";
 import agentVisibilityBaseline from "@/test/agent-visibility-baseline.json";
@@ -176,9 +177,11 @@ beforeEach(() => {
   };
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await client.cancelQueries();
   client.clear();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   globalThis.__nyxidAssistantHttpMock = undefined;
@@ -1560,8 +1563,9 @@ it("replaces an agent section with its parent while preserving the conversation"
 });
 
 
-// Captured by rendering origin/ios-nested-settings (aee1ae9ee), not inferred from section availability.
+// Recaptured from aee1ae9ee with the same en-US/UTC clock and query-readiness harness.
 it.each(Object.keys(agentVisibilityBaseline))("preserves the base controls and authority for %s across every section", async name => {
+  await settingsReviewEnvironment();
   agent = agentRow(agentVisibilityCases[name.split("/")[0]!]!);
   const owner = useAuthStore.getState().user!;
   useAuthStore.setState({ user: { ...owner, capabilities: { ...owner.capabilities, enabled_features: name.endsWith("all-features") ? agentVisibilityFeatures : ["assistant:model-controls"] } } });
@@ -1572,19 +1576,20 @@ it.each(Object.keys(agentVisibilityBaseline))("preserves the base controls and a
   };
   renderSheet({ tab: "overview" });
   await screen.findByRole("tab", { name: "Overview" });
+  await settleSettingsReviewQueries(client);
   const tabs = screen.getAllByRole("tab").map(el => el.textContent!);
   const controls: ReturnType<typeof agentControls> = [];
   const rows = new Set<string>();
   for (const [root, label] of [["overview", "Overview"], ["grants", "Access"], ["skills", "Skills"], ["memory", "Memory"], ["channels", "Channels"]]) {
     if (!tabs.includes(label!)) continue;
     await visitAgent(root!);
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
+    await settleSettingsReviewQueries(client);
     controls.push(...agentControls());
     agentReadOnlyRows().forEach(row => rows.add(row));
     const paths = [...document.querySelectorAll<HTMLElement>("[data-drawer-page-trigger]")].filter(el => !el.closest("[hidden],[inert]") && AGENT_DETAILS_SECTIONS.includes(el.dataset.drawerPageTrigger as typeof AGENT_DETAILS_SECTIONS[number])).map(el => el.dataset.drawerPageTrigger!);
     for (const path of paths) {
       await visitAgent(path);
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
+      await settleSettingsReviewQueries(client);
       controls.push(...agentControls());
       agentReadOnlyRows().forEach(row => rows.add(row));
     }

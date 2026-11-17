@@ -31,7 +31,7 @@ export function agentControls() {
   });
 }
 export function sortedAgentControls(controls: ReturnType<typeof agentControls>) {
-  return [...new Map(controls.map(control => [`${control.role}: ${control.label}`, control])).values()].sort((a,b) => `${a.role}: ${a.label}`.localeCompare(`${b.role}: ${b.label}`));
+  return [...new Map(controls.map(control => [`${control.role}: ${control.label}`, control])).values()].sort((a,b) => `${a.role}: ${a.label}`.localeCompare(`${b.role}: ${b.label}`, "en"));
 }
 
 export const agentVisibilityFeatures = ["assistant:model-controls", "assistant:voice-agent-key", "assistant:agent-learning", "assistant:operation-scopes", "assistant:guest-operation-scopes", "assistant:shared-agents", "nyxbot:org-specialist-channels"];

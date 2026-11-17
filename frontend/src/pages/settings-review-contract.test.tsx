@@ -1,8 +1,8 @@
 import "@/i18n";
 import type { ComponentProps } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider, useSearch } from "@tanstack/react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -15,21 +15,30 @@ import { billingFigures } from "@/test/billing-figures";
 import baseline from "@/test/billing-figures-baseline.json";
 import requestsBaseline from "@/test/settings-requests-baseline.json";
 import type { BillingSection } from "@/lib/billing-sections";
+import { settingsReviewEnvironment, settleSettingsReviewQueries } from "@/test/settings-review-environment";
 
-// Baselines were captured with this harness and fixture at origin/ios-nested-settings
-// (aee1ae9ee9e9858fc9342e519067a5bd8c31f782), before changing presentation.
+// Base renders come from aee1ae9ee9e9858fc9342e519067a5bd8c31f782,
+// with the same fixture, en-US/UTC native formatting and fixed clock as this file.
 const captureBase = process.env.SETTINGS_BASELINE_CAPTURE === "1";
-let requests: string[];
-let client: QueryClient;
-const settle = async () => {
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 60)); });
-  await waitFor(() => expect(client.isFetching()).toBe(0));
-};
-beforeEach(() => {
-  vi.setSystemTime(new Date("2026-10-15T12:00:00Z"));
-  requests = [];
-  useAuthStore.setState({ user: reviewOwner });
-  client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 60_000 } } });
+// Each walk may mount 14–22 retained pages; allow shared CI runners headroom.
+const CONTRACT_TIMEOUT = 30_000;
+beforeEach(settingsReviewEnvironment);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  globalThis.__nyxidAssistantHttpMock = undefined;
+  useAuthStore.setState({ user: null });
+});
+function AgentRoute() {
+  const search = useSearch({ strict: false }) as { details?: ComponentProps<typeof AgentDetailsSheet>["tab"] };
+  return <AgentDetailsSheet agentId="agent-researcher" agents={[]} open tab={search.details} onOpenChange={() => {}} onDeleted={() => {}} />;
+}
+async function open(surface: "account" | "billing" | "agent", section?: string) {
+  const requests: string[] = [];
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  useAuthStore.setState({ user: structuredClone(reviewOwner) });
   const response = (path: string) => {
     requests.push(path);
     return new Response(JSON.stringify(settingsReviewResponse(path)), { headers: { "Content-Type": "application/json" } });
@@ -39,24 +48,26 @@ beforeEach(() => {
     return response(url.pathname.replace(/^\/api\/v1/, "") + url.search);
   }));
   globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => response(endpoint);
-});
-afterEach(() => { cleanup(); client.clear(); vi.unstubAllGlobals(); vi.useRealTimers(); globalThis.__nyxidAssistantHttpMock = undefined; useAuthStore.setState({ user: null }); });
-function AgentRoute() {
-  const search = useSearch({ strict: false }) as { details?: ComponentProps<typeof AgentDetailsSheet>["tab"] };
-  return <AgentDetailsSheet agentId="agent-researcher" agents={[]} open tab={search.details} onOpenChange={() => {}} onDeleted={() => {}} />;
-}
-async function open(surface: "account" | "billing" | "agent", section?: string) {
+  const settle = () => settleSettingsReviewQueries(client);
   const root = createRootRoute();
   const pathname = surface === "account" ? "/settings" : surface === "billing" ? "/billing" : "/assistant";
   const route = createRoute({ getParentRoute: () => root, path: pathname, component: () => surface === "account" ? <SettingsPage /> : surface === "billing" ? <BillingPage /> : <AgentRoute />, validateSearch: (search: Record<string, unknown>) => search });
   const router = createRouter({ routeTree: root.addChildren([route]), history: createMemoryHistory({ initialEntries: [pathname + (section ? `?tab=${section}` : "")] }) });
   render(<QueryClientProvider client={client}><TooltipProvider><RouterProvider router={router} /></TooltipProvider></QueryClientProvider>);
-  await act(() => router.load()); await settle();
+  onTestFinished(async () => {
+    await client.cancelQueries();
+    client.clear();
+  });
+  await act(() => router.load());
+  if (surface === "agent") await screen.findByRole("tab", { name: "Overview" });
+  else if (surface === "account") await screen.findByRole("region", { name: "Account settings" });
+  else await screen.findByRole("tab", { name: "Billing" });
+  await settle();
   const go = async (next?: string) => {
-    await act(() => router.navigate({ to: pathname, search: surface === "account" ? { tab: next } : { tab: next?.split("/")[0], section: next?.includes("/") ? next as BillingSection : undefined }, replace: true }));
+    await act(() => router.navigate({ to: pathname, search: surface === "agent" ? { details: next as ComponentProps<typeof AgentDetailsSheet>["tab"] } : surface === "account" ? { tab: next } : { tab: next?.split("/")[0], section: next?.includes("/") ? next as BillingSection : undefined }, replace: true }));
     await settle();
   };
-  return go;
+  return { go, requests, settle, user: userEvent.setup({ delay: null }) };
 }
 async function record(surface: string, data: unknown) {
   const { writeFileSync } = await import("node:fs");
@@ -64,16 +75,16 @@ async function record(surface: string, data: unknown) {
 }
 
 it("keeps exact account requests limited to visible summaries and first-visited pages", async () => {
-  const go = await open("account");
+  const { go, requests } = await open("account");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
   const pages = captureBase ? ["profile", "security", "sessions", "mcp", "display", "privacy"] : ["profile", "security", "security/mfa", "security/password", "security/linked-accounts", "security/delete", "sessions", "mcp", "mcp/cursor", "mcp/claude-code", "mcp/codex", "display", "display/appearance", "display/text", "display/chat", "display/sidebar", "display/colors", "display/colors/surfaces", "display/colors/text", "display/colors/controls", "display/readability", "privacy"];
   for (const section of pages) { await go(section); stages[section] = requests.splice(0).sort(); }
   if (captureBase) await record("account-requests", stages);
   else { expect(stages).toEqual(requestsBaseline.account); }
-});
+}, CONTRACT_TIMEOUT);
 
 it("keeps billing requests lazy and does not refetch when moving among retained pages", async () => {
-  const go = await open("billing");
+  const { go, requests } = await open("billing");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
   for (const section of captureBase ? ["usage", "billing"] : ["billing/topup", "billing/benefits", "billing/benefits/wallet", "billing/benefits/grants", "billing/benefits/allowances", "billing/bill", "billing/machines", "billing/activity", "usage", "usage/summary", "usage/charts", "usage/charts/quantities", "usage/charts/funding", "usage/explorer"]) {
     await go(section); stages[section] = requests.splice(0).sort();
@@ -86,44 +97,40 @@ it("keeps billing requests lazy and does not refetch when moving among retained 
     for (const section of Object.keys(stages).filter(key => key !== "root")) await go(section);
     expect(requests).toEqual([]);
   }
-}, 20000);
+}, CONTRACT_TIMEOUT);
 
 it("keeps agent detail requests behind their first visit", async () => {
-  await open("agent");
+  const { go, requests } = await open("agent");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
-  const user = userEvent.setup({ delay: null });
   const tabs: Record<string, string> = { overview: "Overview", grants: "Access", skills: "Skills", memory: "Memory", channels: "Channels" };
   for (const section of captureBase ? Object.keys(tabs) : ["overview/persona", "overview/access", "overview/chat", "overview/voice", "overview/automations", "overview/ownership", "grants/services", "grants/operations", "grants/guests", "grants/machines", "grants/connections", "skills/installed", "memory", "channels"]) {
-    const tab = section.split("/")[0]!;
-    if (screen.getByRole("tab", { name: tabs[tab] }).getAttribute("data-state") === "active") await user.click(screen.getByRole("tab", { name: tab === "overview" ? "Skills" : "Overview" }));
-    await user.click(screen.getByRole("tab", { name: tabs[tab] }));
-    if (!captureBase && section.includes("/")) await user.click(document.querySelector<HTMLElement>(`[data-drawer-page-trigger="${section}"]`)!);
-    await settle();
-    if (!captureBase && section.includes("/")) expect(document.querySelector(`[data-grouped-detail]:not([hidden])`)).not.toBeNull();
+    await go(section);
+    if (!captureBase && section.includes("/"))
+      expect(document.querySelector(`[data-grouped-section="${section}"]:not([hidden])`)).not.toBeNull();
     stages[section] = requests.splice(0).sort();
   }
   if (captureBase) await record("agent-requests", stages);
   else { expect(stages).toEqual(requestsBaseline.agent); }
-});
+}, CONTRACT_TIMEOUT);
 
 it("preserves every base billing label and figure exactly once across the focused pages", async () => {
-  const go = await open("billing");
+  const { go, settle, user } = await open("billing");
   const figures: string[] = [];
   const collect = () => figures.push(...billingFigures(document.querySelector<HTMLElement>(".billing-page")!));
   const expand = async () => {
     for (const detail of document.querySelectorAll<HTMLDetailsElement>("details")) {
-      if (detail.closest('[hidden],[inert]')) continue;
-      detail.open = true; fireEvent(detail, new Event("toggle"));
+      if (detail.closest('[hidden],[inert]') || detail.open) continue;
+      await user.click(detail.querySelector("summary")!);
     }
     await settle();
   };
   const machine = async () => {
-    await userEvent.click(screen.getByRole("button", { name: "Review machine runtime" })); await settle();
-    await userEvent.click(screen.getByRole("combobox", { name: "Machine runtime billing selection" }));
-    await userEvent.click(await screen.findByRole("option", { name: /machine-1/ })); await settle();
+    await user.click(screen.getByRole("button", { name: "Review machine runtime" })); await settle();
+    await user.click(screen.getByRole("combobox", { name: "Machine runtime billing selection" }));
+    await user.click(await screen.findByRole("option", { name: /machine-1/ })); await settle();
   };
   if (captureBase) {
-    await userEvent.click(screen.getByRole("button", { name: "View breakdown" }));
+    await user.click(screen.getByRole("button", { name: "View breakdown" }));
     await machine(); await expand(); collect();
     // The old benefits region is shared above both tabs; collect it only once.
     await go("usage"); await expand();
@@ -141,10 +148,10 @@ it("preserves every base billing label and figure exactly once across the focuse
     expect(compact.querySelector("p")!.textContent).toBe(summary.querySelector("strong")!.textContent);
     expect(compact.querySelectorAll("p")[2]!.textContent).toBe(summary.querySelector("dd")!.textContent);
   }
-}, 20000);
+}, CONTRACT_TIMEOUT);
 
 it("keeps gated agent reads behind the corresponding first visit", async () => {
-  await open("agent");
+  const { go, requests, settle } = await open("agent");
   requests.splice(0);
   act(() => useAuthStore.setState({ user: { ...reviewOwner, capabilities: { ...reviewOwner.capabilities, enabled_features: [
     "assistant:model-controls", "assistant:voice-agent-key", "assistant:agent-learning",
@@ -152,20 +159,15 @@ it("keeps gated agent reads behind the corresponding first visit", async () => {
   ] } } }));
   await settle();
   expect(requests).toEqual([]);
-  const user = userEvent.setup({ delay: null });
   const agentPath = "/assistant/nyxagent/agents/agent-researcher";
   const cases = [
-    ["grants/operations", "Access", [`${agentPath}/operations`]],
-    ["grants/voice", "Access", [`${agentPath}/voice-service`]],
-    ["skills/learning", "Skills", [`${agentPath}/learning`, `${agentPath}/learning/proposals`]],
-    ["grants/guests", "Access", [`${agentPath}/guest-readiness`, `${agentPath}/guest-operations`, "/keys"]],
+    ["grants/operations", [`${agentPath}/operations`]],
+    ["grants/voice", [`${agentPath}/voice-service`]],
+    ["skills/learning", [`${agentPath}/learning`, `${agentPath}/learning/proposals`]],
+    ["grants/guests", [`${agentPath}/guest-readiness`, `${agentPath}/guest-operations`, "/keys"]],
   ] as const;
-  for (const [section, tab, expected] of cases) {
-    if (screen.getByRole("tab", { name: tab }).getAttribute("data-state") === "active")
-      await user.click(screen.getByRole("tab", { name: "Overview" }));
-    await user.click(screen.getByRole("tab", { name: tab }));
-    await user.click(document.querySelector<HTMLElement>(`[data-drawer-page-trigger="${section}"]`)!);
-    await settle();
+  for (const [section, expected] of cases) {
+    await go(section);
     expect(requests.splice(0).sort()).toEqual([...expected].sort());
   }
-}, 20_000);
+}, CONTRACT_TIMEOUT);
