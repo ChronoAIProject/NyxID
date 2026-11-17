@@ -964,8 +964,10 @@ export function accountBfcacheCases() {
             JSON.stringify({ ...evidence, cacheMisses }),
           );
           expect(evidence.violations).toEqual([]);
-          if (surface === "settings" && browserName === "chromium")
+          if (browserName === "chromium") {
             expect(evidence.persisted).toBe(true);
+            expect(cacheMisses).toEqual([]);
+          }
           if (evidence.persisted) {
             expect(evidence.token).toBe(originalToken);
             expect(evidence.pagehide).toEqual({
