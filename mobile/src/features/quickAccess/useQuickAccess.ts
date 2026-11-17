@@ -6,6 +6,8 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
+import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { quickAccessApi } from "../../lib/api/quickAccessApi";
 import {
@@ -69,6 +71,18 @@ export type QuickAccessChange =
   | { items: readonly QuickAccessItem[] }
   | { reset: true };
 
+type ActionAuthority = { account: string | null; epoch: number; generation: number };
+type BoundChange = QuickAccessChange & { authority: ActionAuthority };
+function captureAuthority(): ActionAuthority {
+  return { account: getAuthAccountId(), epoch: getAuthEpoch(), generation: authSessionGeneration() };
+}
+function ownsAction(authority: ActionAuthority) {
+  return authority.account === getAuthAccountId() && authority.epoch === getAuthEpoch() && authority.generation === authSessionGeneration();
+}
+function assertAction(authority: ActionAuthority) {
+  if (!ownsAction(authority)) throw new Error("auth_session_changed");
+}
+
 /** What the list looks like the moment a change is made. */
 export function optimisticQuickAccess(change: QuickAccessChange): QuickAccessState {
   return "reset" in change
@@ -85,28 +99,36 @@ export function quickAccessMutationHandlers(
   client: QueryClient,
   key: ReturnType<typeof quickAccessKey>,
 ) {
+  const current = (change?: QuickAccessChange & { authority?: ActionAuthority }) =>
+    key[2] === getAuthEpoch() && (!change?.authority || ownsAction(change.authority));
   return {
-    onMutate: async (change: QuickAccessChange) => {
+    onMutate: async (change: QuickAccessChange & { authority?: ActionAuthority }) => {
+      if (!current(change)) throw new Error("auth_session_changed");
       await client.cancelQueries({ queryKey: key });
+      if (!current(change)) throw new Error("auth_session_changed");
       const previous = client.getQueryData<QuickAccessState>(key);
       client.setQueryData<QuickAccessState>(key, optimisticQuickAccess(change));
       return { previous };
     },
     onError: (
       _error: unknown,
-      _change: QuickAccessChange,
+      change: QuickAccessChange & { authority?: ActionAuthority },
       context: { previous?: QuickAccessState } | undefined,
     ) => {
+      if (!current(change)) return;
       if (context?.previous) client.setQueryData(key, context.previous);
       else client.removeQueries({ queryKey: key, exact: true });
     },
-    onSuccess: (saved: QuickAccessState) => {
+    onSuccess: (saved: QuickAccessState, change?: QuickAccessChange & { authority?: ActionAuthority }) => {
+      if (!current(change)) return;
       client.setQueryData(key, saved);
     },
     onSettled: (
       _saved: QuickAccessState | undefined,
       error: unknown,
+      change?: QuickAccessChange & { authority?: ActionAuthority },
     ) => {
+      if (!current(change)) return;
       if (error) void client.invalidateQueries({ queryKey: key });
     },
   };
@@ -131,10 +153,11 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
   }, [client, enabled, epoch]);
   const mutation = useMutation({
     mutationKey: QUICK_ACCESS_MUTATION_KEY,
-    mutationFn: (change: QuickAccessChange) =>
-      "reset" in change
-        ? quickAccessApi.reset()
-        : quickAccessApi.save(change.items),
+    mutationFn: (change: BoundChange) => {
+      const guard = () => assertAction(change.authority);
+      guard();
+      return "reset" in change ? quickAccessApi.reset(guard) : quickAccessApi.save(change.items, guard);
+    },
     // One account list: changes run in order, never racing each other.
     scope: { id: "account-quick-access" },
     ...quickAccessMutationHandlers(client, key),
@@ -145,8 +168,8 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
     loadError: query.error,
     saving: mutation.isPending,
     saveError: mutation.error,
-    save: (items: readonly QuickAccessItem[]) => mutation.mutate({ items }),
-    reset: () => mutation.mutate({ reset: true }),
+    save: (items: readonly QuickAccessItem[]) => mutation.mutate({ items, authority: captureAuthority() }),
+    reset: () => mutation.mutate({ reset: true, authority: captureAuthority() }),
     clearSaveError: () => mutation.reset(),
     retry: () => void query.refetch(),
   };

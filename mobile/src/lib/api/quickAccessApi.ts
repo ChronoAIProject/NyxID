@@ -24,7 +24,7 @@ export const quickAccessApi = {
   async get(signal?: AbortSignal) {
     return parseState(await requestJson<unknown>(PATH, { signal }));
   },
-  async save(items: readonly QuickAccessItem[]) {
+  async save(items: readonly QuickAccessItem[], authorityGuard?: () => void) {
     // The same limits the server enforces, checked before sending.
     const body = {
       items: quickAccessItemSchema
@@ -34,12 +34,12 @@ export const quickAccessApi = {
         .map(({ kind, id }) => ({ kind, id })),
     };
     return parseState(
-      await requestJson<unknown>(PATH, { method: "PUT", body }),
+      await requestJson<unknown>(PATH, { method: "PUT", body, authorityGuard }),
     );
   },
-  async reset() {
+  async reset(authorityGuard?: () => void) {
     return parseState(
-      await requestJson<unknown>(PATH, { method: "DELETE" }),
+      await requestJson<unknown>(PATH, { method: "DELETE", authorityGuard }),
     );
   },
 };
