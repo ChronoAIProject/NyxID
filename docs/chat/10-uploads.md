@@ -84,8 +84,17 @@ chat results, including every legacy-reader fallback, continue through the
 ordinary large-tool-result paging path; short retained-file handles do not need
 paging.
 
-Retention is limited to 20 MiB and retained files share the eight tool-attachment
-slots per turn with tool images and machine screenshots. Candidate capture
+Retention is limited to 20 MiB. A live turn has eight tool-image slots and
+eight separate tool-file slots, so up to sixteen tool metadata entries can be
+present; file rows never reduce image or screenshot capacity. Settlement,
+transcript, recovery and notification readers tolerate the larger metadata
+vector; image and channel readers filter file rows before applying image
+delivery limits. During a rolling deploy, replicas still on the previous
+release count every entry against one eight-slot limit. In a turn already
+holding eight or more files and images, an image or file handled by such a
+replica is reported as not retained, the existing outcome, until that replica
+is upgraded. Older replicas also page only PDF, DOCX and supported-extension
+text tool files. Candidate capture
 reserves twice the 20 MiB maximum in the shared byte budget before buffering.
 If the budget is full or Content-Length exceeds 20 MiB, NyxID uses the unchanged
 legacy response reader. If an unknown-length body crosses 20 MiB, NyxID releases
@@ -99,9 +108,10 @@ legacy image replies keep their existing limits without a reservation. Complete
 node replies are already buffered by the WebSocket transport before their
 headers can be inspected and retain its frame limit.
 
-For retained files, the model receives only `{attachment_id, name, type, size}` and instructions to
-use the handle with an upload operation or `nyx__attachment_read`. It never
-receives file bytes or base64. The safe, bounded name comes from UTF-8 RFC 5987
+For retained binary files, the model receives `{attachment_id, name, type, size}` and instructions to
+use the handle with an upload operation or `nyx__attachment_read`; short UTF-8 files
+also preserve their inline text as described below. Raw binary bytes and base64
+never enter the model result. The safe, bounded name comes from UTF-8 RFC 5987
 `filename*`, then `filename`, then the operation identifier. Paths and control
 characters are removed. The name lives in `active_turn.attachments[].label`,
 alongside `chat_delivery: false`; the encrypted root retains `origin: tool`.
@@ -114,8 +124,22 @@ format and scope fields, without an origin or image metadata; root, chunks and
 turn slot commit atomically. Channel image delivery and
 image-input continuations ignore these file rows.
 
+For a retained file whose bytes are valid UTF-8 and whose decoded text is at most
+8,000 characters, the legacy text is emitted first, followed by the handle and
+one upload/read hint. Larger UTF-8 files emit only the handle and can be paged
+with `nyx__attachment_read`. The read tool pages any valid-UTF-8 tool file,
+regardless of filename extension; non-UTF-8 files continue through the bounded
+PDF/DOCX/text extractor. If the shared byte budget is busy, reads wait at most
+100 ms and return a retryable `attachment_busy` result. Eligible discovery can
+also perform a catalog lookup and binary capture can spend up to 100 ms waiting
+for the shared budget. Retained-file usage is metered from the original downstream
+body bytes on both direct and node paths, independent of the model-facing handle.
+This matches legacy metering for ASCII and UTF-8 responses without BOM or charset
+conversion. Other files use their actual size rather than the decoded or
+replacement-character length.
+
 `nyx__attachment_read` runs the existing bounded subprocess extractor on demand
-for PDF, DOCX and supported UTF-8 text. Unsupported or malformed documents may
+for non-UTF-8 PDF, DOCX and supported text. Unsupported or malformed documents may
 still be forwarded as their original bytes; the read result explicitly reports
 unavailable extracted text. Reads and egress require the same owner, conversation,
 active key and credential, producing live turn, non-stopped state and retention

@@ -860,6 +860,16 @@ pub async fn chat_bytes(
     Ok(bytes)
 }
 
+async fn reserve_tool_read(size: usize) -> Option<byte_budget::ByteReservation> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        byte_budget::reserve(size),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
 async fn read_tool_file(
     db: &Database,
     keys: &EncryptionKeys,
@@ -873,8 +883,30 @@ async fn read_tool_file(
     }
     let attachment = for_file_egress(db, chat, id).await?;
     let size = usize::try_from(row.size).map_err(|_| missing())?;
-    let _reservation = byte_budget::reserve(size).await?;
+    let Some(_reservation) = reserve_tool_read(size).await else {
+        return Ok(json!({
+            "error": "attachment_busy",
+            "retryable": true,
+            "instructions": "Attachment reading is temporarily busy; retry nyx__attachment_read shortly.",
+        }));
+    };
     let bytes = zeroize::Zeroizing::new(file_egress_bytes(db, keys, chat, &attachment).await?);
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        let extracted = Extracted {
+            content_type: row.content_type.clone(),
+            text: text.to_owned(),
+            sections: vec![crate::services::attachment_extraction::Section {
+                offset: 0,
+                label: "Document".into(),
+            }],
+        };
+        for_file_egress(db, chat, id).await?;
+        return Ok(page(
+            &extracted,
+            args["offset"].as_u64().unwrap_or(0) as usize,
+            (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000),
+        ));
+    }
     let extension = attachment
         .label()
         .rsplit_once('.')
@@ -903,8 +935,30 @@ pub async fn read(
     let id = args["attachment_id"].as_str().ok_or_else(missing)?;
     let row = match for_chat(db, chat, id).await {
         Ok(row) => row,
-        Err(AppError::NotFound(_)) if !chat.guest => {
-            return read_tool_file(db, keys, chat, id, args).await;
+        Err(original @ AppError::NotFound(_))
+            if !chat.guest
+                && !chat.turn_stopped
+                && chat.turn_id.is_some()
+                && Uuid::parse_str(id).is_ok() =>
+        {
+            // Preserve the ordinary upload miss exactly. Only a single indexed
+            // attachment lookup decides whether this is the explicit tool-file
+            // path; a miss does not load the conversation/thread again.
+            let tool = db
+                .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .find_one(doc! {
+                    "_id": id,
+                    "user_id": &chat.user_id,
+                    "conversation_id": &chat.conversation_id,
+                    "turn_id": chat.turn_id.as_deref().unwrap_or_default(),
+                    "origin": "tool",
+                })
+                .projection(doc! {"_id": 1})
+                .await?;
+            if tool.is_some() {
+                return read_tool_file(db, keys, chat, id, args).await;
+            }
+            return Err(original);
         }
         Err(error) => return Err(error),
     };
@@ -2810,6 +2864,23 @@ mod integration_tests {
         assert_eq!(result["text"], "Multi-chunk document text.\n");
         assert!(result["next_offset"].is_null());
         state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_attachment_read_budget_wait_is_bounded_and_retryable() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
+        let full = byte_budget::reserve(byte_budget::CAPACITY / 2)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), reserve_tool_read(1))
+                .await
+                .expect("budget wait must end")
+                .is_none()
+        );
+        drop(full);
+        assert_eq!(byte_budget::available_for_tests(), byte_budget::CAPACITY);
     }
 
     #[tokio::test]

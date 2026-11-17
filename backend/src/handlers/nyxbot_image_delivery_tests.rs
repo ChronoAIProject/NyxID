@@ -374,8 +374,8 @@ async fn attachment_normal_send_command_counts() {
 #[tokio::test]
 async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
     let (f, server) = image_fixture("telegram", "direct").await;
-    let attachments = [None, Some(true), Some(false)]
-        .into_iter()
+    let attachments = (0..16)
+        .map(|index| [None, Some(true), Some(false)][index % 3])
         .map(|delivery| TurnAttachment {
             image_input_reason: None,
             artifact: Default::default(),

@@ -1,4 +1,4 @@
-//! Binary tool results stay encrypted server-side. Model results contain handles only.
+//! Tool files stay encrypted server-side. UTF-8 files preserve short legacy text alongside handles.
 use super::{
     assistant_acknowledgement_service::ChatAuthority, assistant_upload_service as uploads,
     attachment_extraction::MAX_BYTES, content_type,
@@ -69,7 +69,7 @@ pub(crate) fn is_file(status: u16, mime: &str, disposition: Option<&str>, bytes:
             }))
 }
 
-/// No bytes or lossy strings enter the model-facing result for a retained file.
+/// Retained UTF-8 files preserve short legacy text; binary files expose handles only.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn response_text(
     db: &Database,
@@ -79,6 +79,7 @@ pub(crate) async fn response_text(
     mime: &str,
     disposition: Option<&str>,
     fallback: &str,
+    legacy_text: Option<&str>,
     bytes: &[u8],
 ) -> Option<String> {
     if !is_file(status, mime, disposition, bytes) {
@@ -88,13 +89,23 @@ pub(crate) async fn response_text(
         return None;
     }
     let name = filename(disposition, fallback);
-    Some(match retain(db, keys, chat, &name, mime, bytes).await {
+    let result = match retain(db, keys, chat, &name, mime, bytes).await {
         Ok(text) => text,
         Err(error) => {
             tracing::warn!(code = error.error_code(), "Tool file retention unavailable");
             omitted("attachment_storage_or_authority_unavailable")
         }
-    })
+    };
+    Some(file_response_text(legacy_text, result))
+}
+
+fn file_response_text(legacy_text: Option<&str>, handle: String) -> String {
+    match legacy_text.filter(|text| text.chars().take(8_001).count() <= 8_000) {
+        // Preserve every character, including leading/trailing whitespace and
+        // the transport's own BOM/charset decoding, then append one handle line.
+        Some(text) => format!("{text}\n{}", handle.replace('\n', " ")),
+        None => handle,
+    }
 }
 
 /// RFC 5987 UTF-8 extended names take precedence. Reject malformed encodings;
@@ -197,13 +208,7 @@ pub(crate) async fn retain(
     }
     super::assistant_resource_service::require_live(db, chat).await?;
     let mut filter = super::assistant_resource_service::live_filter(chat)?;
-    filter.insert(
-        format!(
-            "active_turn.attachments.{}",
-            super::assistant_nyxagent::MAX_TURN_ATTACHMENTS - 1
-        ),
-        doc! {"$exists":false},
-    );
+    super::assistant_nyxagent::file_attachment_capacity_filter(&mut filter);
     let conversations =
         db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
     if conversations
@@ -380,6 +385,23 @@ fn unavailable() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tool_file_inline_text_preserves_whitespace_and_counts_characters() {
+        let handle = "{\"attachment_id\":\"id\"}\nUse attachment_id or nyx__attachment_read";
+        for text in ["  hello\n", "\u{feff}hello", ""] {
+            assert_eq!(
+                file_response_text(Some(text), handle.into()),
+                format!("{text}\n{}", handle.replace('\n', " "))
+            );
+        }
+        let multibyte = "😀".repeat(8000);
+        assert!(file_response_text(Some(&multibyte), handle.into()).starts_with(&multibyte));
+        assert_eq!(
+            file_response_text(Some(&"x".repeat(8001)), handle.into()),
+            handle
+        );
+        assert_eq!(file_response_text(None, handle.into()), handle);
+    }
     #[test]
     fn tool_file_names_decode_extended_and_sanitize_paths_controls_and_bounds() {
         assert_eq!(
