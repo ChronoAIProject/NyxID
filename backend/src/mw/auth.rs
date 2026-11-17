@@ -205,15 +205,6 @@ impl AuthUser {
     /// channels, groups) are refused to conversation keys regardless of the
     /// flag: an agent must never widen its own or a peer's authority through
     /// the REST API.
-    pub async fn ensure_conversation_key_route_if_enabled(
-        &self,
-        db: &mongodb::Database,
-        path: &str,
-    ) -> AppResult<()> {
-        self.ensure_conversation_key_route_if_enabled_with_method(db, &Method::GET, path)
-            .await
-    }
-
     pub async fn ensure_conversation_key_route_if_enabled_with_method(
         &self,
         db: &mongodb::Database,
@@ -243,10 +234,6 @@ impl AuthUser {
             return Ok(());
         }
         self.ensure_conversation_key_route_with_method(method, path)
-    }
-
-    pub fn ensure_conversation_key_route(&self, path: &str) -> AppResult<()> {
-        self.ensure_conversation_key_route_with_method(&Method::GET, path)
     }
 
     pub fn ensure_conversation_key_route_with_method(
@@ -4163,8 +4150,12 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    auth.ensure_conversation_key_route_if_enabled(&db, path)
-                        .await,
+                    auth.ensure_conversation_key_route_if_enabled_with_method(
+                        &db,
+                        &Method::GET,
+                        path,
+                    )
+                    .await,
                     Err(AppError::Forbidden(_))
                 ),
                 "{path}"
@@ -4173,24 +4164,30 @@ mod tests {
         // Attachment reads stay available, and other routes keep their
         // flag-off behavior.
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(
+            auth.ensure_conversation_key_route_if_enabled_with_method(
                 &db,
+                &Method::GET,
                 "/api/v1/assistant/nyxagent/conversations/c/attachments/a",
             )
             .await
             .is_ok()
         );
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await
-                .is_ok()
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await
+            .is_ok()
         );
         // Ordinary keys are not conversation keys.
         let ordinary = test_auth_user(AuthMethod::ApiKey, "proxy");
         assert!(
             ordinary
-                .ensure_conversation_key_route_if_enabled(
+                .ensure_conversation_key_route_if_enabled_with_method(
                     &db,
+                    &Method::GET,
                     "/api/v1/assistant/nyxagent/settings"
                 )
                 .await
@@ -4239,9 +4236,13 @@ mod tests {
             "the rollout flag is off by default"
         );
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await
-                .is_ok(),
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await
+            .is_ok(),
             "route restrictions must preserve legacy behavior while the flag is off"
         );
         crate::services::security_readiness_service::ready_test_replica(&db).await;
@@ -4255,13 +4256,18 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await,
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await,
             Err(AppError::Forbidden(_))
         ));
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(
+            auth.ensure_conversation_key_route_if_enabled_with_method(
                 &db,
+                &Method::GET,
                 "/api/v1/assistant-attachments/attachment/content",
             )
             .await
@@ -4280,7 +4286,7 @@ mod tests {
             "/api/v1/assistant-attachments/attachment/content",
         ] {
             assert!(
-                auth.ensure_conversation_key_route_if_enabled(&db, path)
+                auth.ensure_conversation_key_route_if_enabled_with_method(&db, &Method::GET, path)
                     .await
                     .is_ok(),
                 "NyxAgent endpoint must remain reachable with a live turn: {path}"
@@ -4418,7 +4424,8 @@ mod tests {
             "/mcp",
         ] {
             assert!(
-                user.ensure_conversation_key_route(path).is_ok(),
+                user.ensure_conversation_key_route_with_method(&Method::GET, path)
+                    .is_ok(),
                 "execution route should remain available: {path}"
             );
         }
@@ -4438,7 +4445,8 @@ mod tests {
             "/api/v1/channel-events",
         ] {
             assert!(
-                user.ensure_conversation_key_route(path).is_err(),
+                user.ensure_conversation_key_route_with_method(&Method::GET, path)
+                    .is_err(),
                 "management/channel route must reject conversation keys: {path}"
             );
         }
@@ -4448,7 +4456,7 @@ mod tests {
     fn ordinary_keys_have_no_conversation_route_restriction() {
         let user = test_auth_user(AuthMethod::ApiKey, "proxy");
         assert!(
-            user.ensure_conversation_key_route("/api/v1/users/me")
+            user.ensure_conversation_key_route_with_method(&Method::GET, "/api/v1/users/me")
                 .is_ok()
         );
     }

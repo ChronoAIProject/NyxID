@@ -40,6 +40,7 @@ fn conversation_auth(
         invocation_id: None,
         platform_thread: false,
         platform_origin: None,
+        voice_parent_conversation_id: None,
         report_to: None,
         with_nyxbot: true,
         org_agent_access: None,
