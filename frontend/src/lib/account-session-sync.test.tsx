@@ -350,7 +350,9 @@ it("announces only delayed evidence checks and restores same-account focus and s
   await act(() => vi.advanceTimersByTimeAsync(299));
   expect(screen.queryByRole("status")).toBeNull();
   await act(() => vi.advanceTimersByTimeAsync(1));
-  const status = screen.getByRole("status", { name: "Checking which account is signed in…" });
+  const status = screen.getByRole("status");
+  expect(status).toHaveTextContent(/^Checking which account is signed in…$/);
+  expect(status).not.toHaveAttribute("aria-label");
   expect(status).toHaveAttribute("aria-live", "polite");
   expect(getComputedStyle(status).visibility).toBe("visible"); // CSS visibility overrides its hidden ancestor.
   await act(async () => resolve(Response.json(person("A"))));

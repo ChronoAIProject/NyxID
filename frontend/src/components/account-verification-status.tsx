@@ -22,7 +22,6 @@ export function AccountVerificationStatus() {
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      aria-label={message}
       className="visible fixed inset-0 z-[1000] flex items-center justify-center bg-background p-6 type-body text-muted-foreground"
     >
       {message}

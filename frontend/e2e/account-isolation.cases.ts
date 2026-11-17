@@ -619,16 +619,14 @@ export function accountIsolationCases() {
           .getState()
           .login(`${id}@example.test`, "local-fixture-password");
       }, owner);
-      await expect(
-        page.getByRole("status", {
-          name: "Checking which account is signed in…",
-        }),
-      ).toBeVisible();
-      await expect(
-        page.getByRole("status", {
-          name: "Checking which account is signed in…",
-        }),
-      ).toHaveAttribute("aria-live", "polite");
+      await expect(page.getByRole("status")).toBeVisible();
+      await expect(page.getByRole("status")).toHaveText(
+        "Checking which account is signed in…",
+      );
+      await expect(page.getByRole("status")).toHaveAttribute(
+        "aria-live",
+        "polite",
+      );
       await expect(
         page.getByText(
           `${owner === "A" ? "B" : "A"} recognisable private conversation`,
@@ -646,11 +644,7 @@ export function accountIsolationCases() {
           ),
         )
         .toBe(owner);
-      await expect(
-        page.getByRole("status", {
-          name: "Checking which account is signed in…",
-        }),
-      ).toHaveCount(0);
+      await expect(page.getByRole("status")).toHaveCount(0);
       await navigate(page, ids[owner]);
       await expect(
         page.getByText(`${owner} recognisable private conversation`, {
@@ -676,11 +670,10 @@ export function accountIsolationCases() {
     await second.evaluate(async () => {
       await (window as AppWindow).__nyxApp.authStore.getState().logout();
     });
-    await expect(
-      page.getByRole("status", {
-        name: "Checking which account is signed in…",
-      }),
-    ).toBeVisible();
+    await expect(page.getByRole("status")).toBeVisible();
+    await expect(page.getByRole("status")).toHaveText(
+      "Checking which account is signed in…",
+    );
     // Firefox propagates cross-process localStorage independently of BroadcastChannel.
     // The fixture authority must reach this tab before answering its held profile.
     await expect
@@ -755,21 +748,16 @@ export function accountIsolationCases() {
       channel.postMessage({ userId: "B", nonce: crypto.randomUUID() });
       channel.close();
     });
-    await expect(
-      page.getByRole("status", {
-        name: "Checking which account is signed in…",
-      }),
-    ).toBeVisible();
+    await expect(page.getByRole("status")).toBeVisible();
+    await expect(page.getByRole("status")).toHaveText(
+      "Checking which account is signed in…",
+    );
     await expect(composer).toBeHidden();
     await page.evaluate(() => {
       (window as AppWindow).__accountFixture.holdProfile = false;
       (window as AppWindow).__accountFixture.releaseProfile!();
     });
-    await expect(
-      page.getByRole("status", {
-        name: "Checking which account is signed in…",
-      }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("status")).toHaveCount(0);
     await page.bringToFront();
     await expect(composer).toBeFocused();
     await expect(composer).toHaveText("preserve my selection");
