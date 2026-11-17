@@ -737,7 +737,7 @@ describe("ChatComposer measured layout", () => {
     vi.restoreAllMocks();
   });
 
-  it("uses a top-aligned row without the broker caption", () => {
+  it("uses a centered row without the broker caption", () => {
     const { button, composer, textarea } = renderMeasuredComposer();
 
     expect(
@@ -745,7 +745,7 @@ describe("ChatComposer measured layout", () => {
         "Every agent action is brokered, scoped, and audit-logged by NyxID.",
       ),
     ).not.toBeInTheDocument();
-    expect(composer).toHaveClass("flex", "items-start");
+    expect(composer).toHaveClass("flex", "items-center");
     expect(button).toHaveClass("h-8");
     expect(textarea).toHaveClass("min-h-8", "px-0");
   });
@@ -756,7 +756,7 @@ describe("ChatComposer measured layout", () => {
 
     fireEvent.change(parts.textarea, { target: { value: "Short draft" } });
 
-    expect(parts.composer).toHaveClass("items-start");
+    expect(parts.composer).toHaveClass("items-center");
     expect(parts.composer).not.toHaveClass("flex-col");
     expect(parts.controls).not.toHaveClass("self-end");
   });
@@ -788,7 +788,7 @@ describe("ChatComposer measured layout", () => {
     textWidth = 80;
     fireEvent.change(parts.textarea, { target: { value: "Short" } });
     expect(parts.composer).not.toHaveClass("flex-col");
-    expect(parts.composer).toHaveClass("items-start");
+    expect(parts.composer).toHaveClass("items-center");
   });
 
   it("uses multiline layout immediately for an explicit newline", () => {

@@ -391,6 +391,7 @@ async fn check_turn(
 
 #[tokio::test]
 async fn all_ten_upload_types_reach_first_resumed_and_attachment_only_turns() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, calls, server) = setup_options(None, Duration::ZERO, Vec::new(), true).await;
     for file in fixtures() {
         let id = Box::pin(draft_id(&state)).await;
@@ -420,6 +421,7 @@ async fn all_ten_upload_types_reach_first_resumed_and_attachment_only_turns() {
 
 #[tokio::test]
 async fn mixed_upload_batch_and_large_document_paging_work_with_the_turn_key() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, calls, server) = setup_options(None, Duration::ZERO, Vec::new(), true).await;
     let id = Box::pin(draft_id(&state)).await;
     let files: Vec<_> = fixtures()
@@ -471,6 +473,7 @@ async fn mixed_upload_batch_and_large_document_paging_work_with_the_turn_key() {
 
 #[tokio::test]
 async fn all_image_types_without_capability_have_model_visible_fallback() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, calls, server) = setup(None, Duration::ZERO).await;
     for file in fixtures()
         .into_iter()
@@ -499,6 +502,7 @@ async fn all_image_types_without_capability_have_model_visible_fallback() {
 
 #[tokio::test]
 async fn unsupported_upload_returns_a_user_visible_error_without_storing_a_file() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use axum::response::IntoResponse;
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let id = Box::pin(draft_id(&state)).await;
@@ -543,6 +547,7 @@ async fn unsupported_upload_returns_a_user_visible_error_without_storing_a_file(
 
 #[tokio::test]
 async fn upload_classification_uses_bytes_and_case_insensitive_extensions_not_browser_mime() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, calls, server) = setup(None, Duration::ZERO).await;
     let id = Box::pin(draft_id(&state)).await;
     let mut resumed = false;

@@ -470,6 +470,24 @@ pub struct RateAdmission {
 pub struct RateWindowStore;
 
 impl RateWindowStore {
+    /// Refund only the exact fixed window originally reserved. The consumed
+    /// reservation token is owned by the caller, so it cannot refund twice.
+    pub(crate) async fn refund(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        reset_at: chrono::DateTime<chrono::Utc>,
+        window: Duration,
+    ) -> AppResult<()> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let start = reset_at - chrono::Duration::milliseconds(window_ms);
+        db.collection::<Document>(RATE_WINDOW_COLLECTION_NAME).update_one(
+            doc! {"_id": hash_parts(&[namespace, key]), "window_start": DateTime::from_chrono(start), "count": {"$gt": 0}},
+            doc! {"$inc": {"count": -1_i64}},
+        ).await?;
+        Ok(())
+    }
+
     /// A read-only shortcut; callers must still claim capacity with admit.
     pub async fn is_exhausted(
         db: &mongodb::Database,

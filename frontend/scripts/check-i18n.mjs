@@ -3,6 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { identicalDuplicateWarnings } from "../../shared/i18n/catalog-core.mjs";
+import {
+  FIXTURE_SOURCE, LANGUAGES, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES, allCatalogFiles, analyzePortions,
+  canonicalText, catalogImportIssue, englishOverrides as makeOverrides, isTestSource, legacyImportReplacement,
+  loadPortions, mayImportLegacyCatalog, moduleSpecifierOf, readJson,
+} from "./lib/i18n-catalogs.mjs";
+import { portionForPath } from "./lib/i18n-portions.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const locales = path.join(root, "src/i18n/locales");
@@ -12,10 +19,29 @@ const simplifiedOnly = new Set(JSON.parse(fs.readFileSync(path.join(root, "src/i
 const domainGlossary = JSON.parse(fs.readFileSync(path.join(root, "src/i18n/domain-glossary.json"), "utf8"));
 const issues = [];
 const catalogs = new Map();
-const fullEnglish = JSON.parse(fs.readFileSync(path.join(locales, "en.json"), "utf8"));
-const englishOverrides = JSON.parse(fs.readFileSync(path.join(locales, "en-overrides.json"), "utf8"));
-const expectedOverrides = Object.fromEntries(Object.entries(fullEnglish).filter(([key, value]) => key !== value));
-if (JSON.stringify(englishOverrides) !== JSON.stringify(expectedOverrides)) {
+const portions = loadPortions(locales);
+const analysis = analyzePortions(portions);
+issues.push(...analysis.issues);
+for (const warning of identicalDuplicateWarnings(analysis, "run npm run sync:i18n")) console.warn(warning);
+for (const file of allCatalogFiles(locales)) {
+  try {
+    if (fs.readFileSync(file, "utf8") !== canonicalText(readJson(file))) issues.push(`${path.relative(root, file)}: non-canonical catalog; run npm run sync:i18n`);
+  } catch (error) {
+    issues.push(`${path.relative(root, file)}: invalid catalog (${error.message})`);
+  }
+}
+const adoptHint = "run npm run adopt:i18n (see docs/MULTILINGUAL.md for explicit --branch/--base/--onto)";
+if (fs.existsSync(path.join(locales, "en-overrides.json"))) issues.push(`legacy file en-overrides.json is present; ${adoptHint}`);
+for (const language of LANGUAGES) {
+  if (fs.existsSync(path.join(locales, `${language}.json`))) issues.push(`legacy monolith ${language}.json is present; ${adoptHint}`);
+  for (const portion of Object.keys(portions)) {
+    if (!fs.existsSync(path.join(locales, "app", portion, `${language}.json`))) issues.push(`app/${portion}: missing ${language}.json`);
+    else if (!Object.keys(portions[portion][language]).length) issues.push(`app/${portion}/${language}.json: empty area; run npm run sync:i18n`);
+  }
+}
+const fullEnglish = analysis.merged.en;
+const overridesFile = path.join(locales, "app/en-overrides.json");
+if (!fs.existsSync(overridesFile) || canonicalText(readJson(overridesFile)) !== canonicalText(makeOverrides(fullEnglish))) {
   issues.push("English runtime overrides are stale; run npm run sync:i18n");
 }
 const placeholders = (text) =>
@@ -23,7 +49,7 @@ const placeholders = (text) =>
 const htmlEntity = /&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
 
 for (const prefix of ["", "wizard-", "common-", "errors-"]) {
-  const english = JSON.parse(fs.readFileSync(path.join(locales, `${prefix}en.json`), "utf8"));
+  const english = prefix ? readJson(path.join(locales, `${prefix}en.json`)) : fullEnglish;
   catalogs.set(prefix, english);
   for (const key of protocolExamples) {
     if (key in english) issues.push(`${prefix}en: protocol example must stay outside catalogs: ${key}`);
@@ -32,7 +58,7 @@ for (const prefix of ["", "wizard-", "common-", "errors-"]) {
     if (htmlEntity.test(key) || htmlEntity.test(value)) issues.push(`${prefix}en: use literal characters instead of HTML entities: ${key}`);
   }
   for (const language of ["zh-CN", "zh-TW"]) {
-    const translated = JSON.parse(fs.readFileSync(path.join(locales, `${prefix}${language}.json`), "utf8"));
+    const translated = prefix ? readJson(path.join(locales, `${prefix}${language}.json`)) : analysis.merged[language];
     for (const key of new Set([...Object.keys(english), ...Object.keys(translated)])) {
       if (!(key in english) || !translated[key]?.trim()) {
         issues.push(`${prefix}${language}: missing or empty translation: ${key}`);
@@ -89,8 +115,15 @@ function sourceFiles(dir) {
     return entry.isDirectory() ? sourceFiles(file) : entry.isFile() ? [file] : [];
   });
 }
-const files = sourceFiles("src").filter((file) => /\.tsx?$/.test(file) &&
-    !/\.test\.|fixtures?|mock|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file));
+// The import boundary covers all non-test source, including fixtures and locale barrels;
+// the copy audit covers a narrower list. Each file is parsed once for both. Legacy
+// catalog imports are reported in every source, tests included; test files are only
+// parsed when their text names a legacy catalog file.
+const allSourceFiles = sourceFiles("src").filter((file) => /\.tsx?$/.test(file));
+const guardedFiles = allSourceFiles.filter((file) => !isTestSource(file));
+const isAuditFile = (file) => !FIXTURE_SOURCE.test(file) &&
+  !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file);
+const files = guardedFiles.filter(isAuditFile);
 let checkedKeys = 0;
 const errorHelperFiles = new Set([
   "src/lib/api-error.ts",
@@ -100,12 +133,23 @@ const errorHelperFiles = new Set([
 ]);
 const hasKey = (key) => [...catalogs.values()].some((catalog) => key in catalog);
 
-for (const file of files) {
+for (const file of allSourceFiles) {
   const source = fs.readFileSync(path.join(root, file), "utf8");
+  const test = isTestSource(file);
+  if (test && !mayImportLegacyCatalog(source, LEGACY_CATALOG_IMPORTS)) continue;
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const audit = !test && isAuditFile(file);
   const report = (node, message) => {
     const line = ast.getLineAndCharacterOfPosition(node.getStart()).line + 1;
     issues.push(`${file}:${line}: ${message}`);
+  };
+  const guardImport = (node) => {
+    const specifier = moduleSpecifierOf(node, ast);
+    if (!specifier) return;
+    const replacement = legacyImportReplacement(file, specifier.text, LEGACY_CATALOG_IMPORTS, SPECIFIER_ALIASES);
+    if (replacement) report(node, `legacy catalog import ${specifier.text}; use ${replacement} (npm run adopt:i18n rewrites it; outside a merge or rebase run npm run adopt:i18n -- --imports-only)`);
+    const issue = test ? null : catalogImportIssue(file, specifier.text);
+    if (issue) report(node, issue);
   };
   const withinCode = (node) => {
     for (let parent = node.parent; parent; parent = parent.parent) {
@@ -113,7 +157,7 @@ for (const file of files) {
     }
     return false;
   };
-  const visit = (node) => {
+  const auditNode = (node) => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
       /^toLocale(?:Date|Time)?String$/.test(node.expression.name.text) &&
       (!node.arguments.length || node.arguments[0].getText(ast) === "undefined" ||
@@ -142,7 +186,7 @@ for (const file of files) {
         if (ts.isStringLiteral(key) && key.text) {
           checkedKeys++;
           if (protocolExamples.has(key.text)) report(node, `protocol example sent to translation: ${key.text}`);
-          if (![...catalogs.values()].some((catalog) => key.text in catalog)) report(node, `missing catalog key: ${key.text}`);
+          if (![...catalogs.values()].some((catalog) => key.text in catalog)) report(node, `missing catalog key: ${key.text}; suggested app portion: ${portionForPath(file)}`);
         } else if (ts.isConditionalExpression(key)) {
           checkKey(key.whenTrue);
           checkKey(key.whenFalse);
@@ -179,6 +223,10 @@ for (const file of files) {
       }
     }
     if (copy && isCopy(decodeEntities(copy)) && !withinCode(node)) report(node, `untranslated UI literal: ${copy}`);
+  };
+  const visit = (node) => {
+    guardImport(node);
+    if (audit) auditNode(node);
     ts.forEachChild(node, visit);
   };
   visit(ast);

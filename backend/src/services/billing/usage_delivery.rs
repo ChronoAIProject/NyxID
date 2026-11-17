@@ -34,6 +34,9 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
             .options(IndexOptions::builder().unique(true).build()).build(),
         IndexModel::builder().keys(doc! {"owner_id":1,"customer_id":1,"subscription_id":1,"acknowledgement_sequence":1}).build(),
         IndexModel::builder().keys(doc! {"state":1,"last_checked_at":1,"_id":1}).build(),
+        IndexModel::builder().keys(doc! {"owner_id":1,"customer_id":1,"subscription_id":1,"event_second":1,"acknowledgement_sequence":1}).build(),
+        IndexModel::builder().keys(doc! {"owner_id":1,"customer_id":1,"subscription_id":1,"event_second":1})
+            .options(IndexOptions::builder().partial_filter_expression(doc! {"state":"prepared"}).build()).build(),
         IndexModel::builder().keys(doc! {"expires_at":1})
             .options(IndexOptions::builder().expire_after(std::time::Duration::ZERO).build()).build(),
     ]).await?;
@@ -42,6 +45,13 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
             IndexModel::builder()
                 .keys(doc! {"owner_id":1,"customer_id":1,"subscription_id":1})
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(COMPARISONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"retired_at":1,"next_visit_at":1,"_id":1})
                 .build(),
         )
         .await?;
@@ -78,6 +88,7 @@ pub(super) async fn prepare(
         duplicate_acknowledgement: false,
         rejection_count: 0,
         prepared_at: Utc::now(),
+        usage_created_at: Some(row.created_at),
         acknowledged_at: None,
         resolved_at: None,
         last_checked_at: None,
@@ -177,11 +188,28 @@ pub(super) async fn acknowledge(
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
+            let event_time =
+                bson::DateTime::from_millis(receipt.event_second.saturating_mul(1_000));
+            let uncertain = doc! {"$gt":[event_time,"$$NOW"]};
             let target = db.collection::<Document>(COMPARISONS)
                 .find_one_and_update(
                     doc! {"owner_id":&receipt.owner_id,"customer_id":&receipt.customer_id,"subscription_id":subscription},
-                    doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"wallet_id":&receipt.wallet_id,"warming_since":now},
-                        "$set":{"last_acknowledged_at":now,"coverage_verified":false},"$inc":{"acknowledgement_sequence":1_i64}})
+                    // Future events can outlive their fixed receipt TTL before their period.
+                    vec![doc! {"$set":{
+                        "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},
+                        "wallet_id":{"$ifNull":["$wallet_id",{"$literal":&receipt.wallet_id}]},
+                        "warming_since":{"$ifNull":["$warming_since","$$NOW"]},
+                        "last_acknowledged_at":"$$NOW","coverage_verified":false,
+                        "acknowledgement_sequence":{"$add":[{"$ifNull":["$acknowledgement_sequence",0_i64]},1_i64]},
+                        "coverage_unknown_reason":{"$cond":[
+                            &uncertain,
+                            "future_delivery_event","$coverage_unknown_reason"]},
+                        "uncertainty_revision":{"$add":[{"$ifNull":["$uncertainty_revision",0_i64]},
+                            {"$cond":[&uncertain,1_i64,0_i64]}]},
+                        "uncertain_through":{"$cond":[
+                            &uncertain,
+                            {"$max":["$uncertain_through","$$NOW",event_time]},"$uncertain_through"]},
+                    }}])
                 .upsert(true).return_document(ReturnDocument::After).session(&mut *session).await?;
             target
                 .and_then(|target| bson::from_document::<BillingUsageComparison>(target).ok())
@@ -337,12 +365,19 @@ async fn mark_capture_unknown(
         return Ok(());
     };
     let comparisons = db.collection::<Document>(COMPARISONS);
+    let event_time = bson::DateTime::from_millis(receipt.event_second.saturating_mul(1_000));
     let operation = comparisons.update_one(
-            doc! {"owner_id":&receipt.owner_id,"customer_id":&receipt.customer_id,"subscription_id":subscription},
-            doc! {"$setOnInsert":{"_id":uuid::Uuid::new_v4().to_string(),"wallet_id":&receipt.wallet_id,"warming_since":bson::DateTime::now(),"acknowledgement_sequence":0_i64},
-                "$set":{"coverage_verified":false,"coverage_unknown_reason":issue}},
-        )
-        .upsert(true);
+        doc! {"owner_id":&receipt.owner_id,"customer_id":&receipt.customer_id,"subscription_id":subscription},
+        vec![doc! {"$set":{
+            "_id":{"$ifNull":["$_id",uuid::Uuid::new_v4().to_string()]},
+            "wallet_id":{"$ifNull":["$wallet_id",{"$literal":&receipt.wallet_id}]},
+            "warming_since":{"$ifNull":["$warming_since","$$NOW"]},
+            "acknowledgement_sequence":{"$ifNull":["$acknowledgement_sequence",0_i64]},
+            "coverage_verified":false,"coverage_unknown_reason":{"$literal":issue},
+            "uncertainty_revision":{"$add":[{"$ifNull":["$uncertainty_revision",0_i64]},1_i64]},
+            "uncertain_through":{"$max":[{"$ifNull":["$uncertain_through","$$NOW"]},"$$NOW",event_time]},
+        }}],
+    ).upsert(true);
     if let Some(session) = session {
         operation.session(session).await?;
     } else {

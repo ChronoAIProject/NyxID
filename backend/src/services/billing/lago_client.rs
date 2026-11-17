@@ -9,10 +9,6 @@ use serde_json::{Value, json};
 use crate::errors::{AppError, AppResult};
 
 #[path = "lago_current_usage.rs"]
-#[allow(
-    dead_code,
-    reason = "Capture ships the parser before enabling period comparisons"
-)]
 pub(super) mod current_usage;
 
 pub(crate) fn require_subscription_id(subscription_id: &str) -> AppResult<()> {
@@ -149,6 +145,15 @@ pub trait LagoApi: Send + Sync {
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError>;
     async fn current_usage(&self, customer_id: &str, subscription_id: &str)
     -> AppResult<LagoUsage>;
+    /// Background observation has a bounded response and a typed provider wait.
+    async fn current_usage_for_comparison(
+        &self,
+        customer_id: &str,
+        subscription_id: &str,
+    ) -> AppResult<LagoUsage> {
+        self.current_usage(customer_id, subscription_id).await
+    }
+
     /// Compatibility method for old adapters. Exact production reads override the method below.
     async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64>;
     async fn wallet_balance_exact(&self, customer_id: &str) -> AppResult<Credits> {
@@ -939,6 +944,80 @@ impl LagoApi for LagoClient {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
             raw: value,
+        })
+    }
+
+    async fn current_usage_for_comparison(
+        &self,
+        customer_id: &str,
+        subscription_id: &str,
+    ) -> AppResult<LagoUsage> {
+        require_subscription_id(subscription_id)?;
+        let path = format!(
+            "customers/{}/current_usage?external_subscription_id={}",
+            urlencoding::encode(customer_id),
+            urlencoding::encode(subscription_id)
+        );
+        let mut response = self
+            .request(reqwest::Method::GET, &path)
+            .send()
+            .await
+            .map_err(|error| lago_error_to_app(LagoError::from_reqwest(error)))?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(AppError::RateLimited);
+        }
+        if response.status().is_client_error()
+            && !matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            )
+        {
+            let reason = if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::GONE) {
+                "subscription_unavailable"
+            } else {
+                "provider_request_rejected"
+            };
+            return Ok(LagoUsage {
+                customer_id: customer_id.into(),
+                subscription_id: subscription_id.into(),
+                raw: json!({"usage_comparison_finding":reason}),
+            });
+        }
+        if !response.status().is_success() {
+            return Err(AppError::BillingProviderUnavailable(format!(
+                "Current usage returned HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        const LIMIT: usize = 1024 * 1024;
+        let mut bytes = Vec::new();
+        let mut oversized = response.content_length().is_some_and(|n| n > LIMIT as u64);
+        while !oversized {
+            let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|error| lago_error_to_app(LagoError::from_reqwest(error)))?
+            else {
+                break;
+            };
+            if chunk.len() > LIMIT.saturating_sub(bytes.len()) {
+                oversized = true;
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let raw = if oversized {
+            json!({"usage_comparison_finding":"response_too_large"})
+        } else {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| parse_lago_json(s).ok())
+                .unwrap_or(Value::Null)
+        };
+        Ok(LagoUsage {
+            customer_id: customer_id.into(),
+            subscription_id: subscription_id.into(),
+            raw,
         })
     }
 

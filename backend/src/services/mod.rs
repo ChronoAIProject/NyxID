@@ -1,3 +1,4 @@
+pub mod account_export_service;
 pub mod action_description;
 pub mod admin_assistant_analytics;
 pub mod admin_audit_service;
@@ -42,6 +43,7 @@ pub mod assistant_service;
 pub mod assistant_skill_authoring;
 pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
+pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
@@ -204,6 +206,9 @@ pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
 pub mod par_service;
+pub(crate) mod personal_attribution_service;
+pub mod personal_data_registry;
+pub mod personal_erasure_orphan_sweep;
 pub mod personal_erasure_registry;
 pub mod personal_erasure_service;
 pub(crate) mod platform_binding_service;
@@ -240,6 +245,7 @@ pub mod proxy_discovery_service;
 pub mod proxy_http_response;
 pub mod proxy_service;
 pub mod push_service;
+pub mod raw_attachment_tool;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub(crate) mod record_field_service;
@@ -611,3 +617,7 @@ pub(crate) mod durable_wake_tests;
 pub mod channel_turn_preparation;
 
 pub mod nyxbot_dispatch_identity;
+
+pub(crate) mod service_account_connection_audit;
+#[cfg(test)]
+mod service_account_connection_audit_tests;

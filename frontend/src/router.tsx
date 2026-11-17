@@ -113,6 +113,7 @@ import {
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
+  DataDeletionPage,
   NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
@@ -297,6 +298,12 @@ const termsRoute = createRoute({
   path: "/terms",
   getParentRoute: () => rootRoute,
   component: TermsPage,
+});
+
+const dataDeletionRoute = createRoute({
+  path: "/data-deletion",
+  getParentRoute: () => rootRoute,
+  component: DataDeletionPage,
 });
 
 const blogIndexRoute = createRoute({
@@ -1287,6 +1294,7 @@ const routeTree = rootRoute.addChildren([
   oauthErrorRoute,
   privacyRoute,
   termsRoute,
+  dataDeletionRoute,
   blogIndexRoute,
   blogDetailRoute,
   blogPreviewRoute,

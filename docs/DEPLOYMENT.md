@@ -406,6 +406,28 @@ groups and restarts to install the unique index.
 
 ## Rolling deploys and graceful drain
 
+Server mode installs SIGTERM and ctrl-c receivers before configuration or database
+IO, and retains the same receivers through shutdown. Startup never cancels an
+awaited step on a signal. It checks at three safe points: after configuration,
+after the read-only database connection and transaction-capability check, and
+immediately before either listener binds. At the first two points it exits with
+status 0 without application writes or workers. After the database checkpoint,
+startup finishes through the bind checkpoint, including migrations and worker
+initialization. A pending signal there prevents both binds and the process-start
+audit, runs the existing drain for workers already started, then exits with
+status 0. A second signal is retained during startup and skips the drain wait
+once that checkpoint is reached; it never interrupts a startup step.
+
+For a startup signal, the configured drain budget starts at signal receipt.
+Remaining startup consumes that budget: with budget B and remaining startup S,
+at most max(B - S, 0) remains for drain and cleanup. This does not place a deadline
+on startup itself. If a startup operation stalls beyond B, the process reaches
+cleanup late, with no budget remaining; a platform kill can still interrupt it.
+Under the normal startup duration (less than ten seconds), the default 25-second
+budget includes the remaining startup and drain. One-shot commands install no
+server signal receivers; database command modes also start no billing or chain
+verification workers. After binding, shutdown follows the serving behavior below.
+
 SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
 returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
@@ -643,6 +665,18 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 
 NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
 
+### Upgrading large databases
+
+Before rolling out this version to a large database, pre-build the 23 erasure
+and export indexes using the exact owner and export-selector commands in the
+[personal-erasure inventory](security/PERSONAL_ERASURE_INVENTORY.md).
+This is required for large collections such as `refresh_tokens`, `nyxbot_events`,
+`assistant_messages`, `trigger_deliveries`, and channel receipts. Startup awaits
+these builds before either listener binds, so a long first build can exhaust
+readiness/startup probe allowances. Pre-building lets the current replicas keep
+serving during the build; startup then reuses the compatible existing indexes.
+No existing index needs to be dropped, renamed, or rebuilt.
+
 ### Collections Created
 
 NyxID uses 29 MongoDB collections, all created automatically at startup:
@@ -737,6 +771,16 @@ Private signing-key backups remain sensitive even after the public verifier is r
 ## Reverse Proxy Configuration
 
 NyxID should run behind a reverse proxy in production for TLS termination, load balancing, and `X-Forwarded-For` header injection.
+
+### Account export transport
+
+Do not compress `POST /api/v1/users/me/export` at any ingress, reverse proxy or
+CDN. Preserve its exact `Content-Length`, disable response buffering, and propagate
+upstream body errors so interrupted exports cannot be saved as complete. The
+frontend nginx configuration has an exact export location with gzip and buffering
+disabled; apply the same rule to any additional ingress. If an intermediary does
+encode a response, clients cannot compare its wire length to decoded bytes and
+must fall back to JSON or structural validation.
 
 ### Caddy (Recommended)
 

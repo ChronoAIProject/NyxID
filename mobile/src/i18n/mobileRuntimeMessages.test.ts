@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { translate } from "./translate";
-import simplified from "./locales/zh-CN.json";
-import traditional from "./locales/zh-TW.json";
+import simplified from "./locales/zh-CN";
+import traditional from "./locales/zh-TW";
 
 // These permission and offline states must never fall back to English in a Chinese UI.
 const runtimeCopy = [
