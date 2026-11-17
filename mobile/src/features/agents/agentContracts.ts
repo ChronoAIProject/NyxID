@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { conversationIdSchema } from "../assistant/assistantTypes";
 
@@ -94,22 +95,33 @@ export const agentDetailSchema = z.object({
 });
 
 export const agentCreateSchema = z.object({
-  name: z
+  get name() {
+    return z
     .string()
     .trim()
     .regex(
-      /^[a-z0-9][a-z0-9-]{0,31}$/,
-      "Use 1–32 lowercase letters, digits or hyphens, starting with a letter or digit.",
+      /^[a-z0-9][a-z0-9-]{0,31}$/, {
+        error: () =>
+          translateApp(
+            "Use 1–32 lowercase letters, digits or hyphens, starting with a letter or digit.",
     ),
-  display_name: z
+      });
+  },
+  get display_name() {
+    return z
     .string()
     .trim()
-    .max(40, "Keep the display name under 40 characters."),
-  description: z
+    .max(40, {
+        error: () => translateApp("Keep the display name under 40 characters."),
+      });
+  },
+  get description() {
+    return z
     .string()
     .trim()
-    .min(1, "Describe what the agent does.")
-    .max(2048),
+    .min(1, { error: () => translateApp("Describe what the agent does.") })
+    .max(2048);
+  },
   persona: z.string().trim().max(2000),
   services: z.array(z.string()),
   account_read: z.boolean(),

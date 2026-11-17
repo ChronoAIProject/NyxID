@@ -39,6 +39,11 @@ export function openWorkspaceSheetAction<
   };
 }
 
+/** The sidebar quick action and the narrow chat header open the same scanner sheet. */
+export function openScannerSheetAction() {
+  return openWorkspaceSheetAction("DeviceLogin", { start_scanner: true });
+}
+
 /** Main pages always resolve inside the slab, including calls from account pages. */
 export function openWorkspacePageAction<
   Name extends keyof WorkspaceContentParamList,

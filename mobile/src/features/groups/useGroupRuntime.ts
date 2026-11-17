@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -22,7 +23,7 @@ export { groupKeys } from "./groupLiveRefresh";
 export const groupError = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
-    : "Could not complete this action. Try again.";
+    : translateApp("Could not complete this action. Try again.");
 
 /** Every group read and local callback belongs to one signed-in foreground view. */
 export function useGroupAvailability() {
@@ -171,7 +172,9 @@ export function useGroupChat(groupId: string) {
             setError(
               refused
                 ? groupError(cause)
-                : "Connection interrupted. This message may have been delivered. Refresh the crew and check its history before sending again.",
+                : translateApp(
+                    "Connection interrupted. This message may have been delivered. Refresh the crew and check its history before sending again.",
+                  ),
             );
           }
           // Unknown delivery consumes uploads: the server may have claimed them.

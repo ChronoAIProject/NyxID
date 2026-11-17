@@ -1,4 +1,6 @@
 import { crashLifecycle } from "../../lib/crashReporting/runtime";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
@@ -29,6 +31,11 @@ import { decodeJwtSub } from "../../lib/auth/jwt";
 import { useMobileConsent } from "../../lib/consent";
 
 const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const RESTORE_TIMEOUT_MS = 6000;
+const RESTORE_RETRY_DELAY_MS = 500;
+const RESTORE_FOREGROUND_ATTEMPTS = 3;
+export const SESSION_STORAGE_FAILED_MESSAGE =
+  "Signed in, but this device couldn't save your session. Please try again.";
 
 type AuthSessionContextValue = {
   isAuthenticated: boolean;
@@ -40,6 +47,7 @@ type AuthSessionContextValue = {
 const AuthSessionContext = createContext<AuthSessionContextValue | null>(null);
 
 export function AuthSessionProvider({ children }: PropsWithChildren) {
+  const { t } = useAppLanguage();
   const queryClient = useQueryClient();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
@@ -89,7 +97,10 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
     let active = true;
     const checkRefresh = () => {
-      if (!active) return;
+      // iOS suspends a backgrounded app within seconds. A refresh the server
+      // completes after suspension rotates the refresh token without the app
+      // ever storing the successor, so only start refreshes in the foreground.
+      if (!active || AppState.currentState !== "active") return;
       void refreshAccessTokenIfNeeded().catch((error) => {
         if (__DEV__) console.warn("[auth] proactive refresh check failed", error);
       });
@@ -121,18 +132,53 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     let active = true;
-    const restoreTimeout = setTimeout(() => {
-      if (!active) return;
+    let settled = false;
+    // Sign-in or sign-out during a slow or retried restore owns the state.
+    const restoreGeneration = authSessionGeneration();
+    const superseded = () => authSessionGeneration() !== restoreGeneration;
+    let retryWhenActive = false;
+    let foregroundFailures = 0;
+    let restoreTimeout: ReturnType<typeof setTimeout> | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const armTimeout = () => {
+      clearTimeout(restoreTimeout);
+      restoreTimeout = setTimeout(() => {
+      if (!active || settled) return;
+        // A background launch stays on the splash: the keychain may only be
+        // waiting for the device to unlock. The timeout re-arms on foreground.
+        if (AppState.currentState !== "active") return;
       if (__DEV__) console.warn("[auth] restore session timeout, continuing without cache");
       setIsRestoring(false);
-    }, 6000);
+    }, RESTORE_TIMEOUT_MS);
+    };
+    const settle = () => {
+      settled = true;
+      clearTimeout(restoreTimeout);
+      clearTimeout(retryTimer);
+      foregroundSubscription.remove();
+      setIsRestoring(false);
+    };
+    const foregroundSubscription = AppState.addEventListener(
+      "change",
+      (next) => {
+        if (next !== "active" || !active || settled) return;
+        armTimeout();
+        if (retryWhenActive) {
+          retryWhenActive = false;
+          restore();
+        }
+      },
+    );
 
-    void loadStoredAuthSession()
+    const restore = () =>
+      void loadStoredAuthSession()
       .then((session) => {
-        if (!active) return;
+        if (!active || settled) return;
+          if (superseded()) return settle();
         setIsAuthenticated(Boolean(session));
         setAuthAccountId(
-          session ? decodeJwtSub(session.accessToken) ?? session.userId ?? null : null,
+          session ? (decodeJwtSub(session.accessToken) ?? session.userId ?? null)
+              : null,
         );
         if (session) {
           // If we restored an authenticated session with a known
@@ -153,21 +199,40 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
               if (__DEV__) console.warn("[push] activate after session restore failed", error);
             });
         }
-      })
+          settle();
+        })
       .catch((error) => {
         if (__DEV__) console.warn("[auth] restore session failed", error);
-        if (!active) return;
-        setIsAuthenticated(false);
-      })
-      .finally(() => {
-        if (!active) return;
-        clearTimeout(restoreTimeout);
-        setIsRestoring(false);
-      });
+        if (!active || settled) return;
+          if (superseded()) return settle();
+          // An unreadable keychain is not a signed-out user. iOS relaunches the
+          // app in the background (silent pushes, after reclaiming it) while the
+          // device may be locked; storage is intact and readable once unlocked.
+          // Retry in the foreground and keep the splash until then.
+          if (AppState.currentState !== "active") {
+            retryWhenActive = true;
+            return;
+          }
+          if (++foregroundFailures < RESTORE_FOREGROUND_ATTEMPTS) {
+            retryTimer = setTimeout(() => {
+        if (active && !settled) restore();
+            }, RESTORE_RETRY_DELAY_MS);
+            return;
+          }
+          // Storage stays unreadable while in use: show sign-in, but leave the
+          // stored session untouched so a later launch can still restore it.
+          setIsAuthenticated(false);
+          settle();
+        });
+
+    armTimeout();
+    restore();
 
     return () => {
       active = false;
       clearTimeout(restoreTimeout);
+      clearTimeout(retryTimer);
+      foregroundSubscription.remove();
     };
   }, []);
 
@@ -178,7 +243,15 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       advanceAuthEpoch();
       await queryClient.cancelQueries();
       queryClient.clear();
-      await persistAuthSession(session);
+      try {
+        await persistAuthSession(session);
+      } catch (error) {
+        // A newer sign-in or sign-out owns the session; nothing to report.
+        if (error instanceof Error && error.message === "auth_session_changed")
+          throw error;
+        if (__DEV__) console.warn("[auth] could not store the session", error);
+        throw new Error(t(SESSION_STORAGE_FAILED_MESSAGE));
+      }
       const expectedGeneration = authSessionGeneration();
 
       // Gate: if an allowlist is configured, verify the user's email before proceeding
@@ -187,7 +260,11 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
           const profile = await getCurrentUserProfileRequest();
           if (!isEmailAllowed(profile.email)) {
             if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
-            throw new Error("Access restricted. Your account is not authorized for this app.");
+            throw new Error(
+              t(
+                "Access restricted. Your account is not authorized for this app.",
+              ),
+            );
           }
         } catch (error) {
           // Re-throw allowlist rejections; swallow profile-fetch failures only
@@ -195,7 +272,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
             throw error;
           }
           if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
-          throw new Error("Unable to verify account access. Please try again.");
+          throw new Error(
+            t("Unable to verify account access. Please try again."),
+          );
         }
       }
 
@@ -227,12 +306,15 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       signInWithSession,
       signOut: performSignOut,
     };
-  }, [isAuthenticated, isRestoring, performSignOut, queryClient]);
+  }, [isAuthenticated, isRestoring, performSignOut, queryClient, t]);
 
-  return <AuthSessionContext.Provider value={value}>{children}</AuthSessionContext.Provider>;
+  return (
+    <AuthSessionContext.Provider value={value}>{children}</AuthSessionContext.Provider>
+  );
 }
 
 export function useAuthSession() {
+  useAppLanguage();
   const context = useContext(AuthSessionContext);
   if (!context) {
     throw new Error("useAuthSession must be used within AuthSessionProvider");

@@ -72,6 +72,7 @@
     "expo-document-picker": "~55.0.17",
     "expo-file-system": "~55.0.26",
     "expo-font": "~55.0.6",
+    "expo-glass-effect": "~55.0.11",
     "expo-image-manipulator": "~55.0.21",
     "expo-image-picker": "~55.0.24",
     "expo-linear-gradient": "^55.0.12",

@@ -1,15 +1,22 @@
-import { ActivityIndicator, Pressable, StyleSheet } from "react-native";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
+import { ActivityIndicator, StyleSheet } from "react-native";
 import { DynamicTypeText as Text } from "../DynamicTypeText";
+import { FloatingButton } from "../FloatingControl";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts, typeScale } from "../../theme/designTokens";
 
 /**
- * The commit action of an edit page, top right of the bar as on iOS. Content
- * pages pass it through `useWorkspaceBack({ options: { headerRight } })` so the
- * workspace header and the action are applied together.
+ * The commit action of an edit page, top right of the bar as on iOS, in the
+ * bar's floating glass (the same FloatingButton as Menu/Back and the chat
+ * bar's controls): a 44pt pill hugging its label. While saving, a spinner
+ * takes the label's place in the same capsule, so the bar never jumps.
+ * Content pages pass it through `useWorkspaceBack({ options: { headerRight } })`
+ * and sheet pages through `useSettingsHeaderAction`, so the header and the
+ * action are applied together.
  */
 export function SettingsHeaderButton({
-  label = "Save",
+  label = translateApp("Save"),
   enabled,
   busy = false,
   onPress,
@@ -19,32 +26,30 @@ export function SettingsHeaderButton({
   busy?: boolean;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
-  if (busy) return <ActivityIndicator color={colors.primary} />;
   return (
-    <Pressable
-      accessibilityRole="button"
+    <FloatingButton
       accessibilityLabel={label}
-      accessibilityState={{ disabled: !enabled }}
-      disabled={!enabled}
-      hitSlop={12}
-      onPress={onPress}
+      // Busy keeps its spinner undimmed but takes no second press.
+      accessibilityState={{ disabled: !enabled || busy, busy }}
+      disabled={!enabled && !busy}
+      onPress={busy ? undefined : onPress}
       style={styles.action}
     >
-      <Text
-        style={[
-          styles.label,
-          { color: enabled ? colors.primary : colors.textMuted },
-        ]}
-      >
-        {label}
-      </Text>
-    </Pressable>
+      {busy ? (
+        <ActivityIndicator color={colors.primary} />
+      ) : (
+        <Text style={[styles.label, { color: colors.primary }]}>{label}</Text>
+      )}
+    </FloatingButton>
   );
 }
 
 const styles = StyleSheet.create({
-  action: { minHeight: 44, justifyContent: "center", paddingHorizontal: 4 },
+  // The pill's own padding; the capsule and its 44pt minimum come from the
+  // primitive.
+  action: { paddingHorizontal: 14 },
   label: {
     ...typeScale.label,
     fontFamily: fonts.bodySemi,

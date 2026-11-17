@@ -1,6 +1,7 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { LANGUAGES } from "../../i18n/language";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Image,
@@ -19,6 +20,7 @@ import {
   Mail,
   Palette,
   Languages,
+  PanelRight,
   ScrollText,
   ShieldCheck,
   Wallet,
@@ -44,6 +46,7 @@ import { mobileApi } from "../../lib/api/mobileApi";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { AccountDeletionSheet } from "./AccountDeletionSheet";
+import { WorkspaceRailWindowContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { isApiError } from "../../lib/api/ApiError";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -67,6 +70,7 @@ export function AccountSettingsTitle({
   children: string;
   tintColor?: string;
 }) {
+  useAppLanguage();
   return (
     <Text
       role="heading"
@@ -97,13 +101,13 @@ function resolveDeleteAccountError(error: unknown): {
       key === "token_expired"
     ) {
       return {
-        message: "Session expired. Please sign in again.",
+        message: translateApp("Session expired. Please sign in again."),
         shouldForceSignOut: true,
       };
     }
     if (key === "not_found" || error.statusCode === 404) {
       return {
-        message: "Account not found or already deleted.",
+        message: translateApp("Account not found or already deleted."),
         shouldForceSignOut: true,
       };
     }
@@ -117,7 +121,7 @@ function resolveDeleteAccountError(error: unknown): {
     lower.includes("request_failed_401")
   ) {
     return {
-      message: "Session expired. Please sign in again.",
+      message: translateApp("Session expired. Please sign in again."),
       shouldForceSignOut: true,
     };
   }
@@ -127,13 +131,13 @@ function resolveDeleteAccountError(error: unknown): {
     lower.includes("failed to fetch")
   ) {
     return {
-      message: "Network error. Check API server and try again.",
+      message: translateApp("Network error. Check API server and try again."),
       shouldForceSignOut: false,
     };
   }
 
   const fallback =
-    __DEV__ && raw ? raw : "Failed to delete account. Please try again.";
+    __DEV__ && raw ? raw : translateApp("Failed to delete account. Please try again.");
   return { message: fallback, shouldForceSignOut: false };
 }
 
@@ -156,12 +160,12 @@ function getIdentityName(
 ): string {
   const trimmedName = name?.trim();
   if (trimmedName) return trimmedName;
-  if (provider === "apple") return "Apple account";
-  return "User";
+  if (provider === "apple") return translateApp("Apple account");
+  return translateApp("User");
 }
 
 function formatSignInMethod(provider?: string | null): string {
-  if (!provider) return "Email/Password";
+  if (!provider) return translateApp("Email/Password");
   switch (provider.toLowerCase()) {
     case "google":
       return "Google";
@@ -179,7 +183,10 @@ function formatSignInMethod(provider?: string | null): string {
  * sub-page that holds the actual controls; only Sign Out and Delete Account act here.
  */
 export function AccountSettingsScreen({ navigation, route }: Props) {
+  useAppLanguage();
   const { language, t } = useAppLanguage();
+  // Quick access customises the Duo's rail: offered where the rail exists.
+  const railWindow = useContext(WorkspaceRailWindowContext);
   const section = route?.params?.section;
   useEffect(() => {
     if (section) navigation.push(SECTION_PAGES[section]);
@@ -225,8 +232,10 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     onSuccess: async (result) => {
       showToast(
         result.status === "complete"
-          ? "Account erasure complete. You have been signed out."
-          : "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
+          ? translateApp("Account erasure complete. You have been signed out.")
+          : translateApp(
+              "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
+            ),
         "success",
       );
       try {
@@ -246,13 +255,15 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
   });
 
   const handleSignOut = () => {
-    Alert.alert("Sign Out", "Do you want to sign out from this account?", [
-      { text: "Cancel", style: "cancel" },
+    Alert.alert(
+      translateApp("Sign Out"),
+      translateApp("Do you want to sign out from this account?"), [
+      { text: translateApp("Cancel"), style: "cancel" },
       {
-        text: "Sign Out",
+        text: translateApp("Sign Out"),
         style: "destructive",
         onPress: () => {
-          showToast("You are signed out.", "info");
+          showToast(translateApp("You are signed out."), "info");
           void signOut()
             .then(() => queryClient.clear())
             .catch(() => {});
@@ -298,12 +309,13 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
       <SettingsPage>
         {isOffline && (
           <OfflineBanner
-            subtitle="Some features unavailable"
+            subtitle={translateApp("Some features unavailable")}
             onRetry={async () => {
               const online = await recheckConnection();
               if (online) void refetchProfile();
               else
-                showToast("Still offline — will retry when connected", "error");
+                showToast(
+                  translateApp("Still offline — will retry when connected"), "error");
             }}
           />
         )}
@@ -386,6 +398,14 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             value={LANGUAGES.find(({ code }) => code === language)?.label}
             onPress={() => navigation.push("LanguageSettings")}
           />
+          {/* The Duo only: the rail beside the status column (synced list). */}
+          {railWindow ? (
+            <SettingsRow
+              icon={PanelRight}
+              label={t("Quick access")}
+              onPress={() => navigation.push("QuickAccessSettings")}
+            />
+          ) : null}
           {/* Dictation is available to everyone; live voice only with its flag. */}
           <SettingsRow
             icon={AudioLines}
@@ -434,12 +454,20 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             label={t("Contact support")}
             value={SUPPORT_EMAIL}
             accessibilityRole="link"
-            accessibilityHint={`Email ${SUPPORT_EMAIL}`}
+            accessibilityHint={translateApp("Email {{email}}", {
+              email: SUPPORT_EMAIL,
+            })}
             onPress={() => {
+              const subject = encodeURIComponent(translateApp("NyxID app support"));
               Linking.openURL(
-                `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent("NyxID app support")}`,
+                `mailto:${SUPPORT_EMAIL}?subject=${subject}`,
               ).catch(() =>
-                Alert.alert("Contact support", `Email us at ${SUPPORT_EMAIL}.`),
+                Alert.alert(
+                  translateApp("Contact support"),
+                  translateApp("Email us at {{email}}.", {
+                    email: SUPPORT_EMAIL,
+                  }),
+                ),
               );
             }}
           />

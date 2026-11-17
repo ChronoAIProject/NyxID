@@ -201,6 +201,8 @@ PODS:
     - ExpoModulesCore
   - ExpoFont (55.0.6):
     - ExpoModulesCore
+  - ExpoGlassEffect (55.0.11):
+    - ExpoModulesCore
   - ExpoImageManipulator (55.0.21):
     - ExpoModulesCore
     - SDWebImageWebPCoder
@@ -2513,6 +2515,7 @@ DEPENDENCIES:
   - "ExpoDomWebView (from `../node_modules/@expo/dom-webview/ios`)"
   - ExpoFileSystem (from `../node_modules/expo-file-system/ios`)
   - ExpoFont (from `../node_modules/expo-font/ios`)
+  - ExpoGlassEffect (from `../node_modules/expo-glass-effect/ios`)
   - ExpoImageManipulator (from `../node_modules/expo-image-manipulator/ios`)
   - ExpoImagePicker (from `../node_modules/expo-image-picker/ios`)
   - ExpoKeepAwake (from `../node_modules/expo-keep-awake/ios`)
@@ -2668,6 +2671,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/expo-file-system/ios"
   ExpoFont:
     :path: "../node_modules/expo-font/ios"
+  ExpoGlassEffect:
+    :path: "../node_modules/expo-glass-effect/ios"
   ExpoImageManipulator:
     :path: "../node_modules/expo-image-manipulator/ios"
   ExpoImagePicker:
@@ -2896,6 +2901,7 @@ SPEC CHECKSUMS:
   ExpoDomWebView: 2b2fbd9a07de8790569257cbf9dfdaa31cf95c70
   ExpoFileSystem: bdb067c7739d9f7405227154a7280e2d6653bbc8
   ExpoFont: cdd7a1d574a376fa003c713eff49e0a4df8672c7
+  ExpoGlassEffect: 2dedac2fe817f9b02d0dad29ce0aef7afebc5cd4
   ExpoImageManipulator: 6ee60a0202c350d82d99fd48773d7c2e770f80ea
   ExpoImagePicker: 7dd57ad3d0922e30efa9b52b3ce83099c2bf4352
   ExpoKeepAwake: a1baf9810a2dee1905aa9bdd336852598f7220e9

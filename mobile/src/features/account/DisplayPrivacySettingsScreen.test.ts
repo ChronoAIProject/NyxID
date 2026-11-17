@@ -118,7 +118,9 @@ test("Privacy analytics keeps shared group insets and wrapping controls at narro
     [402, 3.12],
   ]) {
     env.resize(width!, fontScale!);
-    const title = env.text("USAGE ANALYTICS");
+    const title = env.text("Usage analytics");
+    assert.equal(style(title).textTransform, "uppercase");
+    assert.equal(style(title).letterSpacing, 1.5);
     const footer = env.text(
       "Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules.",
     );

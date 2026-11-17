@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { channelPlatformName } from "../../components/workspace/workspaceChatListModel";
 
 // Event classification mirrors origin/main nyxbot-labels.ts.
@@ -75,7 +76,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "notice",
       tone: notice.includes("published and attached") ? "success" : "warning",
-      summary: "Skill publication",
+      summary: translateApp("Skill publication"),
       detail: notice,
     };
   }
@@ -94,7 +95,7 @@ export function describeEventNotice(text: string): EventNotice {
         : status === "replied"
           ? "neutral"
           : "warning",
-      summary: `${agent} ${failed ? "failed" : status}`,
+      summary: (failed ? translateApp("{{agent}} failed", { agent: agent }) : translateApp("{{agent}} {{status}}", { agent: agent, status: status })),
       detail: match[4]?.trim() || undefined,
       agent,
     };
@@ -109,8 +110,13 @@ export function describeEventNotice(text: string): EventNotice {
       kind: "request",
       tone: "warning",
       summary: service
-        ? `${agent} asks to use ${service}`
-        : `${agent} asks to read your account`,
+        ? translateApp("{{agent}} asks to use {{service}}", {
+            agent: agent,
+            service: service,
+          })
+        : translateApp("{{agent}} asks to read your account", {
+            agent: agent,
+          }),
       detail: match[3]?.trim() || undefined,
       agent,
     };
@@ -124,7 +130,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "decision",
       tone: verdict === "allowed" ? "success" : "destructive",
-      summary: `${by === "NyxBot" ? "NyxBot" : "You"} ${verdict} ${service ?? "read-only account access"}`,
+      summary: (by === "NyxBot" ? translateApp("NyxBot {{verdict}} {{service}}", { verdict: verdict, service: service ?? "read-only account access" }) : translateApp("You {{verdict}} {{service}}", { verdict: verdict, service: service ?? "read-only account access" })),
       detail: reason?.trim() || undefined,
     };
   }
@@ -137,7 +143,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "approval",
       tone: verdict === "approved" ? "success" : "destructive",
-      summary: `You ${verdict} the ${service} request${via ? ` via ${channelPlatformName(via)}` : ""}`,
+      summary: (via ? translateApp("You {{verdict}} the {{service}} request via {{name}}", { verdict: verdict, service: service, name: channelPlatformName(via) }) : translateApp("You {{verdict}} the {{service}} request", { verdict: verdict, service: service })),
       detail: description?.trim() || undefined,
     };
   }
@@ -150,7 +156,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "connection",
       tone: verdict === "finished" ? "success" : "neutral",
-      summary: `${verdict === "finished" ? "Finished" : "Declined"} connecting ${service}`,
+      summary: (verdict === "finished" ? translateApp("Finished connecting {{service}}", { service: service }) : translateApp("Declined connecting {{service}}", { service: service })),
     };
   }
   match =
@@ -164,8 +170,15 @@ export function describeEventNotice(text: string): EventNotice {
       kind: "channel",
       tone: agent ? "success" : "destructive",
       summary: agent
-        ? `${name} bot ${label} linked to ${agent}`
-        : `${name} bot ${label} could not be linked`,
+        ? translateApp("{{name}} bot {{label}} linked to {{agent}}", {
+            name: name,
+            label: label,
+            agent: agent,
+          })
+        : translateApp("{{name}} bot {{label}} could not be linked", {
+            name: name,
+            label: label,
+          }),
     };
   }
   match = /^The user verified their (\S+) account on channel bot (\S+);/.exec(
@@ -176,7 +189,10 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "channel",
       tone: "success",
-      summary: `Verified your ${channelPlatformName(platform)} account on ${label}`,
+      summary: translateApp("Verified your {{platform}} account on {{label}}", {
+        platform: channelPlatformName(platform),
+        label: label,
+      }),
     };
   }
   match =
@@ -187,7 +203,9 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "message",
       tone: "neutral",
-      summary: `New ${channelPlatformName(match[1] ?? "")} message`,
+      summary: translateApp("New {{platform}} message", {
+        platform: channelPlatformName(match[1] ?? ""),
+      }),
       detail: match[2]?.trim() || undefined,
     };
   }
@@ -199,8 +217,10 @@ export function describeEventNotice(text: string): EventNotice {
       kind: "task",
       tone: ok ? "success" : "warning",
       summary: ok
-        ? "Background task finished"
-        : `Background task ${outcome.replace(/_/g, " ")}`,
+        ? translateApp("Background task finished")
+        : translateApp("Background task {{details}}", {
+            details: outcome.replace(/_/g, " "),
+          }),
     };
   }
   const summary = firstSentence(notice);

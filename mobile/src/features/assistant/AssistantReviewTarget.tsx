@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -24,6 +26,7 @@ export function AssistantReviewTarget({
   onReveal?: RevealReviewTarget;
   children: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const target = useRef<View>(null);
   const heading = useRef<Text>(null);
@@ -97,7 +100,7 @@ export function AssistantReviewTarget({
             marginBottom: 4,
           }}
         >
-          Selected confirmation
+          {translateApp("Selected confirmation")}
         </Text>
       ) : null}
       {children}

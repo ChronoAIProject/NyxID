@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useMemo, useState } from "react";
 import { Switch } from "react-native";
@@ -27,13 +28,21 @@ import { voiceSettingsView } from "./voiceSettingsModel";
 const MODES = [
   {
     value: "push_to_talk",
-    label: "Hold to talk",
-    detail: "NyxBot listens while you hold the button.",
+    get label() {
+      return translateApp("Hold to talk");
+    },
+    get detail() {
+      return translateApp("NyxBot listens while you hold the button.");
+    },
   },
   {
     value: "automatic",
-    label: "Hands-free",
-    detail: "NyxBot listens and answers when you pause.",
+    get label() {
+      return translateApp("Hands-free");
+    },
+    get detail() {
+      return translateApp("NyxBot listens and answers when you pause.");
+    },
   },
 ] as const;
 
@@ -46,6 +55,7 @@ const MODES = [
 export function VoiceSettingsScreen({
   route,
 }: SheetScreenProps<"VoiceSettings">) {
+  useAppLanguage();
   const { t } = useAppLanguage();
   const { colors } = useTheme();
   const voiceEnabled = route?.params?.voice ?? true;
@@ -136,7 +146,7 @@ export function VoiceSettingsScreen({
       ) : view ? (
         <SettingsGroup
           title={t("Conversation")}
-          footer={`${t("Used for live voice conversations with NyxBot.")} ${voiceTariff(view.option)}`}
+          footer={translateApp("Used for live voice conversations with NyxBot. {{voiceTariff}}", { voiceTariff: voiceTariff(view.option)})}
         >
           <SettingsMenuRow
             icon={AudioLines}

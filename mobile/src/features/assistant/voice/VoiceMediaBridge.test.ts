@@ -278,3 +278,48 @@ test("beginEndDrain never exempts a WebView engine from disconnect cleanup", asy
   assert.equal(f.state.closed, 0);
   assert.equal(media.usesNativeMedia, false);
 });
+
+test("Chinese presentation preserves the engine error whitelist and command protocol", async () => {
+  const { setAppTranslationLanguage, translateApp } = await import(
+    "../../../i18n/appTranslation"
+  );
+  const f = fixture();
+  const media = new f.module.NativeVoiceMedia(null);
+  const events: VoiceMediaEvent[] = [];
+  const commands: Record<string, unknown>[] = [];
+  try {
+    setAppTranslationLanguage("zh-CN");
+    media.subscribe((event) => events.push(event));
+    media.connect((command) => commands.push(command));
+    media.receive(JSON.stringify({ type: "ready" }));
+    const pending = media.prepare("xai_realtime", new AbortController().signal);
+    const command = commands.find((item) => item.type === "prepare")!;
+    assert.equal(command.protocol, "xai_realtime");
+    media.receive(
+      JSON.stringify({
+        type: "response",
+        generation: command.generation,
+        requestId: command.requestId,
+        result: "",
+      }),
+    );
+    await pending;
+    media.receive(
+      JSON.stringify({
+        type: "error",
+        generation: command.generation,
+        message: "No microphone is available.",
+      }),
+    );
+    const failure = events.at(-1);
+    assert.equal(failure?.type, "error");
+    if (failure?.type !== "error")
+      assert.fail("Expected a localized media error");
+    assert.equal(failure.message, translateApp("No microphone is available."));
+    assert.notEqual(failure.message, "No microphone is available.");
+  } finally {
+    media.close();
+    f.harness.unmount();
+    setAppTranslationLanguage("en");
+  }
+});
