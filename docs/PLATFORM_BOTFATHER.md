@@ -344,9 +344,7 @@ installation tombstones. Durable retirement progress lets interrupted cleanup
 advance in bounded batches, and ordinary accounts with no platform state keep
 standalone Mongo compatibility. Runtime validation is tracked separately.
 
-## Deployment and external acceptance
-
-### Bot Setups browser regression
+## Bot Setups regression
 
 The Bot Setups regression runs the real app entry, Router, DashboardLayout and
 StrictMode against synthetic HTTP responses, without a backend or Telegram:
@@ -361,39 +359,31 @@ npx playwright test --config playwright.platform-setups.config.ts
 The browser suite owns strict port 4634 and refuses an already-running server.
 Its HTTP fixture serves empty Google Fonts CSS locally and blocks other external
 requests, so provider/network availability cannot consume the page-load deadline.
-It checks direct entry, reload, client-side links, back/forward, separate draft
-rows, one in-flight adoption POST, validation/errors and explicit retry. The
-router suite additionally checks binding-generation and account resets. Keep
-distinct account-qualified keys for the sibling draft-import and archive
-modules: a shared account key caused React to retain duplicate import DOM when
-the asynchronous saved-setups query inserted its empty-state message (#2437).
+The current import flow is Linked chat → review → Adopt reviewed draft.
 
-The issue's production report (2026-11-13, source reference `31f3d89`) described a
-token/import form. The regression reproduced the duplicate module on `e0c349a43`
-(frontend 0.78.0), whose flow is Linked chat → review → Adopt reviewed draft.
-These fixtures verify browser behavior, not production or live-provider delivery.
+Keep distinct account-qualified keys for the sibling draft-import and archive
+modules. With a shared sibling key, a later page render that breaks React's
+in-order fast path (for example, when saved setups settle) could orphan the
+original import DOM and mount another copy. The router tests fail on unexpected
+`console.error`, including duplicate-key warnings, and cover delayed list updates,
+navigation, account/binding changes, adoption settlement and explicit retry.
+Browser tests also check direct entry, reload, history, keyboard activation,
+validation/errors and revocation of the selected chat.
+
+The synchronous guard blocks in-flight and double-click repeats. Account,
+binding-generation or chat changes clear consent; each new instance requires a
+fresh review. A successfully loaded list that drops the selected binding also
+clears the selection; refetch errors retain it. The server fences live binding
+and draft revisions, with same-owner/binding/generation adoption idempotent.
+Callbacks from an unmounted review cannot clear a new review's consent.
 
 The `Frontend` CI job runs the router/adoption regressions through `npm run test`.
-The eight browser cases are a separate acceptance command shown above; they are not
-currently run by CI. They are excluded from the default Playwright suite because
-that suite boots Vite in `test` mode with the assistant's in-app fixtures. This
-suite needs its dedicated configuration to exercise the real HTTP client.
+The browser suite runs separately with the dedicated configuration shown above.
+It is excluded from the default Playwright suite because that suite boots Vite
+in `test` mode with the assistant's in-app fixtures; these regressions exercise
+the real HTTP client. Fixtures verify browser behavior, not live delivery.
 
-The router tests also fail on any unexpected `console.error`, including React's
-duplicate-key warning, across delayed empty-state insertion, navigation and
-account changes. Adoption tests cover fast-failure double-clicks, native Enter
-and Space activation, success, explicit retry, rejected query invalidation and
-in-flight review remounts under StrictMode. The synchronous guard belongs to the
-review instance: changing the account, binding generation or selected chat clears
-consent. A new instance can submit only after a fresh review and explicit action.
-The server remains the authority for concurrent requests: adoption fences the live
-binding generation and exact anonymous revision, and replays an already adopted
-draft only for the same owner, binding and generation. No client lock carries
-consent or authority across those boundaries. TanStack Query's hook-level
-invalidation still runs after unmount; per-call success/settled callbacks do not
-run without an observer, so an old reply cannot clear a new instance's review.
-
-### External acceptance
+## Deployment and external acceptance
 
 No deployment or live enablement was performed for this implementation. Before a
 rollout, all replicas handling manager/child traffic must enforce the new markers,
