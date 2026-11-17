@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { StyleSheet, Text, View } from "react-native";
 import { fonts } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -16,9 +18,10 @@ type FullScreenLoadingProps = {
  * chrome.
  */
 export function FullScreenLoading({
-  title = "Loading…",
+  title = translateApp("Loading…"),
   subtitle,
 }: FullScreenLoadingProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <ScreenContainer>

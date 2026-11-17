@@ -1,5 +1,6 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { assistantConnection } from "./connectionState";
-import { createSessionRefresh } from "../auth/sessionRefresh";
+import { createSessionRefresh, isRefreshRefusal } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
 import { fetch as expoFetch } from "expo/fetch";
 import { executeAuthenticatedRequest, type RequestOptions } from "./authenticatedTransport";
@@ -305,7 +306,11 @@ async function requestRefreshAccessToken(
         if (__DEV__) {
           console.warn("[auth] refresh failed", response.status, payload);
         }
-        return null;
+        // Only the server's refusal of this refresh token ends the session.
+        // Outages, rate limits and exhausted conflict retries keep the stored
+        // credentials; callers surface the error and a later attempt retries.
+        if (isRefreshRefusal(response.status)) return null;
+        throw buildApiError(payload, response.status, response.headers);
       }
 
       if (payload && typeof payload === "object") {
@@ -401,7 +406,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
   const expectedSessionGeneration = authSessionGeneration();
   const guard = () => {
     options.authorityGuard?.();
-    if (options.signal?.aborted) throw Object.assign(new Error("Request cancelled"), { name: "AbortError" });
+    if (options.signal?.aborted) throw Object.assign(new Error(translateApp("Request cancelled")), { name: "AbortError" });
     if (requiresAuth && getAuthEpoch() !== expectedEpoch) throw new Error("auth_session_changed");
     if (requiresAuth && authSessionGeneration() !== expectedSessionGeneration) throw new Error("auth_session_changed");
     if (options.expectedAccountId && analyticsConsentState.getSnapshot().accountId !== options.expectedAccountId)
@@ -491,7 +496,8 @@ export async function requestBinaryJson<T>(
     },
     clientHeaders: clientHeaders(),
     transport: (url, init) =>
-      new Promise<{ ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string> }>(
+      new Promise<{ ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string>;
+      }>(
         (resolve, reject) => {
           const xhr = new XMLHttpRequest();
           const abort = () => xhr.abort();
@@ -510,17 +516,21 @@ export async function requestBinaryJson<T>(
           xhr.onerror = () => {
             cleanup();
             reject(
-              new Error("Upload failed. Check your connection and try again."),
+              new Error(
+              translateApp(
+                "Upload failed. Check your connection and try again.",
+              ),
+            ),
             );
           };
           xhr.ontimeout = () => {
             cleanup();
-            reject(new Error("Upload timed out. Try a smaller file."));
+            reject(new Error(translateApp("Upload timed out. Try a smaller file.")));
           };
           xhr.onabort = () => {
             cleanup();
             reject(
-              Object.assign(new Error("Upload cancelled."), {
+              Object.assign(new Error(translateApp("Upload cancelled.")), {
                 name: "AbortError",
               }),
             );
@@ -537,7 +547,7 @@ export async function requestBinaryJson<T>(
           if (init.signal?.aborted) {
             cleanup();
             reject(
-              Object.assign(new Error("Upload cancelled."), {
+              Object.assign(new Error(translateApp("Upload cancelled.")), {
                 name: "AbortError",
               }),
             );
@@ -614,7 +624,8 @@ export async function telegramLinkRequest(): Promise<TelegramLinkInfo> {
   });
 }
 
-export async function telegramDisconnectRequest(): Promise<{ message: string }> {
+export async function telegramDisconnectRequest(): Promise<{ message: string;
+}> {
   return requestJson<{ message: string }>("/notifications/telegram", {
     method: "DELETE",
   });
@@ -628,7 +639,8 @@ export async function loginWithPasswordRequest(payload: LoginRequest): Promise<L
   });
 }
 
-export async function verifyMfaRequest(body: { code: string; mfa_token: string }): Promise<LoginResponse> {
+export async function verifyMfaRequest(body: { code: string; mfa_token: string;
+}): Promise<LoginResponse> {
   return requestJson<LoginResponse>("/auth/mfa/verify", { method: "POST", body: { ...body, client: "mobile" }, requiresAuth: false, retryOnAuthFailure: false });
 }
 
@@ -745,8 +757,8 @@ export async function listApprovalsRequest(
         granted_at: item.granted_at,
         expires_at: item.expires_at,
         org_scoped: orgScoped,
-        org_id: orgScoped ? item.org_id ?? null : undefined,
-        org_name: orgScoped ? item.org_name ?? null : undefined,
+        org_id: orgScoped ? (item.org_id ?? null) : undefined,
+        org_name: orgScoped ? (item.org_name ?? null) : undefined,
       };
     }),
     total: response.total,

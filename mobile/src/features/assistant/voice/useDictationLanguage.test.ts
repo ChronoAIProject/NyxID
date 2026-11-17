@@ -24,7 +24,13 @@ function setup(
       deviceLanguages: () => ["zh-Hans-CN", "en-US"],
     },
     "../../../i18n/LanguageProvider": {
-      useAppLanguage: () => ({ language: "zh-CN", t: (text: string) => text }),
+      useAppLanguage: () => ({
+        language: "zh-CN",
+        t: (text: string, values: Record<string, unknown> = {}) =>
+          text.replace(/\{\{(\w+)\}\}/g, (_, key: string) =>
+            String(values[key]),
+          ),
+      }),
     },
     "./resolveDictationLanguage": { resolveDictationLanguage },
     "./dictationLanguage": {

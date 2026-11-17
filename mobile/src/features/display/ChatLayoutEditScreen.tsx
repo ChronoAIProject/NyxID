@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Pressable, StyleSheet, View } from "react-native";
 import { Minus, Plus } from "lucide-react-native";
@@ -22,15 +23,25 @@ import { ChatPreview } from "./ChatPreview";
 type Key = keyof ChatLayout;
 
 const COPY: Record<Key, { step: number; footer: string }> = {
-  columnWidth: {
+  get columnWidth() {
+    return {
     step: 40,
-    footer:
-      "How wide conversations can grow on large screens. Saved on this device.",
+      get footer() {
+        return translateApp(
+          "How wide conversations can grow on large screens. Saved on this device.",
+        );
+      },
+    };
   },
-  composerMaxHeight: {
+  get composerMaxHeight() {
+    return {
     step: 20,
-    footer:
-      "The composer grows with your draft up to this height. Saved on this device.",
+      get footer() {
+        return translateApp(
+          "The composer grows with your draft up to this height. Saved on this device.",
+        );
+      },
+    };
   },
 };
 
@@ -42,7 +53,7 @@ export function ChatLayoutEditScreen({
 }: SheetScreenProps<"ChatLayoutEdit">) {
   const { t } = useAppLanguage();
   const key = route.params.key;
-  const copy = { ...COPY[key], title: chatLayoutTitle(key) };
+  const copy = COPY[key];
   const { colors } = useTheme();
   const { layout, update } = useChatLayout();
   const [min, max] = chatLayoutBounds[key];
@@ -53,15 +64,11 @@ export function ChatLayoutEditScreen({
     return (
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={
-          direction < 0
-            ? t("Decrease {{setting}}", {
-                setting: t(copy.title).toLowerCase(),
-              })
-            : t("Increase {{setting}}", {
-                setting: t(copy.title).toLowerCase(),
-              })
-        }
+        accessibilityLabel={t(
+          key === "columnWidth"
+            ? direction < 0 ? "Decrease chat column width" : "Increase chat column width"
+            : direction < 0 ? "Decrease maximum composer height" : "Increase maximum composer height",
+        )}
         accessibilityState={{ disabled }}
         disabled={disabled}
         onPress={() => update({ [key]: value + direction * copy.step })}
@@ -91,11 +98,9 @@ export function ChatLayoutEditScreen({
               accessibilityLiveRegion="polite"
               style={[styles.value, { color: colors.textPrimary }]}
             >
-              {value} pt
-            </Text>
+              {translateApp("{{amount}}pt", { amount: value})}</Text>
             <Text style={[styles.range, { color: colors.textMuted }]}>
-              {min}–{max} pt
-            </Text>
+              {translateApp("{{min}}–{{max}}pt", { min: min, max: max})}</Text>
           </View>
           {step(1)}
         </View>

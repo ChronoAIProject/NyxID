@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import type { ServiceConnection } from "../services/serviceContracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { capture } from "../../lib/telemetry";
@@ -58,10 +60,13 @@ import {
 import { RefreshCw } from "lucide-react-native";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { ApprovalsOverview } from "./ApprovalsOverview";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 type Nav = WorkspaceNavigationProp;
 
 export function ActivityScreen() {
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const navigation = useNavigation<Nav>();
@@ -241,12 +246,13 @@ export function ActivityScreen() {
       const isGrant = decision === "APPROVE" && approvalMode === "grant";
       setActiveSegment("pending");
       setToast({
-        message: decision === "APPROVE" ? "Approved" : "Denied",
+        message: decision === "APPROVE" ? translateApp("Approved")
+            : translateApp("Denied"),
         kind: "success",
         ...(isGrant
           ? {
               action: {
-                label: "View grants",
+                label: translateApp("View grants"),
                 onPress: () => setActiveSegment("active"),
               },
             }
@@ -273,10 +279,10 @@ export function ActivityScreen() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
-      setToast({ message: "Revoked", kind: "success" });
+      setToast({ message: translateApp("Revoked"), kind: "success" });
     },
     onError: () => {
-      setToast({ message: "Failed to revoke. Try again.", kind: "error" });
+      setToast({ message: translateApp("Failed to revoke. Try again."), kind: "error" });
     },
     onSettled: (_, __, { id }) => {
       setMutatingIds((prev) => {
@@ -289,10 +295,14 @@ export function ActivityScreen() {
 
   const handleRevoke = useCallback(
     (grant: ApprovalItem) => {
-      Alert.alert("Revoke Access", `Revoke access for ${grant.service_name}?`, [
-        { text: "Cancel", style: "cancel" },
+      Alert.alert(
+        translateApp("Revoke Access"),
+        translateApp("Revoke access for {{service}}?", {
+          service: grant.service_name,
+        }), [
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: "Revoke",
+          text: translateApp("Revoke"),
           style: "destructive",
           // Forward org_id when the grant is org-scoped so the backend
           // pivots ownership to the owning org (otherwise DELETE 404s
@@ -494,7 +504,7 @@ export function ActivityScreen() {
       await handleRefresh("user");
     } else {
       setToast({
-        message: "Still offline — will retry when connected",
+        message: translateApp("Still offline — will retry when connected"),
         kind: "error",
       });
     }
@@ -572,12 +582,13 @@ export function ActivityScreen() {
         <>
           <View style={styles.header}>
             <Text style={[styles.subtitle, styles.headerCopy]}>
-              Grant-mode approvals allow matching requests without another
-              decision until the grant expires or is revoked.
+              {translateApp(
+                "Grant-mode approvals allow matching requests without another decision until the grant expires or is revoked.",
+              )}
             </Text>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Refresh active grants"
+              accessibilityLabel={translateApp("Refresh active grants")}
               accessibilityState={{
                 disabled: isManualRefreshDisabled,
                 busy: isRefreshing,
@@ -640,12 +651,13 @@ export function ActivityScreen() {
               approvalsQuery.isError ? (
                 <View accessibilityRole="alert" style={styles.queryNotice}>
                   <Text style={styles.subtitle}>
-                    Could not load active grants. Displayed grants may be out of
-                    date.
+                    {translateApp(
+                      "Could not load active grants. Displayed grants may be out of date.",
+                    )}
                   </Text>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel="Retry active grants"
+                    accessibilityLabel={translateApp("Retry active grants")}
                     accessibilityState={{ disabled: !isConnected }}
                     disabled={!isConnected}
                     onPress={() => {
@@ -653,7 +665,7 @@ export function ActivityScreen() {
                     }}
                     style={[styles.textButton, !isConnected && styles.disabled]}
                   >
-                    <Text style={styles.linkText}>Retry</Text>
+                    <Text style={styles.linkText}>{translateApp("Retry")}</Text>
                   </Pressable>
                 </View>
               ) : null
@@ -662,20 +674,23 @@ export function ActivityScreen() {
               !isConnected ? (
                 <View style={styles.emptyCell}>
                   <Text style={styles.emptyDescription}>
-                    Connect to check active grants.
+                    {translateApp("Connect to check active grants.")}
                   </Text>
                 </View>
               ) : approvalsQuery.isPending ? (
                 <SkeletonRows
                   rows={3}
-                  accessibilityLabel="Loading active grants"
+                  accessibilityLabel={translateApp("Loading active grants")}
                 />
               ) : !approvalsQuery.isError ? (
                 <View style={styles.emptyCell}>
-                  <Text style={styles.emptyTitle}>No active grants</Text>
+                  <Text style={styles.emptyTitle}>
+                    {translateApp("No active grants")}
+                  </Text>
                   <Text style={styles.emptyDescription}>
-                    Reusable grants appear after you approve a grant-mode
-                    request.
+                    {translateApp(
+                      "Reusable grants appear after you approve a grant-mode request.",
+                    )}
                   </Text>
                 </View>
               ) : null
@@ -704,6 +719,7 @@ export function ActivityScreen() {
                 tintColor={colors.primary}
               />
             }
+            {...railIndicator}
           />
         </>
       )}

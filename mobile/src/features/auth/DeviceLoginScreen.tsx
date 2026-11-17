@@ -1,4 +1,6 @@
+import { Translation } from "../../i18n/Translation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { LoginRequestTerminalView } from "./LoginRequestTerminalView";
 import { useUncertainLoginPreview } from "./useUncertainLoginPreview";
 import { useLoginRequestResume } from "./useLoginRequestResume";
@@ -82,8 +84,8 @@ const ACTION_THROTTLE_MS = 750;
 function formatTimestamp(value: string): string {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime())
-    ? "Unknown time"
-    : parsed.toLocaleString();
+    ? translateApp("Unknown time")
+    : parsed.toLocaleString(appLocale());
 }
 
 function formatRemaining(seconds: number): string {
@@ -106,6 +108,7 @@ export function DetailRow({
   tone?: "default" | "warning" | "danger";
   styles: ReturnType<typeof createDeviceLoginStyles>;
 }) {
+  useAppLanguage();
   const toneStyle =
     tone === "warning"
       ? styles.detailValueWarning
@@ -129,7 +132,7 @@ export function DetailRow({
 }
 
 export function formatLocation(preview: AuthDevicePreview): string {
-  if (preview.client_ip_attribution !== "verified") return "Not available";
+  if (preview.client_ip_attribution !== "verified") return translateApp("Not available");
   const locality = [preview.client_city, preview.client_region]
     .filter((value): value is string => Boolean(value))
     .join(", ");
@@ -142,12 +145,14 @@ export function formatLocation(preview: AuthDevicePreview): string {
   }
   if (place) return place;
   return preview.client_ip_timezone
-    ? `IP timezone: ${preview.client_ip_timezone}`
-    : "Not available";
+    ? translateApp("IP timezone: {{clientIpTimezone}}", {
+        clientIpTimezone: preview.client_ip_timezone,
+      })
+    : translateApp("Not available");
 }
 
 export function formatNetwork(preview: AuthDevicePreview): string {
-  if (preview.client_ip_attribution !== "verified") return "Not available";
+  if (preview.client_ip_attribution !== "verified") return translateApp("Not available");
   const relation =
     preview.network_relation ??
     (preview.same_ip_as_viewer === true
@@ -155,11 +160,11 @@ export function formatNetwork(preview: AuthDevicePreview): string {
       : preview.same_ip_as_viewer === false
         ? "different_ip"
         : null);
-  if (relation === "same_ip") return "Same IP as this phone";
-  if (relation === "same_network") return "Same network as this phone";
-  if (relation === "different_network") return "Different network";
-  if (relation === "different_ip") return "Different IP";
-  return "Not available";
+  if (relation === "same_ip") return translateApp("Same IP as this phone");
+  if (relation === "same_network") return translateApp("Same network as this phone");
+  if (relation === "different_network") return translateApp("Different network");
+  if (relation === "different_ip") return translateApp("Different IP");
+  return translateApp("Not available");
 }
 
 function formatScreen(preview: AuthDevicePreview): string {
@@ -167,20 +172,23 @@ function formatScreen(preview: AuthDevicePreview): string {
     preview.client_screen_width === null ||
     preview.client_screen_height === null
   ) {
-    return "Not reported";
+    return translateApp("Not reported");
   }
-  const ratio =
+  return translateApp(
     preview.client_device_pixel_ratio === null
-      ? ""
-      : ` at ${preview.client_device_pixel_ratio}x`;
-  return `${preview.client_screen_width} x ${preview.client_screen_height} CSS px${ratio}`;
+      ? "{{width}} x {{height}} CSS px"
+      : "{{width}} x {{height}} CSS px at {{scale}}x",
+    { width: preview.client_screen_width, height: preview.client_screen_height, scale: preview.client_device_pixel_ratio ?? 1 },
+  );
 }
 
 export function formatDevice(preview: AuthDevicePreview): string {
   if (preview.client_label && preview.client_model) {
     return `${preview.client_label} · ${preview.client_model}`;
   }
-  return preview.client_label ?? preview.client_model ?? "Not provided";
+  return (
+    preview.client_label ?? preview.client_model ?? translateApp("Not provided")
+  );
 }
 
 function timezoneRow(
@@ -188,19 +196,23 @@ function timezoneRow(
   localTimezone: string | null,
 ): { value: string; anomalous: boolean } {
   if (!preview.client_timezone)
-    return { value: "Not reported", anomalous: false };
+    return { value: translateApp("Not reported"), anomalous: false };
   const differsFromPhone =
     compareDeviceLoginTimezones(preview.client_timezone, localTimezone) ===
     "different";
   const differences = [
-    differsFromPhone ? "this phone" : null,
-    preview.client_timezone_matches_ip === false ? "IP location" : null,
+    differsFromPhone ? translateApp("this phone") : null,
+    preview.client_timezone_matches_ip === false ? translateApp("IP location")
+      : null,
   ].filter((value): value is string => value !== null);
   return {
     value:
       differences.length === 0
         ? preview.client_timezone
-        : `${preview.client_timezone} · differs from ${differences.join(" and ")}`,
+        : translateApp("{{clientTimezone}} · differs from {{details}}", {
+            clientTimezone: preview.client_timezone,
+            details: differences.join(" and "),
+          }),
     anomalous: differences.length > 0,
   };
 }
@@ -210,8 +222,8 @@ export function requesterValue(preview: AuthDevicePreview): string {
     return preview.client_ip;
   }
   return preview.client_ip_attribution === "unverified"
-    ? "Not verified"
-    : "IP unavailable on this deployment";
+    ? translateApp("Not verified")
+    : translateApp("IP unavailable on this deployment");
 }
 
 function requestedAtValue(preview: AuthDevicePreview, nowMs: number): string {
@@ -268,7 +280,7 @@ function ManualCodeModal({
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Close manual code entry"
+          accessibilityLabel={translateApp("Close manual code entry")}
           style={styles.modalBackdrop}
           onPress={onDismiss}
         />
@@ -280,7 +292,9 @@ function ManualCodeModal({
         >
           <View style={styles.modalHeader}>
             <View style={styles.modalHeaderCopy}>
-              <Text style={styles.modalTitle}>Enter login code</Text>
+              <Text style={styles.modalTitle}>
+                {translateApp("Enter login code")}
+              </Text>
               <Text style={styles.modalDescription}>
                 {t(
                   "Enter a device login or Agent Key login code from the requesting device.",
@@ -289,7 +303,7 @@ function ManualCodeModal({
             </View>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Close manual code entry"
+              accessibilityLabel={translateApp("Close manual code entry")}
               disabled={isPending}
               onPress={onDismiss}
               style={({ pressed }) => [
@@ -303,12 +317,14 @@ function ManualCodeModal({
           </View>
 
           <View style={styles.modalField}>
-            <Text style={styles.inputLabel}>Login code</Text>
+            <Text style={styles.inputLabel}>{translateApp("Login code")}</Text>
             <AuthTextInput
               ref={inputRef}
               invalid={!!errorMessage}
-              accessibilityLabel="Login code"
-              accessibilityHint="Eight-character code shown on the requesting device"
+              accessibilityLabel={translateApp("Login code")}
+              accessibilityHint={translateApp(
+                "Eight-character code shown on the requesting device",
+              )}
               value={value}
               onChangeText={onChange}
               onSubmitEditing={onSubmit}
@@ -319,7 +335,7 @@ function ManualCodeModal({
               maxLength={11}
               returnKeyType="done"
               selectionColor={colors.primary}
-              placeholder="ABCD-EFGH"
+              placeholder={"ABCD-EFGH"}
               placeholderTextColor={colors.textTertiary}
               selectTextOnFocus
               style={[
@@ -336,7 +352,9 @@ function ManualCodeModal({
 
           <AuthSubmitButton
             loading={isPending}
-            label={isPending ? "Checking..." : "Continue"}
+            label={
+              isPending ? translateApp("Checking...") : translateApp("Continue")
+            }
             disabled={isPending || coolingDown || !normalizedCode}
             onPress={onSubmit}
           />
@@ -401,10 +419,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   });
   const localTimezone = useMemo(() => {
     try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+      return (
+        Intl.DateTimeFormat(appLocale()).resolvedOptions().timeZone || null
+      );
     } catch {
       return null;
     }
+    // The device's time zone does not depend on the display language.
   }, []);
 
   useLayoutEffect(() => {
@@ -801,15 +822,15 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     : null;
   const reportedTimezone = preview
     ? timezoneRow(preview, localTimezone)
-    : { value: "Not reported", anomalous: false };
+    : { value: translateApp("Not reported"), anomalous: false };
   const clientKindLabel = preview
     ? {
-        cli: "CLI client",
-        browser: "Browser client",
-        mobile: "Mobile client",
-        unknown: "Not identified",
+        cli: translateApp("CLI client"),
+        browser: translateApp("Browser client"),
+        mobile: translateApp("Mobile client"),
+        unknown: translateApp("Not identified"),
       }[preview.client_kind]
-    : "Not identified";
+    : translateApp("Not identified");
   const valueTones = resolveDeviceLoginValueTones(
     originValue !== null,
     reportedTimezone.anomalous,
@@ -865,7 +886,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             <View style={styles.screenHeader}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Back"
+                accessibilityLabel={translateApp("Back")}
                 hitSlop={4}
                 onPress={handleBack}
                 style={({ pressed }) => [
@@ -875,7 +896,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               >
                 <ChevronLeft size={24} color={colors.textPrimary} />
               </Pressable>
-              <Text style={styles.title}>Approve device login</Text>
+              <Text style={styles.title}>
+                {translateApp("Approve device login")}
+              </Text>
             </View>
           )}
           <Text style={styles.subtitle}>
@@ -887,7 +910,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           </Text>
           {!preview && (
             <PrimaryButton
-              label="Agent Key login"
+              label={translateApp("Agent Key login")}
               kind="ghost"
               onPress={() => navigation.navigate("AgentKeyLogin")}
             />
@@ -895,10 +918,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
           {!preview ? (
             <View style={styles.inputSection}>
-              <Text style={styles.inputLabel}>Login code</Text>
+              <Text style={styles.inputLabel}>
+                {translateApp("Login code")}
+              </Text>
               <AuthTextInput
                 invalid={!!errorMessage}
-                accessibilityLabel="Login code"
+                accessibilityLabel={translateApp("Login code")}
                 value={userCode}
                 onChangeText={(value) => {
                   setUserCode(formatAuthDeviceUserCode(value));
@@ -914,7 +939,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   void runPreview(userCode);
                 }}
                 selectionColor={colors.primary}
-                placeholder="ABCD-EFGH"
+                placeholder={"ABCD-EFGH"}
                 placeholderTextColor={colors.textTertiary}
                 style={[
                   styles.codeInput,
@@ -928,7 +953,11 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               ) : null}
               <AuthSubmitButton
                 loading={isPreviewing}
-                label={isPreviewing ? "Checking request..." : "Continue"}
+                label={
+                  isPreviewing
+                    ? translateApp("Checking request...")
+                    : translateApp("Continue")
+                }
                 onPress={() => void runPreview(userCode)}
                 disabled={
                   isPending ||
@@ -938,7 +967,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Scan login QR code"
+                accessibilityLabel={translateApp("Scan login QR code")}
                 disabled={isPending}
                 onPress={() => setIsScanning(true)}
                 style={({ pressed }) => [
@@ -948,7 +977,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 ]}
               >
                 <ScanQrCode size={20} color={colors.primary} />
-                <Text style={styles.scanButtonText}>Scan QR code</Text>
+                <Text style={styles.scanButtonText}>
+                  {translateApp("Scan QR code")}
+                </Text>
               </Pressable>
             </View>
           ) : (
@@ -956,7 +987,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               <View style={styles.detailPanel}>
                 {loginCode ? (
                   <DetailRow
-                    label="Login code"
+                    label={translateApp("Login code")}
                     value={loginCode}
                     mono
                     styles={styles}
@@ -971,96 +1002,103 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 */}
                 {originValue ? (
                   <DetailRow
-                    label="Started from"
+                    label={translateApp("Started from")}
                     value={originValue}
                     tone={valueTones.origin}
                     styles={styles}
                   />
                 ) : null}
                 <DetailRow
-                  label="Requester"
+                  label={translateApp("Requester")}
                   value={requesterValue(preview)}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Location"
+                  label={translateApp("Location")}
                   value={formatLocation(preview)}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Network"
+                  label={translateApp("Network")}
                   value={formatNetwork(preview)}
                   styles={styles}
                 />
                 {preview.client_ip_attribution === "unverified" &&
                 preview.client_ip ? (
                   <DetailRow
-                    label="Reported IP"
-                    value={`${preview.client_ip} · unverified`}
+                    label={translateApp("Reported IP")}
+                    value={translateApp("{{clientIp}} · unverified", {
+                      clientIp: preview.client_ip,
+                    })}
                     mono
                     styles={styles}
                   />
                 ) : null}
                 <DetailRow
-                  label="Requested"
+                  label={translateApp("Requested")}
                   value={requestedAtValue(preview, clockMs)}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Reported device"
+                  label={translateApp("Reported device")}
                   value={formatDevice(preview)}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Reported client"
+                  label={translateApp("Reported client")}
                   value={preview.client_app ?? clientKindLabel}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Platform"
-                  value={preview.client_platform ?? "Not identified"}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Form factor"
-                  value={
-                    preview.client_form_factor
-                      ? `${preview.client_form_factor[0]?.toUpperCase() ?? ""}${preview.client_form_factor.slice(1)}`
-                      : "Not reported"
+                  label={translateApp("Platform")}
+                  value={preview.client_platform ?? translateApp("Not identified")
                   }
                   styles={styles}
                 />
                 <DetailRow
-                  label="Timezone"
+                  label={translateApp("Form factor")}
+                  value={
+                    preview.client_form_factor
+                      ? `${preview.client_form_factor[0]?.toUpperCase() ?? ""}${preview.client_form_factor.slice(1)}`
+                      : translateApp("Not reported")
+                  }
+                  styles={styles}
+                />
+                <DetailRow
+                  label={translateApp("Timezone")}
                   value={reportedTimezone.value}
                   tone={valueTones.timezone}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Locale"
-                  value={preview.client_locale ?? "Not reported"}
+                  label={translateApp("Locale")}
+                  value={preview.client_locale ?? translateApp("Not reported")}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Screen"
+                  label={translateApp("Screen")}
                   value={formatScreen(preview)}
                   styles={styles}
                 />
                 <DetailRow
-                  label="Processor"
+                  label={translateApp("Processor")}
                   value={
                     preview.client_hardware_concurrency === null
-                      ? "Not reported"
-                      : `${preview.client_hardware_concurrency} logical processors`
+                      ? translateApp("Not reported")
+                      : translateApp("{{clientHardwareConcurrency}} logical processors", {
+                          clientHardwareConcurrency: preview.client_hardware_concurrency,
+                        })
                   }
                   styles={styles}
                 />
                 <DetailRow
-                  label="Memory"
+                  label={translateApp("Memory")}
                   value={
                     preview.client_device_memory === null
-                      ? "Not reported"
-                      : `${preview.client_device_memory} GB`
+                      ? translateApp("Not reported")
+                      : translateApp("{{gigabytes}} GB", {
+                          gigabytes: preview.client_device_memory,
+                        })
                   }
                   styles={styles}
                 />
@@ -1068,8 +1106,8 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   accessibilityRole="button"
                   accessibilityLabel={
                     rawUserAgentExpanded
-                      ? "Hide raw user agent"
-                      : "Show raw user agent"
+                      ? translateApp("Hide raw user agent")
+                      : translateApp("Show raw user agent")
                   }
                   onPress={() =>
                     setRawUserAgentExpanded((expanded) => !expanded)
@@ -1079,7 +1117,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.rawUserAgentLabel}>Raw user agent</Text>
+                  <Text style={styles.rawUserAgentLabel}>
+                    {translateApp("Raw user agent")}
+                  </Text>
                   {rawUserAgentExpanded ? (
                     <ChevronUp size={16} color={colors.textMuted} />
                   ) : (
@@ -1088,16 +1128,16 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 </Pressable>
                 {rawUserAgentExpanded ? (
                   <Text style={styles.rawUserAgentValue}>
-                    {preview.client_user_agent ?? "Not provided"}
+                    {preview.client_user_agent ?? translateApp("Not provided")}
                   </Text>
                 ) : null}
                 <DetailRow
-                  label="Expires in"
+                  label={translateApp("Expires in")}
                   value={
                     waitingForDecision
                       ? t("Waiting for NyxID…")
                       : isExpired
-                        ? "Expired"
+                        ? translateApp("Expired")
                         : formatRemaining(secondsRemaining)
                   }
                   tone={waitingForDecision ? "default" : valueTones.expiry}
@@ -1111,14 +1151,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   color={colors.textMuted}
                   style={styles.cautionIcon}
                 />
-                <Text style={styles.cautionText}>
-                  {"Only approve if you started this sign-in. "}
-                  {
-                    "Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "
-                  }
-                  <Text style={styles.cautionDanger}>
-                    If anything looks unfamiliar, reject it.
-                  </Text>
+                <Text style={styles.cautionText}><Translation message="Only approve if you started this sign-in. Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. {{warning}}" values={{ warning: <Text style={styles.cautionDanger}>
+                    {translateApp("If anything looks unfamiliar, reject it.")}
+                  </Text> }} />
                 </Text>
               </View>
 
@@ -1126,7 +1161,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 <View style={{ gap: spacing.md }}>
                   {preview.supports_grant_choice && (
                     <PrimaryButton
-                      label="Restricted Agent Key"
+                      label={translateApp("Restricted Agent Key")}
                       kind="ghost"
                       disabled={isPending || isExpired}
                       onPress={() =>
@@ -1138,15 +1173,15 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                     />
                   )}
                   <Text style={styles.cautionText}>
-                    A full account session grants this machine your account,
-                    service, credential, and organization access. A restricted
-                    Agent Key grants only the permissions and resources you
-                    confirm next.
+                    {translateApp(
+                      "A full account session grants this machine your account, service, credential, and organization access. A restricted Agent Key grants only the permissions and resources you confirm next.",
+                    )}
                   </Text>
                   <View style={styles.decisionButton}>
                     <PrimaryButton
                       label={
-                        decisionPending === "deny" ? "Rejecting..." : "Reject"
+                        decisionPending === "deny" ? translateApp("Rejecting...")
+                          : translateApp("Reject")
                       }
                       kind="danger"
                       disabled={isPending || isExpired}
@@ -1158,8 +1193,8 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                       loading={decisionPending === "approve"}
                       label={
                         decisionPending === "approve"
-                          ? "Approving..."
-                          : "Approve full account session"
+                          ? translateApp("Approving...")
+                          : translateApp("Approve full account session")
                       }
                       disabled={isPending || isExpired}
                       onPress={() => void handleDecision("approve")}
@@ -1169,10 +1204,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               ) : (
                 <View style={styles.signInNotice}>
                   <Text style={styles.signInText}>
-                    Sign in to approve or reject this request.
+                    {translateApp("Sign in to approve or reject this request.")}
                   </Text>
                   <AuthSubmitButton
-                    label="Sign in"
+                    label={translateApp("Sign in")}
                     onPress={() => navigation.navigate("Auth")}
                   />
                 </View>

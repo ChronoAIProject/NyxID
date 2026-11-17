@@ -38,6 +38,7 @@ function setup(
   deferAnimation = false,
   autoLayout = true,
   motionReady = true,
+  insetRight = 0,
 ) {
   let preference: boolean | undefined = motionReady ? reduced : undefined;
   let handlers!: PanHandlers;
@@ -160,7 +161,7 @@ function setup(
         top: insetTop,
         bottom: 34,
         left: 0,
-        right: 0,
+        right: insetRight,
       }),
     },
     "../../theme/ThemeContext": {
@@ -265,6 +266,67 @@ function setup(
     },
   };
 }
+
+test("folded Duo sheets end before the quick rail's column (no cluster under them), and a wider window centers them", () => {
+  const env = setup(
+    false,
+    { width: 466, height: 678 },
+    0,
+    false,
+    true,
+    true,
+    83,
+  );
+  const bodyHost = () =>
+    env.all().find((node) => node.props.children === env.child)!;
+  const band = () => ({
+    ...env.all().find((node) => node.props.value?.paddingBottom !== undefined)!
+      .props.value,
+  });
+  // The panel ends 8pt before the rail's column (466 - 84 = 382pt wide,
+  // from the leading edge), so the clock and the rail stay beside it and
+  // nothing in the sheet sits under the cluster: no header band.
+  const panel = env.all().find((node) => node.props.accessibilityLabel === "Workspace drawer")!;
+  assert.equal(Object.assign({}, ...[panel.props.style].flat()).width, 382);
+  const host = env.all().find((node) => node.props.testID === "workspace-sheet-viewport")!;
+  assert.equal(Object.assign({}, ...[host.props.style].flat()).alignItems, "flex-start");
+  assert.deepEqual(band(), { paddingTop: 0, paddingBottom: 0 });
+  assert.ok(
+    ![bodyHost().props.style].flat().some((style: any) => style?.paddingTop),
+    "no band above the sheet's header",
+  );
+  assert.ok(env.all().some((node) => node.props.value === false), "no corner sensor inside");
+  // The window behind the sheet shows the quick rail (measured with the
+  // window's own insets): Settings offers Quick access. It is the boolean
+  // provider wrapping the (rewritten) corner-sensor one.
+  const railWindow = () => {
+    const [outer, inner] = env
+      .all()
+      .filter((n) => typeof n.type === "object" && typeof n.props.value === "boolean");
+    assert.equal(outer!.props.children, inner, "the rail window wraps the corner sensor");
+    return outer!.props.value;
+  };
+  assert.equal(railWindow(), true);
+  assert.equal(
+    env.all().find((node) => node.props.onMoveShouldSetPanResponder)!.props
+      .style.height,
+    44,
+  );
+  env.rotate(951, 669, 0);
+  assert.deepEqual(band(), { paddingTop: 0, paddingBottom: 0 });
+  assert.equal(bodyHost().props.children, env.child);
+  assert.ok(env.all().some((node) => node.props.value === false));
+  assert.equal(railWindow(), true, "the unfolded Duo shows the rail beside its centered sheet");
+  env.harness.unmount();
+  // An ordinary phone's window has no rail.
+  const phone = setup(false, { width: 402, height: 874 }, 0, false, true, true, 0);
+  assert.equal(
+    phone.all().filter((n) => typeof n.type === "object" && typeof n.props.value === "boolean")[0]!
+      .props.value,
+    false,
+  );
+  phone.harness.unmount();
+});
 
 test("the handle claims a deliberate downward drag without claiming taps, horizontal, or upward movement", () => {
   const env = setup();

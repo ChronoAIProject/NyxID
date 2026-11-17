@@ -708,6 +708,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/me/preferences/service-views",
             put(handlers::users::save_service_views),
         )
+        .route(
+            "/me/quick-access",
+            get(handlers::users::get_quick_access)
+                .put(handlers::users::save_quick_access)
+                .delete(handlers::users::reset_quick_access),
+        )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
         // cannot distinguish "resource absent" from "route absent", so an

@@ -5,9 +5,10 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { ApiError } from "./ApiError";
 import * as responseError from "./responseError";
-import { createSessionRefresh } from "../auth/sessionRefresh";
+import { createSessionRefresh, isRefreshRefusal } from "../auth/sessionRefresh";
 import { executeAuthenticatedRequest } from "./authenticatedTransport";
 import { guardedJsonTransport } from "./guardedTransport";
+import { translateApp } from "../../i18n/appTranslation";
 type ApiUrlModule = typeof import("./baseUrl");
 type HttpModule = typeof import("./http");
 type MobileApiModule = typeof import("./mobileApi");
@@ -25,8 +26,9 @@ export function loadTestModule<T>(filename: string, context: Record<string, unkn
 export function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fetch, loadModule = loadTestModule) {
   let session = { accessToken: "access-before-refresh", refreshToken: "refresh-test", sessionGeneration: 1 };
   const dependencies: Record<string, unknown> = {
+    "../../i18n/appTranslation": { translateApp },
     "./connectionState": { assistantConnection: { observe: (send: () => Promise<unknown>) => send() } },
-    "../auth/sessionRefresh": { createSessionRefresh },
+    "../auth/sessionRefresh": { createSessionRefresh, isRefreshRefusal },
     "expo/fetch": { fetch },
     "./authenticatedTransport": { executeAuthenticatedRequest },
     "./approvalAdapter": {},

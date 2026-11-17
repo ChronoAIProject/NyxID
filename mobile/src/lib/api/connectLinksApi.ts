@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import {
   connectLinkPreviewSchema,
   connectLinkStatusResponseSchema,
@@ -62,7 +63,9 @@ export const connectLinksApi = {
     );
     if (result.id !== id)
       throw new Error(
-        "The server returned a different connection request. Please reload.",
+        translateApp(
+          "The server returned a different connection request. Please reload.",
+        ),
       );
     return result;
   },

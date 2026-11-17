@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import type { VoiceControlSocket } from "./AssistantVoiceClient";
 import {
   assistantVoiceStreamPath,
@@ -25,7 +26,7 @@ export function createVoiceSocketFactory(input: {
   return async (path: string, signal: AbortSignal) => {
     const current = () => {
       if (signal.aborted || input.getEpoch() !== input.epoch)
-        throw Object.assign(new Error("Voice connection cancelled."), {
+        throw Object.assign(new Error(translateApp("Voice connection cancelled.")), {
           name: "AbortError",
         });
     };
@@ -38,7 +39,7 @@ export function createVoiceSocketFactory(input: {
       match?.[1] &&
       match[2] &&
       assistantVoiceStreamPath(match[1], match[2]) === path;
-    if (!validStream) throw new Error("Invalid voice connection.");
+    if (!validStream) throw new Error(translateApp("Invalid voice connection."));
     const base = new URL(input.getApiBaseUrl());
     if (
       !["https:", "http:"].includes(base.protocol) ||
@@ -47,12 +48,14 @@ export function createVoiceSocketFactory(input: {
       base.search ||
       base.hash
     )
-      throw new Error("Voice requires a configured NyxID server.");
+      throw new Error(
+        translateApp("Voice requires a configured NyxID server."),
+      );
     await input.refresh();
     current();
     const session = await input.loadSession();
     current();
-    if (!session?.accessToken) throw new Error("Sign in again to use voice.");
+    if (!session?.accessToken) throw new Error(translateApp("Sign in again to use voice."));
     const url = new URL(
       `${base.pathname.replace(/\/+$/, "")}${path}`,
       base.origin,

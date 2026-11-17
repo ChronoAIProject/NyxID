@@ -365,7 +365,7 @@ test("automatic credentials cannot enter the mobile management picker or counts"
   });
   try {
     assert.equal(env.added().length, 1);
-    assert.match(env.texts(), /ADDED · 1/);
+    assert.match(env.texts(), /Added · 1/);
     assert.deepEqual(Array.from(env.added()[0].manageKeyIds), [dnsPersonal.id]);
     assert.equal(env.added()[0].disabled, true);
     env.connector("service:api-cloudflare");
@@ -397,7 +397,16 @@ test("Connectors is one list: Added first, then Discover with only available ser
     );
     assert.deepEqual(names(env.added()), ["GitHub", "Cloudflare"]);
     assert.deepEqual(names(env.discover()), ["Slack"]);
-    assert.match(env.texts(), /ADDED · 2[\s\S]*DISCOVER · 1/);
+    assert.match(env.texts(), /Added · 2[\s\S]*Discover · 1/);
+    for (const title of ["Added · 2", "Discover · 1"]) {
+      const header = env.all().find((node) => node.props.accessibilityRole === "header" && text(node) === title);
+      assert.ok(header);
+      const style = Object.assign({}, ...[header.props.style].flat(Infinity));
+      assert.equal(style.textTransform, "uppercase");
+      assert.equal(style.fontSize, 12);
+      assert.equal(style.fontWeight, "500");
+      assert.equal(style.letterSpacing, 1.5);
+    }
     assert.deepEqual(
       env
         .all()

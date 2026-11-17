@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useState } from "react";
 import { Alert, Switch } from "react-native";
@@ -77,8 +78,9 @@ export function PrivacySettingsScreen(
     },
     onError: () =>
       setToast({
-        message:
+        message: translateApp(
           "Could not save account analytics permission. This device remains off; retry to withdraw across devices.",
+        ),
         kind: "error",
       }),
   });
@@ -191,7 +193,7 @@ export function PrivacySettingsScreen(
   const accountDetail = analyticsPermission.isFetching
     ? undefined
     : analyticsPermission.isError
-      ? "Permission unavailable"
+      ? translateApp("Permission unavailable")
       : undefined;
   return (
     <>

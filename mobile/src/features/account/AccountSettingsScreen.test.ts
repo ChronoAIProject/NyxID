@@ -10,11 +10,17 @@ const setup = (params?: Record<string, unknown>) =>
 
 test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hold no controls", () => {
   const env = setup();
-  const groups = env
+  const headings = env
     .all()
-    .filter((node) => node.props.accessibilityRole === "header")
-    .map((node) => [node.props.children].flat(Infinity).join(""));
-  assert.deepEqual(groups, ["ACCOUNT", "PREFERENCES", "SUPPORT"]);
+    .filter((node) => node.props.accessibilityRole === "header");
+  for (const heading of headings) {
+    assert.equal(style(heading).textTransform, "uppercase");
+    assert.equal(style(heading).fontSize, 12);
+    assert.equal(style(heading).fontWeight, "500");
+    assert.equal(style(heading).letterSpacing, 1.5);
+  }
+  assert.deepEqual(headings.map((node) => String(node.props.children).toUpperCase()), ["ACCOUNT", "PREFERENCES", "SUPPORT"]);
+  assert.equal(headings[0]!.props.children, "Account", "visual case does not mutate translated copy");
   const routes = [
     ["Account & security", "AccountSecurity"],
     ["Usage & credits", "UsageCredits"],
@@ -231,4 +237,25 @@ test("tablet account identity uses its measured card width when Dynamic Type out
   env.resize(1194, 1);
   assert.equal(style(identity()).flexDirection, "row");
   env.harness.unmount();
+});
+
+test("Quick access (the Duo rail's list) is offered only where the window shows the rail", () => {
+  const phone = setupSettingsScreen("./AccountSettingsScreen.tsx", "AccountSettingsScreen");
+  // Ordinary iPhones and iPads have no rail, so no Quick access row.
+  assert.throws(() => phone.row("Quick access"));
+  phone.harness.unmount();
+  const duo = setupSettingsScreen("./AccountSettingsScreen.tsx", "AccountSettingsScreen", {
+    railWindow: true,
+  });
+  const row = duo.row("Quick access");
+  assert.equal(row.props.accessibilityRole, "button");
+  // Under Preferences, right after Language.
+  const labels = duo
+    .all()
+    .filter((node) => node.type === "Pressable" && typeof node.props.accessibilityHint === "string")
+    .map((node) => node.props.accessibilityHint);
+  assert.ok(labels.indexOf("Opens Quick access") === labels.indexOf("Opens Language") + 1);
+  row.props.onPress();
+  assert.equal(JSON.stringify(duo.pushes.at(-1)), '["QuickAccessSettings"]');
+  duo.harness.unmount();
 });

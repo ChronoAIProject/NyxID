@@ -82,6 +82,7 @@ export function setupSettingsScreen(
     accountPolicy,
     devicePolicy,
     deviceEnabled = false,
+    railWindow = false,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
@@ -99,6 +100,8 @@ export function setupSettingsScreen(
     accountPolicy?: string;
     devicePolicy?: 1|2;
     deviceEnabled?: boolean;
+    /** The window behind the Settings sheet shows the Duo's quick rail. */
+    railWindow?: boolean;
   } = {},
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
@@ -135,6 +138,9 @@ export function setupSettingsScreen(
   );
   const pushPreferenceMutations: unknown[] = [];
   const harness = hookHarness<Element>({
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceRailWindowContext: { value: railWindow },
+    },
     "../../i18n/LanguageProvider": {
       useAppLanguage: () => ({
         language,
@@ -353,10 +359,20 @@ export function setupSettingsScreen(
     all().find((node) => [node.props.children].flat(Infinity).includes(child))!;
   /** The pressable or plain container of a settings row, found by its label. */
   const row = (label: string) => {
-    let node: Element = text(label);
-    for (let depth = 0; depth < 6; depth += 1) {
-      node = parent(node);
-      if (style(node).minHeight === 52) return node;
+    // A group may share its row's label ("Crash diagnostics"): use the first
+    // label that sits inside a row.
+    text(label);
+    const labels = all().filter(
+      (item) =>
+        item.type === "Text" &&
+        [item.props.children].flat(Infinity).join("") === label,
+    );
+    for (const found of labels) {
+      let node: Element | undefined = found;
+      for (let depth = 0; depth < 6 && node; depth += 1) {
+        node = parent(node);
+        if (node && style(node).minHeight === 52) return node;
+      }
     }
     assert.fail(`no settings row for ${label}`);
   };

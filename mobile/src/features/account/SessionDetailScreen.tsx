@@ -1,3 +1,4 @@
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Alert } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -18,8 +19,8 @@ import { sessionDeviceLabel } from "./sessionDevice";
 export function formatSessionDate(value: string): string {
   const date = new Date(value);
   return Number.isFinite(date.getTime())
-    ? date.toLocaleString()
-    : "Unavailable";
+    ? date.toLocaleString(appLocale())
+    : translateApp("Unavailable");
 }
 
 /** Settings › Account & security › one signed-in session and its sign-out. */
@@ -80,7 +81,8 @@ export function SessionDetailScreen({
           value={sessionDeviceLabel(session.user_agent)}
         />
         {current ? (
-          <SettingsRow label={t("Status")} value="This session" />
+          <SettingsRow label={t("Status")} value={translateApp("This session")}
+          />
         ) : null}
         <SettingsRow
           label={t("Signed in")}
@@ -92,12 +94,13 @@ export function SessionDetailScreen({
         />
         <SettingsRow
           label={t("Network")}
-          value={session.ip_address || "Unavailable"}
+          value={session.ip_address || translateApp("Unavailable")}
         />
       </SettingsGroup>
       <SettingsGroup inset={false} title={t("Client")}>
         <SettingsRow
-          label={session.user_agent || "Device details unavailable"}
+          label={session.user_agent || translateApp("Device details unavailable")
+          }
         />
       </SettingsGroup>
       <SettingsGroup inset={false}>
@@ -114,14 +117,19 @@ export function SessionDetailScreen({
           disabled={!isConnected || revoke.isPending}
           onPress={() =>
             Alert.alert(
-              current ? "Sign out of this session?" : "Sign out this session?",
+              current ? translateApp("Sign out of this session?")
+                : translateApp("Sign out this session?"),
               current
-                ? "You will return to the sign-in screen on this device."
-                : "This session will lose access to your account. You can sign in again later.",
+                ? translateApp(
+                    "You will return to the sign-in screen on this device.",
+                  )
+                : translateApp(
+                    "This session will lose access to your account. You can sign in again later.",
+                  ),
               [
-                { text: "Cancel", style: "cancel" },
+                { text: translateApp("Cancel"), style: "cancel" },
                 {
-                  text: "Sign out",
+                  text: translateApp("Sign out"),
                   style: "destructive",
                   onPress: () => revoke.mutate(session.id),
                 },

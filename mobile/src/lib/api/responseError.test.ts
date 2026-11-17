@@ -9,10 +9,39 @@ import {
   CONNECTION_UNAVAILABLE,
 } from "./responseError";
 import { executeAuthenticatedRequest } from "./authenticatedTransport";
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 
 const headers = new Headers({
   "x-request-id": "request-2275",
   "X-NyxID-Trace-Id": "trace-2275",
+});
+
+test("shared network errors follow the app language while server text and diagnostics remain verbatim", () => {
+  try {
+    for (const language of ["zh-CN", "zh-TW"] as const) {
+      setAppTranslationLanguage(language);
+      const unavailable = buildApiError(null, 503, headers);
+      assert.notEqual(unavailable.message, TEMPORARILY_UNAVAILABLE);
+      assert.match(unavailable.message, /NyxID/);
+      assert.equal(unavailable.errorKey, "invalid_error_response");
+      assert.equal(unavailable.statusCode, 503);
+      assert.equal(unavailable.requestId, "request-2275");
+      for (const status of [0, 400, 401, 429, 503]) {
+        assert.match(buildApiError(null, status).message, /[\u4e00-\u9fff]/);
+      }
+      assert.notEqual(
+        networkApiError(new Error("private URL")).message,
+        CONNECTION_UNAVAILABLE,
+      );
+      const message = "Server-owned details / 用户输入";
+      assert.equal(
+        buildApiError({ error: "bad_request", message }, 400).message,
+        message,
+      );
+    }
+  } finally {
+    setAppTranslationLanguage("en");
+  }
 });
 for (const [status, payload] of [
   [

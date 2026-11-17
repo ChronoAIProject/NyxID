@@ -1,3 +1,4 @@
+import { translationTestMocks } from "../i18n/translationTestHarness";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { URL, fileURLToPath } from "node:url";
@@ -24,14 +25,18 @@ function loadCard(
     },
   }).outputText;
   const mocks: Record<string, unknown> = {
+    ...translationTestMocks,
     react: { useMemo: (create: () => unknown) => create() },
     "react/jsx-runtime": {
       jsx: (type: string, props: unknown) => ({ type, props }),
       jsxs: (type: string, props: unknown) => ({ type, props }),
     },
     "./ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    // Live text-size changes re-measure card text (DynamicTypeText).
+    "./DynamicTypeText": { DynamicTypeText: "Text" },
     "./GroupedCell": { GroupedCell: "GroupedCell" },
     "./settings/SettingsList": { SettingsRow: "SettingsRow" },
+    "./workspace/workspaceFloatingInset": { useFloatingTrailingInset: () => 0 },
     "../lib/env": { getFrontendUrl },
     "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
@@ -336,4 +341,13 @@ test("pending rows place Approve and Deny in one borderless split row below the 
     ["Approve", "Deny"],
   );
   assert.ok(all.every((e) => e.type !== "StatusBadge"));
+});
+
+test("approval and activity card text re-measures after a live text-size change", () => {
+  for (const name of ["HistoryCard", "ChallengeCard", "GrantCard"]) {
+    const source = readFileSync(new URL(`./${name}.tsx`, import.meta.url), "utf8");
+    assert.match(source, /DynamicTypeText as Text/, name);
+    assert.doesNotMatch(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/, name);
+    assert.doesNotMatch(source, /[^a-zA-Z]height: \d/, `${name}: no fixed row height`);
+  }
 });
