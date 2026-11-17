@@ -558,7 +558,7 @@ pub(crate) async fn update_prepared(
         }
     }
     let mut session = db.client().start_session().await?;
-    let (group, children, retired) = session.start_transaction()
+    let (group, _children, retired) = session.start_transaction()
         .read_concern(mongodb::options::ReadConcern::snapshot())
         .and_run((db.clone(), owner.to_owned(), before.clone(), name, members, ids, removed), |session, context| {
             let (db, owner, before, name, members, ids, removed) = &*context;
@@ -605,11 +605,6 @@ pub(crate) async fn update_prepared(
                 transactions::transaction_result(result)
             })
         }).await.map_err(transactions::map_transaction_error)?;
-    super::api_key_credential_service::audit_revocations(
-        db,
-        &children,
-        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-    );
     for (conversation_id, agent_id) in retired {
         let _ = super::audit_service::log_actor_event(
             db.clone(),

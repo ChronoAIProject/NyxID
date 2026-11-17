@@ -2337,7 +2337,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
     let db_owned = db.clone();
     let owner_owned = owner.to_owned();
     let agent_id = agent_id.to_owned();
-    let (agent, children) = session
+    let (agent, _children) = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db_owned;
@@ -2447,11 +2447,6 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    super::api_key_credential_service::audit_revocations(
-        db,
-        &children,
-        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-    );
     audit(
         db,
         owner,

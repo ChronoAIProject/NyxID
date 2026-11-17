@@ -13,6 +13,7 @@ pub mod analytics_consent_service;
 pub mod analytics_dispatch_service;
 pub mod anonymous_endpoint_service;
 pub mod api_docs_service;
+pub(crate) mod api_key_audit_service;
 pub mod api_key_credential_service;
 pub mod api_key_mutation_service;
 pub mod api_key_scope_service;
