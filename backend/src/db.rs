@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -56,6 +57,9 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
+
+#[cfg(test)]
+mod index_tests;
 
 /// Type alias for the MongoDB database handle used throughout the application.
 pub type DbHandle = Database;
@@ -116,6 +120,88 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
         ));
     }
     Ok(())
+}
+
+async fn ensure_named_index(
+    collection: &mongodb::Collection<Document>,
+    name: &str,
+    desired: IndexModel,
+) -> Result<(), mongodb::error::Error> {
+    ensure_named_index_with_retry(collection, name, desired, || async { Ok(()) }).await
+}
+
+/// Re-list after concurrent drop/build collisions, at most three attempts.
+/// The callback keeps coordination's backfill between removal and creation;
+/// a read or backfill error is never retried by this index-build policy.
+pub(crate) async fn ensure_named_index_with_retry<F, Fut>(
+    collection: &mongodb::Collection<Document>,
+    name: &str,
+    mut desired: IndexModel,
+    mut before_create: F,
+) -> Result<(), mongodb::error::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), mongodb::error::Error>>,
+{
+    desired.options.get_or_insert_default().name = Some(name.to_owned());
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        if named_index_needs_replacement(collection, name, &desired).await? {
+            match collection.drop_index(name).await {
+                Ok(_) => {}
+                Err(error) if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(e) if e.code == 26 || e.code == 27) =>
+                    {}
+                Err(error) if attempt < 3 && is_retryable_index_build_error(&error) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        before_create().await?;
+        // Even a matching definition may be an in-progress build. Idempotent
+        // creation waits for it and surfaces its result without rebuilding it.
+        match collection.create_index(desired.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt < 3 && is_retryable_index_build_error(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_retryable_index_build_error(error: &mongodb::error::Error) -> bool {
+    matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Command(command) if matches!(command.code, 276 | 12587)
+    )
+}
+
+async fn named_index_needs_replacement(
+    collection: &mongodb::Collection<Document>,
+    name: &str,
+    desired: &IndexModel,
+) -> Result<bool, mongodb::error::Error> {
+    let mut indexes = match collection.list_indexes().await {
+        Ok(indexes) => indexes,
+        Err(error) if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(e) if e.code == 26) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let wanted = desired.options.as_ref().expect("named index has options");
+    while let Some(index) = indexes.try_next().await? {
+        let options = index.options.unwrap_or_default();
+        if options.name.as_deref() != Some(name) {
+            continue;
+        }
+        // BSON document equality ignores order; compound index keys do not.
+        // Omitted boolean options have the same meaning as explicit false.
+        return Ok(!(index.keys.iter().eq(desired.keys.iter())
+            && options.unique.unwrap_or(false) == wanted.unique.unwrap_or(false)
+            && options.partial_filter_expression == wanted.partial_filter_expression
+            && options.sparse.unwrap_or(false) == wanted.sparse.unwrap_or(false)
+            && options.expire_after == wanted.expire_after));
+    }
+    Ok(false)
 }
 
 /// Create all required indexes for every collection.
@@ -431,22 +517,21 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     // Migration: drop legacy non-partial unique index on email so the new
     // partial-unique index (filtered to user_type=person) can be created.
     // Org users do not need a unique email; they often share contact emails
-    // or have none at all. The drop is best-effort -- on fresh DBs the index
-    // does not exist yet, which is fine.
-    let _ = users.drop_index("email_1").await;
-    users
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "email": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "user_type": "person" })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    // or have none at all. Preserve the partial index once installed.
+    ensure_named_index(
+        &users,
+        "email_1",
+        IndexModel::builder()
+            .keys(doc! { "email": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "user_type": "person" })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     users
         .create_index(
             IndexModel::builder()
@@ -480,25 +565,23 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .await?;
     // Social login lookup: find user by (provider, provider_id)
     // Drop old sparse index if it exists (sparse doesn't work with null values from serde)
-    let _ = users
-        .drop_index("social_provider_1_social_provider_id_1")
-        .await;
-    users
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "social_provider": 1, "social_provider_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {
-                            "social_provider": { "$type": "string" },
-                            "social_provider_id": { "$type": "string" },
-                        })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &users,
+        "social_provider_1_social_provider_id_1",
+        IndexModel::builder()
+            .keys(doc! { "social_provider": 1, "social_provider_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {
+                        "social_provider": { "$type": "string" },
+                        "social_provider_id": { "$type": "string" },
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     db.collection::<mongodb::bson::Document>(crate::models::login_approval::COLLECTION_NAME)
         .create_index(
@@ -665,20 +748,20 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
     // Migration: drop legacy non-partial unique index on slug so the new partial index can be created
-    let _ = services.drop_index("slug_1").await;
-    services
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "slug": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "is_active": true })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &services,
+        "slug_1",
+        IndexModel::builder()
+            .keys(doc! { "slug": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "is_active": true })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     // Non-partial slug lookup for read paths that must also see inactive
     // services (e.g. admin audit-log enrichment); the partial unique index
     // above only covers `is_active: true` rows and cannot serve those queries.
@@ -1720,20 +1803,20 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     // ── nodes ──
     let nodes = db.collection::<mongodb::bson::Document>("nodes");
     // Drop legacy index without partial filter (if it exists) to replace with soft-delete-safe version
-    let _ = nodes.drop_index("user_id_1_name_1").await;
-    nodes
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1, "name": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "is_active": true })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &nodes,
+        "user_id_1_name_1",
+        IndexModel::builder()
+            .keys(doc! { "user_id": 1, "name": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "is_active": true })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     nodes
         .create_index(
             IndexModel::builder()
@@ -1772,8 +1855,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     // ── node_service_bindings ──
     let nsb = db.collection::<mongodb::bson::Document>("node_service_bindings");
     // Drop legacy index without partial filter (if it exists) to replace with soft-delete-safe version
-    let _ = nsb.drop_index("node_id_1_service_id_1").await;
-    nsb.create_index(
+    ensure_named_index(
+        &nsb,
+        "node_id_1_service_id_1",
         IndexModel::builder()
             .keys(doc! { "node_id": 1, "service_id": 1 })
             .options(
@@ -2583,17 +2667,6 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
-    // Drop old sparse unique indexes that conflict with partial filter indexes
-    // (MongoDB won't replace an index with different options on the same keys)
-    let _ = db
-        .collection::<mongodb::bson::Document>("user_api_keys")
-        .drop_index("source_1_source_id_1")
-        .await;
-    let _ = db
-        .collection::<mongodb::bson::Document>("user_services")
-        .drop_index("source_1_source_id_1")
-        .await;
-
     // -- user_endpoints --
     let user_endpoints = db.collection::<mongodb::bson::Document>("user_endpoints");
     user_endpoints
@@ -2620,21 +2693,22 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
-    user_api_keys
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "source": 1, "source_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {
-                            "source_id": { "$type": "string" }
-                        })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &user_api_keys,
+        "source_1_source_id_1",
+        IndexModel::builder()
+            .keys(doc! { "source": 1, "source_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {
+                        "source_id": { "$type": "string" }
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     user_api_keys
         .create_index(
@@ -2740,21 +2814,22 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     user_services
         .create_index(IndexModel::builder().keys(doc! { "api_key_id": 1 }).build())
         .await?;
-    user_services
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "source": 1, "source_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {
-                            "source_id": { "$type": "string" }
-                        })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &user_services,
+        "source_1_source_id_1",
+        IndexModel::builder()
+            .keys(doc! { "source": 1, "source_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {
+                        "source_id": { "$type": "string" }
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // -- service_pools --
     let service_pools = db.collection::<mongodb::bson::Document>("service_pools");
@@ -3212,10 +3287,12 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     // must remain visible in the admin UI and must be distinguishable
     // from unknown nonces at redeem time. The plain index still
     // accelerates the range query in `redeem_invite` and admin filters.
-    let _ = org_invites.drop_index("expires_at_1").await;
-    org_invites
-        .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
-        .await?;
+    ensure_named_index(
+        &org_invites,
+        "expires_at_1",
+        IndexModel::builder().keys(doc! { "expires_at": 1 }).build(),
+    )
+    .await?;
     org_invites
         .create_index(
             IndexModel::builder()
