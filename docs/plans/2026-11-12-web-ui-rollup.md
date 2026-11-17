@@ -600,6 +600,80 @@ passes and the 85 sidebar tests pass.
     worktree at c48c1de05 (14/15 each).
   - It is pre-existing and not in CI, and is recorded here, not changed.
 
+### Final pinned main (526de4b4d)
+
+Fable approved the merges up to 7961f0d7d with no findings. Root then pinned
+`main` 526de4b4d as the last snapshot for this integration. It adds two
+commits on 186e35678:
+- 4a31e80ca, #2592: staging images published from `dev`; the backend image
+  declares a numeric user.
+- 526de4b4d, #2517: privacy policy alignment and self-serve account export.
+
+Together they change 82 files (+27,415/−699). Later `main` advances are out of
+scope for this integration.
+
+- **Merge commit 6d71b8a66** (parents 7961f0d7d, 526de4b4d). Opus ran
+  `git merge --no-ff` of the pinned SHA. It had no conflicts, and its tree
+  b88b7c6da equals `git merge-tree --write-tree` of the two heads. The staged
+  file set equals main's own 82 files.
+  - The 74 files only main changed are byte-identical to main. These include
+    the staging-image workflow, the backend Dockerfile and the CLI wizard
+    assets.
+  - The 47 files only this branch changed are byte-identical to 7961f0d7d.
+  - Both sides changed 8 files: `routes.rs`, `CLAUDE.md`, and the `shared`
+    and `unattributed` catalogs in three languages. Each differs from main by
+    exactly this branch's own lines: the show route (4 lines), the route doc
+    line (2), the three bypass-reason keys and the two `Show {{count}} more`
+    plurals. Main's additions are all kept: `POST /users/me/export`, the admin
+    orphan-sweep routes, the personal-data registry rule in `CLAUDE.md`, its
+    `.` key and its two rate-limit strings.
+- **Catalogs.** In en, zh-CN and zh-TW, `verify_adoption.py` (onto
+  526de4b4d) and the new placement audit `verify_final_pin.py` both pass,
+  checked against root's final-pin baseline:
+  - 12,261 keys = main 12,195 + 81 − 15;
+  - all 81 additions keep their original values, placeholders and areas;
+  - every main key keeps its value and area;
+  - the 15 removed fragments stay removed, and none of the 2,204 source and
+    e2e files references them;
+  - no key sits in two areas;
+  - `en-overrides.json` is main's 67 entries plus this branch's 4.
+- **Privacy export and erasure.** #2517 registers `assistant_onboarding` in
+  `personal_data_registry.rs`: owner `_id`, local-inventory erasure, and the
+  `assistant` export section. Erasure deletes the row after its admission
+  fence.
+  - Show suggestions is a plain update of an existing row, with no upsert. It
+    cannot recreate an erased row, which is why it needs no fence, unlike save
+    and hide.
+  - It writes only `suggestions_hidden_at` and `updated_at`, and never the
+    NyxBot memory note.
+  - Main's export field list for this collection omits
+    `suggestions_hidden_at`, as it did before this merge.
+  - This branch's model change is a doc comment, so export round-trips are
+    unaffected. The branch adds no collection, so main's registry rule needs
+    no new entry.
+- **Wizard bundle.** None of the 55 files that differ from main is a wizard
+  hash input: the 216 files in `index.manifest` plus the four config inputs.
+  Main's committed hash and assets therefore stay fresh.
+- **Validation on 6d71b8a66.** The log is
+  `~/.heca/plans/wild-beach-rollup/validate-final-pin-2026-11-17.log`.
+  - tsc passes.
+  - `sync:i18n` is idempotent (12,261 keys).
+  - `check:i18n` passes (1,340 files, 14,236 static calls).
+  - Lint has 0 errors; its 34 warnings are pre-existing.
+  - Targeted Vitest passes 588/588 in 26 files. They cover main's privacy
+    claims, account export, settings, legal pages, and API client and error
+    tests; the i18n loader, language, resources and wizard tests; and this
+    branch's sidebar, dashboard, badge, mock data, Home, onboarding hook, chat
+    page, approval, receipt, acknowledgement, skill card, label and message
+    tests.
+  - `npm run build` and `cargo fmt --check` pass.
+  - Playwright passes 92/92: sidebar threads 12, pins 8, rail 1, workspace
+    sidebar 40, suggestions restore 13, multilingual 4 and assistant settings
+    14. Telegram setup was not run, because neither side of this merge
+    touches it.
+  - The run left no untracked files and no `.tmp`.
+  - The full Vitest suite and the backend tests run in CI.
+
 ## Milestones
 
 - Audit of #2001/#2067 sent to root; #2001 audit comment posted; #2067 closed
