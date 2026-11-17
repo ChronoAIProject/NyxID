@@ -160,6 +160,9 @@ on any replica. Enable the flag only after all replicas support issuance and
 redemption. Before rolling back, unset the flag on **every replica** and restart
 those processes so they stop issuing handles; allow the 60-second handle lifetime
 to elapse before rolling back any replica.
+If diagnostics is already enabled for access-token callers, an older replica
+cannot deserialize or replay the newer `observation: "agent"` result; allow the
+60-second handle lifetime to elapse before completing a mixed-version rollback.
 
 Before enabling, verify that the **deployed** chrono-probe returns an explicit
 boolean `reachable` for each completed health/readiness check from
@@ -174,11 +177,12 @@ broker failures from REST proxy, provider LLM, LLM gateway and MCP service-tool
 calls can carry a short-lived opaque diagnostic handle. Downstream 4xx
 responses, including authentication, validation, missing-resource and throttling
 responses, do not qualify. Ordinary, unconstrained access-token callers and
-eligible `ApiKeyPurpose::General` Agent Keys, including live NyxBot conversation
-keys, can receive handles. Scheduled, permission-bound, `PublicNyxbot`,
-`SharedEntryTransport`, session, service-account, delegated and relay callers
-receive no handle, make no diagnostic database write and add no MCP diagnostic
-content. The original request does not run a probe. It returns its original
+eligible `ApiKeyPurpose::General` Agent Keys, including non-guest live NyxBot
+conversation keys, can receive handles. Guest turns are excluded. Scheduled,
+permission-bound, `PublicNyxbot`, `SharedEntryTransport`, session,
+service-account, delegated and relay callers receive no handle, make no
+diagnostic database write and add no MCP diagnostic content. The original
+request does not run a probe. It returns its original
 status and body after one bounded MongoDB insert, preserving
 application headers and appending `Cache-Control: no-store` without replacing
 downstream cache directives; if handle issuance cannot finish within 250ms, the

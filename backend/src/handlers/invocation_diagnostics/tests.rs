@@ -168,9 +168,17 @@ async fn diagnostic_probe_that_requires_approval_leaves_no_pending_prompt() {
         .extensions_mut()
         .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
 
+    let mut diagnostic_auth = auth(&actor);
+    diagnostic_auth.execution_permission =
+        crate::services::execution_permission_dispatch::RequestContext::enrolled(
+            Some(crate::models::execution_permission::VERSION),
+            &actor,
+            "diagnostic-probe-test-key",
+            None,
+        );
     let result = Box::pin(super::super::proxy::proxy_request_by_slug(
         State(state.clone()),
-        auth(&actor),
+        diagnostic_auth,
         TelemetryContext::default(),
         Path(("same-slug".into(), "healthz".into())),
         request,
@@ -187,6 +195,28 @@ async fn diagnostic_probe_that_requires_approval_leaves_no_pending_prompt() {
             .await
             .unwrap(),
         0
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"execution_proposal": {"$exists": true}})
+            .await
+            .unwrap(),
+        0,
+        "diagnostic probes must not author execution-permission proposals"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>("audit_log")
+            .count_documents(doc! {"event_type": "execution_permission_requested"})
+            .await
+            .unwrap(),
+        0,
+        "diagnostic probes must not emit execution-permission audit events"
     );
     assert!(downstream.received_requests().await.unwrap().is_empty());
     assert!(server.received_requests().await.unwrap().is_empty());

@@ -126,7 +126,8 @@ impl HttpInvocation {
             &auth.auth_method,
             Some(auth.api_key_purpose),
             auth.acting_client_id.as_deref(),
-        ) {
+        ) || auth.assistant_chat.as_ref().is_some_and(|chat| chat.guest)
+        {
             return result;
         }
         let actor_id = auth.user_id.to_string();

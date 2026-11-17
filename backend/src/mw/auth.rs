@@ -210,13 +210,23 @@ impl AuthUser {
         db: &mongodb::Database,
         path: &str,
     ) -> AppResult<()> {
+        self.ensure_conversation_key_route_if_enabled_with_method(db, &Method::GET, path)
+            .await
+    }
+
+    pub async fn ensure_conversation_key_route_if_enabled_with_method(
+        &self,
+        db: &mongodb::Database,
+        method: &Method,
+        path: &str,
+    ) -> AppResult<()> {
         if self.assistant_turn_fence.is_some()
             && path
                 .strip_prefix("/api/v1")
                 .unwrap_or(path)
                 .starts_with("/assistant/")
         {
-            return self.ensure_conversation_key_route(path);
+            return self.ensure_conversation_key_route_with_method(method, path);
         }
         if self.assistant_turn_fence.is_none()
             || (!self
@@ -232,10 +242,18 @@ impl AuthUser {
         {
             return Ok(());
         }
-        self.ensure_conversation_key_route(path)
+        self.ensure_conversation_key_route_with_method(method, path)
     }
 
     pub fn ensure_conversation_key_route(&self, path: &str) -> AppResult<()> {
+        self.ensure_conversation_key_route_with_method(&Method::GET, path)
+    }
+
+    pub fn ensure_conversation_key_route_with_method(
+        &self,
+        method: &Method,
+        path: &str,
+    ) -> AppResult<()> {
         if self.assistant_turn_fence.is_none() {
             return Ok(());
         }
@@ -244,7 +262,7 @@ impl AuthUser {
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         let execution_route = path.starts_with("/proxy")
             || path.starts_with("/llm/")
-            || path == "/keys"
+            || (path == "/keys" && *method == Method::GET)
             || path == "/monitoring/invocation-diagnostics"
             || matches!(path, "/mcp" | "/mcp/config")
             || path.starts_with("/oracle/pools/")
@@ -1273,8 +1291,9 @@ impl FromRequestParts<AppState> for AuthUser {
                                         return Err(AppError::NotFound("Execution request unavailable".into()));
                                     }
                                     auth_user
-                                        .ensure_conversation_key_route_if_enabled(
+                                        .ensure_conversation_key_route_if_enabled_with_method(
                                             &state.db,
+                                            &parts.method,
                                             request_path,
                                         )
                                         .await?;
@@ -1758,7 +1777,11 @@ impl FromRequestParts<AppState> for AuthUser {
                     return Err(AppError::NotFound("Execution request unavailable".into()));
                 }
                 auth_user
-                    .ensure_conversation_key_route_if_enabled(&state.db, request_path)
+                    .ensure_conversation_key_route_if_enabled_with_method(
+                        &state.db,
+                        &parts.method,
+                        request_path,
+                    )
                     .await?;
                 auth_user.ensure_management_write_scope(&parts.method, request_path)?;
                 return Ok(auth_user);
@@ -4396,6 +4419,14 @@ mod tests {
                 "execution route should remain available: {path}"
             );
         }
+        assert!(
+            user.ensure_conversation_key_route_with_method(&Method::GET, "/api/v1/keys")
+                .is_ok()
+        );
+        assert!(
+            user.ensure_conversation_key_route_with_method(&Method::POST, "/api/v1/keys")
+                .is_err()
+        );
         for path in [
             "/api/v1/users/me",
             "/api/v1/assistant/agents",

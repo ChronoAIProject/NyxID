@@ -3264,10 +3264,13 @@ async fn handle_invocation_diagnostic(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
+    if guest_turn(auth) {
+        return guest_refused(request_id);
+    }
     let Some(handle) = arguments.get("handle").and_then(serde_json::Value::as_str) else {
         return rpc_error(request_id, -32602, "Missing handle");
     };
-    let auth_user = match permission_dispatch_auth(auth) {
+    let auth_user = match diagnostic_dispatch_auth(auth) {
         Ok(auth) => auth,
         Err(_) => return tool_result(request_id, "Invocation diagnostic unavailable", true),
     };
@@ -3930,6 +3933,7 @@ async fn service_failure_handle(
             auth.acting_client_id.as_deref(),
         )
         || auth.sender_constrained
+        || auth.chat.as_ref().is_some_and(|chat| chat.guest)
     {
         return None;
     }
@@ -4684,7 +4688,6 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
                 | "nyx__discover_services"
                 | "nyx__list_connected_services"
                 | "nyx__call_tool"
-                | "nyx__diagnose_invocation"
                 | "nyx__resource_get"
         )
 }
@@ -4710,6 +4713,17 @@ fn permission_admission_failure(
 }
 
 fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<auth::AuthUser> {
+    build_permission_dispatch_auth(auth, None)
+}
+
+fn diagnostic_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<auth::AuthUser> {
+    build_permission_dispatch_auth(auth, auth.api_key_credential_id.clone())
+}
+
+fn build_permission_dispatch_auth(
+    auth: &McpAuthContext,
+    api_key_credential_id: Option<String>,
+) -> crate::errors::AppResult<auth::AuthUser> {
     let user_id = uuid::Uuid::parse_str(&auth.user_id)
         .map_err(|_| crate::errors::AppError::Unauthorized("Invalid caller".into()))?;
     Ok(auth::AuthUser {
@@ -4739,7 +4753,11 @@ fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<a
         allowed_node_ids: auth.allowed_node_ids.clone(),
         api_key_id: auth.api_key_id.clone(),
         api_key_name: auth.api_key_name.clone(),
-        api_key_credential_id: auth.api_key_credential_id.clone(),
+        // Existing execution-permission proposals were authored without a
+        // child credential identity. Keep the generic dispatch context
+        // compatible with those rows; diagnostics opt into the exact child
+        // binding through `diagnostic_dispatch_auth`.
+        api_key_credential_id,
         api_key_purpose: Default::default(),
         rate_limit_per_second: auth.rate_limit_per_second,
         rate_limit_burst: auth.rate_limit_burst,
@@ -7322,6 +7340,13 @@ async fn execute_ssh_command_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_turns_cannot_use_invocation_diagnostics() {
+        assert!(!guest_tool_allowed("nyx__diagnose_invocation"));
+        assert!(guest_tool_allowed("nyx__call_tool"));
+        assert!(guest_tool_allowed("nyx__resource_get"));
+    }
 
     #[tokio::test]
     async fn first_party_bearer_checks_active_user_and_mfa_with_one_user_read() {

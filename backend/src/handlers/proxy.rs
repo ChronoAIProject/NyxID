@@ -4797,6 +4797,10 @@ async fn execute_resolved_proxy_inner<'a>(
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
+        // A diagnostic probe is secondary evidence for an already failed
+        // invocation. It must never author or dispatch a new execution
+        // permission proposal before the legacy approval guard below runs.
+        && !invocation_diagnostic_probe
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
