@@ -1039,6 +1039,18 @@ pub static ENTRIES: &[Entry] = &[
         why: "billing_topup_sessions is retained as FinancialBilling evidence because deleting it would change shared, financial, lifecycle, or erasure accountability; only permitted opaque attribution remains.",
     },
     Entry {
+        collection: "billing_usage_comparison_control",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("singleton usage-comparison coverage and schedule state"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: concat!(
+            "billing_usage_comparison_control stores two fixed-id singletons for provider usage ",
+            "comparison: coverage readiness (generation, ready flag and timestamps) and the ",
+            "schedule's read budget and opaque billing-wallet scan cursor; it identifies no person.",
+        ),
+    },
+    Entry {
         collection: "billing_usage_comparisons",
         owner: OwnerSelector::Fields(&["owner_id"]),
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
@@ -1047,7 +1059,9 @@ pub static ENTRIES: &[Entry] = &[
         why: concat!(
             "billing_usage_comparisons stores per-owner billing-provider usage-capture coverage ",
             "metadata (wallet, customer and subscription identifiers, acknowledgement sequence ",
-            "and coverage flags); retained as FinancialBilling reconciliation evidence.",
+            "and coverage flags) and per-metric usage projections and comparisons with the ",
+            "provider's recorded usage (local and provider totals and their differences); ",
+            "retained as FinancialBilling reconciliation evidence.",
         ),
     },
     Entry {
