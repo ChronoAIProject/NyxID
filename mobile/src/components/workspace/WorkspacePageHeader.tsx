@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import {
   FLOATING_HEADER_GAP,
   FLOATING_HEADER_MARGIN,
@@ -40,7 +41,7 @@ function WorkspacePageHeaderContent({
   const band = workspaceHeaderBand(
     insets.top,
     cornerSensor,
-    workspaceStatusCluster({ ...window, rightInset: insets.right }),
+    workspaceStatusCluster({ platform: Platform.OS, ...window, rightInset: insets.right }),
     undefined,
     rail,
   );

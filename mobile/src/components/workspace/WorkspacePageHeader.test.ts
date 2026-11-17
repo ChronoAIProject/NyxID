@@ -26,6 +26,7 @@ test("the main header callback is hook-safe; capped centered titles and custom c
         jsxs: (type: any, props: any) => ({ type, props }),
       },
       "react-native": {
+      Platform: {OS: "ios"},
         Text: "Text",
         View: "View",
         useWindowDimensions: () => ({ width: 402, height: 874 }),
@@ -120,6 +121,7 @@ test("on the folded Duo page bars sit flush at the top, left of the status colum
         jsxs: (type: any, props: any) => ({ type, props }),
       },
       "react-native": {
+      Platform: {OS: "ios"},
         Text: "Text",
         View: "View",
         useWindowDimensions: () => window,

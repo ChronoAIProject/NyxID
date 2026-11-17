@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {
@@ -107,7 +108,7 @@ export function WorkspacePushShell(props: Props) {
   const { colors } = useTheme();
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const windowMetrics = { width, height, rightInset: insets.right };
+  const windowMetrics = { platform: Platform.OS, width, height, rightInset: insets.right };
   const [quickRailHidden, setQuickRailHidden] = useQuickRailHidden();
   const quickRailAvailable =
     props.enabled &&

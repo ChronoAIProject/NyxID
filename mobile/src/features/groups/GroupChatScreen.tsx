@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { ComposerDictationFrame } from "../assistant/ComposerDictation";
@@ -165,6 +166,7 @@ function GroupChat({
   // Both Duo postures: the recipient picker ends before the quick rail's column
   // (the same reserve as every workspace bottom sheet).
   const pickerRailReserve = workspaceSheetRailReserve({
+    platform: Platform.OS,
     width: windowWidth,
     height: windowHeight,
     rightInset: safeInsets.right,

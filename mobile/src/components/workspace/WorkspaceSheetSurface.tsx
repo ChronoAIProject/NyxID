@@ -85,6 +85,7 @@ export function WorkspaceSheetSurface({
   // Classify the device from the window, not the keyboard-resized host: the
   // Duo must keep its bottom-sheet presentation when the keyboard opens.
   const railWindow = workspaceQuickRailAvailable({
+    platform: Platform.OS,
     width,
     height,
     rightInset: insets.right,
@@ -93,6 +94,7 @@ export function WorkspaceSheetSurface({
   // Both Duo postures keep the sheet attached to the bottom, ending before
   // the quick rail (under the scrim; a tap there dismisses).
   const railReserve = workspaceSheetRailReserve({
+    platform: Platform.OS,
     width,
     height,
     rightInset: insets.right,
@@ -114,7 +116,7 @@ export function WorkspaceSheetSurface({
     : gap;
   // Beside the rail the panel no longer reaches the status column.
   const trailingInset = wide || railReserve > 0 ? 0 : insets.right;
-  const sheetWindow = { width, height, rightInset: trailingInset };
+  const sheetWindow = { platform: Platform.OS, width, height, rightInset: trailingInset };
   const cornerSensor = workspaceCornerSensor(sheetWindow);
   // The row sits flush under the handle, left of the status column; the
   // full-width body starts below the cluster.

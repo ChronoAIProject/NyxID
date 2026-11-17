@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {
@@ -66,7 +67,7 @@ function ChatHeaderContent({ options, back, route }: NativeStackHeaderProps) {
   const band = workspaceHeaderBand(
     insets.top,
     cornerSensor,
-    workspaceStatusCluster({ ...window, rightInset: insets.right }),
+    workspaceStatusCluster({ platform: Platform.OS, ...window, rightInset: insets.right }),
     undefined,
     rail,
   );

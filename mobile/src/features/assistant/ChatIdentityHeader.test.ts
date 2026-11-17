@@ -35,6 +35,7 @@ const mocks = {
     jsxs: (type: unknown, props: unknown) => ({ type, props }),
   },
   "react-native": {
+      Platform: {OS: "ios"},
     View: "View",
     Text: "Text",
     Pressable: "Pressable",

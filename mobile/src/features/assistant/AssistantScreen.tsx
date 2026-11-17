@@ -2235,13 +2235,14 @@ function Sheet({
   const band = workspaceHeaderBand(
     SHEET_TOP_PADDING,
     cornerSensor,
-    workspaceStatusCluster({ width, height, rightInset: insets.right }),
+    workspaceStatusCluster({ platform: Platform.OS, width, height, rightInset: insets.right }),
     SHEET_HEADER_HEIGHT,
   );
   // Both Duo postures: the same bottom sheet as Settings, ending before the
   // quick rail's column (a native page sheet always spans the window). The
   // surface owns its travel, scrim, drag handle and dismissal.
   const railReserve = workspaceSheetRailReserve({
+    platform: Platform.OS,
     width,
     height,
     rightInset: insets.right,

@@ -73,6 +73,7 @@ function setup(reduced = false, width = 402, height = 874) {
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
+      Platform: {OS: "ios"},
       View: "View",
       Pressable: "Pressable",
       useWindowDimensions: () => dimensions,
