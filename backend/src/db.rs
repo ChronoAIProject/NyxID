@@ -1,3 +1,5 @@
+mod pool_monitor;
+
 use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
@@ -77,6 +79,9 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     client_options.server_selection_timeout = Some(Duration::from_secs(10));
     client_options.max_idle_time = Some(Duration::from_secs(600));
 
+    #[cfg(test)]
+    crate::pool_starvation_tests::configure(&mut client_options);
+    pool_monitor::install(&mut client_options);
     let client = Client::with_options(client_options)?;
 
     // Extract database name from the connection string, default to "nyxid"

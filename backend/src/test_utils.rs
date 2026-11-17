@@ -307,6 +307,7 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
     options.command_event_handler = Some(handler);
+    crate::pool_starvation_tests::configure(&mut options);
     let keepalive = fixture.clone();
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_| {
         let _ = keepalive.name();
@@ -582,6 +583,7 @@ async fn probe_test_mongo_uri(
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
     options.command_event_handler = command_event_handler;
+    crate::pool_starvation_tests::configure(&mut options);
     let drop_guard = Arc::new(TestDbDropGuard::new(uri, db_name));
     let guard_keepalive = Arc::clone(&drop_guard);
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_event| {
@@ -1369,6 +1371,17 @@ async fn sweep_stale_test_databases_under_lease(client: &mongodb::Client, now_se
         &present_legacy_database_names,
     );
     let _ = tokio::time::timeout_at(deadline, prune_metadata).await;
+}
+
+/// Drop while the fixture runtime can still finish background transactions.
+/// A drop on the application pool can occupy its last socket waiting for a
+/// transaction whose COMMIT needs that socket.
+pub(crate) async fn drop_test_database(db: &mongodb::Database) {
+    let uri = TEST_DB_PINNED_URI.get().expect("connected test database");
+    let client = test_db_cleanup_client(uri)
+        .await
+        .expect("test database cleanup client");
+    client.database(db.name()).drop().await.unwrap();
 }
 
 async fn test_db_cleanup_client(uri: &str) -> Option<mongodb::Client> {
