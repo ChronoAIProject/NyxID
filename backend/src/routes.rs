@@ -687,6 +687,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/me/preferences/analytics",
             get(handlers::users::get_analytics_consent).put(handlers::users::set_analytics_consent),
         )
+        .route("/me/export", post(handlers::users::export_me))
         .route(
             "/me/security",
             put(handlers::users::save_security_preferences),
@@ -1090,6 +1091,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = model_contract_metadata_routes!(register_billing_routes, Router::new())
+        .route(
+            "/personal-erasure/orphans",
+            post(handlers::admin_personal_erasure::orphan_sweep),
+        )
+        .route(
+            "/personal-erasure/orphans/{job_id}",
+            get(handlers::admin_personal_erasure::orphan_sweep_status),
+        )
         .route(
             "/platform-models/credentials",
             get(handlers::platform_models::credentials::list)

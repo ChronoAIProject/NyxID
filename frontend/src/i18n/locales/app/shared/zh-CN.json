@@ -72,6 +72,7 @@
   "(write or admin access) ": "（写入或管理权限）",
   "+ Adding:": "+ 将添加：",
   ", then run ": "，然后运行 ",
+  ".": "。",
   ". Accessibility:": "。辅助功能：",
   ". Connection state does not establish permission.": "。连接状态不代表已获得权限。",
   ". Current source authentication and execution authority are revalidated on every use; an active grant alone does not establish either.": "。每次使用都会重新验证当前来源的身份和执行权限；有效的授权本身不能证明这两项。",

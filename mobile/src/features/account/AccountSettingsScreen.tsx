@@ -456,7 +456,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
 
         <SettingsGroup
           footer={t(
-            "Permanently deletes your account and its data. This cannot be undone.",
+            "Permanently deletes your account and personal data. Necessary security and financial records are retained. This cannot be undone.",
           )}
         >
           <SettingsRow

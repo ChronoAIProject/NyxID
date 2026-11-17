@@ -2242,6 +2242,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             db.clone(),
             "agent",
         )),
+        account_export_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,

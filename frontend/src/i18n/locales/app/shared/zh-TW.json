@@ -72,6 +72,7 @@
   "(write or admin access) ": "（寫入或管理權限）",
   "+ Adding:": "+ 將新增：",
   ", then run ": "，然後執行 ",
+  ".": "。",
   ". Accessibility:": "。輔助使用：",
   ". Connection state does not establish permission.": "。連線狀態不代表已取得權限。",
   ". Current source authentication and execution authority are revalidated on every use; an active grant alone does not establish either.": "。每次使用都會重新驗證目前來源的身分與執行權限；有效的授權本身無法證明這兩項。",

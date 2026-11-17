@@ -895,6 +895,8 @@
   "Your CLI wants to add {{service}} to NyxID. Confirm the details here.": "CLI 希望將 {{service}} 新增到 NyxID。請在此確認詳情。",
   "Your approval preference is still on, but no enabled notification channel is available. Connect or re-enable Telegram or push notifications and protection will resume automatically.": "你的核准偏好設定仍處於開啟狀態，但沒有可用的已啟用通知管道。連結或重新啟用 Telegram 或推播通知後，保護將自動恢復。",
   "Your approval preference remains on. Connect or re-enable Telegram or push notifications and protection will resume automatically.": "你的核准偏好設定仍保持開啟。連結或重新啟用 Telegram 或推播通知後，保護將自動恢復。",
+  "Your data export is rate limited. Try again in 1 minute.": "你的資料匯出受到頻率限制。請在 1 分鐘後重試。",
+  "Your data export is rate limited. Try again in {{minutes}} minutes.": "你的資料匯出受到頻率限制。請在 {{minutes}} 分鐘後重試。",
   "Your last use {{time}}": "你上次使用 {{time}}",
   "Your personal agent. It has full access and remembers across all its threads and chat apps.": "你的個人代理程式。它擁有完整存取權限，並在其所有對話和聊天應用程式中保留記憶。",
   "Your {{name}} account has been connected successfully.": "你的 {{name}} 帳號已成功連線。",

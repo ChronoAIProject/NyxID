@@ -134,8 +134,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user
-RUN groupadd -r nyxid && useradd -r -g nyxid -d /app -s /sbin/nologin nyxid
+# Create a non-root user. The ids are pinned to the values `-r` already assigned
+# on this base image, so existing volumes keep their ownership.
+RUN groupadd -r -g 999 nyxid && useradd -r -u 999 -g nyxid -d /app -s /sbin/nologin nyxid
 
 WORKDIR /app
 
@@ -156,7 +157,9 @@ RUN mkdir -p /app/keys /var/lib/nyxid/tuf \
 ENV NYXID_SERVER_TUF_STATE_DIR=/var/lib/nyxid/tuf
 VOLUME ["/var/lib/nyxid/tuf"]
 
-USER nyxid
+# Numeric, not `nyxid`: Kubernetes `runAsNonRoot` cannot verify a named user and
+# refuses to start the container.
+USER 999:999
 
 EXPOSE 3001
 

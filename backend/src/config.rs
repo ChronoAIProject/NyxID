@@ -372,7 +372,7 @@ pub struct AppConfig {
     /// telemetry is hard-off: `TelemetryClient::from_config` returns
     /// `None` and no events are captured.
     pub telemetry_dsn: Option<String>,
-    /// Telemetry ingest host (defaults to EU PostHog if unset).
+    /// Telemetry ingest host (defaults to the US PostHog endpoint if unset).
     pub telemetry_host: Option<String>,
     /// When true AND `telemetry_dsn` is empty, fall back to the
     /// compiled-in public share-back DSN. Self-hoster opt-in knob.

@@ -189,6 +189,10 @@ pub struct AppState {
     pub cluster_slot_manager: services::cluster_slot_service::RenewableSlotManager,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Self-serve account exports: three requests per person per hour.
+    pub account_export_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Bound memory and MongoDB work for concurrent export builders.
+    pub account_export_semaphore: Arc<tokio::sync::Semaphore>,
     /// Parsed per-user limit for each platform-owned downstream credential.
     pub platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy,
     /// Per-user request and in-flight limiter for direct assistant streams.
@@ -1012,9 +1016,9 @@ async fn server_run(cli: Cli) {
     ));
     // Register before serving. Reuse the process generation, not node socket
     // heartbeats: a replica can enforce policy without owning any node sockets.
-    services::security_readiness_service::ensure_indexes(&db)
+    services::personal_erasure_service::ensure_startup_indexes(&db)
         .await
-        .expect("security replica indexes failed");
+        .expect("late startup indexes failed");
     let readiness_runtime = services::security_readiness_service::Runtime::new(
         (*replica_identity).clone(),
         config.security_rollout.clone(),
@@ -1206,6 +1210,13 @@ async fn server_run(cli: Cli) {
             db.clone(),
             "agent",
         )),
+        account_export_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,
@@ -1362,14 +1373,13 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
-    services::personal_erasure_service::ensure_indexes(&state.db)
-        .await
-        .expect("Personal erasure indexes");
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(
             state.clone(),
         ));
+    let _orphan_sweep_worker =
+        services::personal_erasure_orphan_sweep::jobs::spawn_worker(state.clone());
     let _personal_erasure_worker = services::personal_erasure_service::spawn_worker(state.clone());
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), erasure_clients);
     let _usage_rollup_worker =

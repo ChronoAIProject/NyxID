@@ -72,11 +72,21 @@ it("renders hosted content, encryption limits, recipients and incomplete-erasure
     "users with permission to read administrative usage reports, including Usage Viewers",
   );
   expect(screen.getByText(/NyxID requests revocation/)).toHaveTextContent(
-    "Deletion does not yet cover every stored record",
+    "Personal local account, authentication, service, assistant, channel, device and related data is erased after acceptance",
   );
   expect(screen.getByText(/Software defaults are 24 hours/)).toHaveTextContent(
     "not a promise of the hosted deployment's current settings",
   );
+  const retained = screen.getByText(/This bookkeeping includes records of unresolved problems/);
+  expect(retained).toHaveTextContent("those records do not store message text");
+  expect(retained).toHaveTextContent("expire 24 hours after creation");
+  expect(retained).toHaveTextContent("that same 24-hour deadline");
+  expect(retained).toHaveTextContent("background deletion can run later");
+  const exported = screen.getByText(/You can download a self-service JSON export/);
+  expect(exported).toHaveTextContent("unused space is then shared equally");
+  expect(exported).toHaveTextContent("up to three further reads");
+  expect(exported).toHaveTextContent("10,000 rows");
+  expect(exported).toHaveTextContent("unavailable_sections");
   expect(screen.getByText(/Optional product analytics\./).closest("p")).toHaveTextContent(
     "defaults off",
   );

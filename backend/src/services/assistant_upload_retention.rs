@@ -503,6 +503,48 @@ pub async fn settled_in_session(
     Ok(())
 }
 
+/// Tool-image and upload history needs a prefix covering every attachment origin.
+/// Keep this late startup addition separate from the base index sequence.
+pub(crate) async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>(ATTACHMENTS);
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_assistant_attachments_user_id".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Remove only the attachment TTL, never the upload admission-window TTL.
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     ensure_settings(db).await?;
