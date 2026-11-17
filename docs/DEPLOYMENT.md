@@ -406,6 +406,28 @@ groups and restarts to install the unique index.
 
 ## Rolling deploys and graceful drain
 
+Server mode installs SIGTERM and ctrl-c receivers before configuration or database
+IO, and retains the same receivers through shutdown. Startup never cancels an
+awaited step on a signal. It checks at three safe points: after configuration,
+after the read-only database connection and transaction-capability check, and
+immediately before either listener binds. At the first two points it exits with
+status 0 without application writes or workers. After the database checkpoint,
+startup finishes through the bind checkpoint, including migrations and worker
+initialization. A pending signal there prevents both binds and the process-start
+audit, runs the existing drain for workers already started, then exits with
+status 0. A second signal is retained during startup and skips the drain wait
+once that checkpoint is reached; it never interrupts a startup step.
+
+For a startup signal, the configured drain budget starts at signal receipt.
+Remaining startup consumes that budget: with budget B and remaining startup S,
+at most max(B - S, 0) remains for drain and cleanup. This does not place a deadline
+on startup itself. If a startup operation stalls beyond B, the process reaches
+cleanup late, with no budget remaining; a platform kill can still interrupt it.
+Under the normal startup duration (less than ten seconds), the default 25-second
+budget includes the remaining startup and drain. One-shot commands install no
+server signal receivers; database command modes also start no billing or chain
+verification workers. After binding, shutdown follows the serving behavior below.
+
 SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
 returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
