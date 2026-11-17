@@ -168,14 +168,33 @@ async fn diagnostic_probe_that_requires_approval_leaves_no_pending_prompt() {
         .extensions_mut()
         .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
 
-    let mut diagnostic_auth = auth(&actor);
-    diagnostic_auth.execution_permission =
+    let key = restricted_agent_key(&state, &actor, &id, "enrolled diagnostic agent").await;
+    crate::services::execution_permission_dispatch::phase_b_tests::enroll_global(&state.db, &actor)
+        .await;
+    let mut diagnostic_auth = agent_auth(&actor, &key.id);
+    let execution_permission =
         crate::services::execution_permission_dispatch::RequestContext::enrolled(
             Some(crate::models::execution_permission::VERSION),
             &actor,
-            "diagnostic-probe-test-key",
+            &key.id,
             None,
         );
+    execution_permission
+        .as_ref()
+        .expect("enrolled diagnostic caller")
+        .bind_key(
+            &state
+                .db
+                .collection::<crate::models::api_key::ApiKey>(
+                    crate::models::api_key::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id": &key.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            None,
+        );
+    diagnostic_auth.execution_permission = execution_permission;
     let result = Box::pin(super::super::proxy::proxy_request_by_slug(
         State(state.clone()),
         diagnostic_auth,
