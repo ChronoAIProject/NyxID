@@ -76,6 +76,8 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - Forms use `useAppForm` (`components/ui/form.tsx`), never raw `useForm` (lint-enforced via `no-restricted-imports`): its `setValue` defaults to `shouldDirty/shouldTouch/shouldValidate: true` so non-text controls wired via `watch` + `setValue` (Radix Switch/Select/Checkbox, custom editors) correctly enable dirty-gated submit buttons; programmatic writes (prefill, normalization in effects) opt out per call with `{ shouldDirty: false, shouldTouch: false }`
 - TanStack Query hooks in `hooks/` (one per domain: `use-auth.ts`, `use-services.ts`, ...); auth state in Zustand (`stores/auth-store.ts`)
 - UI components via Radix UI + shadcn/ui pattern (`components/ui/`); no `console.log` in production code
+- App copy lives in `frontend/src/i18n/locales/app/<area>/{en,zh-CN,zh-TW}.json`. Add each new key to its area in all three files, in sorted position (`npm run check:i18n` suggests the area for a missing key), then run `npm run sync:i18n`. Branches from before the split use `npm run adopt:i18n` (see `docs/MULTILINGUAL.md`).
+- Mobile copy uses the same structure without an English file: `mobile/src/i18n/locales/<area>/{zh-CN,zh-TW}.json` (English phrase keys), imported only through the `zh-CN.ts`/`zh-TW.ts` barrels. Add keys to both files in sorted position, then run `pnpm sync:i18n` (regenerates the barrels); pre-split branches use `pnpm adopt:i18n`.
 
 ### 5. Security
 
