@@ -12,4 +12,3 @@ export function autoFocusAllowed(): boolean {
   if (typeof window.matchMedia !== "function") return true;
   return !window.matchMedia("(pointer: coarse)").matches;
 }
-
