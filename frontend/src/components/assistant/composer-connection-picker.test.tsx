@@ -59,6 +59,18 @@ it("uses native disabled only while the entire picker is locked", () => {
   ).toBeDisabled();
 });
 
+it("shows a visible accessible reason when the backend supplies only whitespace", () => {
+  render(<ComposerConnectionPicker {...props} connections={[{
+    ...key,
+    credential_missing: false,
+    execution_unavailable_reason: "   ",
+  }]} />);
+  const option = screen.getByRole("button", { name: "Work Personal · work" });
+  expect(option).toHaveAttribute("aria-disabled", "true");
+  expect(option).toHaveAccessibleDescription("Connection unavailable");
+  expect(screen.getByText("Connection unavailable")).toBeVisible();
+});
+
 it("localizes node and personal copy with literal names, and preserves unknown backend text", async () => {
   appI18n.addResourceBundle("zh-CN", "app", zh, true, true);
   await act(() => appI18n.changeLanguage("zh-CN"));

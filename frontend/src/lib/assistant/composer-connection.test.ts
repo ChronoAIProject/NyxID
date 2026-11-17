@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { appI18n } from "@/i18n/instance";
+import en from "@/i18n/locales/app/shared/en.json";
+import zhCN from "@/i18n/locales/app/shared/zh-CN.json";
+import zhTW from "@/i18n/locales/app/shared/zh-TW.json";
 import type { KeyInfo } from "@/types/keys";
 import { connectionAvailable } from "./connection-context";
 import {
@@ -155,7 +159,11 @@ it("preserves node fallback classification even with expired server credentials"
   ).toBeNull();
 });
 
-it.each(["Provider says <b>wait</b> {{x}}", "   "])(
+afterEach(async () => {
+  await appI18n.changeLanguage("en");
+});
+
+it.each(["Provider says <b>wait</b> {{x}}", "  Provider says wait  "])(
   "keeps an unknown nonempty backend reason verbatim: %j",
   (text) => {
     const reason = composerConnectionUnavailableReason(
@@ -166,3 +174,20 @@ it.each(["Provider says <b>wait</b> {{x}}", "   "])(
     expect(formatComposerConnectionReason(reason)).toBe(text);
   },
 );
+
+it.each([
+  ["en", en, "Connection unavailable"],
+  ["zh-CN", zhCN, "连接不可用"],
+  ["zh-TW", zhTW, "連線不可用"],
+] as const)("keeps blank backend reasons blocking with visible localized copy in %s", async (language, catalog, expected) => {
+  appI18n.addResourceBundle(language, "app", catalog, true, true);
+  await appI18n.changeLanguage(language);
+  for (const text of ["   ", " \t\n ", "\u00a0"]) {
+    const reason = composerConnectionUnavailableReason(
+      { ...connection, execution_unavailable_reason: text },
+      now,
+    )!;
+    expect(reason).toEqual({ kind: "backend", text });
+    expect(formatComposerConnectionReason(reason)).toBe(expected);
+  }
+});

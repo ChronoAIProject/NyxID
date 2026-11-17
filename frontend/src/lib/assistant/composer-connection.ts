@@ -32,7 +32,9 @@ export function composerConnectionUnavailableReason(
 export function formatComposerConnectionReason(
   reason: ComposerConnectionReason,
 ): string {
-  if (reason.kind === "backend") return reason.text;
+  if (reason.kind === "backend") {
+    return reason.text.trim() ? reason.text : translateUi("Connection unavailable");
+  }
   if (reason.kind === "classifier") return translateUi(reason.reason);
   const { name, status } = reason;
   switch (status) {
