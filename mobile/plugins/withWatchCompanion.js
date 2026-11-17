@@ -6,8 +6,16 @@ const { withXcodeProject } = require("expo/config-plugins");
  * version for each profile; this keeps the watch target in step, because the
  * App Store rejects a watch app whose bundle ID isn't prefixed by its
  * companion's or whose version differs from it.
+ *
+ * It also restores the watch's device family. Expo's built-in
+ * `withDeviceFamily` sets `TARGETED_DEVICE_FAMILY` to the iPhone/iPad value on
+ * every build configuration that has a `PRODUCT_NAME`, the watch target's
+ * included. App config plugins register their mods before Expo's built-ins,
+ * and later-registered mods run first, so this plugin runs after it.
  */
 const WATCH_TARGET = "NyxIDWatch";
+/** Apple Watch in `TARGETED_DEVICE_FAMILY`. */
+const WATCH_DEVICE_FAMILY = 4;
 
 function unquote(value) {
   return typeof value === "string" ? value.replace(/^"(.*)"$/, "$1") : value;
@@ -42,6 +50,7 @@ function syncWatchTarget(project, { bundleIdentifier, version, buildNumber }) {
       quote(bundleIdentifier);
     if (version) settings.MARKETING_VERSION = quote(version);
     if (buildNumber) settings.CURRENT_PROJECT_VERSION = quote(buildNumber);
+    settings.TARGETED_DEVICE_FAMILY = WATCH_DEVICE_FAMILY;
   }
   return project;
 }
@@ -57,3 +66,4 @@ module.exports = (config) =>
   });
 module.exports.syncWatchTarget = syncWatchTarget;
 module.exports.WATCH_TARGET = WATCH_TARGET;
+module.exports.WATCH_DEVICE_FAMILY = WATCH_DEVICE_FAMILY;
