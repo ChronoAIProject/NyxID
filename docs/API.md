@@ -4148,6 +4148,8 @@ operation, funding behavior, activation requirements, and recovery limits.
 
 ### Proxy
 
+**Repeated NyxID refusals:** After 20 identical non-retryable NyxID refusals within 60 seconds, the authenticated HTTP proxy returns `429 rate_limited` (code `1005`) with `Retry-After: 30`. Only the identical request is affected: API key ID (or session/JWT user ID), method, service, exact path, raw query string, body bytes and NyxID error code must match. Bodies are fingerprinted only with `Content-Length` at most 64 KiB; bodyless requests use the empty-body fingerprint, while larger or undeclared/streamed bodies bypass this protection. Headers are excluded, so a refusal decided by a header is keyed without that header. Wait at least 30 seconds and correct the original refusal's cause before retrying; one probe is admitted after the interval, the same refusal restarts the delay, and success or a different outcome clears it. State is per process and expires after ten minutes of inactivity beyond the later of the retry deadline or last arrival. Downstream responses, authentication failures, rate limits, approval waits and other retryable NyxID errors never count. Throttled requests run normal outer rate limiting and authentication, then skip proxy processing and its audit and usage writes. MCP `tools/call`, the LLM gateway and WebSocket/CONNECT requests are not covered.
+
 #### ANY /api/v1/proxy/{service_id}/{*path}
 
 Forward any HTTP request to a registered downstream service. NyxID resolves the service, verifies the user has an active connection, decrypts the appropriate credential, and injects it into the outbound request using the configured auth method.
