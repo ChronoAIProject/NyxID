@@ -116,9 +116,8 @@ async fn p2_2_quick_access_preserves_legacy_person_records() {
 }
 #[tokio::test]
 async fn p1_5_quick_access_production_router_credential_matrix() {
-    use crate::crypto::token::hash_token;
-    use crate::services::service_account_service;
-    use mongodb::bson::{Document, doc};
+    use crate::services::{key_service, service_account_service};
+    use mongodb::bson::doc;
     let db = connect_test_database("quick_access_credentials_router")
         .await
         .expect("Mongo required");
@@ -144,12 +143,27 @@ async fn p1_5_quick_access_production_router_credential_matrix() {
     let session = token_service::create_session(&db, &owner, None, None)
         .await
         .unwrap();
-    let raw_key = format!("nyxid_{}", Uuid::new_v4().simple());
-    let key_id = Uuid::new_v4().to_string();
-    db.collection::<Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
-        "_id": &key_id, "user_id": &owner, "name": "quick access fixture", "key_prefix": "nyxid_fixture",
-        "key_hash": hash_token(&raw_key), "scopes": "account:read", "is_active": true, "created_at": mongodb::bson::DateTime::now()
-    }).await.unwrap();
+    let key = key_service::create_api_key(
+        &db,
+        &owner,
+        "quick access fixture",
+        "read proxy",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let raw_key = key.full_key;
+    let key_id = key.id;
     let delegated = jwt::generate_delegated_access_token(
         &state.jwt_keys,
         &state.config,
@@ -164,7 +178,7 @@ async fn p1_5_quick_access_production_router_credential_matrix() {
         &state.jwt_keys,
         &state.config,
         &person,
-        "account:read",
+        "proxy",
         None,
         &jwt::RelayAgentScope {
             api_key_id: key_id,
@@ -176,7 +190,32 @@ async fn p1_5_quick_access_production_router_credential_matrix() {
         },
     )
     .unwrap();
-    let oauth = jwt::generate_oauth_access_token(
+    let (oauth_client, _) = crate::services::oauth_client_service::create_client(
+        &db,
+        "quick access OAuth fixture",
+        &["https://example.test/callback".into()],
+        "public",
+        &owner,
+        "",
+        "account:read",
+        crate::models::oauth_client::ScopeProvenance::Explicit,
+        false,
+        None,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    let consent = crate::services::consent_service::grant_consent(
+        &db,
+        &owner,
+        &oauth_client.id,
+        "account:read",
+    )
+    .await
+    .unwrap();
+    let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+    let oauth = jwt::generate_oauth_access_token_with_consent(
         &state.jwt_keys,
         &state.config,
         &person,
@@ -186,7 +225,8 @@ async fn p1_5_quick_access_production_router_credential_matrix() {
         None,
         None,
         None,
-        "quick-access-oauth",
+        &oauth_client.id,
+        Some(&reference),
     )
     .unwrap();
     let (service, secret) = service_account_service::create_service_account(
@@ -248,6 +288,29 @@ async fn p1_5_quick_access_production_router_credential_matrix() {
         ),
         ("anonymous", "authorization", "".into(), false),
     ] {
+        if kind != "anonymous" {
+            let path = if kind == "relay" {
+                "/api/v1/llm/status"
+            } else {
+                "/api/v1/channel-platforms"
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header, &value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "N8 {kind} positive control {path}"
+            );
+        }
         for method in ["GET", "PUT", "DELETE"] {
             let response = app
                 .clone()
@@ -265,13 +328,14 @@ async fn p1_5_quick_access_production_router_credential_matrix() {
             if allowed {
                 assert_eq!(response.status(), StatusCode::OK, "{kind} {method}");
             } else {
-                assert!(
-                    matches!(
-                        response.status(),
-                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-                    ),
-                    "{kind} {method}: {}",
-                    response.status()
+                assert_eq!(
+                    response.status(),
+                    if kind == "anonymous" {
+                        StatusCode::UNAUTHORIZED
+                    } else {
+                        StatusCode::FORBIDDEN
+                    },
+                    "N8 {kind} {method} policy refusal"
                 );
             }
         }
