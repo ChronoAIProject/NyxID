@@ -684,9 +684,17 @@ async fn reconcile_lease_command_delta_is_two_and_direct_leaf_has_none() {
         Arc::new(crate::test_utils::test_app_config()),
     );
     reconciler.run_once().await.unwrap(); // warm one-time setup/anchor checks
+    let runtime = crate::services::coordination_service::cluster_lease_runtime();
+    let token =
+        super::LeaseStore::acquire(&db, super::RECONCILE_LEASE, &runtime.holder, runtime.ttl)
+            .await
+            .unwrap()
+            .unwrap();
+    // Acquire the required token before measuring only the pass steps.
     commands.lock().unwrap().clear();
-    reconciler.run_pass().await.unwrap();
+    reconciler.run_pass(&token).await.unwrap();
     let plain = commands.lock().unwrap().clone();
+    super::LeaseStore::release(&db, &token).await.unwrap();
     commands.lock().unwrap().clear();
     reconciler.run_once().await.unwrap();
     let leased = commands.lock().unwrap().clone();

@@ -9,19 +9,23 @@ use crate::models::credits::Credits;
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::services::billing) enum Finding {
     UnsupportedShape,
+    ResponseTooLarge,
     InvalidPeriod,
     InvalidUnits,
     DuplicateMetric,
     MissingMetric,
+    SubscriptionUnavailable,
+    RequestRejected,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::services::billing) struct CurrentUsage {
     pub start_second: i64,
     pub end_second_exclusive: i64,
     pub quantities_micros: BTreeMap<String, i64>,
 }
 
+#[cfg(test)]
 impl CurrentUsage {
     pub fn metric(&self, code: &str) -> Result<i64, Finding> {
         self.quantities_micros
@@ -32,6 +36,14 @@ impl CurrentUsage {
 }
 
 pub(in crate::services::billing) fn parse(raw: &Value) -> Result<CurrentUsage, Finding> {
+    if raw.get("usage_comparison_finding").and_then(Value::as_str) == Some("response_too_large") {
+        return Err(Finding::ResponseTooLarge);
+    }
+    match raw.get("usage_comparison_finding").and_then(Value::as_str) {
+        Some("subscription_unavailable") => return Err(Finding::SubscriptionUnavailable),
+        Some("provider_request_rejected") => return Err(Finding::RequestRejected),
+        _ => {}
+    }
     let usage = raw
         .get("customer_usage")
         .and_then(Value::as_object)
@@ -59,6 +71,9 @@ pub(in crate::services::billing) fn parse(raw: &Value) -> Result<CurrentUsage, F
         .get("charges_usage")
         .and_then(Value::as_array)
         .ok_or(Finding::UnsupportedShape)?;
+    if charges.len() > 256 {
+        return Err(Finding::UnsupportedShape);
+    }
     let mut quantities_micros = BTreeMap::new();
     for charge in charges {
         let row = charge.as_object().ok_or(Finding::UnsupportedShape)?;
@@ -97,21 +112,10 @@ pub(in crate::services::billing) fn parse(raw: &Value) -> Result<CurrentUsage, F
         let code = charge
             .pointer("/billable_metric/code")
             .and_then(Value::as_str)
-            .filter(|code| !code.trim().is_empty())
+            .filter(|code| !code.trim().is_empty() && code.len() <= 256)
             .ok_or(Finding::MissingMetric)?;
         let units = row.get("units").ok_or(Finding::InvalidUnits)?;
-        let text = match units {
-            Value::String(text) => text.clone(),
-            Value::Number(number) if number.is_i64() || number.is_u64() => number.to_string(),
-            _ => return Err(Finding::InvalidUnits),
-        };
-        let quantity: Credits = text.parse().map_err(|_| Finding::InvalidUnits)?;
-        if quantity < Credits::ZERO || quantity.pico() % 1_000_000 != 0 {
-            return Err(Finding::InvalidUnits);
-        }
-        let micros = quantity
-            .legacy_micros()
-            .map_err(|_| Finding::InvalidUnits)?;
+        let micros = self::units(units)?;
         if quantities_micros.insert(code.into(), micros).is_some() {
             return Err(Finding::DuplicateMetric);
         }
@@ -121,6 +125,19 @@ pub(in crate::services::billing) fn parse(raw: &Value) -> Result<CurrentUsage, F
         end_second_exclusive,
         quantities_micros,
     })
+}
+
+pub(in crate::services::billing) fn units(value: &Value) -> Result<i64, Finding> {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) if number.is_i64() || number.is_u64() => number.to_string(),
+        _ => return Err(Finding::InvalidUnits),
+    };
+    let quantity: Credits = text.parse().map_err(|_| Finding::InvalidUnits)?;
+    if quantity < Credits::ZERO || quantity.pico() % 1_000_000 != 0 {
+        return Err(Finding::InvalidUnits);
+    }
+    quantity.legacy_micros().map_err(|_| Finding::InvalidUnits)
 }
 
 #[cfg(test)]
