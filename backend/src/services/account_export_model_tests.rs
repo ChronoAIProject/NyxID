@@ -168,6 +168,9 @@ struct OrgMessage {
 
 fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> {
     match collection {
+        "client_error_reports" => {
+            roundtrip::<crate::models::client_error_report::ClientErrorReport>(row)
+        }
         "agent_key_login_requests" => {
             roundtrip::<crate::models::agent_key_login_request::AgentKeyLoginRequest>(row)
         }
@@ -1232,4 +1235,33 @@ async fn personal_group_owner_inputs_from_the_real_writer_are_exported() {
     assert!(text.contains("MY_PERSONAL_GROUP_INPUT"));
     assert!(!text.contains("OTHER_ORG_MEMBER_INPUT"));
     db.drop().await.unwrap();
+}
+
+#[test]
+fn crash_reports_export_metadata_without_frames_or_delivery_state() {
+    let row = model_fixture("client_error_reports");
+    let item = safe_item(&row, fields_for("client_error_reports").unwrap());
+    assert_eq!(item["report"]["platform"], "ios");
+    assert_eq!(item["report"]["app_version"], "1.2.3");
+    assert_eq!(item["report"]["runtime"]["name"], "hermes");
+    assert_eq!(item["report"]["native_signal"], "SIGSEGV");
+    let serialized = serde_json::to_string(&item).unwrap();
+    for forbidden in [
+        "js_frames",
+        "native_frames",
+        "native_images",
+        "fingerprint",
+        "consent_revision",
+        "artifact_id",
+        "destination_id",
+        "frame-sentinel",
+        "delivery-sentinel",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "unexpected diagnostic field: {forbidden}"
+        );
+    }
+    assert_eq!(item.as_object().unwrap().len(), 5);
+    assert_eq!(item["report"].as_object().unwrap().len(), 8);
 }

@@ -787,6 +787,7 @@ export interface PublicConfig {
   readonly telemetry_dsn?: string;
   readonly telemetry_host?: string;
   readonly telemetry_share_analytics?: boolean;
+  readonly crash_diagnostics_offered?: boolean;
 }
 
 export type CredentialMode = "admin" | "user" | "both";

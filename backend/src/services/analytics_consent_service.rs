@@ -14,7 +14,34 @@ use mongodb::{
 use std::future::IntoFuture;
 
 /// Version of the optional, account-linked product analytics permission.
-pub const POLICY_VERSION: &str = "1";
+pub const POLICY_VERSION_V1: &str = "1";
+pub const POLICY_VERSION_DIAGNOSTICS: &str = "2";
+#[cfg(test)]
+pub const POLICY_VERSION: &str = POLICY_VERSION_V1;
+
+#[derive(Clone, Copy)]
+pub enum PolicyVersion {
+    V1,
+    Diagnostics,
+}
+
+impl PolicyVersion {
+    pub fn parse(value: Option<&str>) -> AppResult<Self> {
+        match value {
+            None | Some("1") => Ok(Self::V1),
+            Some("2") => Ok(Self::Diagnostics),
+            _ => Err(AppError::ValidationError(
+                "Invalid analytics policy version".into(),
+            )),
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => POLICY_VERSION_V1,
+            Self::Diagnostics => POLICY_VERSION_DIAGNOSTICS,
+        }
+    }
+}
 
 fn options() -> CollectionOptions {
     CollectionOptions::builder()
@@ -37,6 +64,27 @@ pub async fn read(db: &Database, user_id: &str) -> AppResult<AnalyticsConsent> {
 }
 
 pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<AnalyticsConsent> {
+    set_acknowledging(db, user_id, enabled, PolicyVersion::V1).await
+}
+
+pub async fn set_acknowledging(
+    db: &Database,
+    user_id: &str,
+    enabled: bool,
+    acknowledged: PolicyVersion,
+) -> AppResult<AnalyticsConsent> {
+    if matches!(acknowledged, PolicyVersion::Diagnostics) {
+        use super::crash_report_service::DiagnosticsStatus;
+        match super::crash_report_service::eligibility(db, user_id).await {
+            DiagnosticsStatus::Unknown => return Err(AppError::SecurityReadinessUnavailable),
+            DiagnosticsStatus::NotOffered => {
+                return Err(AppError::ValidationError(
+                    "Diagnostics permission is not currently offered".into(),
+                ));
+            }
+            DiagnosticsStatus::Available | DiagnosticsStatus::ConsentRequired => {}
+        }
+    }
     // A random revision invalidates previously admitted work even on same-ms
     // withdraw/regrant or wall-clock rollback. Majority acknowledgement prevents
     // an acknowledged withdrawal being rolled back on ordinary primary failover.
@@ -47,7 +95,7 @@ pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<Analy
             active_person(user_id),
             vec![doc! {"$set": {"profile_config.analytics": {
                 "enabled": enabled, "changed_at": "$$NOW", "revision": &revision,
-                "policy_version": POLICY_VERSION
+                "policy_version": acknowledged.as_str()
             }}}],
         )
         .return_document(ReturnDocument::After)
@@ -56,42 +104,99 @@ pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<Analy
     Ok(user.profile_config.analytics)
 }
 
-/// Never cache positive permission. The caller saves this revision in the
-/// bounded queue at admission; queued jobs never acquire a replacement revision.
+/// A failed permission read is not evidence of withdrawal.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConsentPermission<T = ()> {
+    Permitted(T),
+    Denied,
+    Unknown,
+}
+impl ConsentPermission<String> {
+    fn revision(self) -> Option<String> {
+        match self {
+            Self::Permitted(revision) => Some(revision),
+            // Legacy categorical analytics continues to fail closed on unknown.
+            Self::Denied | Self::Unknown => None,
+        }
+    }
+    pub(crate) fn for_revision(self, expected: &str) -> ConsentPermission {
+        match self {
+            Self::Permitted(revision) if revision == expected => ConsentPermission::Permitted(()),
+            Self::Unknown => ConsentPermission::Unknown,
+            _ => ConsentPermission::Denied,
+        }
+    }
+}
+
+/// Never cache positive permission. Queued work retains its admitted revision.
 pub async fn permitted_revision(db: &Database, user_id: &str) -> Option<String> {
+    permitted_revision_for(db, user_id, false).await.revision()
+}
+
+#[cfg(test)]
+pub async fn permitted_diagnostics_revision(db: &Database, user_id: &str) -> Option<String> {
+    permitted_revision_for(db, user_id, true).await.revision()
+}
+
+pub async fn permits_diagnostics(
+    db: &Database,
+    user_id: &str,
+    revision: &str,
+) -> ConsentPermission {
+    permitted_revision_for(db, user_id, true)
+        .await
+        .for_revision(revision)
+}
+
+async fn permitted_revision_for(
+    db: &Database,
+    user_id: &str,
+    diagnostics: bool,
+) -> ConsentPermission<String> {
     if uuid::Uuid::parse_str(user_id).is_err() {
-        return None;
+        return ConsentPermission::Unknown;
     }
     let mut filter = active_person(user_id);
     filter.insert("profile_config.analytics.enabled", true);
+    if diagnostics {
+        filter.insert(
+            "profile_config.analytics.policy_version",
+            POLICY_VERSION_DIAGNOSTICS,
+        );
+    }
     filter.insert(
         "profile_config.analytics.revision",
         doc! {"$type": "string", "$ne": ""},
     );
-    // Unlike a majority snapshot, this indexed single-user read must observe
-    // majority-acknowledged choices preceding it even across primary changes.
+    // Linearizable reads observe acknowledged choices across primary changes.
     let mut gate_options = options();
     gate_options.read_concern = Some(ReadConcern::linearizable());
-    let row = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+    bounded_consent_read(
         db.collection_with_options::<Document>(COLLECTION_NAME, gate_options)
             .find_one(filter)
             .max_time(std::time::Duration::from_millis(200))
             .projection(doc! {"profile_config.analytics.revision": 1})
             .into_future(),
+        std::time::Duration::from_millis(250),
     )
     .await
-    .ok()?
-    .ok()??;
-    Some(
-        row.get_document("profile_config")
-            .ok()?
-            .get_document("analytics")
-            .ok()?
-            .get_str("revision")
-            .ok()?
-            .to_owned(),
-    )
+}
+
+pub(crate) async fn bounded_consent_read(
+    read: impl std::future::Future<Output = mongodb::error::Result<Option<Document>>>,
+    deadline: std::time::Duration,
+) -> ConsentPermission<String> {
+    match tokio::time::timeout(deadline, read).await {
+        Ok(Ok(None)) => ConsentPermission::Denied,
+        Ok(Ok(Some(row))) => row
+            .get_document("profile_config")
+            .ok()
+            .and_then(|profile| profile.get_document("analytics").ok())
+            .and_then(|analytics| analytics.get_str("revision").ok())
+            .map(|revision| ConsentPermission::Permitted(revision.to_owned()))
+            .unwrap_or(ConsentPermission::Unknown),
+        Ok(Err(_)) | Err(_) => ConsentPermission::Unknown,
+    }
 }
 
 pub async fn permits_dispatch(db: &Database, user_id: &str, revision: &str) -> bool {
@@ -262,6 +367,42 @@ mod tests {
             other => panic!("maxTimeMS must be a BSON integer: {other:?}"),
         };
         assert_eq!(max_time, 200);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_consent_read_preserves_success_denial_database_error_and_timeout() {
+        let revision = "acknowledged";
+        let row = doc! {"profile_config": {"analytics": {"revision": revision}}};
+        let permitted = bounded_consent_read(
+            std::future::ready(Ok(Some(row))),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            permitted.for_revision(revision),
+            ConsentPermission::Permitted(())
+        );
+        assert_eq!(
+            bounded_consent_read(
+                std::future::ready(Ok(None)),
+                std::time::Duration::from_secs(1)
+            )
+            .await,
+            ConsentPermission::Denied
+        );
+        let failure = mongodb::error::Error::custom("fixed test failure");
+        assert_eq!(
+            bounded_consent_read(
+                std::future::ready(Err(failure)),
+                std::time::Duration::from_secs(1)
+            )
+            .await,
+            ConsentPermission::Unknown
+        );
+        assert_eq!(
+            bounded_consent_read(std::future::pending(), std::time::Duration::ZERO).await,
+            ConsentPermission::Unknown
+        );
     }
 
     #[tokio::test]

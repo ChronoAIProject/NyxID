@@ -248,3 +248,5 @@ pub(crate) mod invocation_diagnostics;
 
 mod platform_model_gateway;
 pub mod platform_models;
+
+pub mod crash_reports;

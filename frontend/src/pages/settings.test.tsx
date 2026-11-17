@@ -102,7 +102,7 @@ async function open(
   await act(() => router.load());
   await screen.findByRole("tab", { name: "Profile" });
   if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-  return { router, history };
+  return { router, history, client };
 }
 
 async function saveSettings() {
@@ -641,4 +641,31 @@ describe("MFA security settings", () => {
     await user.click(within(dialog).getByRole("button", { name: "Disable MFA" }));
     await waitFor(() => expect(mockDisable).toHaveBeenCalledWith({ code: "Ab_cd-12", ...(hasPassword ? { password: "current-password" } : {}) }));
   });
+});
+
+it("privacy hides diagnostics when not offered and orders offered rows account browser diagnostics", async () => {
+  const {client}=await open("/settings","privacy");
+  expect(screen.getByText("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")).toBeInTheDocument();
+  await waitFor(()=>expect(transport).toHaveBeenCalledWith("/api/v1/users/me/preferences/analytics",expect.anything()));
+  expect(screen.queryByText("Crash diagnostics")).not.toBeInTheDocument();
+  expect(screen.queryByText("Review updated analytics")).not.toBeInTheDocument();
+  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,current_policy_version:"2",diagnostics_offered:true,diagnostics_available:false,revision:"live"});});
+  const diagnostics=await screen.findByText("Crash diagnostics");
+  const browser=screen.getByText("Allow on this browser");
+  expect(browser.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Review updated analytics" })).toBeInTheDocument();
+  useConsentStore.setState({ accountId: "owner", enabled: true, asked: true, policy: 2 });
+  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,current_policy_version:"2",diagnostics_offered:true,diagnostics_available:true,revision:"live"});});
+  expect(screen.queryByRole("button", { name: "Review updated analytics" })).not.toBeInTheDocument();
+});
+
+it.each(["2",null])("account re-enable retains an acknowledged policy from account=%s or device",async(accountPolicy)=>{
+  useConsentStore.getState().setConsent(false,2);
+  transport.mockImplementation(async (_url,options)=>new Response(JSON.stringify({account_id:"owner",enabled:options?.method==="PUT",policy_version:accountPolicy,current_policy_version:"2",diagnostics_offered:true,diagnostics_status:"consent_required",diagnostics_available:false,revision:"r",changed_at:null}),{headers:{"Content-Type":"application/json"}}));
+  await open("/settings","privacy");
+  const toggle=await screen.findByRole("switch",{name:"Allow account usage analytics"});
+  await waitFor(()=>expect(toggle).not.toBeDisabled()); await userEvent.click(toggle);
+  await waitFor(()=>expect(transport.mock.calls.some(([,opts])=>opts?.method==="PUT")).toBe(true));
+  const request=transport.mock.calls.find(([,opts])=>opts?.method==="PUT")!;
+  expect(JSON.parse(String(request[1]?.body))).toMatchObject({enabled:true,policy_version:"2"});
 });
