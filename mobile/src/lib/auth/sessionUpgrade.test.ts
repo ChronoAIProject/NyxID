@@ -18,7 +18,7 @@ function fixture(values: Map<string,string>, interruptAt=Infinity) {
   return {coordinator:createSessionCoordinator(storage,()=>{}),count:()=>count};
 }
 function usable(session:StoredAuthSession|null,expected= a) {assert.equal(session?.accessToken,expected.accessToken);assert.equal(session?.refreshToken,expected.refreshToken);assert.equal(session?.userId,expected.userId);}
-for (const platform of ['ios','android']) test(`${platform} upgrade survives interruption after every migration storage operation`,async()=>{
+test('shared iOS/Android storage protocol survives interruption after every migration storage operation',async()=>{
   const measured=fixture(legacy());await measured.coordinator.load();
   for(let boundary=1;boundary<=measured.count();boundary++){
     const values=legacy();const run=fixture(values,boundary);await run.coordinator.load().catch(()=>{});
