@@ -666,7 +666,7 @@ Webhook-target dedup uses durable delivery records. Agent and notification targe
 
 FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
-## SMTP (Optional)
+## SMTP (Reserved; currently unused)
 
 | Variable | Description |
 |----------|-------------|
@@ -676,7 +676,7 @@ FCM and APNs are independent -- configure either or both. Push notifications are
 | `SMTP_PASSWORD` | SMTP authentication password |
 | `SMTP_FROM_ADDRESS` | Sender address for outbound email |
 
-For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
+These variables are reserved for a future mail transport. The current NyxID server does not send email, so setting them has no effect on account verification or password-reset delivery. For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
 
 ## Credential Nodes (Optional)
 

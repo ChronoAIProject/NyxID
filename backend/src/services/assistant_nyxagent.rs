@@ -1198,6 +1198,79 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
     Ok(reset)
 }
 
+/// Additive account-export index, owned here with the message writer. The
+/// base startup fixture deliberately omits this later feature addition.
+pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    ensure_checkpoint_export_index(db).await?;
+    let collection = db.collection::<bson::Document>(MESSAGES);
+    let keys = doc! {"user_id":1,"created_at":-1,"_id":-1};
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index.keys.iter().take(3).eq(keys.iter()) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(keys)
+                .options(
+                    IndexOptions::builder()
+                        .name("assistant_messages_account_export".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn ensure_checkpoint_export_index(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>(CHECKPOINTS);
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_assistant_checkpoints_user_id".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::assistant_wake_service::ensure_indexes(db).await?;
     super::collaboration_group_service::ensure_indexes(db).await?;
@@ -5280,6 +5353,7 @@ pub async fn attach_routed_image(
             turn_id,
             content_type: meta.content_type.clone(),
             size: meta.size,
+            chunks: 0,
             data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
@@ -5366,6 +5440,7 @@ pub(crate) async fn attach_resource_image(
                 .ok_or(AppError::AssistantTurnRequired)?,
             content_type: meta.content_type.clone(),
             size: meta.size,
+            chunks: 0,
             data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
@@ -5669,7 +5744,7 @@ pub async fn read_attachment_for_caller(
         .await?;
         return Err(not_found());
     };
-    let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+    let mut protected = super::assistant_tool_files::payload(db, keys, &row).await?;
     let bytes = std::mem::take(&mut *protected);
     Box::pin(super::assistant_upload_retention::require_available(
         db, filter,

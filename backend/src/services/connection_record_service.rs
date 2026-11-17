@@ -104,6 +104,15 @@ pub(crate) async fn commit(
     source: Option<&Document>,
     row: &UserServiceConnection,
 ) -> AppResult<()> {
+    commit_with_audit(db, source, row, None).await
+}
+
+pub(crate) async fn commit_with_audit(
+    db: &mongodb::Database,
+    source: Option<&Document>,
+    row: &UserServiceConnection,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<()> {
     validate(row)?;
     let mut tx = db.client().start_session().await?;
     tx.start_transaction()
@@ -122,7 +131,7 @@ pub(crate) async fn commit(
                 "Service connection changed before credential commit".into(),
             ));
         }
-        if let Some(source) = source {
+        let changed = if let Some(source) = source {
             let mut set = bson::to_document(row).map_err(|_| invalid())?;
             set.remove("_id");
             // Option fields with skip_serializing_if still have explicit clear
@@ -147,11 +156,21 @@ pub(crate) async fn commit(
                     "Service connection changed before credential commit".into(),
                 ));
             }
+            result.modified_count == 1
         } else {
             db.collection::<UserServiceConnection>(COLLECTION_NAME)
                 .insert_one(row)
                 .session(&mut tx)
                 .await?;
+            true
+        };
+        if changed && let Some(audit) = audit {
+            super::security_effect_service::enqueue_in_session(
+                db,
+                &mut tx,
+                std::slice::from_ref(audit),
+            )
+            .await?;
         }
         Ok(())
     }

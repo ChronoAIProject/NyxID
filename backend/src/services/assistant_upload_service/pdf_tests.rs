@@ -148,6 +148,16 @@ async fn scanned_pdf_web_and_channel_share_images_authority_proofs_and_retention
         .await
         .unwrap();
         assert!(for_egress(&state.db, &chat, image_id).await.is_ok());
+        let file = for_file_egress(&state.db, &chat, image_id).await.unwrap();
+        assert_eq!(
+            file_egress_bytes(&state.db, &state.encryption_keys, &chat, &file)
+                .await
+                .unwrap(),
+            bytes
+        );
+        let identity = super::super::raw_attachment_tool::metadata_identity(&state.db, image_id)
+            .await
+            .unwrap();
         assert_eq!(
             turn_attachments(
                 &state.db,
@@ -206,6 +216,12 @@ async fn scanned_pdf_web_and_channel_share_images_authority_proofs_and_retention
         .await
         .unwrap();
         assert_eq!(
+            identity,
+            super::super::raw_attachment_tool::metadata_identity(&state.db, image_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
             chat_bytes(&state.db, &strict, &chat, image_id, true)
                 .await
                 .unwrap()
@@ -218,6 +234,12 @@ async fn scanned_pdf_web_and_channel_share_images_authority_proofs_and_retention
             .update_one(doc! {"_id":image_id}, doc! {"$set":{"page":2}})
             .await
             .unwrap();
+        assert_ne!(
+            identity,
+            super::super::raw_attachment_tool::metadata_identity(&state.db, image_id)
+                .await
+                .unwrap()
+        );
         assert!(
             chat_bytes(&state.db, &strict, &chat, image_id, true)
                 .await

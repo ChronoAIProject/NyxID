@@ -6339,6 +6339,33 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-
 
 ---
 
+#### POST /api/v1/admin/personal-erasure/orphans
+
+Start a persisted, leased background dry-run (default `{}`) or digest-bound
+apply (`{"apply":true,"digest":"<dry-run digest>"}`). The request returns
+HTTP 202 immediately. No candidate content is included in the report; owner-ID
+lists are capped with an explicit flag, while candidate counts remain exact.
+
+**Auth:** Admin, first-party human
+
+**Response (202):**
+
+```json
+{"job_id":"<uuid>","status":"pending","phase":"scan","report":null,"failure":null}
+```
+
+#### GET /api/v1/admin/personal-erasure/orphans/{job_id}
+
+Poll the job using the same admin, first-party-human authorization. A complete
+job has `status: "complete"` and `report` containing `dry_run`, `digest`,
+`candidate_count`, and `collections` (collection, candidate count, capped owner
+IDs and `owner_ids_truncated`). A changed candidate set or registry definition
+returns `status: "failed"` with a stable failure code. Existing person,
+organization-user, service-account and erasure-job owners remain live. Apply
+reuses the exact persisted set after interruption and records a chained audit.
+
+---
+
 #### PATCH /api/v1/admin/users/{user_id}/verify-email
 
 Manually verify a user's email address. Clears any pending verification token.
@@ -9731,3 +9758,94 @@ CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
 list and publish immutable effective-dated resource prices. See
 [CMA billing](CMA_BILLING.md#enablement-and-runtime-rate-configuration) for
 exact decimal payloads, validation, audit and activation semantics.
+### Account data export
+
+`POST /api/v1/users/me/export` returns the bounded `nyxid.account-export` JSON
+attachment described in [ACCOUNT_DATA_EXPORT.md](ACCOUNT_DATA_EXPORT.md). It is
+first-party human only and rate limited to three requests per account per hour.
+Source reads share a 60-second total build budget from admission; unread sources
+and any subsection whose redistribution reread is in flight become unavailable at
+expiry (its earlier page was released to stay within the byte budget), while
+completed pages not being reread are kept. Unavailable subsections count toward
+the mostly-unavailable refund.
+The response has an exact serialized-byte `Content-Length` and streams in slices
+of at most 64 KiB. A 120-second total delivery deadline discards the remaining
+buffer and aborts the body with an error; it refunds the delivery slot, while
+leaving the attempt charged. The frontend nginx export route disables gzip and
+buffering. Clients must reject body errors and a byte count differing from a
+present length when encoding is absent or identity. Do not compress this route
+at any ingress; for nonidentity encoding clients fall back to JSON/structural
+validation rather than compare wire and decoded byte counts. With a matching
+unencoded length, web checks outer braces through bounded blob slices and saves
+the blob without a full read or parse; otherwise it parses the JSON and checks
+the export format. Without a usable length, mobile requires clean
+transport completion and a bounded check of the first and last non-whitespace
+bytes (`{` / `}`), tracked while writing; it never reads back or parses the full
+file. Mobile bounds headers to 75 seconds (60-second server build budget plus margin),
+then aborts after 30 seconds without new bytes or 195 seconds overall,
+removes its temporary file, and bounds native reader cancellation to one second
+before showing the existing export error. Network deadlines stop before the
+user-controlled share sheet. See the export document for the client validation
+contract.
+
+Orphan application appends a chained `user.account.erasure_orphan_sweep_started`
+event containing the reviewed digest before any mutation, and a chained
+`user.account.erasure_orphan_sweep` completion event afterwards. Application
+rechecks account, service-account and erasure-job liveness under the same
+majority transaction as the deletion or redaction and closes the durable writer
+admission barrier. Joined children are removed only if their authoritative
+parent is still absent inside that transaction. Every mutation also writes the
+current, unexpired sweep lease fence.
+
+Organization accounts count as live owners. Once an organization account is
+absent, structurally orphaned rows in the registry's permitted cleanup classes
+are in scope, subject to the same terminal-state and external-effect guards.
+Financial records, audit records, billing ledger entries and retained recovery
+receipts are never orphan-sweep deletion candidates.
+
+
+Orphan apply selects the completed dry-run by its returned SHA-256 digest and
+consumes that job's persisted candidate pages. It does not rescan the database;
+new orphans need a new dry-run. Only one pending apply can hold a reviewed digest,
+even across different source dry runs. Admission inserts a fence keyed by digest
+in `personal_erasure_orphan_sweep_fences` and claims `active_apply_job_id` on the
+source in the same transaction as inserting the apply. The default `_id` index
+provides exclusivity; no secondary index is added. Admission also checks pending
+applies created before digest fences existed. A concurrent apply returns `1004 conflict` with
+`An apply is already pending for this digest`. Every terminal transition,
+including failure after an expired claim reaches the retry cap, releases both
+source and digest fences in the same transaction. A later apply can process previously
+blocked rows after their blocker clears. Every mutation still checks current
+account and parent liveness transactionally. `candidate_count` is the reviewed count;
+`noop_count` counts vanished, re-parented or already-redacted candidates;
+`skipped_count` separately counts blocked candidates, including owners that are
+live again, remote cleanup still pending, or lifecycle predicates refusing a
+delete. Row mutations, both counts and page advancement commit in one majority
+transaction, so page retries cannot double-count outcomes. A completion audit
+means the reviewed page set was processed; skipped rows need a later apply after
+their blocker clears, even when a new dry-run has the same digest.
+Eight consecutive failed page attempts, including expired leases and abandoned
+claims, terminate the job as `failed` with `page_retry_limit_exceeded`.
+Deployment interruptions count: a worker killed mid-page leaves an abandoned
+claim, and the next claim records one failure when that lease expires. Each
+successful page checkpoint resets the consecutive-failure streak. After eight
+consecutive failures, inspect and resolve the cause, then start a fresh apply
+from the still-valid reviewed dry-run; if its pages have expired or been purged,
+run a new dry-run first. The failed job remains terminal; recovery uses a new job.
+Finished jobs and identifier-only pages are eligible for cleanup after seven
+days. Each worker pass purges at most 128 pages from each of at most 16 finished
+jobs; pending apply jobs pin their source dry-run pages. After retention expires,
+apply admission returns `1004 conflict` with
+`Reviewed dry-run expired or unavailable; run a new dry-run`. It also refuses a
+source whose page purge has started, checking retention and purge state again
+inside the admission transaction. Run a fresh dry-run before applying.
+No additional large-collection index is
+needed: page reads and deletion use the existing `_id` prefix.
+
+An erasure-domain retry following `remote_cleanup_wait_exceeded` returns:
+`Erasure domain queued for evidence re-evaluation. Resolve the remaining remote cleanup dependencies. For a node-blocked Stop, bring the node online or, if permanently gone, have an administrator delete it via DELETE /api/v1/admin/nodes/{id}, then retry. Unresolved cleanup immediately returns to operator_action (remote_cleanup_wait_exceeded)`.
+Pending domain status has reason `remote_cleanup_verification_required`.
+Retry preserves the original wait clock; it neither attests remote completion
+nor restarts the 24-hour bound. Follow the remote-cleanup operator procedure in
+[PERSONAL_ERASURE_INVENTORY.md](security/PERSONAL_ERASURE_INVENTORY.md) before
+submitting the retry, and poll status for verified progress.

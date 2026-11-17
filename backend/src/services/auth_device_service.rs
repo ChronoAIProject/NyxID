@@ -2142,6 +2142,13 @@ mod tests {
         );
         assert!(updated.expires_at < original.expires_at);
         assert!(updated.expires_at <= Utc::now() + Duration::seconds(70));
+        let reservation = db
+            .collection::<bson::Document>(RESERVATION_COLLECTION_NAME)
+            .find_one(doc! {"user_code_hmac": &updated.user_code_hmac})
+            .await
+            .expect("reservation query")
+            .expect("reservation exists");
+        assert!(reservation.get("approved_user_id").is_none());
 
         let (access, refresh) = decrypt_tokens(
             &encryption_keys,

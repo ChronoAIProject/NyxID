@@ -12,7 +12,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
-import { api, apiClient, ApiError } from "@/lib/api-client";
+import { api, apiFetch, apiClient, ApiError } from "@/lib/api-client";
+import { validateAccountExport } from "@/lib/account-export";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
 import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
@@ -1075,6 +1076,7 @@ function PrivacyTab() {
   const setConsent = useConsentStore((s) => s.setConsent);
   const accountId = useAuthStore((s) => s.user?.id);
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const permission = useQuery({
     queryKey: ["analytics-consent", accountId],
     queryFn: () => readAnalyticsConsent(accountId!),
@@ -1096,8 +1098,91 @@ function PrivacyTab() {
     }
   }
 
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const response = await apiFetch("/users/me/export", { method: "POST" });
+      const blob = await response.blob();
+      await validateAccountExport(blob, response.headers);
+      const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/i)?.[1];
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download =
+        filename ??
+        `nyxid-account-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast.success(translateUi("Your data export is ready."));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.status === 429) {
+          const seconds = error.retryAfter;
+          const minutes = error.retryAfter
+            ? Math.max(1, Math.ceil(error.retryAfter / 60))
+            : undefined;
+          toast.error(
+            translateUi(
+              minutes === undefined
+                ? "Your data export is temporarily rate limited."
+                : seconds && seconds < 60
+                  ? seconds === 1
+                    ? "Your data export is temporarily rate limited. Try again in 1 second."
+                    : "Your data export is temporarily rate limited. Try again in {{seconds}} seconds."
+                  : minutes === 1
+                  ? "Your data export is temporarily rate limited. Try again in 1 minute."
+                  : "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
+              minutes === undefined ? undefined : { minutes, seconds },
+            ),
+          );
+        } else if (error.status === 404 || error.status === 405) {
+          toast.error(
+            translateUi("Data export is not available on this server yet."),
+          );
+        } else {
+          toast.error(
+            translateUi("We couldn't create your data export. Please try again."),
+          );
+        }
+      } else {
+        toast.error(
+          translateUi("We couldn't create your data export. Please try again."),
+        );
+      }
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
-    <GroupedList
+    <>
+      <GroupedList
+        title={translateUi("Your data")}
+        footer={translateUi(
+          "Download a JSON copy of your account profile, services, activity, your assistant inputs, private assistant replies to web/mobile turns without platform routing, and channel metadata, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.",
+        )}
+      >
+        <GroupedRow
+          title={translateUi("Download your data")}
+          description={translateUi(
+            "Creates a bounded JSON export. You can request one up to three times per hour.",
+          )}
+          accessory={
+            <Button
+              variant="outline"
+              size="sm"
+              isLoading={exporting}
+              onClick={() => void handleExport()}
+            >
+              {translateUi("Download")}
+            </Button>
+          }
+        />
+      </GroupedList>
+      <GroupedList
       title={translateUi("Usage analytics")}
       footer={
         <>
@@ -1179,6 +1264,7 @@ function PrivacyTab() {
           />
         }
       />
-    </GroupedList>
+      </GroupedList>
+    </>
   );
 }

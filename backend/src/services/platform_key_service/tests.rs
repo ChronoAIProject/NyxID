@@ -697,6 +697,8 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
     let ctx = mcp_service::McpExecContext {
         strict_response_utf8: false,
         execution_permission: None,
+
+        attachment_owner_key: false,
         assistant_chat: None,
         response_body_limit: None,
         actor_user_id: None,

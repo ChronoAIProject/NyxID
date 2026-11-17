@@ -1,6 +1,6 @@
 import { formatDateTime } from "@/lib/utils";
 import { appI18n } from "@/i18n/instance";
-import zh from "@/i18n/locales/zh-CN.json";
+import zh from "@/i18n/locales/app/zh-CN";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -552,7 +552,7 @@ it("renders the Discord release safety explanation in Chinese without a retry bu
   try {
     data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", gateway_native_activation: "gateway_native_draining" })];
     render(<ChannelBotsManager agents={[]} />);
-    expect(screen.getByText(zh["Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."])).toBeVisible();
+    expect(screen.getByText(zh["Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."]!)).toBeVisible();
     expect(screen.queryByRole("button", { name: /重试|Retry native/ })).not.toBeInTheDocument();
   } finally { await act(() => appI18n.changeLanguage("en")); }
 });

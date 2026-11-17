@@ -26,6 +26,9 @@ mod routes;
 mod services;
 mod shutdown_servers;
 mod ssh_cli;
+#[cfg(test)]
+#[cfg(unix)]
+mod startup_signal_tests;
 mod telemetry;
 mod telemetry_erasure_cli;
 mod turn_trace;
@@ -186,6 +189,10 @@ pub struct AppState {
     pub cluster_slot_manager: services::cluster_slot_service::RenewableSlotManager,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Self-serve account exports: three requests per person per hour.
+    pub account_export_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Bound memory and MongoDB work for concurrent export builders.
+    pub account_export_semaphore: Arc<tokio::sync::Semaphore>,
     /// Parsed per-user limit for each platform-owned downstream credential.
     pub platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy,
     /// Per-user request and in-flight limiter for direct assistant streams.
@@ -567,6 +574,17 @@ fn server_main(cli: Cli) {
 }
 
 async fn server_run(cli: Cli) {
+    let startup_signals = if cli.command.is_none() && cli.promote_admin.is_none() {
+        Some(
+            services::shutdown::signals::Signals::new()
+                .expect("Cannot install shutdown signal handlers")
+                .watch_startup(),
+        )
+    } else {
+        None
+    };
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("entry").await;
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
@@ -619,10 +637,26 @@ async fn server_run(cli: Cli) {
         );
     }
 
-    // Connect to database
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("configuration_ready").await
+    {
+        return;
+    }
+
+    // Connect to database without indexes, migrations or application writes.
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("database_ready").await;
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("database_ready").await
+    {
+        return;
+    }
+    db::initialize(&db)
+        .await
+        .expect("Failed to initialize database");
     // Preparation reads the unchanged legacy bytes and bounded chain evidence.
     // It neither loads a signer nor starts normal server writers, so an older
     // weak signer can be exported before the strict JWT cutover.
@@ -668,19 +702,6 @@ async fn server_run(cli: Cli) {
     services::assistant_action_receipts::init_action_fingerprint_hmac_key(action_fingerprint);
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger.clone());
     let billing_ledger_hmac_key = Arc::new(billing_ledger);
-    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
-    services::billing::account_reconciliation::spawn(
-        db.clone(),
-        config.billing_enabled,
-        config.chain_verify_interval_secs,
-    );
-    services::chain_verify_service::spawn_chain_verify_worker(
-        db.clone(),
-        audit_chain_hmac_key.clone(),
-        billing_ledger_hmac_key.clone(),
-        config.chain_verify_interval_secs,
-    );
-
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
         services::role_service::seed_system_roles(&db)
@@ -706,6 +727,22 @@ async fn server_run(cli: Cli) {
         }
         return;
     }
+
+    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
+    services::billing::account_reconciliation::spawn(
+        db.clone(),
+        config.billing_enabled,
+        config.chain_verify_interval_secs,
+    );
+    services::chain_verify_service::spawn_chain_verify_worker(
+        db.clone(),
+        audit_chain_hmac_key.clone(),
+        billing_ledger_hmac_key.clone(),
+        config.chain_verify_interval_secs,
+    );
+
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("after_workers").await;
 
     // Validate provider-specific encryption config before any seed calls that use it.
     config.validate_key_provider();
@@ -979,9 +1016,9 @@ async fn server_run(cli: Cli) {
     ));
     // Register before serving. Reuse the process generation, not node socket
     // heartbeats: a replica can enforce policy without owning any node sockets.
-    services::security_readiness_service::ensure_indexes(&db)
+    services::personal_erasure_service::ensure_startup_indexes(&db)
         .await
-        .expect("security replica indexes failed");
+        .expect("late startup indexes failed");
     let readiness_runtime = services::security_readiness_service::Runtime::new(
         (*replica_identity).clone(),
         config.security_rollout.clone(),
@@ -1173,6 +1210,13 @@ async fn server_run(cli: Cli) {
             db.clone(),
             "agent",
         )),
+        account_export_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,
@@ -1329,14 +1373,13 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
-    services::personal_erasure_service::ensure_indexes(&state.db)
-        .await
-        .expect("Personal erasure indexes");
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(
             state.clone(),
         ));
+    let _orphan_sweep_worker =
+        services::personal_erasure_orphan_sweep::jobs::spawn_worker(state.clone());
     let _personal_erasure_worker = services::personal_erasure_service::spawn_worker(state.clone());
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), erasure_clients);
     let _usage_rollup_worker =
@@ -1932,6 +1975,48 @@ async fn server_run(cli: Cli) {
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("before_listeners").await;
+    let (mut signals, startup_stop) = startup_signals
+        .expect("server mode has startup signal receivers")
+        .finish()
+        .await;
+    if let Some(received) = startup_stop {
+        tracing::info!(target: "nyxid::shutdown", signal = received.signal,
+            safe_point = "before_listeners", "Stopping startup without binding listeners");
+        if let Some(drain) = services::shutdown::drain::Drain::begin_startup(
+            &shutdown_state,
+            std::time::Duration::from_secs(config.shutdown_drain_timeout_secs),
+            received,
+        ) {
+            let finish = async {
+                let end = drain
+                    .wait(&shutdown_state, drain.work_deadline(), signals.next())
+                    .await;
+                let cleanup_deadline = drain
+                    .deadline
+                    .min(tokio::time::Instant::now() + drain.cleanup_reserve());
+                finish_shutdown(
+                    &shutdown_state,
+                    &drain,
+                    end,
+                    &discord_shutdown,
+                    cleanup_deadline,
+                )
+                .await;
+            };
+            tokio::select! {
+                biased;
+                () = finish => {},
+                never = drain.progress(&shutdown_state) => match never {},
+            }
+        } else {
+            // Preserve the configured zero-budget Discord cancellation path.
+            discord_shutdown.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discord_worker).await;
+        }
+        return;
+    }
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr)
         .await
@@ -1939,6 +2024,8 @@ async fn server_run(cli: Cli) {
     let internal_listener = TcpListener::bind(&config.internal_bind_addr)
         .await
         .expect("Failed to bind internal dispatch address");
+    #[cfg(all(test, unix))]
+    startup_signal_tests::listeners_bound();
     let listeners_bound_at = chrono::Utc::now();
     let internal_body_limit =
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
@@ -1959,13 +2046,6 @@ async fn server_run(cli: Cli) {
         "Internal replica listener started"
     );
 
-    let mut signals = match services::shutdown::signals::Signals::new() {
-        Ok(signals) => signals,
-        Err(error) => {
-            tracing::error!(%error, "Cannot install shutdown signal handlers");
-            return;
-        }
-    };
     let mut servers = shutdown_servers::Servers::new(
         shutdown_state.shutdown.clone(),
         listener,
@@ -1974,6 +2054,8 @@ async fn server_run(cli: Cli) {
         internal_app,
     );
     services::shutdown::startup::listeners_bound(&shutdown_state, listeners_bound_at);
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("serving").await;
     let signal = tokio::select! {
         () = servers.failed() => None,
         signal = signals.next() => Some(signal),

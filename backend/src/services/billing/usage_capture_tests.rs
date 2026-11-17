@@ -11,6 +11,8 @@ struct Provider {
     retry_first: bool,
     response: Option<LagoError>,
     require_prepared: Option<mongodb::Database>,
+    usage: Option<serde_json::Value>,
+    usage_reads: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait::async_trait]
@@ -42,14 +44,25 @@ impl LagoApi for Provider {
     async fn record_events_batch(&self, _: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
         unreachable!()
     }
-    async fn current_usage(&self, _: &str, subscription: &str) -> AppResult<LagoUsage> {
+    async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
         crate::services::billing::lago_client::require_subscription_id(subscription)?;
         if subscription.trim().is_empty() {
             return Err(AppError::BillingProviderUnavailable(
                 "missing subscription".into(),
             ));
         }
-        panic!("capture-only maintenance must not read provider usage")
+        if let Some(raw) = &self.usage {
+            self.usage_reads
+                .lock()
+                .unwrap()
+                .push((customer.into(), subscription.into()));
+            return Ok(LagoUsage {
+                customer_id: customer.into(),
+                subscription_id: subscription.into(),
+                raw: raw.clone(),
+            });
+        }
+        panic!("unready capture must not read provider usage")
     }
     async fn wallet_balance(&self, _: &str) -> AppResult<i64> {
         unreachable!()
@@ -67,6 +80,23 @@ struct Fixture {
 }
 
 impl Fixture {
+    async fn compare_usage(
+        &self,
+    ) -> AppResult<crate::services::billing::reconcile::ReconcileStats> {
+        let runtime = crate::services::coordination_service::cluster_lease_runtime();
+        let token = crate::services::coordination_service::LeaseStore::acquire(
+            &self.db,
+            RECONCILE_LEASE,
+            &runtime.holder,
+            runtime.ttl,
+        )
+        .await?
+        .unwrap();
+        let result = self.worker.compare_usage_for_test(&token).await;
+        crate::services::coordination_service::LeaseStore::release(&self.db, &token).await?;
+        result
+    }
+
     async fn new(retry_first: bool) -> Self {
         let commands = Arc::new(Mutex::new(Vec::new()));
         let recorded = commands.clone();
@@ -177,20 +207,13 @@ async fn usage_capture_retry_preserves_missing_finalized_timestamp() {
 }
 
 #[tokio::test]
-async fn usage_capture_warming_never_calls_provider_or_compares() {
+async fn usage_capture_unready_fleet_never_calls_provider_or_compares() {
     let f = Fixture::new(false).await;
     f.db.collection::<UsageMeterRow>(USAGE_METER)
         .insert_one(tests::finalized_row("capture-warming"))
         .await
         .unwrap();
-    assert_eq!(
-        f.worker
-            .compare_usage_for_test()
-            .await
-            .unwrap()
-            .drift_alerts,
-        0
-    );
+    assert_eq!(f.compare_usage().await.unwrap().drift_alerts, 0);
     f.db.drop().await.unwrap();
 }
 
@@ -938,7 +961,7 @@ async fn usage_capture_retry_keeps_original_target_and_properties() {
 }
 
 #[tokio::test]
-async fn usage_capture_warming_clears_old_failure_and_keeps_since() {
+async fn usage_capture_success_clears_old_failure_without_obsolete_warming_diagnostic() {
     use crate::models::coordination::CoordinationHolder;
     let f = Fixture::new(false).await;
     let holder = CoordinationHolder {
@@ -964,9 +987,7 @@ async fn usage_capture_warming_clears_old_failure_and_keeps_since() {
     pass.record("usage_comparison", Ok(()));
     assert!(pass.release(&f.db, &token).await.unwrap());
     let first = super::super::reconcile_status::diagnostics(&f.db).await;
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].code, "billing_usage_warming");
-    assert!(first[0].detail.contains("unverified"));
+    assert!(first.is_empty());
     let (token, checkpoint) = LeaseStore::acquire_with_checkpoint(
         &f.db,
         RECONCILE_LEASE,
@@ -980,8 +1001,7 @@ async fn usage_capture_warming_clears_old_failure_and_keeps_since() {
     pass.record("usage_comparison", Ok(()));
     assert!(pass.release(&f.db, &token).await.unwrap());
     let second = super::super::reconcile_status::diagnostics(&f.db).await;
-    assert_eq!(second.len(), 1);
-    assert_eq!(second[0].detected_at, first[0].detected_at);
+    assert!(second.is_empty());
     assert!(f.provider.events.lock().unwrap().is_empty());
     f.db.drop().await.unwrap();
 }
@@ -1108,6 +1128,217 @@ async fn usage_capture_receipt_repair_failure_does_not_block_push() {
             .unwrap()
             .unwrap()
             .lago_acked
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn usage_comparison_lost_response_retry_projects_equal_without_uncertainty() {
+    let mut f = Fixture::new(false).await;
+    crate::services::security_readiness_service::ready_test_replica(&f.db).await;
+    crate::services::security_readiness_service::stop_test_replica(&f.db).await;
+    let now = Utc::now();
+    let start = now - Duration::days(10);
+    let end = now + Duration::days(20);
+    f.provider = Arc::new(Provider {
+        retry_first: true,
+        response: Some(LagoError::duplicate("already accepted")),
+        usage: Some(serde_json::json!({"customer_usage":{
+            "from_datetime":start.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "to_datetime":end.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "charges_usage":[{"billable_metric":{"code":"platform_requests","aggregation_type":"sum_agg"},"units":"1"}]
+        }})),
+        ..Default::default()
+    });
+    f.worker = BillingReconciler::new(
+        f.db.clone(),
+        Some(f.provider.clone()),
+        Arc::new(tests::billing_enabled_config()),
+    );
+    f.db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(tests::finalized_row("compare-real-receipt"))
+        .await
+        .unwrap();
+    assert_eq!(f.worker.push_usage_outage_for_test().await.retried, 1);
+    f.db.collection::<Document>(USAGE_METER)
+        .update_many(
+            doc! {},
+            doc! {"$set":{"updated_at":bson::DateTime::from_chrono(now-Duration::hours(1))}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(f.worker.push_usage_for_test().await.unwrap().pushed, 1);
+    let events = f.provider.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0], events[1],
+        "lost response retries immutable payload"
+    );
+    f.db.collection::<Document>("billing_usage_comparisons")
+        .update_one(
+            doc! {},
+            doc! {"$set":{
+                "last_acknowledged_at":bson::DateTime::from_chrono(now-Duration::minutes(11))
+            }},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<Document>("billing_usage_comparison_control").replace_one(
+        doc! {"_id":"5b543627-0ed6-464e-b6a8-94e99c4d1773"},
+        doc! {"_id":"5b543627-0ed6-464e-b6a8-94e99c4d1773", "kind":"coverage", "ready":true,
+            "generation":uuid::Uuid::new_v4().to_string(), "observed_at":bson::DateTime::from_chrono(now),
+            "continuous_since":bson::DateTime::from_chrono(start-Duration::days(1))},
+    ).upsert(true).await.unwrap();
+    f.commands.lock().unwrap().clear();
+    let stats = f.compare_usage().await.unwrap();
+    println!("USAGE_COMPARISON_COMMANDS {:?}", f.commands.lock().unwrap());
+    assert_eq!(
+        *f.provider.usage_reads.lock().unwrap(),
+        vec![("customer-1".to_owned(), "subscription-1".to_owned())]
+    );
+    assert_eq!(stats.drift_alerts, 0);
+    let target =
+        f.db.collection::<Document>("billing_usage_comparisons")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(!target.contains_key("coverage_unknown_reason"));
+    let comparison = target
+        .get_document("comparison")
+        .expect("a complete observation is durable");
+    assert_eq!(comparison.get_str("status"), Ok("equal"));
+    assert_eq!(
+        comparison
+            .get_document("local")
+            .unwrap()
+            .get_str("platform_requests"),
+        Ok("1")
+    );
+    crate::services::security_readiness_service::stop_test_replica(&f.db).await;
+    f.db.collection::<Document>("billing_wallet")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    f.db.collection::<Document>("billing_usage_comparisons")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    f.commands.lock().unwrap().clear();
+    f.compare_usage().await.unwrap();
+    assert_eq!(
+        f.commands.lock().unwrap().len(),
+        9,
+        "ready empty comparison plus test lease acquire/release"
+    );
+    f.db.collection::<Document>(crate::models::security_capability_activation::COLLECTION_NAME)
+        .delete_one(
+            doc! {"capability":crate::services::billing::usage_comparison::coverage::READINESS},
+        )
+        .await
+        .unwrap();
+    f.commands.lock().unwrap().clear();
+    f.compare_usage().await.unwrap();
+    assert_eq!(
+        f.commands.lock().unwrap().len(),
+        8,
+        "unready empty comparison plus test lease acquire/release"
+    );
+    println!(
+        "USAGE_COMPARISON_EMPTY ready=7 unready=6 commands excluding test lease acquire/release"
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn usage_comparison_future_ack_keeps_delivery_but_invalidates_coverage() {
+    {
+        let f = Fixture::new(false).await;
+        let mut row = tests::finalized_row("uncertain-ack");
+        row.finalized_at = Some(Utc::now() + Duration::days(101));
+        f.db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let receipt = super::super::usage_delivery::prepare(
+            &f.db,
+            &row,
+            "customer-1",
+            LagoEvent::from_usage_row(&row, Some("subscription-1".into())).unwrap(),
+        )
+        .await
+        .unwrap();
+        mark_delivered(&f.db, &row.id, Some((receipt.clone(), false)))
+            .await
+            .unwrap();
+        let saved =
+            f.db.collection::<Document>(USAGE_METER)
+                .find_one(doc! {"_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(saved.get_bool("lago_acked"), Ok(true));
+        let target =
+            f.db.collection::<Document>("billing_usage_comparisons")
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(target.get_i64("acknowledgement_sequence"), Ok(1));
+        assert_eq!(target.get_i64("uncertainty_revision"), Ok(1));
+        assert_eq!(
+            target.get_str("coverage_unknown_reason"),
+            Ok("future_delivery_event")
+        );
+        assert!(
+            target
+                .get_datetime("uncertain_through")
+                .unwrap()
+                .timestamp_millis()
+                >= receipt.event_second * 1000
+        );
+        f.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn usage_comparison_round2_duplicate_ack_does_not_discard_period() {
+    let f = Fixture::new(false).await;
+    let row = tests::finalized_row("retry-provenance");
+    f.db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let receipt = super::super::usage_delivery::prepare(
+        &f.db,
+        &row,
+        "customer-1",
+        LagoEvent::from_usage_row(&row, Some("subscription-1".into())).unwrap(),
+    )
+    .await
+    .unwrap();
+    mark_delivered(&f.db, &row.id, Some((receipt.clone(), true)))
+        .await
+        .unwrap();
+    let target =
+        f.db.collection::<Document>("billing_usage_comparisons")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(!target.contains_key("coverage_unknown_reason"));
+    let saved =
+        f.db.collection::<Document>("billing_usage_deliveries")
+            .find_one(doc! {"_id":receipt.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        saved
+            .get_datetime("usage_created_at")
+            .unwrap()
+            .timestamp_millis(),
+        row.created_at.timestamp_millis()
     );
     f.db.drop().await.unwrap();
 }

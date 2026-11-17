@@ -416,6 +416,13 @@ fn all_sources(directory: &Path, out: &mut BTreeSet<PathBuf>) {
 // raw spawn beside an approved one still fails. Reasons describe ownership.
 const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
+        "handlers/users.rs",
+        "export_body_with_deadline",
+        "body_stream",
+        1,
+        "Bounded export body releases its reservation and semaphore permit at EOF, Drop or a total 120-second deadline; non-deliveries refund via tracked shutdown cleanup.",
+    ),
+    (
         "handlers/assistant_cma_agents.rs",
         "relay_events",
         "body_stream",
@@ -719,6 +726,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
         "main.rs",
         "server_run",
+        "services::personal_erasure_orphan_sweep::jobs::spawn_worker",
+        1,
+        "Leased orphan-sweep worker shares the erasure worker lifetime; shutdown stops claims and drains the bounded claimed pass before lease expiry permits recovery.",
+    ),
+    (
+        "main.rs",
+        "server_run",
         "services::personal_erasure_service::spawn_worker",
         1,
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
@@ -925,6 +939,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "tokio::spawn",
         1,
         "Tracker primitive: Work registered before spawn; retained abort handle and Work Drop prove completion before ownership release.",
+    ),
+    (
+        "services/shutdown/signals.rs",
+        "watch_startup",
+        "tokio::spawn",
+        1,
+        "Startup signal observer owns only receivers: joined at the bind checkpoint and aborted on early return/failed startup; no database work or durable claims.",
     ),
     (
         "services/voice/grok_runtime.rs",

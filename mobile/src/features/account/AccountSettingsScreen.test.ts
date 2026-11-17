@@ -106,7 +106,7 @@ test("Sign Out and Delete Account are centred actions, not navigation, and delet
   );
   assert.ok(
     env.text(
-      "Permanently deletes your account and its data. This cannot be undone.",
+      "Permanently deletes your account and personal data. Necessary security and financial records are retained. This cannot be undone.",
     ),
   );
   env.pending();
