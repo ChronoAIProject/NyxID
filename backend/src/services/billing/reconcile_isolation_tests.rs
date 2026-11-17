@@ -158,16 +158,50 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         Some(provider.clone()),
         Arc::new(billing_enabled_config()),
     );
+    db.collection::<Document>(USAGE)
+        .insert_one(doc! {
+            "_id": "metering-counted", "status": "finalized", "quantity": 1_i64,
+            "rollup_pending": false, "released": true, "forwarded": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    seen.lock().unwrap().clear();
     r.run_once().await.unwrap();
+    assert!(
+        seen.lock().unwrap().iter().all(|(_, command)| {
+            command.get_str("find").ok() != Some("usage_rollup_state")
+                && command.get_str("update").ok() != Some("usage_rollup_state")
+        }),
+        "closed readiness gate must not run metering retention"
+    );
     assert!(
         provider.calls.lock().unwrap().is_empty(),
         "migration readiness must stop all later work"
+    );
+    assert!(
+        db.collection::<Document>(USAGE)
+            .find_one(doc! {"_id": "metering-counted"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get("expires_at")
+            .is_none()
     );
     db.collection::<Document>("billing_migrations")
         .insert_one(doc! {"_id":"exact-v2","completed_at":bson::DateTime::now()})
         .await
         .unwrap();
     r.run_once().await.unwrap();
+    assert!(
+        db.collection::<Document>(USAGE)
+            .find_one(doc! {"_id": "metering-counted"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("expires_at")
+            .is_ok()
+    );
     seen.lock().unwrap().clear();
     r.run_once().await.unwrap();
     let commands: Vec<_> = seen
@@ -182,8 +216,8 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     );
     assert_eq!(
         commands.len(),
-        46,
-        "warming keeps the bounded prepared-receipt read and holdless reads"
+        47,
+        "dormant retention adds only its state read"
     );
     assert_eq!(
         commands.iter().filter(|c| c.as_str() == "delete").count(),
@@ -203,8 +237,8 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     assert!(error.contains("schedules:") && error.contains("grant_expiry:"));
     assert_eq!(
         seen.lock().unwrap().len(),
-        46,
-        "failure publication adds no extra command beyond the holdless reads"
+        47,
+        "failure publication adds no command beyond retention maintenance"
     );
     let count = |command: &str| {
         seen.lock()
@@ -231,7 +265,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     r.run_once().await.unwrap();
     assert_eq!(
         seen.lock().unwrap().len(),
-        46,
+        47,
         "clearing status adds no command"
     );
     assert_eq!(count("update"), 1);
@@ -241,7 +275,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         "clearing failures retains the informational warming timestamp"
     );
     println!(
-        "BILLING_PASS_STATUS failure_commands=46 clear_commands=46 failed_updates=1 clear_updates=1 added_commands=0"
+        "BILLING_PASS_STATUS failure_commands=47 clear_commands=47 failed_updates=1 clear_updates=1 added_commands=0"
     );
     db.drop().await.unwrap();
 }

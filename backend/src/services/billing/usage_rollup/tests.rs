@@ -365,6 +365,132 @@ async fn crash_after_increment_replays_without_double_count_on_standalone_protoc
 }
 
 #[tokio::test]
+async fn metering_rows_get_retention_only_when_counted() {
+    use crate::handlers::billing::{UsageQuery, get_usage};
+    use crate::test_utils::{test_app_state, test_auth_user};
+    use axum::extract::{Query, State};
+
+    let db = connect_test_database("rollup_metering_retention")
+        .await
+        .unwrap();
+    ensure_indexes(&db).await.unwrap();
+    let now = hour(Utc::now());
+    let owner = uuid::Uuid::new_v4().to_string();
+    let mut metering = row(now - chrono::Duration::hours(2));
+    metering.insert("_id", "metered");
+    let mut null_metering = metering.clone();
+    null_metering.insert("_id", "metered-null");
+    null_metering.insert("wallet_id", Bson::Null);
+    null_metering.insert("expires_at", Bson::Null);
+    let mut billed = row(now - chrono::Duration::hours(2));
+    billed.insert("_id", "billed-retention");
+    billed.insert("wallet_id", "wallet");
+    billed.insert("released", true);
+    billed.insert("lago_acked", true);
+    let billed_expiry = now + chrono::Duration::days(7);
+    billed.insert("expires_at", bson::DateTime::from_chrono(billed_expiry));
+    let mut unacked = billed.clone();
+    unacked.insert("_id", "billed-unacked");
+    unacked.insert("lago_acked", false);
+    unacked.remove("expires_at");
+    unacked.insert(
+        "funding",
+        doc! {"settled": true, "total_charge_micros": 1_i64},
+    );
+    let mut rows = [metering, null_metering, billed, unacked];
+    for row in &mut rows {
+        row.insert("billing_owner_id", &owner);
+        row.insert("actor_user_id", &owner);
+    }
+    db.collection::<Document>(METERS)
+        .insert_many(rows.clone())
+        .await
+        .unwrap();
+    let app = test_app_state(db.clone());
+    let history = || {
+        get_usage(
+            State(app.clone()),
+            test_auth_user(&owner),
+            Query(UsageQuery {
+                owner_id: None,
+                machine_id: None,
+                job_id: None,
+                period: Some("all".into()),
+                bucket: None,
+            }),
+        )
+    };
+    assert_eq!(history().await.unwrap().0.totals.events, 4);
+    let before = read(&db, now - chrono::Duration::days(1), now).await.totals;
+    initialize(&db).await.unwrap();
+    let batch = claim(&db, &required_state(&db).await.unwrap(), cutoff(now))
+        .await
+        .unwrap()
+        .unwrap();
+    apply(&db, &batch, None).await.unwrap();
+    // No retention date until the source-marking write, even after increments.
+    for id in ["metered", "metered-null", "billed-unacked"] {
+        let saved = db
+            .collection::<Document>(METERS)
+            .find_one(doc! {"_id": id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.get("expires_at").is_none_or(|v| v == &Bson::Null));
+    }
+    let counted_at = now + chrono::Duration::minutes(7);
+    finish(&db, &batch, counted_at, None).await.unwrap();
+    // Replaying a finished batch cannot extend its retention horizon.
+    finish(&db, &batch, counted_at + chrono::Duration::days(1), None)
+        .await
+        .unwrap();
+    for id in ["metered", "metered-null"] {
+        let saved = db
+            .collection::<Document>(METERS)
+            .find_one(doc! {"_id": id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *saved.get_datetime("expires_at").unwrap(),
+            bson::DateTime::from_chrono(
+                counted_at + chrono::Duration::days(super::super::reconcile::ACKED_RETENTION_DAYS)
+            )
+        );
+        assert_eq!(saved.get_bool("rollup_pending"), Ok(false));
+        assert!(!saved.get_bool("lago_acked").unwrap_or(false));
+    }
+    for original in &rows[2..] {
+        let saved = db
+            .collection::<Document>(METERS)
+            .find_one(doc! {"_id": original.get_str("_id").unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.get("expires_at"), original.get("expires_at"));
+        assert_eq!(saved.get("lago_acked"), original.get("lago_acked"));
+    }
+    assert_eq!(fold_once(&db, now).await.unwrap(), 0);
+    let after = read(&db, now - chrono::Duration::days(1), now).await.totals;
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(&after).unwrap()
+    );
+    assert_eq!(history().await.unwrap().0.totals.events, 4);
+    // Execute the TTL predicate explicitly, avoiding dependence on monitor timing.
+    assert_eq!(db.collection::<Document>(METERS).delete_many(doc! {
+        "wallet_id": null, "expires_at": {"$lte": bson::DateTime::from_chrono(counted_at + chrono::Duration::days(30))},
+    }).await.unwrap().deleted_count, 2);
+    assert_eq!(history().await.unwrap().0.totals.events, 2);
+    assert_eq!(fold_once(&db, now).await.unwrap(), 0);
+    assert_eq!(
+        serde_json::to_value(read(&db, now - chrono::Duration::days(1), now).await.totals).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn concurrent_replicas_fold_once_and_handle_edges_live_rows_and_late_settlement() {
     let db = connect_test_database("rollup_edges")
         .await
@@ -696,7 +822,7 @@ async fn pre_tier_hourly_history_bootstraps_after_legacy_batch_recovery_and_raw_
             .unwrap();
         apply(&db, &batch, None).await.unwrap();
         if n == 1 {
-            finish(&db, &batch, None).await.unwrap();
+            finish(&db, &batch, Utc::now(), None).await.unwrap();
         }
         // Avoid bootstrapping until the simulated legacy writes finish.
         if n == 1 {

@@ -246,7 +246,7 @@ pub struct InvoiceDownloadResponse {
     tag = "Billing",
     params(
         ("owner_id" = Option<String>, Query, description = "Organization owner; requires org admin"),
-        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all"),
+        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all; summarizes retained request rows only (metering-only: 30 days after rollup counting; billed: 30 days after acknowledgement); 90d/all cannot recover expired rows"),
         ("bucket" = Option<String>, Query, description = "`day` splits rows by UTC day")
     ),
     responses(

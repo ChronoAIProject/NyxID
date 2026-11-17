@@ -10016,9 +10016,15 @@ mod curation_auth_regressions {
             .await
             .unwrap()
             .unwrap();
-        curation_grant_service::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
-            .await
-            .unwrap();
+        curation_grant_service::issue(
+            &f.state.db,
+            &f.sa.id,
+            &f.owner,
+            grant_input(&f.service.id),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         let fresh = token(&f, None).await;
         headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());

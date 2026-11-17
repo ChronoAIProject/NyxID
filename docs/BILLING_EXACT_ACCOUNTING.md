@@ -139,16 +139,35 @@ final evidence. Its terminal transaction records zero usage and
 summary pass ID; it changes no wallet, benefit, tax, ledger or carry resource.
 The marked row's release write also acknowledges the zero and sets a 30-day
 expiry, touching only usage metadata; shared usage push and acknowledgement are
-unchanged and never select it. Waived metering-only rows therefore expire while
-ordinary measured metering-only rows still have no expiry. Rollups count a
-zero-usage request on its original day and survive source-row expiry; raw billing
-history no longer includes expired rows. Each nonempty pass writes
+unchanged and never select it. Rollups count a zero-usage request on its original
+day and survive source-row expiry; raw billing history no longer includes expired
+rows. Each nonempty pass writes
 one chained `billing_holdless_requests_ended` summary with layer/metric counts
 and age bounds, without person IDs; interrupted summaries resume durably.
 Integrity retains separate `holdless_ended_requests` and `holdless_ended_rows`
 counters. Completely finished rows are already terminal, released and
 acknowledged, so older replicas select no settlement or push work for them.
 No rollout step or environment setting is required.
+
+Ordinary metering-only rows (free services and the person's own key) receive
+`expires_at = counted_at + 30 days` in the same write that marks their rollup
+count complete. Already-dated rows keep their date; wallet-backed rows retain
+acknowledgement-owned retention. Uncounted rows receive no date from this policy.
+The existing billing pass walks 100 IDs at a time through the existing `_id_`
+index, retaining a durable cursor in `usage_rollup_state`. It keeps taking
+pages, dating only finalized (or forwarded dead-letter), counted metering-only
+rows without a date, until roughly one second has elapsed or the pass is
+drained. The cursor advances durably after every page. A complete sweep records
+its time and sleeps until the next daily due time; a dormant pass does one state
+read and no write. The cursor wraps to pick up rows counted by older replicas
+during a rolling upgrade. No new index, setting or operator step is required.
+Failed/abandoned rows without quantities and unacknowledged wallet-backed rows
+keep their existing retention behavior.
+
+`GET /api/v1/billing/usage` and its response totals summarize retained raw rows;
+`90d` and `all` cannot restore expired requests. Admin whole-hour/day rollup
+totals survive expiry. Custom partial-hour edges and operation breakdowns that
+read raw rows lose those details after expiry.
 
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced

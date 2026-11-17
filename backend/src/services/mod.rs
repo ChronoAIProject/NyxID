@@ -306,6 +306,7 @@ pub mod inference_voice;
 mod inference_voice_tests;
 pub mod options_service;
 pub mod platform_key_service;
+mod service_account_grant_audit;
 pub mod service_account_scope_service;
 
 pub mod channel_platform_catalog_service;

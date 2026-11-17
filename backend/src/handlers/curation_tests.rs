@@ -74,7 +74,7 @@ pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     .await
     .unwrap();
     if curated {
-        sa = grants::issue(&db, &sa.id, &owner, grant_input(&service.id))
+        sa = grants::issue(&db, &sa.id, &owner, grant_input(&service.id), None)
             .await
             .unwrap();
     }
@@ -1175,9 +1175,15 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         StatusCode::FORBIDDEN
     );
     assert!(
-        grants::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
-            .await
-            .is_err()
+        grants::issue(
+            &f.state.db,
+            &f.sa.id,
+            &f.owner,
+            grant_input(&f.service.id),
+            None
+        )
+        .await
+        .is_err()
     );
     f.state.db.collection::<Document>(SERVICES).update_one(doc! {"_id": &f.service.id}, doc! {"$set": {"proxy_operation_policy": bson::to_bson(&f.service.proxy_operation_policy).unwrap()}}).await.unwrap();
     // A missing SA credential must not fall back to either owner or master.

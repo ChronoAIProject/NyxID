@@ -611,16 +611,9 @@ pub async fn issue_curation_grant(
         &id,
         &auth.user_id.to_string(),
         input,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin.sa.curation_granted",
-        Some(
-            serde_json::json!({"target_sa_id": id, "grant_id": sa.curation_grant.as_ref().map(|g| &g.id)}),
-        ),
-    );
     Ok(Json(sa_to_item(sa)))
 }
 
@@ -630,13 +623,12 @@ pub async fn revoke_curation_grant(
     Path(id): Path<String>,
 ) -> AppResult<Json<ServiceAccountItem>> {
     require_admin(&state, &auth).await?;
-    let sa = crate::services::curation_grant_service::revoke(&state.db, &id).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin.sa.curation_revoked",
-        Some(serde_json::json!({"target_sa_id": id})),
-    );
+    let sa = crate::services::curation_grant_service::revoke(
+        &state.db,
+        &id,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
+    )
+    .await?;
     Ok(Json(sa_to_item(sa)))
 }
 

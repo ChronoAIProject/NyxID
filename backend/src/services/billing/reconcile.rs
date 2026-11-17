@@ -54,7 +54,7 @@ tokio::task_local! {
 const PUSH_GRACE_SECS: i64 = 30;
 const MAX_RECONCILE_PUSH_BATCH: i64 = 100;
 const MAX_WALLET_REFRESH_BATCH: i64 = 100;
-const ACKED_RETENTION_DAYS: i64 = 30;
+pub(crate) const ACKED_RETENTION_DAYS: i64 = 30;
 
 #[derive(Clone)]
 pub struct BillingReconciler {
@@ -272,6 +272,17 @@ impl BillingReconciler {
         )? {
             return Ok(ReconcileStats::default());
         }
+        let result = self.run_billing_steps(report).await;
+        if continue_reconcile() {
+            report.record(
+                "metering_retention",
+                super::usage_rollup::retention::backfill(&self.db, Utc::now()).await,
+            );
+        }
+        result
+    }
+
+    async fn run_billing_steps(&self, report: &mut Pass) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         // Benefit-only estimates can spill into wallet funding at settlement.
         // Refresh before recovery: pending component/voice recovery may return
