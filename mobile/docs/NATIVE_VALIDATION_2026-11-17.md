@@ -4,7 +4,7 @@ This record continues [NATIVE_VALIDATION_2026-11-14.md](NATIVE_VALIDATION_2026-1
 
 ## Environment and revisions
 
-- Code under test: branch `feat/mobile-1868-completion`, rebased onto `main` `0aa248d7c`. Device runs used per-fix builds before the rebase; the defect table lists the rebased commit of each fix. The final Android pass ran on the pre-rebase head (`9eae166b0`: the same branch patches on the original base `2b1162ba7`). After the rebase, Android was smoke-tested on `89b946b15` and re-checked on the final head `c604a1ce8`: service OAuth with the explicit Chrome package, force-stop recovery (no stale task after cold start, then a fresh authorization completes), the App Link fallback in a Custom Tab, and terminal connect.
+- Code under test: branch `feat/mobile-1868-completion`, rebased onto `main` `0aa248d7c`. Device runs used per-fix builds before the rebase; the defect table lists the rebased commit of each fix. The final Android pass ran on the pre-rebase head (`9eae166b0`: the same branch patches on the original base `2b1162ba7`). After the rebase, Android was smoke-tested on `89b946b15` and re-checked on the final head `c604a1ce8`: service OAuth with the explicit Chrome package, force-stop recovery (no stale task after cold start, then a fresh authorization completes), the App Link fallback in a Custom Tab, and terminal connect. The final iOS pass ran on `ea518aabe`, whose app code is identical to `c604a1ce8`.
 - Android:
   - emulator `ws6-pixel35`: Pixel 7 profile, Android 15 (API 35), `google_apis` arm64 image with Chrome, Google Play services and Play Store, headless;
   - emulator `ws6-pixel30`: Android 11 (API 30), `google_apis` arm64, used for pre-Android-12 App Links;
@@ -95,7 +95,13 @@ This record continues [NATIVE_VALIDATION_2026-11-14.md](NATIVE_VALIDATION_2026-1
 | 4 MB flood | Completes (`FLOOD-DONE`); the session stays connected. |
 | Key bar with the software keyboard | Stays directly above the iOS keyboard (unchanged by D3). |
 | "Connecting…" observation | Seen once: on the first terminal deep link after a fresh install and sign-in, the screen stayed on "Connecting…" for over 2 minutes, with no Connect button. Not reproduced in 4 further attempts: Back and re-open; cold start via the link; reinstall with the notification prompt pending; an erased simulator with fresh sign-in, about 3 minutes on Home, then the link. Code inspection showed the lookup had no bound or Retry. D7 bounds it to 20 s with Retry. |
-| Final build | PENDING. Since about 03:17 on 2026-11-17, app launch on every iOS 27.2 simulator on the verification machine hangs (`simctl launch` of the app or of Settings, `openurl`, `install`), and the CoS reproduced it on a separate device. The final-head iOS build compiles; the remaining iOS checks are listed in the WS6 handoff. |
+| Final build (`ea518aabe`): terminal | Deep link → "Connect to ws6-ssh as nyx?" → Connect → approval → Connected. PTY output (`/dev/pts/0`), key bar above the keyboard. `exit` → "Connection closed." with Disconnected and Reconnect, with no failure banner (D5). |
+| Final build: D7 | API frozen (TLS front stopped): "Connecting…", then, after the 20 s lookup bound, "This SSH connection could not be loaded." with Retry (observed at about 28 s after opening, including screen load). After the API resumes, Retry → "Connect to ws6-ssh as nyx?". |
+| Final build: service OAuth | Ephemeral auth session on the mock provider (PKCE). Closing the sheet → "Authorization incomplete" with Continue authentication. Continue → Approve → token exchange → Connected. |
+| Final build: push (`simctl push`) | The backend's `apns_alert_payload` shape for real pending approvals. Foreground: in-app toast → Open → the exact request in Activity; approving in the app completed the waiting `nyxid ssh exec`. Background and cold start: banner tap → Approval detail for the exact request; denying in the app rejected the waiting command (7001). |
+| Developer-mode Universal Link (optional) | Inconclusive on the simulator. With `applinks:localhost?mode=developer` added only in a local build clone, the system downloaded the `localhost` AASA. However, `simctl openurl` opens https URLs in Safari, and a tapped cross-domain link also stayed in Safari. OS-level association remains under "Not verified here". |
+
+The final-build iOS rows ran after the simulator launch failure cleared (a host reboot; launches had hung machine-wide from about 03:17). The reboot also wiped the local verification environment. It was rebuilt with the same backend binary, a fresh local database and a new test CA, and the simulator was erased.
 
 ## Defects found and fixed on this branch
 
