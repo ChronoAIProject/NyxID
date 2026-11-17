@@ -1238,7 +1238,40 @@ pub async fn revoke_grant(
     owner_user_id: &str,
     api_key_id: &str,
     grant_id: &str,
-    actor_user_id: &str,
+    actor: &super::audit_service::AuditActor,
+) -> AppResult<DurableOperationGrant> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let owner_user_id = owner_user_id.to_owned();
+    let api_key_id = api_key_id.to_owned();
+    let grant_id = grant_id.to_owned();
+    let actor = actor.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            key_mutations::transaction_result(
+                revoke_grant_in_session(
+                    &db,
+                    &owner_user_id,
+                    &api_key_id,
+                    &grant_id,
+                    &actor,
+                    session,
+                )
+                .await,
+            )
+        })
+        .await
+        .map_err(key_mutations::map_transaction_error)
+}
+
+async fn revoke_grant_in_session(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    api_key_id: &str,
+    grant_id: &str,
+    actor: &super::audit_service::AuditActor,
+    session: &mut mongodb::ClientSession,
 ) -> AppResult<DurableOperationGrant> {
     let now = Utc::now();
     let result = db
@@ -1252,13 +1285,22 @@ pub async fn revoke_grant(
             },
             doc! { "$set": {
                 "revoked_at": bson::DateTime::from_chrono(now),
-                "revoked_by": actor_user_id,
+                "revoked_by": &actor.user_id,
                 "updated_at": bson::DateTime::from_chrono(now),
             }, "$inc": { "state_version": 1_i64 } },
         )
         .return_document(mongodb::options::ReturnDocument::After)
+        .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::DurableGrantMissing("active grant not found".to_string()))?;
+    let intent = super::api_key_audit_service::grant_revoked(
+        actor,
+        api_key_id,
+        grant_id,
+        &result.endpoint_id,
+        &result.contract_digest,
+    )?;
+    super::security_effect_service::enqueue_in_session(db, session, &[intent]).await?;
     Ok(result)
 }
 
@@ -1303,23 +1345,32 @@ async fn activate_scheduled_key(
     db: &mongodb::Database,
     key_id: &str,
     owner_user_id: &str,
+    intent: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
 ) -> AppResult<ApiKey> {
-    let activation = key_mutations::update_one(
-        db,
-        doc! {
-            "_id": key_id,
-            "user_id": owner_user_id,
-            "purpose": "scheduled_invocation",
-            "scheduled_write_enabled": false,
-        },
-        doc! { "$set": { "scheduled_write_enabled": true } },
-        None,
-    )
-    .await?;
-    if activation.modified_count != 1 {
-        return Err(AppError::Internal(
-            "scheduled key activation fence could not be committed".to_string(),
-        ));
+    if let Some(intent) = intent {
+        let mut session = db.client().start_session().await?;
+        let db = db.clone();
+        let key_id = key_id.to_owned();
+        let owner_user_id = owner_user_id.to_owned();
+        let intent = intent.clone();
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                key_mutations::transaction_result(
+                    activate_scheduled_source(
+                        &db,
+                        &key_id,
+                        &owner_user_id,
+                        Some(session),
+                        Some(&intent),
+                    )
+                    .await,
+                )
+            })
+            .await
+            .map_err(key_mutations::map_transaction_error)?;
+    } else {
+        activate_scheduled_source(db, key_id, owner_user_id, None, None).await?;
     }
 
     db.collection::<ApiKey>(API_KEYS)
@@ -1335,6 +1386,47 @@ async fn activate_scheduled_key(
                 "scheduled key authority evidence disappeared after activation".to_string(),
             )
         })
+}
+
+async fn activate_scheduled_source(
+    db: &mongodb::Database,
+    key_id: &str,
+    owner_user_id: &str,
+    mut session: Option<&mut mongodb::ClientSession>,
+    intent: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<()> {
+    if intent.is_some() && session.is_none() {
+        return Err(AppError::Internal(
+            "Required grant audit needs the activation transaction".into(),
+        ));
+    }
+    let activation = key_mutations::update_one(
+        db,
+        doc! {
+            "_id": key_id,
+            "user_id": owner_user_id,
+            "purpose": "scheduled_invocation",
+            "scheduled_write_enabled": false,
+        },
+        doc! { "$set": { "scheduled_write_enabled": true } },
+        session.as_deref_mut(),
+    )
+    .await?;
+    if activation.modified_count != 1 {
+        return Err(AppError::Internal(
+            "scheduled key activation fence could not be committed".to_string(),
+        ));
+    }
+
+    if let (Some(intent), Some(session)) = (intent, session) {
+        super::security_effect_service::enqueue_in_session(
+            db,
+            session,
+            std::slice::from_ref(intent),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn record_scheduled_key_provisioning_failure(
@@ -1377,6 +1469,7 @@ pub async fn provision_scheduled_key(
     platform: Option<&str>,
     selections: &[DurableOperationSelection],
     expected_digest: &str,
+    audit_actor: Option<&super::audit_service::AuditActor>,
 ) -> AppResult<ProvisionedScheduledKey> {
     let plan = api_key_scope_service::verify_durable_scope_plan_precondition(
         db,
@@ -1420,6 +1513,19 @@ pub async fn provision_scheduled_key(
         .map(|operation| grant_from_plan(owner_user_id, &key.id, actor_user_id, operation, None))
         .collect::<AppResult<_>>()?;
 
+    let intent = audit_actor
+        .map(|actor| {
+            super::api_key_audit_service::grants_provisioned(
+                actor,
+                owner_user_id,
+                &key.id,
+                &grants
+                    .iter()
+                    .map(|grant| grant.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .transpose()?;
     let provision_result: AppResult<ApiKey> = async {
         if grants.is_empty() {
             return Err(validation(
@@ -1429,7 +1535,7 @@ pub async fn provision_scheduled_key(
         db.collection::<DurableOperationGrant>(GRANTS)
             .insert_many(&grants)
             .await?;
-        activate_scheduled_key(db, &key.id, owner_user_id).await
+        activate_scheduled_key(db, &key.id, owner_user_id, intent.as_ref()).await
     }
     .await;
 
@@ -1665,7 +1771,7 @@ mod tests {
             .await
             .expect("insert scheduled key");
 
-        let activated = activate_scheduled_key(&db, &key_id, &owner)
+        let activated = activate_scheduled_key(&db, &key_id, &owner, None)
             .await
             .expect("activate scheduled key");
         assert!(activated.scheduled_write_enabled);
