@@ -17,7 +17,7 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => mocks.navigate }))
 vi.mock("@/hooks/use-account-panel", () => ({
   useAccountPanel: () => ({ current: { panel: "notifications", ...mocks.current }, update: mocks.update }),
 }));
-vi.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
+vi.mock("sonner", () => ({ toast: { error: mocks.toastError, dismiss: vi.fn() } }));
 
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });

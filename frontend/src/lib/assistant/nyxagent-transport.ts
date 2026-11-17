@@ -1,3 +1,5 @@
+import { AccountChangedError } from "./identity";
+import { isAccountAbort } from "./identity";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
@@ -301,7 +303,7 @@ export class NyxAgentTransport {
 
   private current(generation: number) {
     if (generation !== this.generation || this.owner !== getAssistantIdentityUserId()) {
-      throw new DOMException("Identity changed", "AbortError");
+      throw new AccountChangedError();
     }
   }
 
@@ -444,6 +446,7 @@ export class NyxAgentTransport {
       if (!card || !(error instanceof ApiError) || error.status !== 400) throw error;
       response = await fetchHistory(endpoint);
     } finally {
+      controller.abort();
       this.requests.delete(controller);
     }
     const page = parseHistoryResponse(nyxAgentHistorySchema, response);
@@ -1170,6 +1173,8 @@ export class NyxAgentTransport {
         throw new Error("The connection was interrupted. The assistant may still be working.");
       }
     } catch (error) {
+      this.current(generation);
+      if (isAccountAbort(error)) throw error;
       if (terminal) return;
       if (responded && adopted && generation === this.generation && !turn.settled) {
         await this.history(key).catch(() => undefined);
@@ -1193,6 +1198,7 @@ export class NyxAgentTransport {
       interruption = failure;
       streamError = error;
     } finally {
+      controller.abort();
       this.requests.delete(controller);
       if (generation === this.generation) {
         if (adopted) await this.history(key).catch(() => undefined);

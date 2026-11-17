@@ -1,3 +1,4 @@
+import { AccountBoundary } from "@/components/account-boundary";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -165,16 +166,18 @@ import {
 
 const rootRoute = createRootRoute({
   component: () => (
-    <TooltipProvider delayDuration={200}>
-      <CmaSessionProvider>
-        <Suspense>
-          <Outlet />
-        </Suspense>
-        <Toaster />
-        <CreditsDeniedHost />
-        <FloatingCmaSessions />
-      </CmaSessionProvider>
-    </TooltipProvider>
+    <AccountBoundary>
+      <TooltipProvider delayDuration={200}>
+        <CmaSessionProvider>
+          <Suspense>
+            <Outlet />
+          </Suspense>
+          <Toaster />
+          <CreditsDeniedHost />
+          <FloatingCmaSessions />
+        </CmaSessionProvider>
+      </TooltipProvider>
+    </AccountBoundary>
   ),
 });
 

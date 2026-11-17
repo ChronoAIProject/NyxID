@@ -1,9 +1,9 @@
 /**
  * The shared preview column's width across chats and the threads where the
- * user hid the machine card. Width is persisted per browser; conversation IDs
- * stay in memory and are cleared with the account.
+ * user hid the machine card. Width is shared; hidden thread IDs belong to the confirmed account.
  */
 
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -23,6 +23,8 @@ export function clampMachinePanePercent(value: unknown): number {
 }
 
 interface MachinePaneState {
+  readonly ownerUserId: string | null;
+  readonly bindAccount: (userId: string | null) => void;
   readonly percent: number;
   readonly hidden: readonly string[];
   readonly setPercent: (percent: number) => void;
@@ -32,25 +34,29 @@ interface MachinePaneState {
 export const useMachinePaneStore = create<MachinePaneState>()(
   persist(
     (set) => ({
+      ownerUserId: null,
+      bindAccount: (userId) => set((state) => state.ownerUserId === userId ? {} : { ownerUserId: userId, hidden: [] }),
       percent: MACHINE_PANE_PERCENT.default,
       hidden: [],
       setPercent: (percent) => set({ percent: clampMachinePanePercent(percent) }),
       setHidden: (conversationId, hidden) =>
         set((state) => {
           const rest = state.hidden.filter((id) => id !== conversationId);
-          return { hidden: hidden ? [...rest, conversationId].slice(-HIDDEN_LIMIT) : rest };
+          return { ownerUserId: getAssistantIdentityUserId(), hidden: hidden ? [...rest, conversationId].slice(-HIDDEN_LIMIT) : rest };
         }),
     }),
     {
       name: "nyxid.machine-pane",
       version: 1,
-      partialize: (state) => ({ percent: state.percent }),
+      partialize: (state) => ({ percent: state.percent, ownerUserId: state.ownerUserId, hidden: state.hidden }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Record<string, unknown>;
         return {
           ...current,
           percent: clampMachinePanePercent(p.percent ?? p.width),
-          hidden: current.hidden,
+          ownerUserId: typeof p.ownerUserId === "string" ? p.ownerUserId : null,
+          hidden: typeof p.ownerUserId === "string" && (!getAssistantIdentityUserId() || p.ownerUserId === getAssistantIdentityUserId()) && Array.isArray(p.hidden)
+            ? p.hidden.filter((id): id is string => typeof id === "string").slice(-HIDDEN_LIMIT) : [],
         };
       },
     },

@@ -1,8 +1,12 @@
+import { AccountChangedError } from "@/lib/assistant/identity";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ToolImage } from "./tool-image";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
-vi.mock("@/lib/assistant/assistant-http", () => ({ assistantHttp: vi.fn() }));
+vi.mock("@/lib/assistant/assistant-http", () => {
+  const assistantHttp = vi.fn();
+  return { assistantHttp, assistantBlob: async (endpoint: string) => (await assistantHttp(endpoint)).blob() };
+});
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal("URL", {
@@ -90,7 +94,7 @@ it("shows retained guest images with an honest model notice and no tool suggesti
 });
 
 it.each(["image/png", "application/pdf"])("silently discards an account abort for %s without retry or error copy", async (contentType) => {
-  vi.mocked(assistantHttp).mockRejectedValue(new DOMException("Account changed", "AbortError"));
+  vi.mocked(assistantHttp).mockRejectedValue(new AccountChangedError());
   render(<ToolImage image={{ id: "old", endpoint: "/private/old", contentType, label: "old-file" }} />);
   if (contentType === "application/pdf") fireEvent.click(screen.getByRole("button", { name: /old-file/ }));
   await waitFor(() => expect(assistantHttp).toHaveBeenCalledOnce());

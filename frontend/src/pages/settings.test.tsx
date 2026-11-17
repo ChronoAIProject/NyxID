@@ -1,3 +1,4 @@
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -23,7 +24,7 @@ const { securityUser, mockDisable, toastSuccess, toastError } = vi.hoisted(() =>
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
 }));
-vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
+vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError, dismiss: vi.fn() } }));
 vi.mock("@/hooks/use-auth", () => ({
   useUser: () => ({ data: securityUser }),
   useMfaDisable: () => ({ mutateAsync: mockDisable }),
@@ -484,6 +485,29 @@ describe.each(["/settings", "/assistant"] as const)(
         if (oldRevokeObjectUrl) Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: oldRevokeObjectUrl }); else Reflect.deleteProperty(URL, "revokeObjectURL");
         click.mockRestore();
       }
+    });
+
+    it("drops an export consumed after an account change without a download or toast", async () => {
+      transitionAssistantIdentity("owner");
+      let finish!: (blob: Blob) => void;
+      const response = new Response('{"format":"nyxid.account-export"}');
+      const read = vi.spyOn(response, "blob").mockImplementation(() => new Promise<Blob>((done) => { finish = done; }));
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/export" ? response : original(url, options));
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+      try {
+        await open(route, "privacy");
+        await userEvent.click(screen.getByRole("button", { name: "Download" }));
+        await waitFor(() => expect(read).toHaveBeenCalledOnce());
+        await act(async () => {
+          transitionAssistantIdentity("replacement");
+          finish(new Blob(['{"format":"nyxid.account-export"}']));
+        });
+        await waitFor(() => expect(screen.getByRole("button", { name: "Download" })).toBeEnabled());
+        expect(click).not.toHaveBeenCalled();
+        expect(toastSuccess).not.toHaveBeenCalled();
+        expect(toastError).not.toHaveBeenCalled();
+      } finally { click.mockRestore(); }
     });
 
     it.each(["fetch abort", "body abort", "short body", "identity mismatch", "encoded invalid JSON", "invalid JSON without length"])("does not download an incomplete export: %s", async (failure) => {

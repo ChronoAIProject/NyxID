@@ -1,3 +1,4 @@
+import { AccountChangedError, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
@@ -76,6 +77,7 @@ function controlledSse() {
     push(frame: unknown) {
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
     },
+    fail(error: Error) { controller.error(error); },
     close() {
       controller.close();
     },
@@ -1425,4 +1427,24 @@ describe("useAssistantChat", () => {
       await sendPromise!;
     });
   });
+});
+
+
+it("keeps an opaque native stream abort silent after an account transition", async () => {
+  transitionAssistantIdentity("stream-A");
+  const stream = controlledSse();
+  installSwitchingMock(stream);
+  const { result } = renderHook(() => useAssistantChat({ selectedConversationId: ACTOR_ID }));
+  await waitFor(() => expect(result.current.session?.messages).toHaveLength(2));
+  let sending!: Promise<void>;
+  act(() => { sending = result.current.send("private A message"); });
+  await waitFor(() => expect(result.current.isStreaming).toBe(true));
+  const rejected = expect(sending).rejects.toBeInstanceOf(AccountChangedError);
+  vi.mocked(capture).mockClear();
+  await act(async () => {
+    transitionAssistantIdentity("stream-B");
+    stream.fail(new DOMException("The operation was aborted.", "AbortError"));
+    await rejected;
+  });
+  expect(capture).not.toHaveBeenCalled();
 });

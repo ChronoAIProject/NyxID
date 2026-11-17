@@ -1,3 +1,4 @@
+import { AccountChangedError } from "@/lib/assistant/identity";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -42,7 +43,7 @@ beforeEach(() => {
     if (endpoint === "/assistant/nyxagent/settings" && init.method === "PUT") {
       const body = JSON.parse(init.body as string) as { notifications: { push: Record<string, boolean> } };
       puts.push(body);
-      if (abortSave) throw new DOMException("Request aborted", "AbortError");
+      if (abortSave) throw new AccountChangedError();
       if (saveStatus !== 200) return json({ error: "boom", message: "Settings are read-only right now", error_code: 5000 }, saveStatus);
       settings = { ...settings, notifications: body.notifications };
       return json(settings);

@@ -14,24 +14,11 @@ import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { usePendingConnectStore } from "./pending-connect-store";
 import { useOAuthPopupStore } from "./oauth-popup-store";
 import { useMachinePaneStore } from "./machine-pane-store";
-import { captureAccountRequest } from "@/lib/assistant/identity";
+import { bindAccountResourcePreferences } from "@/lib/account-resource-preferences";
+import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort } from "@/lib/assistant/identity";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
-
-function clearAccountResourcePreferences(): void {
-  try {
-    // Legacy resource preferences have no owner marker. Discard their IDs
-    // rather than adopting them into an unconfirmed or replacement account.
-    for (let index = localStorage.length - 1; index >= 0; index--) {
-      const key = localStorage.key(index);
-      if (key && (key === "nyxid:last-picked-agent-key" || key.startsWith("nyxid:desktop-collapsed:")))
-        localStorage.removeItem(key);
-    }
-  } catch {
-    /* Storage may be unavailable; these preferences contain no content. */
-  }
-}
 
 function clearAccountLocalState(): void {
   useServiceCardView.setState({
@@ -42,7 +29,6 @@ function clearAccountLocalState(): void {
   });
   usePendingConnectStore.setState({ attempts: {} });
   useOAuthPopupStore.setState({ attempt: null });
-  useMachinePaneStore.setState({ hidden: [] });
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
   useAssistantWireLogStore.getState().reset();
@@ -50,7 +36,8 @@ function clearAccountLocalState(): void {
 
 function clearAccountIdentity(): void {
   transitionAssistantIdentity(null);
-  clearAccountResourcePreferences();
+  bindAccountResourcePreferences(null);
+  useMachinePaneStore.getState().bindAccount(null);
   // Reset attribution before publishing the cleared account state.
   telemetryReset();
   useConsentStore.getState().bindAccount(null);
@@ -62,11 +49,12 @@ function applyIdentityTransition(
   previousUser: User | null,
   nextUser: User | null,
 ): void {
-  if (previousUser?.id === nextUser?.id) return;
-  transitionAssistantIdentity(nextUser?.id ?? null);
-  clearAccountResourcePreferences();
+  if (previousUser?.id !== nextUser?.id) transitionAssistantIdentity(nextUser?.id ?? null);
   useConsentStore.getState().bindAccount(nextUser?.id ?? null);
   useAssistantPinsStore.getState().bindAccount(nextUser?.id ?? null);
+  if (previousUser?.id === nextUser?.id) return;
+  bindAccountResourcePreferences(nextUser?.id ?? null);
+  useMachinePaneStore.getState().bindAccount(nextUser?.id ?? null);
   telemetryReset();
   useServiceCardView.setState({
     accountId: nextUser?.id,
@@ -107,12 +95,14 @@ interface AuthActions {
     /** QR session handoff: clear the unconfirmed identity and fence restoration. */
     isCurrent?: () => boolean;
   }) => Promise<boolean>;
+  readonly verifySession: () => Promise<boolean>;
   readonly setUser: (user: User | null) => void;
   readonly setMfaRequired: (required: boolean, token: string | null) => void;
   readonly clearMfaState: () => void;
 }
 
 type AuthStore = AuthState & AuthActions;
+let sessionVerification: { revision: number; promise: Promise<boolean> } | undefined;
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
   accountGeneration: 0,
@@ -192,9 +182,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // is authoritative while its replacement profile is still unconfirmed.
       const previousUser = get().user;
       clearAccountIdentity();
-      set({
-        user: null,
-        isAuthenticated: false,
+      set({ user: null, isAuthenticated: false,
         accountGeneration: get().accountGeneration + (previousUser ? 1 : 0),
       });
     } else {
@@ -245,14 +233,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
           clearAccountIdentity();
         } else {
           transitionAssistantIdentity(null);
-          clearAccountResourcePreferences();
+          bindAccountResourcePreferences(null);
+          useMachinePaneStore.getState().bindAccount(null);
           useAssistantPinsStore.getState().bindAccount(null);
           clearAccountLocalState();
         }
-        set({
-          user: null,
-          isAuthenticated: false,
-          isLoading: false,
+        set({ user: null, isAuthenticated: false, isLoading: false,
           accountGeneration: get().accountGeneration + (get().user ? 1 : 0),
         });
       } else {
@@ -263,6 +249,49 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
+  verifySession: (): Promise<boolean> => {
+    const revision = getAssistantIdentityRevision();
+    if (sessionVerification?.revision === revision) return sessionVerification.promise;
+    const request = captureAccountRequest();
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new DOMException("Session verification timed out", "TimeoutError");
+        controller.abort(error);
+        reject(error);
+      }, 15_000);
+    });
+    const promise = (async () => {
+      try {
+        const user = await Promise.race([
+          apiClient<User>("/users/me", { preserveSessionOn401: true, signal: controller.signal }),
+          deadline,
+        ]);
+        request.assertCurrent();
+        const previous = get().user;
+        if (previous?.id === user.id) {
+          // Idempotent binds retry a previous browser-storage read failure.
+          applyIdentityTransition(previous, previous);
+          if (JSON.stringify(previous) !== JSON.stringify(user)) set({ user });
+        } else get().setUser(user);
+        return true;
+      } catch (error) {
+        if (isAccountAbort(error) || revision !== getAssistantIdentityRevision()) return false;
+        request.assertCurrent();
+        if (error instanceof ApiError && error.status === 401) {
+          if (get().user) get().setUser(null);
+          return true;
+        }
+        return false;
+      } finally { clearTimeout(timer); request.dispose(); }
+    })().finally(() => {
+      if (sessionVerification?.revision === revision) sessionVerification = undefined;
+    });
+    sessionVerification = { revision, promise };
+    return promise;
+  },
+
   setUser: (user: User | null): void => {
     const previousUser = get().user;
     if (user === null) {
@@ -270,9 +299,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     } else {
       applyIdentityTransition(previousUser, user);
     }
-    set({
-      user,
-      isAuthenticated: user !== null,
+    set({ user, isAuthenticated: user !== null,
       accountGeneration:
         get().accountGeneration +
         (previousUser && previousUser.id !== user?.id ? 1 : 0),

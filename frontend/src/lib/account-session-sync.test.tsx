@@ -10,10 +10,14 @@ const person = (id: string) => ({ id, email: `${id}@example.test` }) as User;
 let receive: (event: { data: unknown }) => void;
 const post = vi.fn();
 let stop: () => void;
+let style: HTMLStyleElement;
 beforeEach(() => {
   useAuthStore.getState().setUser(person("A"));
   useAuthStore.setState({ isIdentityVerifying: false, isLoading: false });
   post.mockReset();
+  style = document.createElement("style");
+  style.textContent = "html[data-account-verifying] body { visibility: hidden; }";
+  document.head.append(style);
   vi.stubGlobal(
     "BroadcastChannel",
     class {
@@ -28,6 +32,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   stop();
+  style.remove();
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -118,20 +123,49 @@ it("keeps same-account pages and drafts mounted through bfcache verification", a
   expect(unmount).not.toHaveBeenCalled();
 });
 
-it("retries transient verification errors without revealing the unconfirmed account", async () => {
-  vi.useFakeTimers();
-  const fetch = vi
-    .fn()
-    .mockResolvedValueOnce(Response.json({}, { status: 503 }))
-    .mockResolvedValueOnce(Response.json(person("B")));
-  vi.stubGlobal("fetch", fetch);
+it.each([401, 503, "network"])("fails closed and reveals the signed-out surface on evidence verification failure %s", async (status) => {
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    if (status === "network") throw new TypeError("Offline");
+    return Response.json({}, { status: Number(status) });
+  }));
   receive({ data: { userId: "B" } });
-  await vi.advanceTimersByTimeAsync(0);
-  expect(useAuthStore.getState().isIdentityVerifying).toBe(true);
-  expect(document.documentElement).toHaveAttribute("data-account-verifying");
+  await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+  expect(useAuthStore.getState().user).toBeNull();
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+});
+
+it("bounds an unresponsive evidence check to five seconds", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+  receive({ data: { userId: "B" } });
   await vi.advanceTimersByTimeAsync(5_000);
-  expect(useAuthStore.getState().user?.id).toBe("B");
+  expect(useAuthStore.getState().user).toBeNull();
   expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+});
+
+it("deduplicates channel/storage hints by nonce and nonce-less duplicate target", async () => {
+  let resolve!: (response: Response) => void;
+  const fetch = vi.fn(() => new Promise<Response>((done) => { resolve = done; }));
+  vi.stubGlobal("fetch", fetch);
+  receive({ data: { userId: "B", nonce: "one" } });
+  window.dispatchEvent(new StorageEvent("storage", { key: "nyxid:account-session", newValue: JSON.stringify({ userId: "B", nonce: "one" }) }));
+  receive({ data: { userId: "B" } });
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  resolve(Response.json(person("B")));
+  await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+  expect(fetch).toHaveBeenCalledOnce();
+});
+
+it("never polls anonymous pages", async () => {
+  useAuthStore.getState().setUser(null);
+  vi.useFakeTimers();
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  await vi.advanceTimersByTimeAsync(180_000);
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(fetch).not.toHaveBeenCalled();
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
 });
 
 it("only verifies stale visible pages and deduplicates in-flight checks", async () => {
@@ -147,4 +181,106 @@ it("only verifies stale visible pages and deduplicates in-flight checks", async 
   await vi.advanceTimersByTimeAsync(1);
   expect(fetch).toHaveBeenCalledOnce();
   expect(useAuthStore.getState().user?.id).toBe("A");
+});
+
+it("keeps background checks silent, retaining identity, loading, mount, focus and concurrent requests", async () => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  let resolve!: (response: Response) => void;
+  const user = useAuthStore.getState().user;
+  const fetch = vi.fn((url: string) => String(url).endsWith("/users/me")
+    ? new Promise<Response>((done) => { resolve = done; }) : Promise.resolve(Response.json({ ok: true })));
+  vi.stubGlobal("fetch", fetch);
+  const unmount = vi.fn();
+  function Draft() { useEffect(() => unmount, []); return createElement("input", { defaultValue: "private draft", "aria-label": "Draft" }); }
+  render(createElement(AccountBoundary, { children: createElement(Draft) }));
+  screen.getByRole("textbox").focus();
+  for (let minute = 0; minute < 3; minute++) {
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(useAuthStore.getState().isLoading).toBe(false);
+    expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+    expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+    const { apiClient } = await import("./api-client");
+    await expect(apiClient("/concurrent")).resolves.toEqual({ ok: true });
+    await act(async () => resolve(Response.json(user)));
+    expect(useAuthStore.getState().user).toBe(user);
+    expect(screen.getByRole("textbox")).toHaveFocus();
+    expect(screen.getByRole("textbox")).toHaveValue("private draft");
+  }
+  expect(unmount).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(6);
+});
+
+it.each([401, 503, "network"])("background failure %s never hides or toggles loading", async (status) => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const user = useAuthStore.getState().user;
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    if (status === "network") throw new TypeError("Offline");
+    return Response.json({}, { status: Number(status) });
+  }));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(useAuthStore.getState().user).toBe(status === 401 ? null : user);
+  expect(useAuthStore.getState().isLoading).toBe(false);
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+});
+
+it("times out a hung background check and retries at the next interval without losing the account", async () => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const user = useAuthStore.getState().user;
+  const fetch = vi.fn().mockImplementationOnce(() => new Promise(() => {})).mockResolvedValue(Response.json(user));
+  vi.stubGlobal("fetch", fetch);
+  await vi.advanceTimersByTimeAsync(75_000);
+  expect(useAuthStore.getState().user).toBe(user);
+  await vi.advanceTimersByTimeAsync(45_000);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(useAuthStore.getState().user).toBe(user);
+});
+
+it.each(["late failure", "deadline"])("does not clear a newer locally confirmed account on an obsolete evidence %s", async (scenario) => {
+  let fail!: (error: Error) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((_, reject) => { fail = reject; })));
+  receive({ data: { userId: "B" } });
+  await vi.waitFor(() => expect(fail).toBeDefined());
+  useAuthStore.getState().setUser(person("C"));
+  if (scenario === "deadline") {
+    vi.useFakeTimers();
+    // Restart with fake timers before installing the attempt's deadline.
+    stop();
+    stop = installAccountSessionSync();
+    receive({ data: { userId: "B" } });
+    useAuthStore.getState().setUser(person("D"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(useAuthStore.getState().user?.id).toBe("D");
+  } else {
+    fail(new TypeError("Old network failure"));
+    await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+    expect(useAuthStore.getState().user?.id).toBe("C");
+  }
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+});
+
+it("does not poll a hidden signed-in tab, then silently checks on stale visibility return", async () => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  const visible = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  const fetch = vi.fn().mockResolvedValue(Response.json(person("A")));
+  vi.stubGlobal("fetch", fetch);
+  await vi.advanceTimersByTimeAsync(180_000);
+  expect(fetch).not.toHaveBeenCalled();
+  visible.mockReturnValue("visible");
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+  expect(useAuthStore.getState().isLoading).toBe(false);
 });

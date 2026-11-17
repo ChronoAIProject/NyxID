@@ -1,6 +1,18 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { conversationRow, openAssistant, sendMessage, stopButton } from "./helpers";
 
+// Chat adoption can navigate before the mock search flag is visible to the
+// profile refresh. Keep that auth HTTP boundary in the same local fixture.
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/v1/users/me", async (route) => {
+    const user = await page.evaluate(async () => {
+      const path = "/src/lib/mock-data.ts";
+      return (await import(path)).getMockUser();
+    });
+    await route.fulfill({ json: user });
+  });
+});
+
 const titles = ["First pin candidate", "Second pin candidate", "Newest conversation"];
 
 async function showChats(page: Page) {

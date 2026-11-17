@@ -605,3 +605,17 @@ it.each([
   );
   expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
 });
+
+it.each([false, true])("clears a rejected draft scope so another upload can proceed (account abort: %s)", async (accountAbort) => {
+  const { AccountChangedError } = await import("@/lib/assistant/identity");
+  vi.mocked(createUploadDraft).mockRejectedValueOnce(accountAbort ? new AccountChangedError() : new Error("Upload cancelled."))
+    .mockResolvedValue("fresh-draft");
+  render(<UploadComposer {...base} scope={{ kind: "conversations" }} />);
+  choose(new File(["first"], "first.txt", { type: "text/plain" }));
+  await waitFor(() => expect(createUploadDraft).toHaveBeenCalledOnce());
+  if (accountAbort) expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  else expect(await screen.findByRole("alert")).toHaveTextContent("Upload cancelled.");
+  choose(new File(["second"], "second.txt", { type: "text/plain" }));
+  await waitFor(() => expect(createUploadDraft).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(uploadFile).toHaveBeenCalledWith(expect.objectContaining({ id: "fresh-draft" }), expect.any(File), expect.any(AbortSignal), expect.any(Function)));
+});

@@ -1,8 +1,5 @@
 import { apiErrorBody } from "@/lib/api-error";
-import {
-  markConnectionLost,
-  markConnectionOk,
-} from "@/lib/assistant/connection-state";
+import { markConnectionLost, markConnectionOk } from "@/lib/assistant/connection-state";
 import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
 import {
@@ -19,17 +16,11 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import { assistantRequestErrorMessage } from "./request-error";
 import { billingError } from "./billing-error";
+import { captureNyxbotError, httpErrorCode, responseCorrelation, type ErrorCorrelation } from "./error-telemetry";
 import {
-  captureNyxbotError,
-  httpErrorCode,
-  responseCorrelation,
-  type ErrorCorrelation,
-} from "./error-telemetry";
-import {
-  accountResponse,
+  retainAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
-  isIdentityVerificationPending,
 } from "./identity";
 
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
@@ -111,7 +102,8 @@ function suppressWireLog(endpoint: string): boolean {
 function wireHeaders(endpoint: string): Record<string, string> {
   if (suppressWireLog(endpoint)) return {};
   const { featureEnabled, captureEnabled } =
-    useAssistantWireLogStore.getState();
+    useAssistantWireLogStore
+      .getState();
   return featureEnabled && captureEnabled
     ? { [DEBUG_REQUEST_HEADER]: "1" }
     : {};
@@ -124,7 +116,8 @@ async function captureResponse(
 ): Promise<void> {
   if (suppressWireLog(endpoint)) return;
   const request = captureAccountRequest();
-  const store = useAssistantWireLogStore.getState();
+  const store = useAssistantWireLogStore
+    .getState();
   if (!store.featureEnabled || !store.captureEnabled) return;
   const meta = {
     kind: "header" as const,
@@ -163,7 +156,8 @@ async function captureResponse(
     }
     request.assertCurrent();
     const result = capture.finish();
-    const latest = useAssistantWireLogStore.getState();
+    const latest = useAssistantWireLogStore
+      .getState();
     latest.attachResponseBody(
       exchangeId,
       result.text,
@@ -191,10 +185,7 @@ export function assignAssistantResponseConversation(
     .assignConversation(exchangeId, conversationId);
 }
 
-async function parseError(
-  response: Response,
-  format?: "cma",
-): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
+async function parseError(response: Response, format?: "cma"): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
   const raw: unknown = await response.json().catch(() => null);
   return { parsed: apiErrorBody(raw, response.status, format), raw };
 }
@@ -236,8 +227,7 @@ async function withNetworkError<T>(
     return await request();
   } catch (error) {
     if (
-      signal?.aborted ||
-      (error instanceof Error && error.name === "AbortError")
+      signal?.aborted || (error instanceof Error && error.name === "AbortError")
     ) {
       throw signal?.reason ?? error;
     }
@@ -270,42 +260,23 @@ export async function assistantHttp(
     },
   };
   try {
-    if (isIdentityVerificationPending()) await request.ready();
     options.authorityGuard?.();
     const identityRevision = getAssistantIdentityRevision();
     const method = options.method ?? "GET";
     const startedAt = Date.now();
-    const engine = endpoint.startsWith("/assistant/direct/")
-      ? "direct"
-      : endpoint.startsWith("/assistant/nyxagent/")
-        ? "nyxagent"
-        : "aevatar";
+    const engine = endpoint.startsWith("/assistant/direct/") ? "direct" : endpoint.startsWith("/assistant/nyxagent/") ? "nyxagent" : "aevatar";
     const reportError = (error: unknown) => {
-      if (
-        options.signal?.aborted ||
-        getAssistantIdentityRevision() !== identityRevision
-      )
-        return;
-      try {
-        options.onError?.(error);
-      } catch {
-        /* Reporting cannot change the request. */
-      }
+      if (options.signal?.aborted || getAssistantIdentityRevision() !== identityRevision) return;
+      try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
       if (options.reportErrors === false) return;
       const http = error instanceof ApiError ? error : undefined;
-      captureNyxbotError(
-        {
-          code: http ? httpErrorCode(http.status) : "NYXBOT_UNKNOWN_ERROR",
-          engine,
-          stage: "request",
-          endpoint,
-          status: http?.status || undefined,
-          upstreamCode: http?.errorCode,
-          ...(error instanceof AssistantHttpError ? error.correlation : {}),
-          durationMs: Date.now() - startedAt,
-        },
-        error,
-      );
+      captureNyxbotError({
+        code: http ? httpErrorCode(http.status) : "NYXBOT_UNKNOWN_ERROR",
+        engine, stage: "request", endpoint, status: http?.status || undefined,
+        upstreamCode: http?.errorCode,
+        ...(error instanceof AssistantHttpError ? error.correlation : {}),
+        durationMs: Date.now() - startedAt,
+      }, error);
     };
     const actorId = options.creditsDenial ? currentCreditsActor() : null;
     const init = buildFetchConfig({
@@ -323,57 +294,35 @@ export async function assistantHttp(
     );
     // Account changes are authority failures, not transport failures.
     options.authorityGuard?.();
-    const response =
-      mocked ??
-      (await withNetworkError(
-        () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
-        options.signal,
-        reportError,
-      ));
-    await request.ready();
+    const response = mocked ?? (await withNetworkError(
+      () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
+      options.signal,
+      reportError,
+    ));
+    request.assertCurrent();
     options.authorityGuard?.();
     markConnectionOk();
 
     void captureResponse(endpoint, method, response).catch(() => undefined);
-    if (response.ok) {
-      const result = ownsRequest
-        ? accountResponse(response, request)
-        : response;
-      const exchange = responseWireLogExchangeIds.get(response);
-      if (exchange) responseWireLogExchangeIds.set(result, exchange);
-      return result;
-    }
+    if (response.ok)
+      return ownsRequest ? retainAccountResponse(response, request.dispose) : response;
 
-    const { parsed: errorBody, raw } = await parseError(
-      response,
-      options.errorFormat,
-    );
-    await request.ready();
+    const { parsed: errorBody, raw } = await parseError(response, options.errorFormat);
+    request.assertCurrent();
     options.authorityGuard?.();
     // Classify the raw envelope: the parsed shape defaults a missing symbol.
-    reportCreditsDenialHttp(
-      options.creditsDenial,
-      response.status,
-      raw,
-      actorId,
-    );
+    reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
     const failure = new AssistantHttpError(response, {
       ...errorBody,
-      message:
-        (response.status === 402
-          ? billingError(errorBody.error)?.message
-          : undefined) ??
-        assistantRequestErrorMessage(
+      message: (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
+        ?? assistantRequestErrorMessage(
           response.status,
           errorBody.message,
           errorBody.error,
         ),
     });
     reportError(failure);
-    if (
-      response.status === 401 &&
-      DEAD_SESSION_CODES.has(errorBody.error_code)
-    ) {
+    if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
       useAuthStore.getState().setUser(null);
     }
     redirectToConsent(errorBody);
@@ -409,44 +358,37 @@ export async function assistantJson<T>(
     try {
       result = (await response.json()) as T;
     } catch {
-      await request.ready();
+      request.assertCurrent();
       options.authorityGuard?.();
-      const error = new AssistantHttpError(
-        response,
-        apiErrorBody(null, response.status),
-      );
-      if (
-        !options.signal?.aborted &&
-        getAssistantIdentityRevision() === identityRevision
-      ) {
-        try {
-          options.onError?.(error);
-        } catch {
-          /* Reporting cannot change the request. */
-        }
-        if (options.reportErrors !== false)
-          captureNyxbotError(
-            {
-              code: "NYXBOT_PROTOCOL_ERROR",
-              engine: endpoint.startsWith("/assistant/nyxagent/")
-                ? "nyxagent"
-                : endpoint.startsWith("/assistant/direct/")
-                  ? "direct"
-                  : "aevatar",
-              stage: "request",
-              endpoint,
-              status: response.status,
-              ...responseCorrelation(response),
-            },
-            error,
-          );
+      const error = new AssistantHttpError(response, apiErrorBody(null, response.status));
+      if (!options.signal?.aborted && getAssistantIdentityRevision() === identityRevision) {
+        try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
+        if (options.reportErrors !== false) captureNyxbotError({
+          code: "NYXBOT_PROTOCOL_ERROR",
+          engine: endpoint.startsWith("/assistant/nyxagent/") ? "nyxagent" : endpoint.startsWith("/assistant/direct/") ? "direct" : "aevatar",
+          stage: "request", endpoint, status: response.status,
+          ...responseCorrelation(response),
+        }, error);
       }
       throw error;
     }
-    await request.ready();
+    request.assertCurrent();
     options.authorityGuard?.();
     return result;
   } finally {
     request.dispose();
   }
+}
+
+/** Foreground download consumers need an explicit post-body authority check. */
+export async function assistantBlob(endpoint: string, options: AssistantHttpRequest = {}): Promise<Blob> {
+  const request = captureAccountRequest(options.signal);
+  try {
+    const response = await assistantHttp(endpoint, { ...options, accountRequest: request, signal: request.signal });
+    const blob = await response.blob();
+    request.assertCurrent();
+    options.authorityGuard?.();
+    return blob;
+  } catch (error) { request.assertCurrent(); throw error; }
+  finally { request.dispose(); }
 }

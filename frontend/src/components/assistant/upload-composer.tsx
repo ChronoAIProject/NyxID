@@ -215,6 +215,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
           entry.item = item;
           entry.progress = 100;
         } catch (error) {
+          if (!resolved.current.id) scopeId.current = undefined;
           if (isAccountAbort(error)) return;
           entry.error =
             error instanceof Error ? error.message : "Upload failed.";

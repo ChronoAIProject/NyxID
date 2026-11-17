@@ -4,7 +4,7 @@ import { translateUi } from "@/i18n/use-ui-translation";
 import { ApiError } from "@/lib/api-client";
 import { useState } from "react";
 import { Download, FileText } from "lucide-react";
-import { assistantHttp } from "@/lib/assistant/assistant-http";
+import { assistantBlob } from "@/lib/assistant/assistant-http";
 import type { ChatImage } from "@/lib/assistant/chat-types";
 
 /** Documents download only on demand; transcript rendering never loads every file. */
@@ -22,8 +22,8 @@ export function DocumentAttachment({
     setBusy(true);
     setError(false);
     try {
-      const response = await assistantHttp(attachment.endpoint);
-      const url = URL.createObjectURL(await response.blob());
+      const blob = await assistantBlob(attachment.endpoint);
+      const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
       link.download = attachment.label;

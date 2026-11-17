@@ -63,9 +63,8 @@ function isLoginApprovalPage() {
   );
 }
 
-function Root() {
+function AccountRuntime({ ready }: { ready: boolean }) {
   const queryClient = useQueryClient();
-  const [ready, setReady] = useState(false);
   const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
     () =>
@@ -74,9 +73,12 @@ function Root() {
       }),
     [],
   );
-  const isIdentityVerifying = useAuthStore((s) => s.isIdentityVerifying);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  const telemetryAccountId = useAuthStore((s) => s.user?.id);
+  const confirmedUser = useAuthStore((s) => s.user);
+  const telemetryAccountId = confirmedUser?.id;
+  useEffect(() => {
+    if (confirmedUser) queryClient.setQueryData(["user", "me"], confirmedUser);
+  }, [confirmedUser, queryClient]);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
 
@@ -96,15 +98,6 @@ function Root() {
   const { data: publicConfig } = usePublicConfig({
     enabled: telemetryMightInit && !agentKeyLogin,
   });
-
-  useEffect(() => {
-    useAuthStore
-      .getState()
-      .checkAuth({ ephemeral: isLoginApprovalPage() })
-      .finally(() => {
-        setReady(true);
-      });
-  }, []);
 
   // Initialize telemetry once:
   //   1. auth has resolved (we know who the user is, if any)
@@ -129,6 +122,17 @@ function Root() {
     }
   }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin, telemetryAccountId]);
 
+  return (
+    <>
+      <BuildUpdateBanner ready={ready} queryClient={queryClient} />
+      {!agentKeyLogin && <ConsentBanner />}
+    </>
+  );
+}
+
+function Root({ ready }: { ready: boolean }) {
+  const isIdentityVerifying = useAuthStore((s) => s.isIdentityVerifying);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → assistant
   // - Unauthenticated user on protected route → login
@@ -161,24 +165,28 @@ function Root() {
     }
   }, [ready, isAuthenticated, isIdentityVerifying]);
 
-  // Only block rendering on auth for protected routes.
-  // Public routes (landing, login, register, etc.) render immediately.
-  if (!ready) {
-    if (!isPublicPath(window.location.pathname)) return null;
-  }
-
+  if (!ready && !isPublicPath(window.location.pathname)) return null;
   return (
     <>
-      <AccountBoundary><RouterProvider router={router} /></AccountBoundary>
-      <BuildUpdateBanner ready={ready} queryClient={queryClient} />
-      {!agentKeyLogin && <ConsentBanner />}
+      <RouterProvider router={router} />
+      <AccountBoundary><AccountRuntime ready={ready} /></AccountBoundary>
     </>
   );
 }
 
 function AppProviders() {
   useAuthStore((state) => state.user?.id);
-  return <QueryClientProvider client={accountQueries.getClient()}><Root /></QueryClientProvider>;
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    useAuthStore
+      .getState()
+      .checkAuth({ ephemeral: isLoginApprovalPage() })
+      .finally(() => {
+        setReady(true);
+      });
+  }, []);
+
+  return <QueryClientProvider client={accountQueries.getClient()}><Root ready={ready} /></QueryClientProvider>;
 }
 
 const rootElement = document.getElementById("root");
@@ -186,9 +194,7 @@ if (!rootElement) {
   throw new Error("Root element not found");
 }
 
-// QueryClientProvider must wrap Root — `usePublicConfig()` (and every
-// other TanStack Query hook used inside Root) throws without a provider
-// above it in the tree.
+// All route and runtime query observers share the current account client.
 void appLanguageReady.then(() => createRoot(rootElement).render(
   <StrictMode>
     <AppProviders />

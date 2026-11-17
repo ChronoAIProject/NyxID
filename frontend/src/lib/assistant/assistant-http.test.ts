@@ -585,3 +585,18 @@ describe("assistant transport authority", () => {
     expect(useAuthStore.getState().user?.id).toBe("owner-two");
   });
 });
+
+it("drops a foreground download if the account changes while its blob is consumed", async () => {
+  const { assistantBlob } = await import("./assistant-http");
+  transitionAssistantIdentity("download-A");
+  let resolve!: (blob: Blob) => void;
+  const response = new Response("private A document");
+  const read = vi.spyOn(response, "blob").mockImplementation(() => new Promise<Blob>((done) => { resolve = done; }));
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+  const pending = assistantBlob("/assistant/nyxagent/attachments/file");
+  const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  await vi.waitFor(() => expect(read).toHaveBeenCalled());
+  transitionAssistantIdentity("download-B");
+  resolve(new Blob(["private A document"]));
+  await rejected;
+});

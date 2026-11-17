@@ -1,3 +1,4 @@
+import { captureAccountRequest, isAccountAbort } from "./identity";
 import { AGUIEventType } from "@/lib/assistant/agui-types";
 import {
   decodeActorFrame,
@@ -92,6 +93,7 @@ export async function runChatStream({
   refreshConversations,
   updateEntry,
 }: ChatStreamOrchestratorOptions): Promise<string | undefined> {
+  const account = captureAccountRequest(controller.signal);
   const assistantMessageId = createClientId();
   const assistantMessage: ChatMessage = {
     content: "",
@@ -130,7 +132,7 @@ export async function runChatStream({
   let correlation: ErrorCorrelation = {};
 
   const reportError = (error: unknown, code?: NyxbotErrorCode) => {
-    if (errorReported) return;
+    if (errorReported || isAccountAbort(account.signal.reason)) return;
     errorReported = true;
     const httpError =
       error instanceof ChatApiError || error instanceof ApiError
@@ -185,6 +187,7 @@ export async function runChatStream({
 
   const bestEffortStop = () => {
     if (
+      account.signal.aborted ||
       !authoritativeConversationId ||
       !authoritativeTurnId ||
       actorState.stateVersion <= 0
@@ -227,10 +230,12 @@ export async function runChatStream({
       reportErrors: false,
       onError: reportError,
     });
+    account.assertCurrent();
     correlation = responseCorrelation(response);
     for await (const frame of readChatStreamFrames(response, {
       signal: controller.signal,
     })) {
+      account.assertCurrent();
       rawFrames.push(frame.raw);
       const actorFrame = decodeActorFrame(frame.raw);
       if (actorFrame.type !== "ignored") {
@@ -358,7 +363,9 @@ export async function runChatStream({
       ),
     );
     updateEntry(activeKey, { projection: actorState, session: final });
+    account.assertCurrent();
     await refreshConversations();
+    account.assertCurrent();
     try {
       actorState = await loadActorState(
         authoritativeConversationId,
@@ -373,6 +380,7 @@ export async function runChatStream({
     }
     return authoritativeConversationId;
   } catch (error) {
+    if (isAccountAbort(account.signal.reason)) throw account.signal.reason;
     const reason = controller.signal.aborted ? controller.signal.reason : error;
     const stopped = reason instanceof ReaderStoppedError || serverStopped;
     if (!stopped) reportError(reason);
@@ -403,6 +411,7 @@ export async function runChatStream({
     if (adopted) void refreshConversations().catch(() => undefined);
     return authoritativeConversationId || undefined;
   } finally {
+    account.dispose();
     clearTimeout(startDeadline);
     if (progressWatchdog) clearTimeout(progressWatchdog);
   }

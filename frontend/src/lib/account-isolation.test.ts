@@ -1,3 +1,5 @@
+import { toast } from "sonner";
+import { useAssistantPinsStore, PIN_STORAGE_KEY } from "@/stores/assistant-pins-store";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
@@ -15,6 +17,9 @@ import {
   createAccountQueryScope,
 } from "./account-query-cache";
 import {
+  AccountChangedError,
+  isAccountAbort,
+  releaseAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
 } from "./assistant/identity";
@@ -385,16 +390,13 @@ describe("request epoch", () => {
         const add = vi.spyOn(caller.signal, "addEventListener");
         const remove = vi.spyOn(caller.signal, "removeEventListener");
         const cancelled = vi.fn();
-        vi.stubGlobal(
-          "fetch",
-          vi
-            .fn()
-            .mockResolvedValue(
-              end === "consume"
-                ? Response.json({ text: "A body" })
-                : new Response(new ReadableStream({ cancel: cancelled })),
-            ),
-        );
+        vi.stubGlobal("fetch", vi.fn(async (_url, init: RequestInit) => {
+          if (end === "consume") return Response.json({ text: "A body" });
+          return new Response(new ReadableStream({
+            start(controller) { init.signal!.addEventListener("abort", () => { controller.error(init.signal!.reason); cancelled(); }, { once: true }); },
+            cancel: cancelled,
+          }));
+        }));
         const response = await apiFetch("/private-stream", {
           signal: caller.signal,
         });
@@ -411,6 +413,7 @@ describe("request epoch", () => {
           await read;
           expect(cancelled).toHaveBeenCalledOnce();
         }
+        releaseAccountResponse(response);
         expect(add).toHaveBeenCalled();
         for (const [, listener] of add.mock.calls)
           expect(
@@ -425,7 +428,7 @@ describe("request epoch", () => {
     },
   );
 
-  it("keeps a clone's caller cancellation after its original response has completed", async () => {
+  it("fences a buffered native clone with the caller scope after its original response has completed", async () => {
     const originalAny = AbortSignal.any;
     Object.defineProperty(AbortSignal, "any", {
       configurable: true,
@@ -435,17 +438,19 @@ describe("request epoch", () => {
       const caller = new AbortController();
       const add = vi.spyOn(caller.signal, "addEventListener");
       const remove = vi.spyOn(caller.signal, "removeEventListener");
-      vi.stubGlobal(
-        "fetch",
-        vi.fn().mockResolvedValue(Response.json({ private: "A" })),
-      );
+      const nativeFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn((_url, init: RequestInit) => nativeFetch("data:application/json,%7B%22private%22%3A%22A%22%7D", init)));
+
       const response = await apiFetch("/private-body", {
         signal: caller.signal,
       });
+      const account = captureAccountRequest(caller.signal);
       const clone = response.clone();
       expect(await response.json()).toEqual({ private: "A" });
       caller.abort(new DOMException("Caller cancelled", "AbortError"));
-      await expect(clone.json()).rejects.toMatchObject({ name: "AbortError" });
+      await expect((async () => { const result = await clone.json(); account.assertCurrent(); return result; })()).rejects.toMatchObject({ name: "AbortError" });
+      account.dispose();
+      releaseAccountResponse(response);
       for (const [, listener] of add.mock.calls)
         expect(
           remove.mock.calls.some(([, removed]) => removed === listener),
@@ -457,4 +462,37 @@ describe("request epoch", () => {
       });
     }
   });
+});
+
+it("distinguishes account aborts from caller cancellation and dismisses old toasts only on a real transition", () => {
+  useAuthStore.getState().setUser(person("A"));
+  const dismiss = vi.spyOn(toast, "dismiss");
+  const caller = new AbortController();
+  const own = captureAccountRequest(caller.signal);
+  caller.abort(new DOMException("Caller cancelled", "AbortError"));
+  try { own.assertCurrent(); } catch (error) { expect(isAccountAbort(error)).toBe(false); }
+  expect(isAccountAbort(new AccountChangedError())).toBe(true);
+  const account = captureAccountRequest();
+  useAuthStore.getState().setUser({ ...person("A"), display_name: "updated" });
+  expect(dismiss).not.toHaveBeenCalled();
+  useAuthStore.getState().setUser(person("B"));
+  expect(dismiss).toHaveBeenCalledOnce();
+  try { account.assertCurrent(); } catch (error) { expect(isAccountAbort(error)).toBe(true); }
+});
+
+it("retries a failed pin-storage load on same-account confirmation and clears previous-owner pins on switch", () => {
+  useAuthStore.getState().setUser(person("A"));
+  localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify({ version: 1, ownerUserId: "A", ids: ["A-conversation"] }));
+  useAssistantPinsStore.setState({ ownerUserId: "A", error: "load", ids: [] });
+  const original = localStorage.getItem.bind(localStorage);
+  const read = vi.spyOn(localStorage, "getItem").mockImplementation((key) => { if (key === PIN_STORAGE_KEY) throw new Error("temporarily unavailable"); return original(key); });
+  useAuthStore.getState().setUser(person("A"));
+  expect(useAssistantPinsStore.getState().error).toBe("load");
+  read.mockRestore();
+  useAuthStore.getState().setUser(person("A"));
+  expect(useAssistantPinsStore.getState().ids).toEqual(["A-conversation"]);
+  expect(useAssistantPinsStore.getState().error).toBeNull();
+  useAuthStore.getState().setUser(person("B"));
+  expect(useAssistantPinsStore.getState().ids).toEqual([]);
+  expect(localStorage.getItem(PIN_STORAGE_KEY)).toBeNull();
 });

@@ -1,17 +1,8 @@
 import { ApiError, apiErrorBody, responseApiError } from "@/lib/api-error";
 import { apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { assistantJson } from "@/lib/assistant/assistant-http";
-import {
-  captureNyxbotError,
-  httpErrorCode,
-  responseCorrelation,
-} from "./error-telemetry";
-import {
-  captureAccountRequest,
-  getAssistantIdentityRevision,
-  isAccountAbort,
-  isIdentityVerificationPending,
-} from "./identity";
+import { captureNyxbotError, httpErrorCode, responseCorrelation } from "./error-telemetry";
+import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort } from "./identity";
 import type { NyxbotErrorCode } from "@/lib/telemetry-schema";
 import {
   nyxAgentAttachmentSchema,
@@ -29,39 +20,14 @@ export interface UploadedMessage {
   readonly conversationId?: string;
 }
 
-export const UNSUPPORTED_FORMAT_MESSAGE =
-  "Format not supported. Please try again.";
+export const UNSUPPORTED_FORMAT_MESSAGE = "Format not supported. Please try again.";
 
-const DOCX =
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 /** The server identifies these from their bytes, whatever the file is called. */
-const SNIFFED_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "application/pdf",
-  DOCX,
-]);
-const SNIFFED_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "pdf",
-  "docx",
-]);
+const SNIFFED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", DOCX]);
+const SNIFFED_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "pdf", "docx"]);
 /** UTF-8 text dialects the server accepts by name; "" is an extensionless file. */
-const TEXT_EXTENSIONS = new Set([
-  "",
-  "txt",
-  "text",
-  "md",
-  "markdown",
-  "csv",
-  "json",
-]);
+const TEXT_EXTENSIONS = new Set(["", "txt", "text", "md", "markdown", "csv", "json"]);
 const UNKNOWN_TYPES = new Set(["", "application/octet-stream"]);
 // Windows reports CSV files with Excel's MIME type.
 const CSV_TYPES = new Set(["application/csv", "application/vnd.ms-excel"]);
@@ -69,13 +35,8 @@ const CSV_TYPES = new Set(["application/csv", "application/vnd.ms-excel"]);
 /** The extension the server derives from the sanitized upload name (`safe_name`). */
 function serverExtension(name: string): string {
   const leaf = name.split(/[/\\]/).pop() ?? "";
-  const kept = [...leaf.replace(/[^\p{L}\p{N}._\- ()]/gu, "")]
-    .slice(0, 120)
-    .join("");
-  const clean = kept
-    .trim()
-    .replace(/^\.+|\.+$/g, "")
-    .trim();
+  const kept = [...leaf.replace(/[^\p{L}\p{N}._\- ()]/gu, "")].slice(0, 120).join("");
+  const clean = kept.trim().replace(/^\.+|\.+$/g, "").trim();
   const dot = clean.lastIndexOf(".");
   return dot < 0 ? "" : clean.slice(dot + 1).toLowerCase();
 }
@@ -85,9 +46,7 @@ function serverExtension(name: string): string {
  * (content-sniffed), and UTF-8 text, Markdown, CSV and JSON chosen by
  * extension. Anything else is refused before its bytes are uploaded.
  */
-export function isSupportedAttachment(
-  file: Pick<File, "name" | "type">,
-): boolean {
+export function isSupportedAttachment(file: Pick<File, "name" | "type">): boolean {
   const type = (file.type.split(";")[0] ?? "").trim().toLowerCase();
   const extension = serverExtension(file.name);
   if (SNIFFED_TYPES.has(type)) return true;
@@ -124,39 +83,28 @@ export async function uploadFile(
   progress: (value: number) => void,
 ): Promise<NyxAgentAttachment> {
   const request = captureAccountRequest(signal);
+  const requestRevision = getAssistantIdentityRevision();
+  signal = request.signal;
   try {
-    if (isIdentityVerificationPending()) await request.ready();
-    request.assertCurrent();
-    signal = request.signal;
     const identityRevision = getAssistantIdentityRevision();
     const startedAt = Date.now();
     if (!file.size || file.size > 20 * 1024 * 1024)
-      return Promise.reject(
-        new Error("Choose a file between 1 byte and 20 MB."),
-      );
+      return Promise.reject(new Error("Choose a file between 1 byte and 20 MB."));
     // The preview fixture accepts raw files without sending them to a backend.
     // Vite removes this branch from production builds.
-    if (
-      (import.meta.env.DEV || import.meta.env.MODE === "test") &&
-      globalThis.__nyxidAssistantHttpMock
-    ) {
+    if ((import.meta.env.DEV || import.meta.env.MODE === "test") && globalThis.__nyxidAssistantHttpMock) {
       const mock = globalThis.__nyxidAssistantHttpMock;
       return await (async () => {
-        request.assertCurrent();
+        if (signal.aborted) throw isAccountAbort(signal.reason) ? signal.reason : new Error("Upload cancelled.");
         const response = await mock({
           endpoint: attachmentPath(scope),
-          init: {
-            method: "POST",
-            body: file,
-            signal,
-            headers: { "x-attachment-name": encodeURIComponent(file.name) },
-          },
+          init: { method: "POST", body: file, signal, headers: { "x-attachment-name": encodeURIComponent(file.name) } },
         });
-        request.assertCurrent();
+        if (signal.aborted) throw isAccountAbort(signal.reason) ? signal.reason : new Error("Upload cancelled.");
         if (!response) throw new Error("Preview upload route not found.");
         if (!response.ok) throw await responseApiError(response);
         const body: unknown = await response.json();
-        await request.ready();
+        request.assertCurrent();
         progress(100);
         return nyxAgentAttachmentSchema.parse(body);
       })();
@@ -168,36 +116,20 @@ export async function uploadFile(
       const rejectFailure = (error: unknown, code: NyxbotErrorCode) => {
         if (settled) return;
         settled = true;
-        if (
-          !signal.aborted &&
-          getAssistantIdentityRevision() === identityRevision
-        ) {
+        if (!signal.aborted && getAssistantIdentityRevision() === identityRevision) {
           try {
             const headers = new Headers();
-            for (const name of [
-              "x-request-id",
-              "x-correlation-id",
-              "X-NyxID-Trace-Id",
-              "x-trace-id",
-            ]) {
+            for (const name of ["x-request-id", "x-correlation-id", "X-NyxID-Trace-Id", "x-trace-id"]) {
               const value = xhr.getResponseHeader(name);
               if (value) headers.set(name, value);
             }
-            captureNyxbotError(
-              {
-                code,
-                engine: "nyxagent",
-                stage: "request",
-                endpoint,
-                status: xhr.status || undefined,
-                ...responseCorrelation({ headers }),
-                durationMs: Date.now() - startedAt,
-              },
-              error,
-            );
-          } catch {
-            /* Diagnostics cannot prevent the upload error from settling. */
-          }
+            captureNyxbotError({
+              code, engine: "nyxagent", stage: "request", endpoint,
+              status: xhr.status || undefined,
+              ...responseCorrelation({ headers }),
+              durationMs: Date.now() - startedAt,
+            }, error);
+          } catch { /* Diagnostics cannot prevent the upload error from settling. */ }
         }
         reject(error);
       };
@@ -213,71 +145,46 @@ export async function uploadFile(
       xhr.setRequestHeader("x-attachment-name", encodeURIComponent(file.name));
       xhr.upload.onprogress = (event) => {
         if (!signal.aborted && event.lengthComputable)
-          progress(
-            Math.min(99, Math.round((event.loaded / event.total) * 100)),
-          );
+          progress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
       };
       const abort = () => xhr.abort();
       signal.addEventListener("abort", abort, { once: true });
       xhr.onloadend = () => signal.removeEventListener("abort", abort);
       xhr.onerror = () =>
-        rejectFailure(
-          new Error("Upload failed. Check your connection and try again."),
-          "NYXBOT_NETWORK_ERROR",
-        );
+        rejectFailure(new Error("Upload failed. Check your connection and try again."), "NYXBOT_NETWORK_ERROR");
       xhr.ontimeout = () =>
-        rejectFailure(
-          new Error("Upload timed out. Try a smaller file."),
-          "NYXBOT_START_TIMEOUT",
-        );
+        rejectFailure(new Error("Upload timed out. Try a smaller file."), "NYXBOT_START_TIMEOUT");
       xhr.onabort = () => {
         settled = true;
-        reject(new DOMException("Upload cancelled.", "AbortError"));
+        reject(isAccountAbort(signal.reason) ? signal.reason : new Error("Upload cancelled."));
       };
       xhr.onload = () => {
         if (settled) return;
         try {
           if (xhr.status < 200 || xhr.status >= 300) {
             let payload: unknown = null;
-            try {
-              payload = JSON.parse(xhr.responseText);
-            } catch {
-              /* Never display a parser's body snippet. */
-            }
+            try { payload = JSON.parse(xhr.responseText); } catch { /* Never display a parser's body snippet. */ }
             const body = apiErrorBody(payload, xhr.status);
-            throw new ApiError(
-              xhr.status,
-              /malformed or unsupported attachment/i.test(body.message)
-                ? { ...body, message: UNSUPPORTED_FORMAT_MESSAGE }
-                : body,
-              { get: (name) => xhr.getResponseHeader(name) },
-            );
+            throw new ApiError(xhr.status, /malformed or unsupported attachment/i.test(body.message)
+              ? { ...body, message: UNSUPPORTED_FORMAT_MESSAGE } : body, { get: (name) => xhr.getResponseHeader(name) });
           }
           let body: unknown;
-          try {
-            body = JSON.parse(xhr.responseText);
-          } catch {
-            throw new ApiError(xhr.status, apiErrorBody(null, xhr.status), {
-              get: (name) => xhr.getResponseHeader(name),
-            });
+          try { body = JSON.parse(xhr.responseText); } catch {
+            throw new ApiError(xhr.status, apiErrorBody(null, xhr.status), { get: (name) => xhr.getResponseHeader(name) });
           }
           request.assertCurrent();
           const attachment = nyxAgentAttachmentSchema.parse(body);
           settled = true;
           resolve(attachment);
         } catch (error) {
-          rejectFailure(
-            error,
-            xhr.status >= 200 && xhr.status < 300
-              ? "NYXBOT_PROTOCOL_ERROR"
-              : httpErrorCode(xhr.status),
-          );
+          rejectFailure(error, xhr.status >= 200 && xhr.status < 300
+            ? "NYXBOT_PROTOCOL_ERROR" : httpErrorCode(xhr.status));
         }
       };
       if (signal.aborted) {
         signal.removeEventListener("abort", abort);
         settled = true;
-        reject(new DOMException("Upload cancelled.", "AbortError"));
+        reject(isAccountAbort(signal.reason) ? signal.reason : new Error("Upload cancelled."));
         return;
       }
       try {
@@ -288,7 +195,7 @@ export async function uploadFile(
       }
     });
   } catch (error) {
-    if (!isAccountAbort(error)) request.assertCurrent();
+    if (requestRevision !== getAssistantIdentityRevision()) request.assertCurrent();
     throw error;
   } finally {
     request.dispose();

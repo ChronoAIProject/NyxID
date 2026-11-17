@@ -1,5 +1,6 @@
 import { QueryClient, type QueryClientConfig } from "@tanstack/react-query";
 import {
+  AccountChangedError,
   getAssistantIdentityRevision,
   subscribeAssistantIdentity,
 } from "./assistant/identity";
@@ -35,19 +36,25 @@ export function bindAccountQueryClient(client: QueryClient): () => void {
     const fn = options.mutationFn;
     if (fn && !wrapped.has(fn)) {
       options.mutationFn = async (...args) => {
-        if (!current()) throw new DOMException("Account changed", "AbortError");
+        if (!current()) throw new AccountChangedError();
         const result = await fn(...args);
-        if (!current()) throw new DOMException("Account changed", "AbortError");
+        if (!current()) throw new AccountChangedError();
         return result;
       };
       wrapped.add(options.mutationFn);
     }
     mutation.setOptions(options);
   });
-  const stopIdentity = subscribeAssistantIdentity(() => {
-    // Cancellation reverts queries to their previous data; remove after cancelling.
+  const stopIdentity = subscribeAssistantIdentity((_next, previous) => {
+    // Cancellation reverts queries to their previous data. A departing account
+    // removes everything; first sign-in resets anonymous queries in place so
+    // still-mounted observers stay attached to the retained client.
     void client.cancelQueries();
-    client.clear();
+    if (previous !== null) client.clear();
+    else {
+      client.getMutationCache().clear();
+      void client.resetQueries();
+    }
   });
   return () => {
     stopMutations();
@@ -59,7 +66,8 @@ export function bindAccountQueryClient(client: QueryClient): () => void {
 export function createAccountQueryScope(config: QueryClientConfig) {
   let client = new QueryClient(config);
   let stopBinding = bindAccountQueryClient(client);
-  const stopIdentity = subscribeAssistantIdentity(() => {
+  const stopIdentity = subscribeAssistantIdentity((_next, previous) => {
+    if (previous === null) return;
     void client.cancelQueries();
     client.clear();
     stopBinding();

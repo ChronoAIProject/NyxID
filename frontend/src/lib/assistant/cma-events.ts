@@ -1,3 +1,4 @@
+import { releaseAccountResponse } from "./identity";
 import {
   cmaPublicText,
   type CmaTranscriptMessage,
@@ -211,5 +212,6 @@ export async function* readCmaStream(
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
+    releaseAccountResponse(response);
   }
 }

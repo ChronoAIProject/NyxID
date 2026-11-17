@@ -1,3 +1,4 @@
+import { AccountChangedError } from "@/lib/assistant/identity";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -29,7 +30,7 @@ function show(value = card, decide = vi.fn().mockResolvedValue(undefined), acces
 beforeEach(() => { mocks.json.mockReset().mockResolvedValue(preview); });
 afterEach(cleanup);
 it("silently drops an aborted decision without refreshing or retrying", async () => {
-  const decide = show(card, vi.fn().mockRejectedValue(new DOMException("Account changed", "AbortError")));
+  const decide = show(card, vi.fn().mockRejectedValue(new AccountChangedError()));
   const allow = await screen.findByRole("button", { name: "Allow and publish" });
   await act(async () => { fireEvent.click(allow); });
   expect(decide).toHaveBeenCalledOnce();

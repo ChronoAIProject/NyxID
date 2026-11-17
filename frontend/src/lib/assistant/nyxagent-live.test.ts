@@ -217,3 +217,23 @@ it("refreshes titles even when the turn and message count did not change", () =>
   expect(refresh.lists).toContainEqual(["assistant", "nyxagent", "u", "threads"]);
   expect(refresh.now).toContainEqual(["assistant", "nyxagent", "u", "history", "nyxa-1"]);
 });
+
+it("never reconnects or delivers an old frame after an epoch change, including an opaque native abort", async () => {
+  const { transitionAssistantIdentity } = await import("./identity");
+  transitionAssistantIdentity("live-A");
+  let reader!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    requests.push(endpoint);
+    return new Response(new ReadableStream({ start(value) { reader = value; value.enqueue(encoder.encode('data: {"type":"ready"}\n\n')); } }), { headers: { "content-type": "text/event-stream" } });
+  };
+  const event = vi.fn();
+  const stop = listenNyxAgentLive(event);
+  await vi.waitFor(() => expect(event).toHaveBeenCalledOnce());
+  vi.useFakeTimers();
+  transitionAssistantIdentity("live-B");
+  reader.error(new DOMException("The operation was aborted.", "AbortError"));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(requests).toHaveLength(1);
+  expect(event).toHaveBeenCalledOnce();
+  stop();
+});

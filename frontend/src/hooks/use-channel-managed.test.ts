@@ -121,3 +121,18 @@ describe("managed completion transport", () => {
     expect(stage).toHaveBeenCalledWith("subscribing");
   });
 });
+
+it("normalizes a native completion-stream abort after an account switch and emits no later stages", async () => {
+  const { AccountChangedError, transitionAssistantIdentity } = await import("@/lib/assistant/identity");
+  transitionAssistantIdentity("managed-A");
+  let stream!: ReadableStreamDefaultController<Uint8Array>;
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({ start(value) { stream = value; } }), { headers: { "content-type": "text/event-stream" } })));
+  const stage = vi.fn();
+  const pending = completeManagedOnboarding("whatsapp", input, stage, signal, origin);
+  const rejected = expect(pending).rejects.toBeInstanceOf(AccountChangedError);
+  await vi.waitFor(() => expect(stream).toBeDefined());
+  transitionAssistantIdentity("managed-B");
+  stream.error(new DOMException("The operation was aborted.", "AbortError"));
+  await rejected;
+  expect(stage).not.toHaveBeenCalled();
+});

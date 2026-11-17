@@ -1,3 +1,4 @@
+import { captureAccountRequest, releaseAccountResponse } from "./identity";
 import { assistantHttp, type AssistantHttpRequest } from "./assistant-http";
 import { ApiError, apiErrorBody } from "@/lib/api-error";
 
@@ -52,12 +53,27 @@ export async function cmaJson(
   path: string,
   options: AssistantHttpRequest = {},
 ): Promise<unknown> {
-  const signal = options.signal
-    ? AbortSignal.any([options.signal, AbortSignal.timeout(30_000)])
-    : AbortSignal.timeout(30_000);
-  const response = await assistantHttp(path, { ...options, signal, errorFormat: "cma" });
-  const result = await readCmaJson(response);
-  signal.throwIfAborted();
-  options.authorityGuard?.();
-  return result;
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(new DOMException("CMA request timed out", "TimeoutError")), 30_000);
+  const request = captureAccountRequest(options.signal);
+  const abort = () => timeout.abort(request.signal.reason);
+  request.signal.addEventListener("abort", abort, { once: true });
+  if (request.signal.aborted) abort();
+  let response: Response | undefined;
+  try {
+    response = await assistantHttp(path, { ...options, signal: timeout.signal, errorFormat: "cma" });
+    const result = await readCmaJson(response);
+    request.assertCurrent();
+    timeout.signal.throwIfAborted();
+    options.authorityGuard?.();
+    return result;
+  } catch (error) {
+    request.assertCurrent();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    request.signal.removeEventListener("abort", abort);
+    request.dispose();
+    if (response) releaseAccountResponse(response);
+  }
 }

@@ -2907,3 +2907,22 @@ it("keeps model approval guidance and settings link in the saved failed reply", 
   expect(screen.getAllByText(storedError("model_approval_required"))[0]).toBeVisible();
   expect(screen.getByRole("link", { name: "https://example.test/approvals/settings" })).toHaveAttribute("href", "https://example.test/approvals/settings");
 });
+
+it("normalizes an opaque native body abort after admission to a silent account abort", async () => {
+  const { AccountChangedError } = await import("./identity");
+  let reader!: ReadableStreamDefaultController<Uint8Array>;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
+    ? new Response(new ReadableStream({ start(value) { reader = value; } })) : json(history());
+  const transport = new NyxAgentTransport();
+  const failed = vi.fn();
+  const sending = transport.send(undefined, "Private A", vi.fn(), failed);
+  const rejected = expect(sending).rejects.toBeInstanceOf(AccountChangedError);
+  await vi.waitFor(() => expect(reader).toBeDefined());
+  reader.enqueue(sseBytes(runningStatus));
+  await vi.waitFor(() => expect(transport.getActiveTurnId(id)).toBe("turn"));
+  transitionAssistantIdentity("stream-B");
+  reader.error(new DOMException("The operation was aborted.", "AbortError"));
+  await rejected;
+  expect(failed).not.toHaveBeenCalled();
+  expect(capture).not.toHaveBeenCalled();
+});

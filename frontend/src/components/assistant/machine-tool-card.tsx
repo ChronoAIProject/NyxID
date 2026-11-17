@@ -1,4 +1,4 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
+import { isAccountAbort, releaseAccountResponse } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -164,7 +164,10 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
   useEffect(() => {
     const controller = new AbortController();
     assistantHttp(endpoint, { signal: controller.signal })
-      .then((response) => response.text())
+      .then(async (response) => {
+        try { return await response.text(); }
+        finally { releaseAccountResponse(response); }
+      })
       .then((value) => {
         if (!controller.signal.aborted) setText(value.slice(0, 4096));
       })

@@ -1,3 +1,4 @@
+import { releaseAccountResponse } from "./identity";
 import { assistantHttp } from "./assistant-http";
 import { subscribeAssistantIdentity } from "./identity";
 
@@ -34,8 +35,11 @@ async function fetchBlob(entry: Entry) {
     signal: entry.controller.signal,
   });
   const declared = Number(response.headers.get("content-length"));
-  if (declared > entry.reservedBytes)
+  if (declared > entry.reservedBytes) {
+    await response.body?.cancel();
+    releaseAccountResponse(response);
     throw new Error("Generated file exceeds download limit");
+  }
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Generated file body unavailable");
   const parts: Uint8Array<ArrayBuffer>[] = [];
@@ -50,6 +54,7 @@ async function fetchBlob(entry: Entry) {
       parts.push(chunk.value as Uint8Array<ArrayBuffer>);
     }
   } finally {
+    releaseAccountResponse(response);
     await reader.cancel();
   }
   return new Blob(parts, {

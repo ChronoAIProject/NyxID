@@ -4,7 +4,6 @@ import {
 } from "@/lib/assistant/errors";
 import {
   captureAccountRequest,
-  isIdentityVerificationPending,
   getAssistantIdentityUserId,
   subscribeAssistantIdentity,
 } from "@/lib/assistant/identity";
@@ -823,7 +822,7 @@ export class DirectAssistantTransport {
     const firstByteDeadline = this.now() + this.firstByteTimeoutMs;
     const account = captureAccountRequest(run.controller.signal);
     try {
-      if (isIdentityVerificationPending()) await account.ready();
+
       account.assertCurrent();
       const response = await this.withTimeout(
         this.fetchFn(DIRECT_COMPLETIONS_URL, {
@@ -840,12 +839,12 @@ export class DirectAssistantTransport {
         run,
         "first_byte_timeout",
       );
-      await account.ready();
+      account.assertCurrent();
       run.responseStatus = response.status;
       run.correlation = responseCorrelation(response);
       if (!response.ok) {
         const body = await parseJsonErrorResponse(response);
-        await account.ready();
+        account.assertCurrent();
         // Before the generic `http_402` rewrite below discards the symbol.
         if (isInsufficientCreditsHttp(response.status, body)) {
           this.notifyCredits(conversationId, run);
@@ -901,7 +900,7 @@ export class DirectAssistantTransport {
           run,
           firstRead ? "first_byte_timeout" : "idle_timeout",
         );
-        await account.ready();
+        account.assertCurrent();
         firstRead = false;
         if (result.done) break;
         buffer += decoder.decode(result.value, { stream: true });

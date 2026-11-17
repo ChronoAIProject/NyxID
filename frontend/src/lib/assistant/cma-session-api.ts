@@ -1,3 +1,4 @@
+import { AccountChangedError, releaseAccountResponse } from "./identity";
 import { z } from "zod";
 import { ApiError, apiFetch } from "@/lib/api-client";
 import { apiErrorBody } from "@/lib/api-error";
@@ -39,7 +40,7 @@ function guard(ownerId: string, revision = getAssistantIdentityRevision()) {
     getAssistantIdentityUserId() !== ownerId ||
     getAssistantIdentityRevision() !== revision
   )
-    throw new DOMException("Account changed", "AbortError");
+    throw new AccountChangedError();
 }
 
 function request(
@@ -101,6 +102,7 @@ async function json(
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
+    releaseAccountResponse(response);
   }
 }
 
@@ -310,6 +312,7 @@ export async function watchCmaSession(
     const abort = () => attempt.abort();
     signal.addEventListener("abort", abort, { once: true });
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let response: Response | undefined;
     let idle: ReturnType<typeof setTimeout> | undefined;
     try {
       guard(ownerId, revision);
@@ -353,7 +356,7 @@ export async function watchCmaSession(
         after_cursor: cursor,
         follow: "true",
       });
-      const response = await request(
+      response = await request(
         ownerId,
         `${cmaProxyPath(session.connection.id, session.routes.events, session.agentId)}?${query}`,
         attempt.signal,
@@ -435,6 +438,7 @@ export async function watchCmaSession(
       signal.removeEventListener("abort", abort);
       await reader?.cancel().catch(() => undefined);
       reader?.releaseLock();
+      if (response) releaseAccountResponse(response);
     }
     if (signal.aborted) return;
     publish({ connection: "reconnecting" });

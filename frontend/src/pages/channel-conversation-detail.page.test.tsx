@@ -21,7 +21,7 @@ import { ChannelConversationDetailPage } from "./channel-conversation-detail";
 vi.mock("@/components/layout/dashboard-layout", () => ({
   useBreadcrumbLabel: vi.fn(),
 }));
-vi.mock("sonner", () => ({ toast: { success: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), dismiss: vi.fn() } }));
 
 const conversation = {
   id: "conv-1",

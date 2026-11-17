@@ -1,118 +1,103 @@
+import { getAssistantIdentityRevision } from "./assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
-import {
-  beginIdentityVerification,
-  finishIdentityVerification,
-} from "./assistant/identity";
 
 const STORAGE_KEY = "nyxid:account-session";
-const CHANNEL = "nyxid:account-session";
 const STALE_MS = 60_000;
+const EVIDENCE_TIMEOUT_MS = 5_000;
 
-/** Messages are invalidation hints only. The cookie-authenticated profile is authority. */
+/** Hints invalidate identity; only the cookie-authenticated profile is authority. */
 export function installAccountSessionSync(): () => void {
   let channel: BroadcastChannel | undefined;
-  try {
-    channel = new BroadcastChannel(CHANNEL);
-  } catch {
-    /* Storage event fallback. */
-  }
-  let pending: Promise<void> | undefined;
-  let lastVerified = Date.now();
-  let remote = false;
+  try { channel = new BroadcastChannel(STORAGE_KEY); } catch { /* Storage fallback. */ }
   let disposed = false;
-  let retry: ReturnType<typeof setTimeout> | undefined;
-  let verifyAgain = false;
-  const verify = () => {
-    if (disposed) return;
-    if (pending) {
-      verifyAgain = true;
-      return;
-    }
-    clearTimeout(retry);
-    let confirmed = false;
-    beginIdentityVerification();
+  let remote = false;
+  let lastAttempt = Date.now();
+  type Attempt = { revision: number; evidence: boolean; target?: string | null; again: boolean; timer?: ReturnType<typeof setTimeout> };
+  let pending: Attempt | undefined;
+  const seen = new Set<string>();
+  const reveal = () => {
+    document.documentElement.removeAttribute("data-account-verifying");
+    useAuthStore.setState({ isIdentityVerifying: false });
+  };
+  const hide = () => {
     document.documentElement.setAttribute("data-account-verifying", "");
     useAuthStore.setState({ isIdentityVerifying: true });
+  };
+  const verify = (evidence: boolean, target?: string | null) => {
+    if (disposed) return;
+    if (pending) {
+      if (evidence) {
+        if (pending.evidence && pending.target !== target) pending.again = true;
+        pending.target = target;
+        pending.evidence = true;
+        hide();
+        armDeadline(pending);
+      }
+      return;
+    }
+    lastAttempt = Date.now();
+    const attempt: Attempt = { revision: getAssistantIdentityRevision(), evidence, target, again: false };
+    pending = attempt;
+    if (evidence) { hide(); armDeadline(attempt); }
     remote = true;
-    pending = useAuthStore
-      .getState()
-      .checkAuth()
-      .then((valid) => {
-        confirmed = valid || useAuthStore.getState().user === null;
-        if (confirmed) lastVerified = Date.now();
-      })
-      .finally(() => {
-        remote = false;
-        pending = undefined;
-        if (disposed) return;
-        if (!confirmed || verifyAgain) {
-          verifyAgain = false;
-          retry = setTimeout(verify, confirmed ? 0 : 5_000);
-          return;
-        }
-        finishIdentityVerification();
-        document.documentElement.removeAttribute("data-account-verifying");
-        useAuthStore.setState({ isIdentityVerifying: false });
-      });
+    void useAuthStore.getState().verifySession().then((confirmed) => {
+      if (disposed || pending !== attempt) return;
+      clearTimeout(attempt.timer);
+      pending = undefined;
+      if (attempt.evidence && !confirmed && attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
+      if (attempt.again) verify(true, attempt.target);
+      else reveal();
+    }).finally(() => { if (!pending) remote = false; });
+  };
+  const armDeadline = (attempt: Attempt) => {
+    if (attempt.timer) return;
+    attempt.timer = setTimeout(() => {
+      if (disposed || pending !== attempt) return;
+      pending = undefined;
+      if (attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
+      remote = false;
+      reveal();
+    }, EVIDENCE_TIMEOUT_MS);
   };
   const receive = (value: unknown) => {
     if (!value || typeof value !== "object" || !("userId" in value)) return;
     const id = value.userId;
     if (id !== null && typeof id !== "string") return;
-    if (pending) {
-      verifyAgain = true;
-      return;
+    if ("nonce" in value && typeof value.nonce === "string") {
+      if (seen.has(value.nonce)) return;
+      seen.add(value.nonce);
+      if (seen.size > 100) seen.delete(seen.values().next().value!);
     }
     if (id === (useAuthStore.getState().user?.id ?? null)) return;
-    verify();
+    verify(true, id);
   };
   if (channel) channel.onmessage = (event) => receive(event.data);
   const storage = (event: StorageEvent) => {
     if (event.key !== STORAGE_KEY || !event.newValue) return;
-    try {
-      receive(JSON.parse(event.newValue));
-    } catch {
-      /* Ignore malformed hints. */
-    }
+    try { receive(JSON.parse(event.newValue)); } catch { /* Malformed hint. */ }
   };
-  const pageshow = (event: PageTransitionEvent) => {
-    if (event.persisted) verify();
-  };
+  const pageshow = (event: PageTransitionEvent) => { if (event.persisted) verify(true); };
   const visibility = () => {
-    if (
-      document.visibilityState === "visible" &&
-      Date.now() - lastVerified >= STALE_MS
-    )
-      verify();
+    if (useAuthStore.getState().user && document.visibilityState === "visible" && Date.now() - lastAttempt >= STALE_MS)
+      verify(false);
   };
   const timer = setInterval(visibility, STALE_MS);
   const stop = useAuthStore.subscribe((state, previous) => {
-    if (state.user !== previous.user) lastVerified = Date.now();
     if (state.user?.id === previous.user?.id) return;
-    lastVerified = Date.now();
+    lastAttempt = Date.now();
     if (remote) return;
     const hint = { userId: state.user?.id ?? null, nonce: crypto.randomUUID() };
-    try {
-      channel?.postMessage(hint);
-    } catch {
-      /* Storage event fallback. */
-    }
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(hint));
-    } catch {
-      /* BroadcastChannel still works. */
-    }
+    try { channel?.postMessage(hint); } catch { /* Storage fallback. */ }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(hint)); } catch { /* Channel remains available. */ }
   });
   window.addEventListener("storage", storage);
   window.addEventListener("pageshow", pageshow);
   document.addEventListener("visibilitychange", visibility);
   return () => {
     disposed = true;
-    clearTimeout(retry);
+    clearTimeout(pending?.timer);
     clearInterval(timer);
-    finishIdentityVerification();
-    document.documentElement.removeAttribute("data-account-verifying");
-    useAuthStore.setState({ isIdentityVerifying: false });
+    reveal();
     stop();
     channel?.close();
     window.removeEventListener("storage", storage);

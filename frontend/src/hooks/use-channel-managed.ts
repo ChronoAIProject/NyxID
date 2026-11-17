@@ -1,3 +1,4 @@
+import { captureAccountRequest } from "@/lib/assistant/identity";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { api, apiClient, apiFetch, ApiError } from "@/lib/api-client";
@@ -45,50 +46,60 @@ export async function completeManagedOnboarding(
   apiBaseUrl: string,
   connectToken?: string,
 ): Promise<CreateChannelBotResponse> {
-  const response = await apiFetch(
-    connectToken ? "/channel-connect-links/managed/complete" : `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`,
-    {
-      method: "POST",
-      apiBaseUrl,
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
-      body: { ...managedCompleteSchema.parse(input), ...(connectToken ? { token: connectToken } : {}) },
-      signal,
-    },
-  );
-  if (!response.headers.get("content-type")?.includes("text/event-stream"))
-    return (await response.json()) as CreateChannelBotResponse;
-  if (!response.body)
-    throw new Error(
-      "Onboarding response was interrupted. Check your bot list before reconnecting.",
-    );
-  const decoder = new SsePayloadDecoder();
-  const reader = response.body.getReader();
+  const account = captureAccountRequest(signal);
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      for (const payload of done ? decoder.finish() : decoder.push(value)) {
-        const event = progressSchema.parse(JSON.parse(payload));
-        if (event.error)
-          throw new ApiError(response.status, {
-            error: event.error,
-            message: event.message ?? event.error,
-            error_code: event.error_code ?? -1,
-          });
-        if (event.stage) onStage(event.stage);
-        if (event.result)
-          return event.result as unknown as CreateChannelBotResponse;
+    const response = await apiFetch(
+      connectToken ? "/channel-connect-links/managed/complete" : `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`,
+      {
+        method: "POST",
+        apiBaseUrl,
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: { ...managedCompleteSchema.parse(input), ...(connectToken ? { token: connectToken } : {}) },
+        accountRequest: account,
+        signal: account.signal,
+      },
+    );
+    if (!response.headers.get("content-type")?.includes("text/event-stream"))
+      try { const result = (await response.json()) as CreateChannelBotResponse; account.assertCurrent(); return result; }
+      catch (error) { account.assertCurrent(); throw error; }
+    if (!response.body)
+      throw new Error(
+        "Onboarding response was interrupted. Check your bot list before reconnecting.",
+      );
+    const decoder = new SsePayloadDecoder();
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        account.assertCurrent();
+        for (const payload of done ? decoder.finish() : decoder.push(value)) {
+          const event = progressSchema.parse(JSON.parse(payload));
+          if (event.error)
+            throw new ApiError(response.status, {
+              error: event.error,
+              message: event.message ?? event.error,
+              error_code: event.error_code ?? -1,
+            });
+          if (event.stage) onStage(event.stage);
+          if (event.result)
+            return event.result as unknown as CreateChannelBotResponse;
+        }
+        if (done)
+          throw new Error(
+            "Onboarding response was interrupted. Check your bot list before reconnecting.",
+          );
       }
-      if (done)
-        throw new Error(
-          "Onboarding response was interrupted. Check your bot list before reconnecting.",
-        );
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
-  } finally {
-    reader.releaseLock();
-  }
+  } catch (error) {
+    account.assertCurrent();
+    throw error;
+  } finally { account.dispose(); }
 }
 
 export async function startManagedOAuth(platform: string, label: string, orgId: string | null, signal: AbortSignal, connectToken?: string) {

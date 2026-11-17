@@ -1,14 +1,9 @@
 import {
-  accountResponse,
+  retainAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
 } from "./assistant/identity";
-import {
-  ApiError,
-  apiErrorBody,
-  responseApiError,
-  networkApiError,
-} from "./api-error";
+import { ApiError, apiErrorBody, responseApiError, networkApiError } from "./api-error";
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
@@ -73,20 +68,12 @@ let sessionConfirmation: {
   revision: number;
   promise: Promise<boolean>;
 } | null = null;
-let lastSessionConfirmation: {
-  at: number;
-  valid: boolean;
-  user: unknown;
-} | null = null;
+let lastSessionConfirmation: { at: number; valid: boolean; user: unknown } | null = null;
 
 async function confirmSessionStillValid(): Promise<boolean> {
   const now = Date.now();
   const user = useAuthStore.getState().user;
-  if (
-    lastSessionConfirmation &&
-    lastSessionConfirmation.user === user &&
-    now - lastSessionConfirmation.at < 500
-  ) {
+  if (lastSessionConfirmation && lastSessionConfirmation.user === user && now - lastSessionConfirmation.at < 500) {
     return lastSessionConfirmation.valid;
   }
   const revision = getAssistantIdentityRevision();
@@ -100,10 +87,7 @@ async function confirmSessionStillValid(): Promise<boolean> {
       // Only a confirmed identity 401 proves that the NyxID session is gone.
       // A 2xx, another HTTP status, or a transient network failure must keep
       // the browser session intact.
-      .then(
-        (response) =>
-          response.status !== 401 || useAuthStore.getState().user !== user,
-      )
+      .then((response) => response.status !== 401 || useAuthStore.getState().user !== user)
       .catch(() => true)
       .then((valid) => {
         lastSessionConfirmation = { at: Date.now(), valid, user };
@@ -125,11 +109,7 @@ export function buildFetchConfig(options: RequestOptions): RequestInit {
   // This device header only narrows the persisted account permission. The
   // backend rechecks it and consent revisions at admission and dispatch.
   const telemetryHeaders: Record<string, string> = isTelemetryActive()
-    ? {
-        "X-NyxID-Client": "ui",
-        "X-NyxID-Analytics": "enabled",
-        "X-NyxID-Analytics-Account": useAuthStore.getState().user?.id ?? "",
-      }
+    ? { "X-NyxID-Client": "ui", "X-NyxID-Analytics": "enabled", "X-NyxID-Analytics-Account": useAuthStore.getState().user?.id ?? "" }
     : {};
 
   const config: RequestInit = {
@@ -186,7 +166,6 @@ export async function apiClient<T>(
     },
   };
   try {
-    if (endpoint !== "/users/me") await request.ready();
     if (import.meta.env.DEV) {
       const { isMockMode, getMockResponse } = await import("./mock-data");
       options.authorityGuard?.();
@@ -203,16 +182,11 @@ export async function apiClient<T>(
     const response = await apiFetch(endpoint, options);
     options.authorityGuard?.();
     if (response.status === 204) return undefined as T;
-    const body = (await response.json().catch(async () => {
-      if (endpoint !== "/users/me") await request.ready();
+    const body = (await response.json().catch(() => {
       options.authorityGuard?.();
-      throw new ApiError(
-        response.status,
-        apiErrorBody(null, response.status),
-        response.headers,
-      );
+      throw new ApiError(response.status, apiErrorBody(null, response.status), response.headers);
     })) as T;
-    if (endpoint !== "/users/me") await request.ready();
+
     options.authorityGuard?.();
     return body;
   } finally {
@@ -239,7 +213,6 @@ export async function apiFetch(
     },
   };
   try {
-    if (endpoint !== "/users/me") await request.ready();
     const userAtRequest = useAuthStore.getState().user;
     const actorId = options.creditsDenial ? currentCreditsActor() : null;
     options.authorityGuard?.();
@@ -250,7 +223,7 @@ export async function apiFetch(
       request.assertCurrent();
       throw networkApiError(cause);
     });
-    if (endpoint !== "/users/me") await request.ready();
+
     // A late response belongs to its original authority, including any 401.
     options.authorityGuard?.();
     try {
@@ -261,7 +234,7 @@ export async function apiFetch(
 
     if (!response.ok) {
       const error = await responseApiError(response, options.errorFormat);
-      if (endpoint !== "/users/me") await request.ready();
+
       options.authorityGuard?.();
       if (
         response.status === 401 &&
@@ -273,10 +246,7 @@ export async function apiFetch(
         } else {
           const sessionStillValid = await confirmSessionStillValid();
           options.authorityGuard?.();
-          if (
-            !sessionStillValid &&
-            useAuthStore.getState().user === userAtRequest
-          ) {
+          if (!sessionStillValid && useAuthStore.getState().user === userAtRequest) {
             useAuthStore.getState().setUser(null);
           }
         }
@@ -292,7 +262,7 @@ export async function apiFetch(
       throw error;
     }
 
-    return ownsRequest ? accountResponse(response, request) : response;
+    return ownsRequest ? retainAccountResponse(response, request.dispose) : response;
   } catch (error) {
     request.dispose();
     throw error;
@@ -315,7 +285,7 @@ export async function apiBlobClient(
     const disposition = response.headers.get("Content-Disposition") ?? "";
     const match = disposition.match(/filename="([^"]+)"/i);
     const blob = await response.blob();
-    await request.ready();
+    request.assertCurrent();
     return { blob, filename: match?.[1] };
   } catch (error) {
     request.assertCurrent();

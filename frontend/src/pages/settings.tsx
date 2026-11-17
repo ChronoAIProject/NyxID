@@ -1,3 +1,4 @@
+import { captureAccountRequest, isAccountAbort, releaseAccountResponse } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -1101,10 +1102,13 @@ function PrivacyTab() {
   async function handleExport() {
     if (exporting) return;
     setExporting(true);
+    const account = captureAccountRequest();
+    let response: Response | undefined;
     try {
-      const response = await apiFetch("/users/me/export", { method: "POST" });
+      response = await apiFetch("/users/me/export", { method: "POST" });
       const blob = await response.blob();
       await validateAccountExport(blob, response.headers);
+      account.assertCurrent();
       const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/i)?.[1];
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -1118,6 +1122,7 @@ function PrivacyTab() {
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       toast.success(translateUi("Your data export is ready."));
     } catch (error) {
+      if (isAccountAbort(error) || isAccountAbort(account.signal.reason)) return;
       if (error instanceof ApiError) {
         if (error.status === 429) {
           const seconds = error.retryAfter;
@@ -1153,6 +1158,8 @@ function PrivacyTab() {
         );
       }
     } finally {
+      account.dispose();
+      if (response) releaseAccountResponse(response);
       setExporting(false);
     }
   }
