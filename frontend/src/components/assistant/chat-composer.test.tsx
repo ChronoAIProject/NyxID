@@ -1,3 +1,4 @@
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
@@ -61,6 +62,7 @@ describe("ChatComposer drafts", () => {
     ]);
   });
   beforeEach(() => {
+  transitionAssistantIdentity("user-1");
     vi.useFakeTimers();
     localStorage.clear();
     useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
@@ -276,6 +278,7 @@ function renderImeComposer() {
 
 describe("ChatComposer IME handling", () => {
   beforeEach(() => {
+  transitionAssistantIdentity("user-1");
     localStorage.clear();
     useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   });
@@ -340,6 +343,7 @@ function dropFocusToBody() {
 
 describe("ChatComposer focus", () => {
   beforeEach(() => {
+  transitionAssistantIdentity("user-1");
     localStorage.clear();
     useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   });
@@ -726,6 +730,7 @@ function setComposerMetrics({
 
 describe("ChatComposer measured layout", () => {
   beforeEach(() => {
+  transitionAssistantIdentity("user-1");
     localStorage.clear();
     useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
     resizeCallbacks = [];
@@ -860,6 +865,7 @@ describe("ChatComposer @mentions (group chats)", () => {
   ];
 
   beforeEach(() => {
+  transitionAssistantIdentity("user-1");
     localStorage.clear();
     useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
     baseProps.onSend.mockClear();

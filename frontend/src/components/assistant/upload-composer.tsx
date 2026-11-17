@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
@@ -214,6 +215,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
           entry.item = item;
           entry.progress = 100;
         } catch (error) {
+          if (isAccountAbort(error)) return;
           entry.error =
             error instanceof Error ? error.message : "Upload failed.";
           // A failed draft request can be retried by removing and adding again.
@@ -317,6 +319,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
       await onVoice(id, preparation);
     } catch (error) {
       preparation?.close();
+      if (isAccountAbort(error)) return;
       if (!resolved.current.id) scopeId.current = undefined;
       if (alive.current && voiceGeneration.current === ticket)
         setNotice(

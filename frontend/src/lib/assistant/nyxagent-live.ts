@@ -1,3 +1,4 @@
+import { isAccountAbort } from "./identity";
 import { z } from "zod";
 import { ApiError } from "@/lib/api-client";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
@@ -185,7 +186,7 @@ async function run(signal: AbortSignal) {
       setStatus("connecting");
       await wait(REOPEN_MS, signal);
     } catch (error) {
-      if (signal.aborted) return;
+      if (signal.aborted || isAccountAbort(error)) return;
       if (error instanceof ApiError && [404, 405, 501].includes(error.status)) {
         // Keep polling; a rolling deploy may bring the stream later.
         setStatus("unsupported");

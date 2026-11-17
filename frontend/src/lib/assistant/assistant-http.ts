@@ -1,5 +1,8 @@
 import { apiErrorBody } from "@/lib/api-error";
-import { markConnectionLost, markConnectionOk } from "@/lib/assistant/connection-state";
+import {
+  markConnectionLost,
+  markConnectionOk,
+} from "@/lib/assistant/connection-state";
 import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
 import {
@@ -16,8 +19,18 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import { assistantRequestErrorMessage } from "./request-error";
 import { billingError } from "./billing-error";
-import { captureNyxbotError, httpErrorCode, responseCorrelation, type ErrorCorrelation } from "./error-telemetry";
-import { getAssistantIdentityRevision } from "./identity";
+import {
+  captureNyxbotError,
+  httpErrorCode,
+  responseCorrelation,
+  type ErrorCorrelation,
+} from "./error-telemetry";
+import {
+  accountResponse,
+  captureAccountRequest,
+  getAssistantIdentityRevision,
+  isIdentityVerificationPending,
+} from "./identity";
 
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
 const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
@@ -29,6 +42,7 @@ const responseWireLogExchangeIds = new WeakMap<Response, string>();
 type AssistantMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface AssistantHttpRequest {
+  readonly accountRequest?: ReturnType<typeof captureAccountRequest>;
   /** Explicit CMA adapter opt-in; never inferred from a response body. */
   readonly errorFormat?: "cma";
   readonly apiBaseUrl?: string;
@@ -109,6 +123,7 @@ async function captureResponse(
   response: Response,
 ): Promise<void> {
   if (suppressWireLog(endpoint)) return;
+  const request = captureAccountRequest();
   const store = useAssistantWireLogStore.getState();
   if (!store.featureEnabled || !store.captureEnabled) return;
   const meta = {
@@ -146,6 +161,7 @@ async function captureResponse(
         break;
       }
     }
+    request.assertCurrent();
     const result = capture.finish();
     const latest = useAssistantWireLogStore.getState();
     latest.attachResponseBody(
@@ -175,7 +191,10 @@ export function assignAssistantResponseConversation(
     .assignConversation(exchangeId, conversationId);
 }
 
-async function parseError(response: Response, format?: "cma"): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
+async function parseError(
+  response: Response,
+  format?: "cma",
+): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
   const raw: unknown = await response.json().catch(() => null);
   return { parsed: apiErrorBody(raw, response.status, format), raw };
 }
@@ -189,7 +208,15 @@ function redirectToConsent(error: ApiErrorResponse): void {
     return;
   }
   const url = error.consent_url;
-  void import("@/lib/navigation").then(({ openExternal }) => openExternal(url));
+  const request = captureAccountRequest();
+  void import("@/lib/navigation").then(({ openExternal }) => {
+    try {
+      request.assertCurrent();
+      openExternal(url);
+    } catch {
+      /* Identity changed. */
+    }
+  });
 }
 
 async function mockResponse(
@@ -208,8 +235,11 @@ async function withNetworkError<T>(
   try {
     return await request();
   } catch (error) {
-    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-      throw error;
+    if (
+      signal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw signal?.reason ?? error;
     }
     const failure = new ApiError(0, {
       error: "network_error",
@@ -226,97 +256,197 @@ export async function assistantHttp(
   endpoint: string,
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
-  options.authorityGuard?.();
-  const identityRevision = getAssistantIdentityRevision();
-  const method = options.method ?? "GET";
-  const startedAt = Date.now();
-  const engine = endpoint.startsWith("/assistant/direct/") ? "direct" : endpoint.startsWith("/assistant/nyxagent/") ? "nyxagent" : "aevatar";
-  const reportError = (error: unknown) => {
-    if (options.signal?.aborted || getAssistantIdentityRevision() !== identityRevision) return;
-    try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
-    if (options.reportErrors === false) return;
-    const http = error instanceof ApiError ? error : undefined;
-    captureNyxbotError({
-      code: http ? httpErrorCode(http.status) : "NYXBOT_UNKNOWN_ERROR",
-      engine, stage: "request", endpoint, status: http?.status || undefined,
-      upstreamCode: http?.errorCode,
-      ...(error instanceof AssistantHttpError ? error.correlation : {}),
-      durationMs: Date.now() - startedAt,
-    }, error);
-  };
-  const actorId = options.creditsDenial ? currentCreditsActor() : null;
-  const init = buildFetchConfig({
+  const ownsRequest = !options.accountRequest;
+  const request =
+    options.accountRequest ?? captureAccountRequest(options.signal);
+  const guard = options.authorityGuard;
+  options = {
     ...options,
-    method,
-    headers: {
-      ...wireHeaders(endpoint),
-      ...options.headers,
+    accountRequest: request,
+    signal: request.signal,
+    authorityGuard: () => {
+      request.assertCurrent();
+      guard?.();
     },
-  });
-  const mocked = await withNetworkError(
-    () => mockResponse(endpoint, init),
-    options.signal,
-    reportError,
-  );
-  // Account changes are authority failures, not transport failures.
-  options.authorityGuard?.();
-  const response = mocked ?? (await withNetworkError(
-    () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
-    options.signal,
-    reportError,
-  ));
-  options.authorityGuard?.();
-  markConnectionOk();
+  };
+  try {
+    if (isIdentityVerificationPending()) await request.ready();
+    options.authorityGuard?.();
+    const identityRevision = getAssistantIdentityRevision();
+    const method = options.method ?? "GET";
+    const startedAt = Date.now();
+    const engine = endpoint.startsWith("/assistant/direct/")
+      ? "direct"
+      : endpoint.startsWith("/assistant/nyxagent/")
+        ? "nyxagent"
+        : "aevatar";
+    const reportError = (error: unknown) => {
+      if (
+        options.signal?.aborted ||
+        getAssistantIdentityRevision() !== identityRevision
+      )
+        return;
+      try {
+        options.onError?.(error);
+      } catch {
+        /* Reporting cannot change the request. */
+      }
+      if (options.reportErrors === false) return;
+      const http = error instanceof ApiError ? error : undefined;
+      captureNyxbotError(
+        {
+          code: http ? httpErrorCode(http.status) : "NYXBOT_UNKNOWN_ERROR",
+          engine,
+          stage: "request",
+          endpoint,
+          status: http?.status || undefined,
+          upstreamCode: http?.errorCode,
+          ...(error instanceof AssistantHttpError ? error.correlation : {}),
+          durationMs: Date.now() - startedAt,
+        },
+        error,
+      );
+    };
+    const actorId = options.creditsDenial ? currentCreditsActor() : null;
+    const init = buildFetchConfig({
+      ...options,
+      method,
+      headers: {
+        ...wireHeaders(endpoint),
+        ...options.headers,
+      },
+    });
+    const mocked = await withNetworkError(
+      () => mockResponse(endpoint, init),
+      options.signal,
+      reportError,
+    );
+    // Account changes are authority failures, not transport failures.
+    options.authorityGuard?.();
+    const response =
+      mocked ??
+      (await withNetworkError(
+        () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
+        options.signal,
+        reportError,
+      ));
+    await request.ready();
+    options.authorityGuard?.();
+    markConnectionOk();
 
-  void captureResponse(endpoint, method, response).catch(() => undefined);
-  if (response.ok) return response;
+    void captureResponse(endpoint, method, response).catch(() => undefined);
+    if (response.ok) {
+      const result = ownsRequest
+        ? accountResponse(response, request)
+        : response;
+      const exchange = responseWireLogExchangeIds.get(response);
+      if (exchange) responseWireLogExchangeIds.set(result, exchange);
+      return result;
+    }
 
-  const { parsed: errorBody, raw } = await parseError(response, options.errorFormat);
-  options.authorityGuard?.();
-  // Classify the raw envelope: the parsed shape defaults a missing symbol.
-  reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
-  const failure = new AssistantHttpError(response, {
-    ...errorBody,
-    message: (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
-      ?? assistantRequestErrorMessage(
-        response.status,
-        errorBody.message,
-        errorBody.error,
-      ),
-  });
-  reportError(failure);
-  if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
-    useAuthStore.getState().setUser(null);
+    const { parsed: errorBody, raw } = await parseError(
+      response,
+      options.errorFormat,
+    );
+    await request.ready();
+    options.authorityGuard?.();
+    // Classify the raw envelope: the parsed shape defaults a missing symbol.
+    reportCreditsDenialHttp(
+      options.creditsDenial,
+      response.status,
+      raw,
+      actorId,
+    );
+    const failure = new AssistantHttpError(response, {
+      ...errorBody,
+      message:
+        (response.status === 402
+          ? billingError(errorBody.error)?.message
+          : undefined) ??
+        assistantRequestErrorMessage(
+          response.status,
+          errorBody.message,
+          errorBody.error,
+        ),
+    });
+    reportError(failure);
+    if (
+      response.status === 401 &&
+      DEAD_SESSION_CODES.has(errorBody.error_code)
+    ) {
+      useAuthStore.getState().setUser(null);
+    }
+    redirectToConsent(errorBody);
+    throw failure;
+  } catch (error) {
+    request.dispose();
+    throw error;
   }
-  redirectToConsent(errorBody);
-  throw failure;
 }
 
 export async function assistantJson<T>(
   endpoint: string,
   options: AssistantHttpRequest = {},
 ): Promise<T> {
+  const request =
+    options.accountRequest ?? captureAccountRequest(options.signal);
+  const guard = options.authorityGuard;
+  options = {
+    ...options,
+    accountRequest: request,
+    signal: request.signal,
+    authorityGuard: () => {
+      request.assertCurrent();
+      guard?.();
+    },
+  };
   const identityRevision = getAssistantIdentityRevision();
-  const response = await assistantHttp(endpoint, options);
-  options.authorityGuard?.();
-  if (response.status === 204) return undefined as T;
-  let result: T;
   try {
-    result = (await response.json()) as T;
-  } catch {
+    const response = await assistantHttp(endpoint, options);
     options.authorityGuard?.();
-    const error = new AssistantHttpError(response, apiErrorBody(null, response.status));
-    if (!options.signal?.aborted && getAssistantIdentityRevision() === identityRevision) {
-      try { options.onError?.(error); } catch { /* Reporting cannot change the request. */ }
-      if (options.reportErrors !== false) captureNyxbotError({
-        code: "NYXBOT_PROTOCOL_ERROR",
-        engine: endpoint.startsWith("/assistant/nyxagent/") ? "nyxagent" : endpoint.startsWith("/assistant/direct/") ? "direct" : "aevatar",
-        stage: "request", endpoint, status: response.status,
-        ...responseCorrelation(response),
-      }, error);
+    if (response.status === 204) return undefined as T;
+    let result: T;
+    try {
+      result = (await response.json()) as T;
+    } catch {
+      await request.ready();
+      options.authorityGuard?.();
+      const error = new AssistantHttpError(
+        response,
+        apiErrorBody(null, response.status),
+      );
+      if (
+        !options.signal?.aborted &&
+        getAssistantIdentityRevision() === identityRevision
+      ) {
+        try {
+          options.onError?.(error);
+        } catch {
+          /* Reporting cannot change the request. */
+        }
+        if (options.reportErrors !== false)
+          captureNyxbotError(
+            {
+              code: "NYXBOT_PROTOCOL_ERROR",
+              engine: endpoint.startsWith("/assistant/nyxagent/")
+                ? "nyxagent"
+                : endpoint.startsWith("/assistant/direct/")
+                  ? "direct"
+                  : "aevatar",
+              stage: "request",
+              endpoint,
+              status: response.status,
+              ...responseCorrelation(response),
+            },
+            error,
+          );
+      }
+      throw error;
     }
-    throw error;
+    await request.ready();
+    options.authorityGuard?.();
+    return result;
+  } finally {
+    request.dispose();
   }
-  options.authorityGuard?.();
-  return result;
 }

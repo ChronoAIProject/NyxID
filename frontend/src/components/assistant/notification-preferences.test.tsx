@@ -22,6 +22,7 @@ const SETTINGS = {
 let settings: Record<string, unknown>;
 const puts: unknown[] = [];
 let saveStatus = 200;
+let abortSave = false;
 
 function signIn(features: string[]) {
   useAuthStore.getState().setUser({
@@ -34,12 +35,14 @@ function signIn(features: string[]) {
 beforeEach(() => {
   puts.length = 0;
   saveStatus = 200;
+  abortSave = false;
   settings = { ...SETTINGS, notifications: { push: { chat_update: true } } };
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     if (endpoint === "/assistant/nyxagent/settings" && (init.method ?? "GET") === "GET") return json(settings);
     if (endpoint === "/assistant/nyxagent/settings" && init.method === "PUT") {
       const body = JSON.parse(init.body as string) as { notifications: { push: Record<string, boolean> } };
       puts.push(body);
+      if (abortSave) throw new DOMException("Request aborted", "AbortError");
       if (saveStatus !== 200) return json({ error: "boom", message: "Settings are read-only right now", error_code: 5000 }, saveStatus);
       settings = { ...settings, notifications: body.notifications };
       return json(settings);
@@ -117,4 +120,20 @@ it("keeps the draft and shows the error when saving fails", async () => {
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review changes" })).not.toBeInTheDocument());
   expect(within(form).getByRole("switch", { name: "Push for group mentions" })).toHaveAttribute("aria-checked", "true");
   expect(screen.getByRole("button", { name: "Save notifications" })).toBeInTheDocument();
+});
+
+it("keeps an aborted save silent without an error banner or retry", async () => {
+  signIn([FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS]);
+  abortSave = true;
+  const user = userEvent.setup();
+  renderPreferences();
+  const form = await screen.findByRole("form", { name: "Notification preferences" });
+  await user.click(within(form).getByRole("switch", { name: "Push for agent updates" }));
+  await user.click(await screen.findByRole("button", { name: "Save notifications" }));
+  await confirmChanges();
+  await waitFor(() => expect(puts).toHaveLength(1));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save notifications" })).toBeEnabled());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText(/request aborted|account changed|could not save/i)).not.toBeInTheDocument();
+  expect(puts).toHaveLength(1);
 });

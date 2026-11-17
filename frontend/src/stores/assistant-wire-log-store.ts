@@ -1,3 +1,4 @@
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import {
   createJSONStorage,
@@ -409,13 +410,14 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
       storage: createJSONStorage(() => quotaSafeStorage),
       migrate: migrateWireLog,
       partialize: ({ captureEnabled, showResponses, entries }) => ({
+        ownerUserId: getAssistantIdentityUserId(),
         captureEnabled,
         showResponses,
         entries: entries.map(persistedExchange),
       }),
       merge: (persisted, current) => {
         const parsed = assistantWireLogPersistedSchema.safeParse(persisted);
-        if (!parsed.success) {
+        if (!parsed.success || (getAssistantIdentityUserId() && parsed.data.ownerUserId !== getAssistantIdentityUserId())) {
           removeInvalidPersistedState();
           return current;
         }

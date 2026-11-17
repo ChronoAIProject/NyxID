@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -287,6 +288,7 @@ export function AgentLearningReview({
                         proposalId: proposal.id,
                       });
                     } catch (cause) {
+                      if (isAccountAbort(cause)) return;
                       setErrors((current) => ({
                         ...current,
                         [proposal.id]: requestFailure(cause),
@@ -319,6 +321,7 @@ export function AgentLearningReview({
                         }));
                       }
                     } catch (cause) {
+                      if (isAccountAbort(cause)) return;
                       setErrors((current) => ({
                         ...current,
                         [proposal.id]: requestFailure(cause),
@@ -360,6 +363,7 @@ export function AgentLearningReview({
                         revision: proposal.revision,
                       });
                     } catch (cause) {
+                      if (isAccountAbort(cause)) return;
                       setErrors((current) => ({
                         ...current,
                         [proposal.id]: requestFailure(cause),

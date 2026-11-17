@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -90,6 +91,7 @@ export function ComposerSettings({
     void changeModel
       .mutateAsync({ conversationId, model: next })
       .catch((error: unknown) => {
+        if (isAccountAbort(error)) return;
         toast.error(
           translateErrorMessage(error instanceof Error
             ? error.message
@@ -216,6 +218,7 @@ export function ComposerSettings({
                 void changePermissions
                   .mutateAsync({ access_mode: value })
                   .catch((error: unknown) => {
+                    if (isAccountAbort(error)) return;
                     toast.error(
                       translateErrorMessage(error instanceof Error
                         ? error.message

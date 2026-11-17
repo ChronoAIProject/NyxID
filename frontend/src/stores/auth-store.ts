@@ -11,9 +11,27 @@ import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
+import { usePendingConnectStore } from "./pending-connect-store";
+import { useOAuthPopupStore } from "./oauth-popup-store";
+import { useMachinePaneStore } from "./machine-pane-store";
+import { captureAccountRequest } from "@/lib/assistant/identity";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
+
+function clearAccountResourcePreferences(): void {
+  try {
+    // Legacy resource preferences have no owner marker. Discard their IDs
+    // rather than adopting them into an unconfirmed or replacement account.
+    for (let index = localStorage.length - 1; index >= 0; index--) {
+      const key = localStorage.key(index);
+      if (key && (key === "nyxid:last-picked-agent-key" || key.startsWith("nyxid:desktop-collapsed:")))
+        localStorage.removeItem(key);
+    }
+  } catch {
+    /* Storage may be unavailable; these preferences contain no content. */
+  }
+}
 
 function clearAccountLocalState(): void {
   useServiceCardView.setState({
@@ -22,27 +40,33 @@ function clearAccountLocalState(): void {
     expanded: [],
     savedViewId: undefined,
   });
+  usePendingConnectStore.setState({ attempts: {} });
+  useOAuthPopupStore.setState({ attempt: null });
+  useMachinePaneStore.setState({ hidden: [] });
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
   useAssistantWireLogStore.getState().reset();
 }
 
 function clearAccountIdentity(): void {
+  transitionAssistantIdentity(null);
+  clearAccountResourcePreferences();
   // Reset attribution before publishing the cleared account state.
   telemetryReset();
   useConsentStore.getState().bindAccount(null);
   useAssistantPinsStore.getState().bindAccount(null);
   clearAccountLocalState();
-  transitionAssistantIdentity(null);
 }
 
 function applyIdentityTransition(
   previousUser: User | null,
   nextUser: User | null,
 ): void {
+  if (previousUser?.id === nextUser?.id) return;
+  transitionAssistantIdentity(nextUser?.id ?? null);
+  clearAccountResourcePreferences();
   useConsentStore.getState().bindAccount(nextUser?.id ?? null);
   useAssistantPinsStore.getState().bindAccount(nextUser?.id ?? null);
-  if (previousUser?.id === nextUser?.id) return;
   telemetryReset();
   useServiceCardView.setState({
     accountId: nextUser?.id,
@@ -51,7 +75,12 @@ function applyIdentityTransition(
     savedViewId: undefined,
   });
   if (previousUser !== null) clearAccountLocalState();
-  transitionAssistantIdentity(nextUser?.id ?? null);
+  else useAssistantWireLogStore.getState().reset();
+  // A reload may hydrate a different account's persisted state before auth.
+  if (useAssistantDraftStore.getState().ownerUserId !== nextUser?.id)
+    useAssistantDraftStore.getState().clear();
+  if (useAssistantContextStore.getState().ownerUserId !== nextUser?.id)
+    useAssistantContextStore.getState().clear();
 }
 
 interface LoginResult {
@@ -60,6 +89,8 @@ interface LoginResult {
 }
 
 interface AuthState {
+  readonly accountGeneration: number;
+  readonly isIdentityVerifying: boolean;
   readonly user: User | null;
   readonly isAuthenticated: boolean;
   readonly isLoading: boolean;
@@ -84,6 +115,8 @@ interface AuthActions {
 type AuthStore = AuthState & AuthActions;
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
+  accountGeneration: 0,
+  isIdentityVerifying: false,
   user: null,
   isAuthenticated: false,
   isLoading: true,
@@ -122,16 +155,23 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   logout: async (): Promise<void> => {
+    const request = captureAccountRequest();
     try {
       await api.post<void>("/auth/logout");
     } finally {
-      clearAccountIdentity();
-      set({
-        user: null,
-        isAuthenticated: false,
-        mfaRequired: false,
-        mfaToken: null,
-      });
+      // An old logout must never clear a replacement session.
+      if (!request.signal.aborted) {
+        const previousUser = get().user;
+        clearAccountIdentity();
+        set({
+          accountGeneration: get().accountGeneration + (previousUser ? 1 : 0),
+          user: null,
+          isAuthenticated: false,
+          mfaRequired: false,
+          mfaToken: null,
+        });
+      }
+      request.dispose();
     }
   },
 
@@ -150,11 +190,17 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (isCurrent) {
       // The delivered cookie may belong to a different account. No old identity
       // is authoritative while its replacement profile is still unconfirmed.
+      const previousUser = get().user;
       clearAccountIdentity();
-      set({ user: null, isAuthenticated: false });
+      set({
+        user: null,
+        isAuthenticated: false,
+        accountGeneration: get().accountGeneration + (previousUser ? 1 : 0),
+      });
     } else {
       set({ isLoading: true });
     }
+    const request = captureAccountRequest();
     try {
       const user =
         ephemeral || authorityGuard
@@ -163,9 +209,14 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
               authorityGuard,
             })
           : await api.get<User>("/users/me");
+      request.assertCurrent();
       authorityGuard?.();
-      applyIdentityTransition(get().user, user);
+      const previousUser = get().user;
+      applyIdentityTransition(previousUser, user);
       set({
+        accountGeneration:
+          get().accountGeneration +
+          (previousUser && previousUser.id !== user.id ? 1 : 0),
         user,
         isAuthenticated: true,
         ...(!isCurrent && { isLoading: false }),
@@ -176,6 +227,11 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       if (!ephemeral) telemetryIdentify(user.id);
       return true;
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        if (!isCurrent) set({ isLoading: false });
+        if (requireSession) throw error;
+        return false;
+      }
       // Scoped failures retain pending MFA and leave global loading untouched.
       if (isCurrent) {
         if (requireSession) throw error;
@@ -188,10 +244,17 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         if (!ephemeral) {
           clearAccountIdentity();
         } else {
-          useAssistantPinsStore.getState().bindAccount(null);
           transitionAssistantIdentity(null);
+          clearAccountResourcePreferences();
+          useAssistantPinsStore.getState().bindAccount(null);
+          clearAccountLocalState();
         }
-        set({ user: null, isAuthenticated: false, isLoading: false });
+        set({
+          user: null,
+          isAuthenticated: false,
+          isLoading: false,
+          accountGeneration: get().accountGeneration + (get().user ? 1 : 0),
+        });
       } else {
         set({ isLoading: false });
       }
@@ -207,7 +270,13 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     } else {
       applyIdentityTransition(previousUser, user);
     }
-    set({ user, isAuthenticated: user !== null });
+    set({
+      user,
+      isAuthenticated: user !== null,
+      accountGeneration:
+        get().accountGeneration +
+        (previousUser && previousUser.id !== user?.id ? 1 : 0),
+    });
     if (user !== null) {
       telemetryIdentify(user.id);
     }

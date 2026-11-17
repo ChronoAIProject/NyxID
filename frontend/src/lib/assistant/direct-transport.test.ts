@@ -736,6 +736,28 @@ describe("DirectAssistantTransport identity isolation", () => {
   });
 });
 
+describe("DirectAssistantTransport stale response side effects", () => {
+  it.each([401, 402])("drops a noncooperative old HTTP %s response, including after switching back", async (status) => {
+    const { useCreditsDenialStore } = await import("@/stores/credits-denial-store");
+    let release!: (response: Response) => void;
+    const fetch = vi.fn(() => new Promise<Response>((done) => { release = done; }));
+    const transport = new DirectAssistantTransport({ fetch });
+    const id = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+    transport.sendMessage(id, "A prompt", (event) => events.push(event));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    useAuthStore.getState().setUser(user("user-b"));
+    useAuthStore.getState().setUser(user("user-a"));
+    const count = events.length;
+    release(Response.json({ error: status === 401 ? "unauthorized" : "insufficient_credits", error_code: 1001, message: "Old account error" }, { status }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(useAuthStore.getState().user?.id).toBe("user-a");
+    expect(events).toHaveLength(count);
+    expect(useCreditsDenialStore.getState().current).toBeNull();
+    expect(await transport.listConversations()).toEqual([]);
+  });
+});
+
 describe("DirectAssistantTransport credits denial", () => {
   it("detects HTTP 402 insufficient_credits before the http_402 rewrite", async () => {
     const { useCreditsDenialStore } = await import(

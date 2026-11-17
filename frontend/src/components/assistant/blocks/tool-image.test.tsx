@@ -88,3 +88,14 @@ it("shows retained guest images with an honest model notice and no tool suggesti
   expect(screen.getByRole("status")).toHaveTextContent("unavailable to the model in that turn");
   expect(screen.getByRole("status")).not.toHaveTextContent(/machine|smaller/);
 });
+
+it.each(["image/png", "application/pdf"])("silently discards an account abort for %s without retry or error copy", async (contentType) => {
+  vi.mocked(assistantHttp).mockRejectedValue(new DOMException("Account changed", "AbortError"));
+  render(<ToolImage image={{ id: "old", endpoint: "/private/old", contentType, label: "old-file" }} />);
+  if (contentType === "application/pdf") fireEvent.click(screen.getByRole("button", { name: /old-file/ }));
+  await waitFor(() => expect(assistantHttp).toHaveBeenCalledOnce());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(screen.queryByText(/unavailable|expired|account changed|abort|retry/i)).toBeNull();
+  expect(URL.createObjectURL).not.toHaveBeenCalled();
+  expect(assistantHttp).toHaveBeenCalledOnce();
+});

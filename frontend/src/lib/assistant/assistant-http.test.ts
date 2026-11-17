@@ -1,3 +1,5 @@
+import { openExternal } from "@/lib/navigation";
+import { useCreditsDenialStore } from "@/stores/credits-denial-store";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { capture, identify, initTelemetry, reset as resetTelemetry } from "@/lib/telemetry";
 import { useConsentStore } from "@/stores/consent-store";
@@ -11,6 +13,8 @@ import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import { transitionAssistantIdentity } from "./identity";
+
+vi.mock("@/lib/navigation", () => ({ openExternal: vi.fn() }));
 
 vi.mock("@/lib/telemetry", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/telemetry")>();
@@ -92,8 +96,8 @@ describe("assistantHttp", () => {
 
   it("preserves deliberate cancellation", async () => {
     const controller = new AbortController();
-    controller.abort();
     const error = new DOMException("Cancelled", "AbortError");
+    controller.abort(error);
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(error));
     await expect(assistantHttp("/assistant/nyxagent/turns", { signal: controller.signal })).rejects.toBe(error);
   });
@@ -385,17 +389,52 @@ describe("originating-account telemetry", () => {
     useAssistantWireLogStore.setState({ featureEnabled: false, captureEnabled: false });
   });
 
+  it.each(["http", "protocol"])("retains a delayed same-account %s error and reports it", async (kind) => {
+    const late = deferred<Response>();
+    const fetchMock = vi.fn().mockReturnValue(late.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const onError = vi.fn();
+    const pending = expect(assistantJson("/assistant/nyxagent/conversations", { onError })).rejects.toMatchObject({ status: kind === "http" ? 403 : 200 });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    late.resolve(new Response(kind === "http" ? "{}" : "invalid JSON", { status: kind === "http" ? 403 : 200 }));
+    await pending;
+    expect(onError).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalled();
+  });
+
+  it.each([402, 403])("drops old HTTP %s side effects even if its error body arrives late", async (status) => {
+    const late = deferred<unknown>();
+    const response = Response.json({}, { status });
+    const parse = vi.spyOn(response, "json").mockImplementation(() => late.promise);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+    vi.mocked(openExternal).mockClear();
+    useCreditsDenialStore.getState().reset();
+    const onError = vi.fn();
+    const pending = expect(assistantHttp("/assistant/nyxagent/conversations", { onError, creditsDenial: { key: "late-A", payer: "self" } })).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
+    transitionAssistantIdentity("account-b");
+    transitionAssistantIdentity("account-a");
+    late.resolve({ error: status === 402 ? "insufficient_credits" : "consent_required", error_code: 11300, message: "A private error", consent_url: "https://example.test/consent" });
+    await pending;
+    expect(capture).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(useCreditsDenialStore.getState().current).toBeNull();
+  });
+
   it.each([false, true])("does not report a late HTTP failure after an account transition (ABA: %s)", async (aba) => {
     const response = deferred<Response>();
     const fetchMock = vi.fn().mockReturnValue(response.promise);
     vi.stubGlobal("fetch", fetchMock);
-    const pending = expect(assistantHttp("/assistant/nyxagent/conversations")).rejects.toMatchObject({ status: 403 });
+    const onError = vi.fn();
+    const pending = expect(assistantHttp("/assistant/nyxagent/conversations", { onError })).rejects.toMatchObject({ name: "AbortError" });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     transitionAssistantIdentity("account-b");
     if (aba) transitionAssistantIdentity("account-a");
     response.resolve(new Response("{}", { status: 403 }));
     await pending;
     expect(capture).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("does not report late invalid JSON after an account transition (ABA: %s)", async (aba) => {
@@ -406,7 +445,8 @@ describe("originating-account telemetry", () => {
       throw new SyntaxError("private invalid response");
     });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
-    const pending = expect(assistantJson("/assistant/nyxagent/conversations")).rejects.toMatchObject({ status: 200, message: "NyxID couldn't complete this request. Please try again." });
+    const onError = vi.fn();
+    const pending = expect(assistantJson("/assistant/nyxagent/conversations", { onError })).rejects.toMatchObject({ name: "AbortError" });
     await vi.waitFor(() => expect(parse).toHaveBeenCalledOnce());
     transitionAssistantIdentity("account-b");
     if (aba) transitionAssistantIdentity("account-a");

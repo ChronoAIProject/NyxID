@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { ApiError } from "@/lib/api-client";
@@ -30,6 +31,7 @@ export function DocumentAttachment({
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
+      if (isAccountAbort(error)) return;
       setError(true);
       setExpired(error instanceof ApiError && error.errorCode === 12101);
     } finally {

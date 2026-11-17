@@ -1,3 +1,4 @@
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAssistantDraftStore } from "./assistant-draft-store";
 
@@ -9,6 +10,7 @@ describe("useAssistantDraftStore", () => {
   beforeEach(() => {
     localStorage.clear();
     resetStore();
+    transitionAssistantIdentity("user-1");
     vi.restoreAllMocks();
   });
 
@@ -37,6 +39,7 @@ describe("useAssistantDraftStore", () => {
   it("resets prior-account drafts before applying a mutation", () => {
     const store = useAssistantDraftStore.getState();
     store.saveDraft("user-1", "conv:private", "Private draft");
+    transitionAssistantIdentity("user-2");
     useAssistantDraftStore
       .getState()
       .saveDraft("user-2", "conv:second", "Second account");
@@ -93,6 +96,7 @@ describe("useAssistantDraftStore", () => {
 });
 
 it("drops the retired Ask/Full draft preference from persisted drafts", () => {
+  transitionAssistantIdentity("one");
   localStorage.setItem(
     "nyxid.assistant_drafts",
     JSON.stringify({

@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label, FieldHelp } from "@/components/ui/label";
@@ -345,6 +346,7 @@ export function OperationSelectionForm({
       await persist(next);
       form.reset(next);
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(
         cause instanceof Error
           ? cause.message

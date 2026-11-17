@@ -17,6 +17,8 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("managed completion transport", () => {
   it("shares API and assistant headers at the configured API origin", async () => {
+    const caller = new AbortController();
+    const signal = caller.signal;
     const fetch = vi
       .fn()
       .mockImplementation(() =>
@@ -40,8 +42,7 @@ describe("managed completion transport", () => {
     expect(fetch.mock.calls[2]?.[0]).toBe(
       "https://api.nyxid.example/api/v1/channel-bots/managed-onboarding/whatsapp/complete",
     );
-    expect(fetch.mock.calls[2]?.[1]).toEqual(fetch.mock.calls[0]?.[1]);
-    expect(fetch.mock.calls[2]?.[1]).toEqual(fetch.mock.calls[1]?.[1]);
+    for (const [, init] of fetch.mock.calls) expect(init).toEqual({ ...fetch.mock.calls[0]?.[1], signal: expect.any(AbortSignal) });
     expect(fetch.mock.calls[2]?.[1]).toMatchObject({
       credentials: "include",
       headers: {
@@ -49,8 +50,10 @@ describe("managed completion transport", () => {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      signal,
+      signal: expect.any(AbortSignal),
     });
+    caller.abort();
+    for (const [, init] of fetch.mock.calls) expect(init.signal.aborted).toBe(true);
   });
   it.each(["json", "sse"])(
     "preserves the safe server message and code from %s",

@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -168,6 +169,7 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
         if (!controller.signal.aborted) setText(value.slice(0, 4096));
       })
       .catch((error: unknown) => {
+        if (isAccountAbort(error)) return;
         if (!controller.signal.aborted) {
           setFailed(true);
           setExpired(error instanceof ApiError && error.errorCode === 12101);

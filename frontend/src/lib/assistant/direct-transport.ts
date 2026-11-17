@@ -3,6 +3,8 @@ import {
   AssistantTurnActiveError,
 } from "@/lib/assistant/errors";
 import {
+  captureAccountRequest,
+  isIdentityVerificationPending,
   getAssistantIdentityUserId,
   subscribeAssistantIdentity,
 } from "@/lib/assistant/identity";
@@ -819,7 +821,10 @@ export class DirectAssistantTransport {
     request: DirectRequest,
   ): Promise<void> {
     const firstByteDeadline = this.now() + this.firstByteTimeoutMs;
+    const account = captureAccountRequest(run.controller.signal);
     try {
+      if (isIdentityVerificationPending()) await account.ready();
+      account.assertCurrent();
       const response = await this.withTimeout(
         this.fetchFn(DIRECT_COMPLETIONS_URL, {
           method: "POST",
@@ -829,16 +834,18 @@ export class DirectAssistantTransport {
           },
           credentials: "include",
           body: JSON.stringify(request),
-          signal: run.controller.signal,
+          signal: account.signal,
         }),
         this.firstByteTimeoutMs,
         run,
         "first_byte_timeout",
       );
+      await account.ready();
       run.responseStatus = response.status;
       run.correlation = responseCorrelation(response);
       if (!response.ok) {
         const body = await parseJsonErrorResponse(response);
+        await account.ready();
         // Before the generic `http_402` rewrite below discards the symbol.
         if (isInsufficientCreditsHttp(response.status, body)) {
           this.notifyCredits(conversationId, run);
@@ -858,7 +865,9 @@ export class DirectAssistantTransport {
           // transition aborts and discards active direct runs, so clearing the
           // session first would swallow this failure from the UI.
           if (response.status === 401) {
-            queueMicrotask(() => useAuthStore.getState().setUser(null));
+            queueMicrotask(() => {
+              try { account.assertCurrent(); useAuthStore.getState().setUser(null); } catch { /* Account changed. */ }
+            });
           }
           return;
         }
@@ -892,6 +901,7 @@ export class DirectAssistantTransport {
           run,
           firstRead ? "first_byte_timeout" : "idle_timeout",
         );
+        await account.ready();
         firstRead = false;
         if (result.done) break;
         buffer += decoder.decode(result.value, { stream: true });
@@ -945,7 +955,7 @@ export class DirectAssistantTransport {
           (error instanceof Error ? error.message : "The stream failed."),
       });
       this.finishDrain(conversationId, run);
-    }
+    } finally { account.dispose(); }
   }
 
   private handlePayload(

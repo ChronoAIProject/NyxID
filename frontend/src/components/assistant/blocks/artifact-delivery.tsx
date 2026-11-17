@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
+  isAccountAbort,
   getAssistantIdentityRevision,
   getAssistantIdentityUserId,
 } from "@/lib/assistant/identity";
@@ -83,6 +84,7 @@ export function ArtifactDelivery({
       }
       if (current()) setBusy(false);
     } catch (failure) {
+      if (isAccountAbort(failure)) return;
       if (current()) {
         setError(attachmentFailure(failure));
         setBusy(false);

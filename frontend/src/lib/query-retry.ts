@@ -9,6 +9,7 @@ export function shouldRetryQuery(
   failureCount: number,
   error: unknown,
 ): boolean {
+  if (error instanceof Error && error.name === "AbortError") return false;
   if (
     error &&
     typeof error === "object" &&

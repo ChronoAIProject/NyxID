@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { OrgChannelDisclosure } from "./org-channel-preview";
 import type { OrgChannelPreview } from "@/schemas/org-specialist-channel";
@@ -192,6 +193,7 @@ export function ChannelBotsManager({
     try {
       await retryGateway.mutateAsync({ channelAgentId: row.id });
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "Could not retry native gateway activation."));
     }
   }
@@ -219,6 +221,7 @@ export function ChannelBotsManager({
           link: result.link,
         });
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "Could not connect this bot. Try again."));
     }
   }
@@ -238,6 +241,7 @@ export function ChannelBotsManager({
       }
       await link.mutateAsync({ channelAgentId: row.id, agentId });
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(
         errorMessage(
           cause,
@@ -256,6 +260,7 @@ export function ChannelBotsManager({
       setConfirming(undefined);
       if (ownerLink?.botId === row.channel_bot_id) setOwnerLink(undefined);
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(
         errorMessage(cause, "Could not disconnect this bot. Try again."),
       );
@@ -282,7 +287,7 @@ export function ChannelBotsManager({
               setReview(undefined);
               if (pending.channelId) {
                 try { await link.mutateAsync({ channelAgentId: pending.channelId, agentId: pending.facts.agent_id }); }
-                catch (cause) { setError(errorMessage(cause, "Could not move this bot to that agent. Try again.")); }
+                catch (cause) { if (isAccountAbort(cause)) return; setError(errorMessage(cause, "Could not move this bot to that agent. Try again.")); }
               } else { await requestLink(pending.facts.bot_id, pending.facts.agent_id, true); }
             }}>{translateUi("Confirm connection")}</Button>
           </DialogFooter>

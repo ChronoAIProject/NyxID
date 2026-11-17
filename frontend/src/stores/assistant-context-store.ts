@@ -1,3 +1,4 @@
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -39,6 +40,7 @@ export const useAssistantContextStore = create<AssistantContextState>()(
     (set) => ({
       ...EMPTY_CONTEXT,
       recordScreen: (userId, screenKey) => {
+        if (getAssistantIdentityUserId() !== userId) return;
         set((state) => {
           if (state.ownerUserId !== userId) {
             return {
@@ -58,6 +60,12 @@ export const useAssistantContextStore = create<AssistantContextState>()(
       },
     }),
     {
+      merge: (persisted, current) => {
+        const value = persisted as Partial<typeof current> | null;
+        const owner = getAssistantIdentityUserId();
+        if (owner && value?.ownerUserId !== owner) return current;
+        return { ...current, ...value };
+      },
       name: STORAGE_KEY,
       version: 2,
       migrate: migrateAssistantContext,

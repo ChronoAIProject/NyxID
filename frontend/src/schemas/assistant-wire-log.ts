@@ -204,6 +204,7 @@ export const persistedAssistantWireLogExchangeSchema =
 
 export const assistantWireLogPersistedSchema = z
   .object({
+    ownerUserId: z.string().nullable().optional(),
     captureEnabled: z.boolean(),
     showResponses: z.boolean(),
     entries: z.array(persistedAssistantWireLogExchangeSchema),

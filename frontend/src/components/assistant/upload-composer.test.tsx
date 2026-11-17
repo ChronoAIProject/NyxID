@@ -1,3 +1,4 @@
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
@@ -45,6 +46,7 @@ function choose(file = new File(["notes"], "notes.txt")) {
   });
 }
 beforeEach(() => {
+  transitionAssistantIdentity("owner");
   vi.clearAllMocks();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   vi.mocked(uploadFile).mockResolvedValue(item);

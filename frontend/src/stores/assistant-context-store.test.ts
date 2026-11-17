@@ -1,3 +1,4 @@
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAssistantContextStore } from "./assistant-context-store";
 
@@ -12,6 +13,7 @@ describe("useAssistantContextStore", () => {
   beforeEach(() => {
     localStorage.clear();
     resetStore();
+    transitionAssistantIdentity("user-1");
     vi.restoreAllMocks();
   });
 
@@ -31,6 +33,7 @@ describe("useAssistantContextStore", () => {
   it("resets prior-account state before applying a mutation", () => {
     const store = useAssistantContextStore.getState();
     store.recordScreen("user-1", "/keys");
+    transitionAssistantIdentity("user-2");
     useAssistantContextStore.getState().recordScreen("user-2", "/nodes");
 
     expect(useAssistantContextStore.getState()).toMatchObject({

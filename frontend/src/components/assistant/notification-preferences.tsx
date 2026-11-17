@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useState } from "react";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -64,6 +65,7 @@ function NotificationPreferencesForm({
       const saved = await update.mutateAsync({ notifications: { push: values } });
       form.reset(saved.notifications?.push ?? values);
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause));
     }
   }

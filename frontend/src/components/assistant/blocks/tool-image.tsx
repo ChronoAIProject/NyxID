@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
@@ -41,6 +42,7 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
         setUrl(objectUrl);
       })
       .catch((error: unknown) => {
+        if (isAccountAbort(error)) return;
         if (active) {
           setFailed(true);
           setExpired(error instanceof ApiError && error.errorCode === 12101);

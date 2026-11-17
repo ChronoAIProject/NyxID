@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -119,6 +120,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
           try {
             await nyxBotApi.changeModel(uploads.conversationId, draftModel);
           } catch (error) {
+            if (isAccountAbort(error)) return;
             toast.error(translateErrorMessage(error instanceof Error ? error.message : "Could not change the model."));
             throw error;
           } finally {
@@ -143,6 +145,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
         setNotice({ code: receipt.code, outcome: receipt.outcome });
         request.current = undefined;
       } catch (error) {
+        if (isAccountAbort(error)) return;
         const code = error instanceof ApiError ? error.errorResponse.error : "steer_unavailable";
         setNotice({ code, text });
         if (code === "no_active_turn") { request.current = undefined; return; }

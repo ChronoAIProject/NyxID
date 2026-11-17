@@ -46,8 +46,19 @@ describe("apiClient", () => {
     await apiClient("/admin/audit-log", { signal: controller.signal });
     expect(mockFetch).toHaveBeenCalledWith(
       "/api/v1/admin/audit-log",
-      expect.objectContaining({ signal: controller.signal }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+  it("propagates caller cancellation through the combined account signal", async () => {
+    const controller = new AbortController();
+    mockFetch.mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+    }));
+    const pending = expect(apiClient("/admin/audit-log", { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await pending;
+    expect(mockFetch.mock.calls[0]?.[1].signal.aborted).toBe(true);
   });
   it("makes a GET request by default", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ id: "1" }));

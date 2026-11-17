@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactScroll } from "@/components/ui/compact-title";
@@ -162,6 +163,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
     try {
       form.reset(formValues(await update.mutateAsync(body)));
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, translateUi("Could not save settings. Try again.")));
     }
   }

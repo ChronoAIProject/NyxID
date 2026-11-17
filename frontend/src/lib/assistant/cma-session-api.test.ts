@@ -302,14 +302,39 @@ describe("read-only CMA session observation", () => {
     await vi.waitFor(() => expect(tailCount).toBe(1));
     const count = states.length;
     transitionAssistantIdentity("other-owner");
-    tail.enqueue(
+    expect(() => tail.enqueue(
       encoder.encode(
         cmaFrame(11, { type: "title_set", title: "Old account data" }),
       ),
-    );
+    )).toThrow(TypeError);
     await watching;
     expect(states).toHaveLength(count);
     expect(requests.at(-1)?.config?.signal?.aborted).toBe(true);
+  });
+
+  it("drops a noncooperative stream response delivered after switching accounts without reconnecting", async () => {
+    let release!: (response: Response) => void;
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: string, config: RequestInit) => {
+      if (!String(input).includes("/events?")) return originalFetch(input, config);
+      requests.push({ url: String(input), config });
+      tailCount++;
+      // Deliberately ignore config.signal, as a response already in transit can.
+      return new Promise<Response>((resolve) => { release = resolve; });
+    }));
+    const states: CmaSessionState[] = [];
+    const watching = watchCmaSession("owner", cmaSession, new AbortController().signal,
+      (state) => states.push(state));
+    await vi.waitFor(() => expect(tailCount).toBe(1));
+    const count = states.length;
+    transitionAssistantIdentity("other-owner");
+    release(new Response(cmaFrame(11, { type: "title_set", title: "Old account data" }), {
+      headers: { "content-type": "text/event-stream" },
+    }));
+    await watching;
+    expect(states).toHaveLength(count);
+    expect(requests.at(-1)?.config?.signal?.aborted).toBe(true);
+    expect(tailCount).toBe(1);
   });
 
   it("uses the current head for an idle session instead of replaying historical work", async () => {
@@ -576,11 +601,11 @@ it("cancels a stale reader after switching away and back to the same account", a
   const before = states.length;
   transitionAssistantIdentity("other");
   transitionAssistantIdentity("owner");
-  tail.enqueue(
+  expect(() => tail.enqueue(
     encoder.encode(
       cmaFrame(11, { type: "title_changed", title: "stale account data" }),
     ),
-  );
+  )).toThrow(TypeError);
   await watching;
   expect(states).toHaveLength(before);
   expect(

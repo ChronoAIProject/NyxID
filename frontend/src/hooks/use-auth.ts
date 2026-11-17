@@ -37,6 +37,7 @@ export function useLogin() {
   const login = useAuthStore((s) => s.login);
 
   return useMutation({
+    meta: { identityTransition: true },
     mutationFn: async (credentials: {
       email: string;
       password: string;
@@ -69,6 +70,7 @@ export function useLogout() {
   const logout = useAuthStore((s) => s.logout);
 
   return useMutation({
+    meta: { identityTransition: true },
     mutationFn: async (): Promise<void> => {
       await logout();
     },
@@ -97,6 +99,7 @@ export function useMfaVerify() {
 
   const mutation = useMutation({
     scope: { id: "mfa-login" },
+    meta: { identityTransition: true },
     retry: false,
     mutationFn: async (data: MfaVerifyRequest): Promise<void> => {
       // Social sign-in carries its one-shot challenge in an HttpOnly cookie,

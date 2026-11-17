@@ -5,7 +5,7 @@ import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { useAuthStore } from "./stores/auth-store";
@@ -14,6 +14,9 @@ import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
+import { createAccountQueryScope } from "./lib/account-query-cache";
+import { installAccountSessionSync } from "./lib/account-session-sync";
+import { AccountBoundary } from "./components/account-boundary";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
@@ -36,26 +39,19 @@ window.addEventListener("vite:preloadError", (event) => {
   }
 });
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 60 * 1000,
-      retry: shouldRetryQuery,
-    },
-  },
+const accountQueries = createAccountQueryScope({
+  defaultOptions: { queries: { staleTime: 60 * 1000, retry: shouldRetryQuery } },
 });
-
-subscribeAssistantIdentity(() => {
-  queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
-  queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
-  queryClient.removeQueries({ queryKey: ["cma-session"] });
-});
+installAccountSessionSync();
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
 // cache slots nothing renders yet (e.g. the per-conversation turn episode).
 // Stripped from production builds with the rest of the DEV branch.
 if (import.meta.env.DEV) {
-  (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
+  (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = accountQueries.getClient();
+  subscribeAssistantIdentity(() => {
+    (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = accountQueries.getClient();
+  });
   // Use the instances mounted below, not a fresh module import: Vite's HMR
   // timestamps can otherwise give browser drivers a second, idle router/store.
   (window as { __nyxApp?: { router: typeof router; authStore: typeof useAuthStore } }).__nyxApp = { router, authStore: useAuthStore };
@@ -68,6 +64,7 @@ function isLoginApprovalPage() {
 }
 
 function Root() {
+  const queryClient = useQueryClient();
   const [ready, setReady] = useState(false);
   const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
@@ -77,6 +74,7 @@ function Root() {
       }),
     [],
   );
+  const isIdentityVerifying = useAuthStore((s) => s.isIdentityVerifying);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const telemetryAccountId = useAuthStore((s) => s.user?.id);
   const consentAsked = useConsentStore((s) => s.asked);
@@ -135,7 +133,7 @@ function Root() {
   // - Authenticated user on landing → assistant
   // - Unauthenticated user on protected route → login
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || isIdentityVerifying) return;
     const path = window.location.pathname;
     if (isAuthenticated && path === "/") {
       router.navigate({ to: "/assistant" });
@@ -161,7 +159,7 @@ function Root() {
         });
       }
     }
-  }, [ready, isAuthenticated]);
+  }, [ready, isAuthenticated, isIdentityVerifying]);
 
   // Only block rendering on auth for protected routes.
   // Public routes (landing, login, register, etc.) render immediately.
@@ -171,11 +169,16 @@ function Root() {
 
   return (
     <>
-      <RouterProvider router={router} />
+      <AccountBoundary><RouterProvider router={router} /></AccountBoundary>
       <BuildUpdateBanner ready={ready} queryClient={queryClient} />
       {!agentKeyLogin && <ConsentBanner />}
     </>
   );
+}
+
+function AppProviders() {
+  useAuthStore((state) => state.user?.id);
+  return <QueryClientProvider client={accountQueries.getClient()}><Root /></QueryClientProvider>;
 }
 
 const rootElement = document.getElementById("root");
@@ -188,8 +191,6 @@ if (!rootElement) {
 // above it in the tree.
 void appLanguageReady.then(() => createRoot(rootElement).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <Root />
-    </QueryClientProvider>
+    <AppProviders />
   </StrictMode>,
 ));

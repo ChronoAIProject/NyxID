@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { TextBlock } from "./blocks/text-block";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -320,6 +321,7 @@ export function AssistantChatPage() {
         });
       }
     } catch (error) {
+      if (isAccountAbort(error)) return;
       toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error
@@ -336,6 +338,7 @@ export function AssistantChatPage() {
       if (actorActive) await chat.steer(content);
       else await chat.send(content);
     } catch (error) {
+      if (isAccountAbort(error)) return;
       toast.error(translateErrorMessage("The message was not delivered"), {
         description:
           error instanceof Error
@@ -514,6 +517,7 @@ export function DirectAssistantChatPage() {
       await chat.deleteConversation(conversationId);
       if (selectedId === conversationId) createNewChat();
     } catch (error) {
+      if (isAccountAbort(error)) return;
       toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error
@@ -529,6 +533,7 @@ export function DirectAssistantChatPage() {
     try {
       await chat.send(content);
     } catch (error) {
+      if (isAccountAbort(error)) return;
       toast.error(translateErrorMessage("The message was not delivered"), {
         description:
           error instanceof Error
@@ -705,6 +710,7 @@ function NyxAgentThreadPage() {
   function requestConfirmationAgain(id: string, kind: string) {
     setRequestError(undefined);
     void chat.send(`Please request a new ${kind} for expired request ${id}. Recheck the current state and permissions first; do not reuse the expired confirmation.`).catch((error: unknown) => {
+      if (isAccountAbort(error)) return;
       if (!isAdmittedSendError(error)) {
         setRequestError({ scope: errorScope, message: error instanceof Error ? error.message : "Could not request a new confirmation." });
       }
@@ -812,6 +818,7 @@ function NyxAgentThreadPage() {
     try {
       await chat.retry(selectedId, messageId);
     } catch (error) {
+      if (isAccountAbort(error)) return;
       const message = error instanceof Error ? error.message : "Could not retry your message. Try again shortly.";
       // Admitted stream interruptions belong to the transport; history may
       // already have reconciled them by the time this catch runs.
@@ -904,6 +911,7 @@ function NyxAgentThreadPage() {
     try {
       await chat.send(text, uploads, model);
     } catch (error) {
+      if (isAccountAbort(error)) return;
       // Keep admission marked for upload/draft handling, but do not copy a
       // transient stream notice into a permanent component error or toast.
       if (isAdmittedSendError(error)) throw error;
@@ -1483,6 +1491,7 @@ function NyxAgentThreadPage() {
               try {
                 await chat.stop();
               } catch (error) {
+                if (isAccountAbort(error)) return;
                 const message =
                   error instanceof Error
                     ? error.message

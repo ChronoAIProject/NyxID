@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -97,6 +98,7 @@ export function GeneratedAttachment({
         }
       })
       .catch((failure: unknown) => {
+        if (isAccountAbort(failure)) return;
         if (active) setError(attachmentFailure(failure));
       });
     return () => {

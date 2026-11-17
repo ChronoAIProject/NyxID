@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -354,7 +355,8 @@ function GroupTranscript({
     setLoadingOlder(true);
     try {
       await onLoadOlder();
-    } catch {
+    } catch (error) {
+      if (isAccountAbort(error)) return;
       toast.error(translateErrorMessage("Could not load earlier messages. Try again."));
     } finally {
       setLoadingOlder(false);
@@ -739,6 +741,7 @@ export function NyxAgentGroupPage({
   const [deciding, setDeciding] = useState(false);
   const [requestError, setRequestError] = useState<{ owner: string | undefined; message: string }>();
   function reportError(error: unknown, fallback: string) {
+    if (isAccountAbort(error)) return;
     const message = error instanceof Error ? error.message : fallback;
     setRequestError({ owner: user?.id, message });
     toast.error(translateErrorMessage(assistantErrorSummary(message)));

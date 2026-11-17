@@ -57,7 +57,7 @@ describe("apiClient credits opt-in", () => {
     await vi.waitFor(() => expect(resolve).toBeTypeOf("function"));
     transitionAssistantIdentity("person-b");
     resolve(response(402, denied));
-    await expect(request).rejects.toBeInstanceOf(ApiError);
+    await expect(request).rejects.toMatchObject({ name: "AbortError" });
     expect(useCreditsDenialStore.getState().current).toBeNull();
   });
 });

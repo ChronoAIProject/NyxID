@@ -10,6 +10,7 @@ import type {
   NyxAgentConversationAgent,
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
+import { subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 import { isCmaOperationPending } from "@/schemas/cma-operation";
 import { useDecideApproval } from "@/hooks/use-approvals";
@@ -114,6 +115,7 @@ export function continuationForAll(acknowledgements: readonly NyxAgentAcknowledg
  * refreshes the thread lists, so two views never fetch them twice.
  */
 const claimedAgentsChanges = new Map<string, string>();
+subscribeAssistantIdentity(() => claimedAgentsChanges.clear());
 function claimAgentsChange(userId: string, signature: string): boolean {
   const previous = claimedAgentsChanges.get(userId);
   if (previous === signature) return false;

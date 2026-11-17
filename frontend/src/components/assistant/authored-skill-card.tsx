@@ -1,6 +1,7 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import type { z } from "zod";
 import { DecisionReceipt } from "./decision-receipt";
@@ -142,7 +143,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
-  const [acceptReducedScope, setAcceptReducedScope] = useState(false);
+  const [acceptedRevision, setAcceptedRevision] = useState<number>();
   const scopeId = useId();
   const [editing, setEditing] = useState(false);
   const preview = useQuery({
@@ -158,9 +159,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   });
   const data = preview.data;
   const actions = data?.actions ?? [];
-  useEffect(() => {
-    setAcceptReducedScope(false);
-  }, [data?.revision]);
+  const acceptReducedScope = data !== undefined && acceptedRevision === data.revision;
   const scopePending = data?.scope_unavailable
     || (data?.scope?.status === "reduced" && !acceptReducedScope);
   const path = `/assistant/nyxagent/agents/${encodeURIComponent(reference.agent_id)}/learning/proposals/${encodeURIComponent(reference.proposal_id)}`;
@@ -173,8 +172,8 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   async function decide(choice: "allow" | "deny") {
     setError(undefined);
     try { await (acceptReducedScope ? onDecision(choice, true) : onDecision(choice)); }
-    catch { setError("Publication did not finish. The current state is shown below."); }
-    finally { await refresh(); }
+    catch (error) { if (isAccountAbort(error)) return; setError("Publication did not finish. The current state is shown below."); }
+    await refresh();
   }
   async function postAction(action: "approve" | "reject" | "reprepare") {
     setError(undefined);
@@ -194,12 +193,13 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
           ? "The package was rebuilt, but its review card was not posted. Use Show updated draft to post it."
           : "The package was rebuilt from the source skill. Review the new confirmation posted in this conversation.");
       }
-    } catch {
+    } catch (error) {
+      if (isAccountAbort(error)) return;
       setError(action === "reprepare"
         ? "The package could not be rebuilt. The current state is shown below."
         : "The request could not be completed. Reload the current state and try again.");
     }
-    finally { await refresh(); }
+    await refresh();
   }
   const messages = <>
     {error ? <p role="alert" className="text-14 text-destructive">{translateUi(error)}</p> : null}
@@ -272,7 +272,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
           data={data}
           id={scopeId}
           accepted={acceptReducedScope}
-          onAccepted={setAcceptReducedScope}
+          onAccepted={(accepted) => setAcceptedRevision(accepted ? data?.revision : undefined)}
         />
         <CoverageList data={data} />
       </>

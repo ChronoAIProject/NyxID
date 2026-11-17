@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -235,6 +236,7 @@ function AssistantWorkspacePage({
         await actorChat.deleteConversation(conversationId);
       }
     } catch (error) {
+      if (isAccountAbort(error)) return;
       toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error

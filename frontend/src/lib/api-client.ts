@@ -1,4 +1,14 @@
-import { ApiError, apiErrorBody, responseApiError, networkApiError } from "./api-error";
+import {
+  accountResponse,
+  captureAccountRequest,
+  getAssistantIdentityRevision,
+} from "./assistant/identity";
+import {
+  ApiError,
+  apiErrorBody,
+  responseApiError,
+  networkApiError,
+} from "./api-error";
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
@@ -15,6 +25,8 @@ export function apiUrl(endpoint: string, apiBaseUrl = ""): string {
 export { ApiError } from "./api-error";
 
 interface RequestOptions {
+  /** Internal scope shared through response body consumption. */
+  readonly accountRequest?: ReturnType<typeof captureAccountRequest>;
   /** CMA adapters alone opt into CMA problem/Responses error documents. */
   readonly errorFormat?: "cma";
   /** Opt-in fence for requests bound to a captured account or local CLI session. */
@@ -57,34 +69,54 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/mfa/cancel",
 ]);
 
-let sessionConfirmation: Promise<boolean> | null = null;
-let lastSessionConfirmation: { at: number; valid: boolean; user: unknown } | null = null;
+let sessionConfirmation: {
+  revision: number;
+  promise: Promise<boolean>;
+} | null = null;
+let lastSessionConfirmation: {
+  at: number;
+  valid: boolean;
+  user: unknown;
+} | null = null;
 
 async function confirmSessionStillValid(): Promise<boolean> {
   const now = Date.now();
   const user = useAuthStore.getState().user;
-  if (lastSessionConfirmation && lastSessionConfirmation.user === user && now - lastSessionConfirmation.at < 500) {
+  if (
+    lastSessionConfirmation &&
+    lastSessionConfirmation.user === user &&
+    now - lastSessionConfirmation.at < 500
+  ) {
     return lastSessionConfirmation.valid;
   }
-  if (!sessionConfirmation) {
-    sessionConfirmation = fetch(apiUrl("/users/me"), {
+  const revision = getAssistantIdentityRevision();
+  if (!sessionConfirmation || sessionConfirmation.revision !== revision) {
+    const request = captureAccountRequest();
+    const promise = fetch(apiUrl("/users/me"), {
       ...buildFetchConfig({ preserveSessionOn401: true }),
       method: "GET",
+      signal: request.signal,
     })
       // Only a confirmed identity 401 proves that the NyxID session is gone.
       // A 2xx, another HTTP status, or a transient network failure must keep
       // the browser session intact.
-      .then((response) => response.status !== 401 || useAuthStore.getState().user !== user)
+      .then(
+        (response) =>
+          response.status !== 401 || useAuthStore.getState().user !== user,
+      )
       .catch(() => true)
       .then((valid) => {
         lastSessionConfirmation = { at: Date.now(), valid, user };
         return valid;
       })
       .finally(() => {
-        sessionConfirmation = null;
+        request.dispose();
+        if (sessionConfirmation?.revision === revision)
+          sessionConfirmation = null;
       });
+    sessionConfirmation = { revision, promise };
   }
-  return sessionConfirmation;
+  return sessionConfirmation.promise;
 }
 
 export function buildFetchConfig(options: RequestOptions): RequestInit {
@@ -93,7 +125,11 @@ export function buildFetchConfig(options: RequestOptions): RequestInit {
   // This device header only narrows the persisted account permission. The
   // backend rechecks it and consent revisions at admission and dispatch.
   const telemetryHeaders: Record<string, string> = isTelemetryActive()
-    ? { "X-NyxID-Client": "ui", "X-NyxID-Analytics": "enabled", "X-NyxID-Analytics-Account": useAuthStore.getState().user?.id ?? "" }
+    ? {
+        "X-NyxID-Client": "ui",
+        "X-NyxID-Analytics": "enabled",
+        "X-NyxID-Analytics-Account": useAuthStore.getState().user?.id ?? "",
+      }
     : {};
 
   const config: RequestInit = {
@@ -121,7 +157,15 @@ function redirectToConsentIfRequired(error: ApiErrorResponse): void {
 
   if (typeof window !== "undefined") {
     const url = error.consent_url;
-    void import("./navigation").then(({ openExternal }) => openExternal(url));
+    const request = captureAccountRequest();
+    void import("./navigation").then(({ openExternal }) => {
+      try {
+        request.assertCurrent();
+        openExternal(url);
+      } catch {
+        /* Identity changed. */
+      }
+    });
   }
 }
 
@@ -129,28 +173,51 @@ export async function apiClient<T>(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  if (import.meta.env.DEV) {
-    const { isMockMode, getMockResponse } = await import("./mock-data");
-    options.authorityGuard?.();
-    if (isMockMode()) {
-      const mock = getMockResponse(
-        endpoint,
-        options.method ?? "GET",
-        options.body,
-      );
-      if (mock !== undefined) return mock as T;
+  const request =
+    options.accountRequest ?? captureAccountRequest(options.signal);
+  const guard = options.authorityGuard;
+  options = {
+    ...options,
+    accountRequest: request,
+    signal: request.signal,
+    authorityGuard: () => {
+      request.assertCurrent();
+      guard?.();
+    },
+  };
+  try {
+    if (endpoint !== "/users/me") await request.ready();
+    if (import.meta.env.DEV) {
+      const { isMockMode, getMockResponse } = await import("./mock-data");
+      options.authorityGuard?.();
+      if (isMockMode()) {
+        const mock = getMockResponse(
+          endpoint,
+          options.method ?? "GET",
+          options.body,
+        );
+        if (mock !== undefined) return mock as T;
+      }
     }
-  }
 
-  const response = await apiFetch(endpoint, options);
-  options.authorityGuard?.();
-  if (response.status === 204) return undefined as T;
-  const body = (await response.json().catch(() => {
+    const response = await apiFetch(endpoint, options);
     options.authorityGuard?.();
-    throw new ApiError(response.status, apiErrorBody(null, response.status), response.headers);
-  })) as T;
-  options.authorityGuard?.();
-  return body;
+    if (response.status === 204) return undefined as T;
+    const body = (await response.json().catch(async () => {
+      if (endpoint !== "/users/me") await request.ready();
+      options.authorityGuard?.();
+      throw new ApiError(
+        response.status,
+        apiErrorBody(null, response.status),
+        response.headers,
+      );
+    })) as T;
+    if (endpoint !== "/users/me") await request.ready();
+    options.authorityGuard?.();
+    return body;
+  } finally {
+    request.dispose();
+  }
 }
 
 /** Authenticated transport shared by JSON and streaming API requests. */
@@ -158,58 +225,78 @@ export async function apiFetch(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<Response> {
-  const userAtRequest = useAuthStore.getState().user;
-  const actorId = options.creditsDenial ? currentCreditsActor() : null;
-  options.authorityGuard?.();
-  const response = await fetch(
-    apiUrl(endpoint, options.apiBaseUrl),
-    buildFetchConfig(options),
-  ).catch((cause: unknown) => { throw networkApiError(cause); });
-  // A late response belongs to its original authority, including any 401.
-  options.authorityGuard?.();
+  const ownsRequest = !options.accountRequest;
+  const request =
+    options.accountRequest ?? captureAccountRequest(options.signal);
+  const guard = options.authorityGuard;
+  options = {
+    ...options,
+    accountRequest: request,
+    signal: request.signal,
+    authorityGuard: () => {
+      request.assertCurrent();
+      guard?.();
+    },
+  };
   try {
-    options.onResponse?.(response);
-  } catch {
-    // Response observers are diagnostic-only and must not affect the request.
-  }
-
-  if (
-    response.status === 401 &&
-    !options.preserveSessionOn401 &&
-    !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)
-  ) {
-    // The identity endpoint is authoritative and can clear immediately. A
-    // downstream/provider endpoint gets one debounced, single-flight session
-    // check so an unrelated 401 cannot make the SPA appear logged out.
-    if (endpoint === "/users/me") {
-      useAuthStore.getState().setUser(null);
-    } else {
-      const sessionStillValid = await confirmSessionStillValid();
-      // The original request may have crossed an account switch while the
-      // identity check was in flight. Re-run the caller's fence immediately
-      // before mutating global auth state.
-      options.authorityGuard?.();
-      if (!sessionStillValid && useAuthStore.getState().user === userAtRequest) {
-        useAuthStore.getState().setUser(null);
-      }
-    }
-  }
-
-  if (!response.ok) {
-    const error = await responseApiError(response, options.errorFormat);
-    const errorBody = error.errorResponse;
+    if (endpoint !== "/users/me") await request.ready();
+    const userAtRequest = useAuthStore.getState().user;
+    const actorId = options.creditsDenial ? currentCreditsActor() : null;
     options.authorityGuard?.();
-    redirectToConsentIfRequired(errorBody);
-    reportCreditsDenialHttp(
-      options.creditsDenial,
-      response.status,
-      errorBody,
-      actorId,
-    );
+    const response = await fetch(
+      apiUrl(endpoint, options.apiBaseUrl),
+      buildFetchConfig(options),
+    ).catch((cause: unknown) => {
+      request.assertCurrent();
+      throw networkApiError(cause);
+    });
+    if (endpoint !== "/users/me") await request.ready();
+    // A late response belongs to its original authority, including any 401.
+    options.authorityGuard?.();
+    try {
+      options.onResponse?.(response);
+    } catch {
+      // Response observers are diagnostic-only and must not affect the request.
+    }
+
+    if (!response.ok) {
+      const error = await responseApiError(response, options.errorFormat);
+      if (endpoint !== "/users/me") await request.ready();
+      options.authorityGuard?.();
+      if (
+        response.status === 401 &&
+        !options.preserveSessionOn401 &&
+        !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)
+      ) {
+        if (endpoint === "/users/me") {
+          useAuthStore.getState().setUser(null);
+        } else {
+          const sessionStillValid = await confirmSessionStillValid();
+          options.authorityGuard?.();
+          if (
+            !sessionStillValid &&
+            useAuthStore.getState().user === userAtRequest
+          ) {
+            useAuthStore.getState().setUser(null);
+          }
+        }
+      } else {
+        redirectToConsentIfRequired(error.errorResponse);
+        reportCreditsDenialHttp(
+          options.creditsDenial,
+          response.status,
+          error.errorResponse,
+          actorId,
+        );
+      }
+      throw error;
+    }
+
+    return ownsRequest ? accountResponse(response, request) : response;
+  } catch (error) {
+    request.dispose();
     throw error;
   }
-
-  return response;
 }
 
 /** Authenticated binary response helper used by attachment-style downloads. */
@@ -217,10 +304,25 @@ export async function apiBlobClient(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<{ blob: Blob; filename?: string }> {
-  const response = await apiFetch(endpoint, options);
-  const disposition = response.headers.get("Content-Disposition") ?? "";
-  const match = disposition.match(/filename="([^"]+)"/i);
-  return { blob: await response.blob(), filename: match?.[1] };
+  const request =
+    options.accountRequest ?? captureAccountRequest(options.signal);
+  try {
+    const response = await apiFetch(endpoint, {
+      ...options,
+      accountRequest: request,
+      signal: request.signal,
+    });
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    const match = disposition.match(/filename="([^"]+)"/i);
+    const blob = await response.blob();
+    await request.ready();
+    return { blob, filename: match?.[1] };
+  } catch (error) {
+    request.assertCurrent();
+    throw error;
+  } finally {
+    request.dispose();
+  }
 }
 
 export const api = {

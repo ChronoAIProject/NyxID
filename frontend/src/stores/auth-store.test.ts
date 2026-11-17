@@ -650,7 +650,11 @@ describe("ephemeral profile restoration", () => {
         mfaRequired: status !== 200,
         mfaToken: status === 200 ? null : "pending-password-mfa",
       });
-      expect(useAssistantContextStore.getState()).toBe(accountContext);
+      if (status === 401) {
+        expect(useAssistantContextStore.getState()).toMatchObject({ ownerUserId: null, lastScreen: null });
+      } else {
+        expect(useAssistantContextStore.getState()).toBe(accountContext);
+      }
       expect(telemetryReset).not.toHaveBeenCalled();
       expect(telemetryIdentify).not.toHaveBeenCalled();
     },

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AuthoredSkillScopePreview } from "./authored-skill-scope-preview";
@@ -28,6 +28,15 @@ function show(value = card, decide = vi.fn().mockResolvedValue(undefined), acces
 }
 beforeEach(() => { mocks.json.mockReset().mockResolvedValue(preview); });
 afterEach(cleanup);
+it("silently drops an aborted decision without refreshing or retrying", async () => {
+  const decide = show(card, vi.fn().mockRejectedValue(new DOMException("Account changed", "AbortError")));
+  const allow = await screen.findByRole("button", { name: "Allow and publish" });
+  await act(async () => { fireEvent.click(allow); });
+  expect(decide).toHaveBeenCalledOnce();
+  expect(mocks.json).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Account changed|Publication did not finish/)).not.toBeInTheDocument();
+});
 it.each(["autopilot", "nyxmode", "ask_every_time"] as const)("keeps an expired authored card free of confirmation controls only in %s", async (accessMode) => {
   mocks.json.mockResolvedValue({ ...preview, actions: ["renew", "discard"] });
   const decide = show({ ...card, status: "expired" }, undefined, accessMode);

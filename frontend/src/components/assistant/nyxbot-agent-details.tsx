@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { OrgGuestGrantsAdoption } from "./org-guest-grants-adoption";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -699,6 +700,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
       });
       form.reset(values, { keepDirtyValues: false });
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "Could not save. Try again."));
     }
   }
@@ -1020,6 +1022,7 @@ function GrantsForm({
       });
       form.reset(values, { keepDirtyValues: false });
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "Could not save the grants. Try again."));
     }
   }
@@ -1259,6 +1262,7 @@ function MemoryList({
       memoryForm.reset({ text: "" });
       setEditing(undefined);
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "Could not save this note. Try again."));
     }
   }
@@ -1268,6 +1272,7 @@ function MemoryList({
     try {
       await forget.mutateAsync({ agentId: agent.id, noteId: note.id });
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "Could not forget this note. Try again."));
     }
   }
@@ -1452,6 +1457,7 @@ function Lifecycle({
       }
       setConfirm(undefined);
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorMessage(cause, "That did not work. Try again."));
     }
   }

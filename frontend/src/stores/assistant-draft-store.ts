@@ -1,3 +1,4 @@
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
@@ -50,6 +51,7 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
     (set, get) => ({
       ...EMPTY_DRAFTS,
       saveDraft: (userId, key, text) => {
+        if (getAssistantIdentityUserId() !== userId) return;
         set((state) => {
           const ownedDrafts: Record<string, AssistantDraft> =
             state.ownerUserId === userId ? state.drafts : EMPTY_DRAFTS.drafts;
@@ -67,6 +69,7 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
       },
       getDraft: (key) => get().drafts[key]?.text ?? "",
       clearDraft: (userId, key) => {
+        if (getAssistantIdentityUserId() !== userId) return;
         set((state) => {
           const drafts =
             state.ownerUserId === userId ? { ...state.drafts } : {};
@@ -93,6 +96,12 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
       },
     }),
     {
+      merge: (persisted, current) => {
+        const value = persisted as Partial<typeof current> | null;
+        const owner = getAssistantIdentityUserId();
+        if (owner && value?.ownerUserId !== owner) return current;
+        return { ...current, ...value };
+      },
       name: STORAGE_KEY,
       version: 1,
       // Payloads written while the retired Ask/Full draft preference existed

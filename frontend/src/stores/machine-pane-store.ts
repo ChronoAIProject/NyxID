@@ -1,7 +1,7 @@
 /**
  * The shared preview column's width across chats and the threads where the
- * user hid the machine card. The existing storage key preserves both choices.
- * Persisted per browser and validated on load, like the display preferences.
+ * user hid the machine card. Width is persisted per browser; conversation IDs
+ * stay in memory and are cleared with the account.
  */
 
 import { create } from "zustand";
@@ -44,15 +44,13 @@ export const useMachinePaneStore = create<MachinePaneState>()(
     {
       name: "nyxid.machine-pane",
       version: 1,
-      partialize: (state) => ({ percent: state.percent, hidden: state.hidden }),
+      partialize: (state) => ({ percent: state.percent }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Record<string, unknown>;
         return {
           ...current,
           percent: clampMachinePanePercent(p.percent ?? p.width),
-          hidden: Array.isArray(p.hidden)
-            ? p.hidden.filter((id): id is string => typeof id === "string").slice(-HIDDEN_LIMIT)
-            : current.hidden,
+          hidden: current.hidden,
         };
       },
     },

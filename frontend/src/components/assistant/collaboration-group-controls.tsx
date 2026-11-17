@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { ExecutionPermissionCard } from "./blocks/execution-permission-card";
@@ -216,6 +217,7 @@ export function CollaborationSettings({
         onLeft();
       return true;
     } catch (cause) {
+      if (isAccountAbort(cause)) return false;
       setError(errorText(cause));
       return false;
     }
@@ -730,6 +732,7 @@ export function GroupInviteDialog({
         onJoined(group);
       }
     } catch (cause) {
+      if (isAccountAbort(cause)) return;
       setError(errorText(cause));
     } finally {
       setBusy(false);
