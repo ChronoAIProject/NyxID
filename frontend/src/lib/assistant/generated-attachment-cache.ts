@@ -1,5 +1,5 @@
 import { assistantHttp } from "./assistant-http";
-import { releaseAccountResponse, subscribeAssistantIdentity } from "./identity";
+import { subscribeAssistantIdentity } from "./identity";
 
 const FILE_BYTES = 8 * 1024 * 1024;
 const CACHE_BYTES = 32 * 1024 * 1024;
@@ -36,7 +36,6 @@ async function fetchBlob(entry: Entry) {
   const declared = Number(response.headers.get("content-length"));
   if (declared > entry.reservedBytes) {
     await response.body?.cancel();
-    releaseAccountResponse(response);
     throw new Error("Generated file exceeds download limit");
   }
   const reader = response.body?.getReader();
@@ -53,7 +52,6 @@ async function fetchBlob(entry: Entry) {
       parts.push(chunk.value as Uint8Array<ArrayBuffer>);
     }
   } finally {
-    releaseAccountResponse(response);
     await reader.cancel();
   }
   return new Blob(parts, {

@@ -15,6 +15,7 @@ beforeEach(() => {
   useAuthStore.getState().setUser(person("A"));
   useAuthStore.setState({ isIdentityVerifying: false, isLoading: false });
   post.mockReset();
+  localStorage.removeItem("nyxid:account-session");
   style = document.createElement("style");
   style.textContent = "html[data-account-verifying] body { visibility: hidden; }";
   document.head.append(style);
@@ -332,4 +333,198 @@ it("does not poll a hidden signed-in tab, then silently checks on stale visibili
   expect(fetch).toHaveBeenCalledOnce();
   expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
   expect(useAuthStore.getState().isLoading).toBe(false);
+});
+
+it("announces only delayed evidence checks and restores same-account focus and selection", async () => {
+  vi.useFakeTimers();
+  let resolve!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+  const { AccountVerificationStatus } = await import("@/components/account-verification-status");
+  style.textContent += ".visible { visibility: visible; }";
+  render(createElement("div", {}, createElement(AccountVerificationStatus), createElement("input", { defaultValue: "private draft", "aria-label": "Draft" })));
+  const input = screen.getByRole("textbox") as HTMLInputElement;
+  input.focus();
+  input.setSelectionRange(2, 7, "backward");
+  act(() => receive({ data: { userId: "B" } }));
+  input.blur(); // Real browsers drop focus when the body becomes hidden.
+  await act(() => vi.advanceTimersByTimeAsync(299));
+  expect(screen.queryByRole("status")).toBeNull();
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  const status = screen.getByRole("status", { name: "Checking which account is signed in…" });
+  expect(status).toHaveAttribute("aria-live", "polite");
+  expect(getComputedStyle(status).visibility).toBe("visible"); // CSS visibility overrides its hidden ancestor.
+  await act(async () => resolve(Response.json(person("A"))));
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(input).toHaveFocus();
+  expect([input.selectionStart, input.selectionEnd, input.selectionDirection]).toEqual([2, 7, "backward"]);
+});
+
+it("does not announce fast evidence or background checks, or steal a deliberate focus change", async () => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  let resolve!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+  const { AccountVerificationStatus } = await import("@/components/account-verification-status");
+  render(createElement("div", {}, createElement(AccountVerificationStatus), createElement("input", { "aria-label": "First" }), createElement("input", { "aria-label": "Second", style: { visibility: "visible" } })));
+  screen.getByRole("textbox", { name: "First" }).focus();
+  act(() => receive({ data: { userId: "B" } }));
+  screen.getByRole("textbox", { name: "Second" }).focus();
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(async () => resolve(Response.json(person("A"))));
+  await act(() => vi.advanceTimersByTimeAsync(300));
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Second" })).toHaveFocus();
+  await act(() => vi.advanceTimersByTimeAsync(60_000));
+  expect(screen.queryByRole("status")).toBeNull();
+  await act(() => vi.advanceTimersByTimeAsync(500));
+  expect(screen.queryByRole("status")).toBeNull();
+  await act(async () => resolve(Response.json(person("A"))));
+});
+
+it("pre-hides persisted pagehide without a request and verifies on restore, while normal pagehide reveals", async () => {
+  const fetch = vi.fn().mockResolvedValue(Response.json(person("A")));
+  vi.stubGlobal("fetch", fetch);
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+  expect(document.documentElement).toHaveAttribute("data-account-verifying");
+  expect(fetch).not.toHaveBeenCalled();
+  window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+  await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+  expect(fetch).toHaveBeenCalledOnce();
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: false }));
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+  expect(fetch).toHaveBeenCalledOnce();
+});
+
+it("silently checks stale window focus without visibilitychange and deduplicates pending checks", async () => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  let resolve!: (response: Response) => void;
+  const fetch = vi.fn(() => new Promise<Response>((done) => { resolve = done; }));
+  vi.stubGlobal("fetch", fetch);
+  window.dispatchEvent(new Event("focus"));
+  expect(fetch).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(60_000);
+  visibility.mockReturnValue("visible");
+  window.dispatchEvent(new Event("focus"));
+  window.dispatchEvent(new Event("focus"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+  expect(useAuthStore.getState().isLoading).toBe(false);
+  resolve(Response.json(person("A")));
+  await vi.advanceTimersByTimeAsync(0);
+  stop();
+  await vi.advanceTimersByTimeAsync(60_000);
+  window.dispatchEvent(new Event("focus"));
+  expect(fetch).toHaveBeenCalledOnce();
+});
+
+it.each([false, true])("restores focus blurred in the navigation task only (earlier deliberate blur: %s)", async (earlier) => {
+  vi.useFakeTimers();
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(person("A"))));
+  render(createElement("input", { defaultValue: "retained name", "aria-label": "Name" }));
+  const input = screen.getByRole("textbox") as HTMLInputElement;
+  input.focus();
+  input.setSelectionRange(2, 6);
+  input.blur(); // Chromium blurs before pagehide.
+  if (earlier) await act(() => vi.advanceTimersByTimeAsync(0));
+  act(() => window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true })));
+  expect(document.documentElement).toHaveAttribute("data-account-verifying");
+  act(() => window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true })));
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+  if (earlier) expect(input).not.toHaveFocus();
+  else {
+    expect(input).toHaveFocus();
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 6]);
+  }
+});
+
+it("closes only cached channels, reopens before restore verification and coalesces queued storage hints", async () => {
+  stop();
+  const channels: { closed: boolean; onmessage?: (event: { data: unknown }) => void; close: ReturnType<typeof vi.fn>; deliver: (data: unknown) => void }[] = [];
+  vi.stubGlobal("BroadcastChannel", class {
+    closed = false;
+    onmessage?: (event: { data: unknown }) => void;
+    close = vi.fn(() => { this.closed = true; });
+    postMessage = post;
+    deliver(data: unknown) { if (!this.closed) this.onmessage?.({ data }); }
+    constructor() { channels.push(this); }
+  });
+  stop = installAccountSessionSync();
+  let resolve!: (response: Response) => void;
+  const fetch = vi.fn(() => {
+    expect(channels).toHaveLength(2);
+    expect(channels[1]!.closed).toBe(false);
+    return new Promise<Response>((done) => { resolve = done; });
+  });
+  vi.stubGlobal("fetch", fetch);
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: false }));
+  expect(channels[0]!.close).not.toHaveBeenCalled();
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+  expect(channels[0]!.close).toHaveBeenCalledOnce();
+  expect(() => channels[0]!.deliver({ userId: "B", nonce: "cached" })).not.toThrow();
+  const hint = () => window.dispatchEvent(new StorageEvent("storage", { key: "nyxid:account-session", newValue: JSON.stringify({ userId: "B", nonce: "queued" }) }));
+  hint();
+  expect(fetch).not.toHaveBeenCalled();
+  localStorage.setItem("nyxid:account-session", JSON.stringify({ userId: "B", nonce: "queued" }));
+  window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+  hint(); // A queued fallback hint is covered by the authoritative restore check.
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  resolve(Response.json(person("A")));
+  await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+  expect(fetch).toHaveBeenCalledOnce();
+  channels[1]!.deliver({ userId: "A", nonce: "same" });
+  expect(fetch).toHaveBeenCalledOnce();
+  stop();
+  expect(channels[1]!.close).toHaveBeenCalledOnce();
+});
+
+it("rechecks a new identity hint arriving during a persisted restore", async () => {
+  const resolve: ((response: Response) => void)[] = [];
+  const fetch = vi.fn(() => new Promise<Response>((done) => { resolve.push(done); }));
+  vi.stubGlobal("fetch", fetch);
+  window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+  localStorage.setItem("nyxid:account-session", JSON.stringify({ userId: "A", nonce: "while-cached" }));
+  window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  receive({ data: { userId: "B", nonce: "after-restore" } });
+  resolve[0]!(Response.json(person("A")));
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(document.documentElement).toHaveAttribute("data-account-verifying");
+  resolve[1]!(Response.json(person("B")));
+  await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+  expect(useAuthStore.getState().user?.id).toBe("B");
+});
+
+it.each(["broadcast", "bfcache"])("requires a fresh profile after %s evidence supersedes a pending silent read", async (trigger) => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const resolve: ((response: Response) => void)[] = [];
+  const fetch = vi.fn(() => new Promise<Response>((done) => { resolve.push(done); }));
+  vi.stubGlobal("fetch", fetch);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetch).toHaveBeenCalledOnce(); // The server captured A before the session changed.
+  if (trigger === "broadcast") receive({ data: { userId: "B", nonce: "new-session" } });
+  else {
+    window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+    window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+  }
+  resolve[0]!(Response.json(person("A")));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(true);
+  expect(document.documentElement).toHaveAttribute("data-account-verifying");
+  resolve[1]!(Response.json(person("B")));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(useAuthStore.getState().user?.id).toBe("B");
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+  expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
 });

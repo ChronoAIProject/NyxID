@@ -3,7 +3,6 @@ import {
   type CmaTranscriptMessage,
   type CmaResourceEvent,
 } from "@/schemas/assistant-cma-agent";
-import { releaseAccountResponse } from "./identity";
 
 export interface CmaEventScope {
   agentId: string;
@@ -212,6 +211,5 @@ export async function* readCmaStream(
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
-    releaseAccountResponse(response);
   }
 }

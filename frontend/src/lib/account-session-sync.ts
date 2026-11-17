@@ -8,17 +8,66 @@ const EVIDENCE_TIMEOUT_MS = 5_000;
 /** Hints invalidate identity; only the cookie-authenticated profile is authority. */
 export function installAccountSessionSync(): () => void {
   let channel: BroadcastChannel | undefined;
-  try { channel = new BroadcastChannel(STORAGE_KEY); } catch { /* Storage fallback. */ }
+  let cached = false;
+  let restoring = false;
   let disposed = false;
   let lastAttempt = Date.now();
   type Attempt = { revision: number; evidence: boolean; target?: string | null; again: boolean; timer?: ReturnType<typeof setTimeout> };
   let pending: Attempt | undefined;
   const seen = new Set<string>();
+  const remember = (nonce: string) => {
+    seen.add(nonce);
+    if (seen.size > 100) seen.delete(seen.values().next().value!);
+  };
+  type SavedFocus = { element: HTMLElement; revision: number; range?: Range; start?: number | null; end?: number | null; direction?: "forward" | "backward" | "none" | null; moved: boolean };
+  let focusBeforeHide: SavedFocus | undefined;
+  let blurredFocus: SavedFocus | undefined;
+  let blurTimer: ReturnType<typeof setTimeout> | undefined;
+  const captureFocus = (element: HTMLElement): SavedFocus => {
+    const selection = window.getSelection();
+    return { element, revision: getAssistantIdentityRevision(), moved: false,
+      ...(selection?.rangeCount ? { range: selection.getRangeAt(0).cloneRange() } : {}),
+      ...(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? { start: element.selectionStart, end: element.selectionEnd, direction: element.selectionDirection } : {}),
+    };
+  };
+  const focusin = (event: FocusEvent) => {
+    blurredFocus = undefined;
+    if (focusBeforeHide && event.target !== focusBeforeHide.element && event.target !== document.body)
+      focusBeforeHide.moved = true;
+  };
+  // Chromium blurs the field before dispatching pagehide in the same task.
+  // Keep that snapshot only until the next task, so an earlier deliberate blur
+  // cannot cause a later navigation to restore an obsolete focus target.
+  const focusout = (event: FocusEvent) => {
+    if (event.relatedTarget || focusBeforeHide || !(event.target instanceof HTMLElement)) return;
+    blurredFocus = captureFocus(event.target);
+    clearTimeout(blurTimer);
+    blurTimer = setTimeout(() => { blurredFocus = undefined; }, 0);
+  };
   const reveal = () => {
+    restoring = false;
     document.documentElement.removeAttribute("data-account-verifying");
     useAuthStore.setState({ isIdentityVerifying: false });
+    const saved = focusBeforeHide;
+    focusBeforeHide = undefined;
+    if (saved && !saved.moved && saved.revision === getAssistantIdentityRevision() && saved.element.isConnected &&
+        (!document.activeElement || document.activeElement === document.body || document.activeElement === saved.element)) {
+      saved.element.focus({ preventScroll: true });
+      if (saved.element instanceof HTMLInputElement || saved.element instanceof HTMLTextAreaElement) {
+        if (saved.start != null && saved.end != null) saved.element.setSelectionRange(saved.start, saved.end, saved.direction ?? undefined);
+      } else if (saved.range?.startContainer.isConnected && saved.range.endContainer.isConnected) {
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(saved.range);
+      }
+    }
   };
   const hide = () => {
+    if (!document.documentElement.hasAttribute("data-account-verifying") && document.activeElement instanceof HTMLElement) {
+      focusBeforeHide = document.activeElement === document.body && blurredFocus
+        ? blurredFocus : captureFocus(document.activeElement);
+    }
     document.documentElement.setAttribute("data-account-verifying", "");
     useAuthStore.setState({ isIdentityVerifying: true });
   };
@@ -26,7 +75,8 @@ export function installAccountSessionSync(): () => void {
     if (disposed) return;
     if (pending) {
       if (evidence) {
-        if (pending.evidence && pending.target !== target) pending.again = true;
+        // A silent read may have captured the old session before this evidence.
+        if (!pending.evidence || pending.target !== target) pending.again = true;
         pending.target = target;
         pending.evidence = true;
         hide();
@@ -57,23 +107,56 @@ export function installAccountSessionSync(): () => void {
     }, EVIDENCE_TIMEOUT_MS);
   };
   const receive = (value: unknown) => {
+    if (cached || disposed) return;
     if (!value || typeof value !== "object" || !("userId" in value)) return;
     const id = value.userId;
     if (id !== null && typeof id !== "string") return;
     if ("nonce" in value && typeof value.nonce === "string") {
       if (seen.has(value.nonce)) return;
-      seen.add(value.nonce);
-      if (seen.size > 100) seen.delete(seen.values().next().value!);
+      remember(value.nonce);
     }
     if (id === (useAuthStore.getState().user?.id ?? null)) return;
     verify(true, id);
   };
-  if (channel) channel.onmessage = (event) => receive(event.data);
+  const openChannel = () => {
+    if (channel) return;
+    try {
+      channel = new BroadcastChannel(STORAGE_KEY);
+      channel.onmessage = (event) => receive(event.data);
+    } catch { /* Storage fallback. */ }
+  };
+  openChannel();
   const storage = (event: StorageEvent) => {
     if (event.key !== STORAGE_KEY || !event.newValue) return;
-    try { receive(JSON.parse(event.newValue)); } catch { /* Malformed hint. */ }
+    try {
+      // Discard obsolete storage events queued while the document was cached.
+      const latest = localStorage.getItem(STORAGE_KEY);
+      if (restoring && latest && latest !== event.newValue) return;
+      receive(JSON.parse(event.newValue));
+    } catch { /* Malformed hint or unavailable storage. */ }
   };
-  const pageshow = (event: PageTransitionEvent) => { if (event.persisted) verify(true); };
+  const pagehide = (event: PageTransitionEvent) => {
+    if (event.persisted) {
+      cached = true;
+      channel?.close();
+      channel = undefined;
+      hide();
+    } else reveal();
+  };
+  const pageshow = (event: PageTransitionEvent) => {
+    if (event.persisted) {
+      cached = false;
+      restoring = true;
+      openChannel();
+      // The restore check covers the latest hint missed while cached. A new
+      // nonce arriving during that check still schedules a fresh verification.
+      try {
+        const hint = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
+        if (typeof hint?.nonce === "string") remember(hint.nonce);
+      } catch { /* Storage unavailable; the authoritative check still runs. */ }
+      verify(true);
+    }
+  };
   const visibility = () => {
     if (useAuthStore.getState().user && document.visibilityState === "visible" && Date.now() - lastAttempt >= STALE_MS)
       verify(false);
@@ -88,16 +171,25 @@ export function installAccountSessionSync(): () => void {
   });
   window.addEventListener("storage", storage);
   window.addEventListener("pageshow", pageshow);
+  window.addEventListener("pagehide", pagehide);
+  window.addEventListener("focus", visibility);
+  document.addEventListener("focusin", focusin);
+  document.addEventListener("focusout", focusout);
   document.addEventListener("visibilitychange", visibility);
   return () => {
     disposed = true;
     clearTimeout(pending?.timer);
     clearInterval(timer);
+    clearTimeout(blurTimer);
     reveal();
     stop();
     channel?.close();
     window.removeEventListener("storage", storage);
     window.removeEventListener("pageshow", pageshow);
+    window.removeEventListener("pagehide", pagehide);
+    window.removeEventListener("focus", visibility);
+    document.removeEventListener("focusin", focusin);
+    document.removeEventListener("focusout", focusout);
     document.removeEventListener("visibilitychange", visibility);
   };
 }

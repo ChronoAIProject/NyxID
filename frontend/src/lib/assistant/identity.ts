@@ -9,6 +9,21 @@ let currentUserId: string | null = null;
 let identityRevision = 0;
 let requests = new AbortController();
 const listeners = new Set<AssistantIdentityListener>();
+// Neither the epoch nor a long-lived caller keeps fallback requests alive.
+const fallbackChildren = new Set<WeakRef<AbortController>>();
+type FallbackCleanup = { child: WeakRef<AbortController>; caller: WeakRef<AbortSignal>; listener: EventListener };
+const fallbackCleanup = new Map<WeakRef<AbortController>, FallbackCleanup>();
+function removeFallback(entry: FallbackCleanup): void {
+  entry.caller.deref()?.removeEventListener("abort", entry.listener);
+  fallbackChildren.delete(entry.child);
+  fallbackCleanup.delete(entry.child);
+  collectedFallbacks.unregister(entry.child);
+}
+const collectedFallbacks = new FinalizationRegistry<FallbackCleanup>(removeFallback);
+// A separate closure scope ensures the caller listener captures only a WeakRef.
+function forwardCallerAbort(child: WeakRef<AbortController>): EventListener {
+  return (event) => child.deref()?.abort((event.target as AbortSignal).reason);
+}
 
 interface AccountRequest {
   readonly signal: AbortSignal;
@@ -32,7 +47,17 @@ export function transitionAssistantIdentity(userId: string | null): void {
   identityRevision += 1;
   const previousRequests = requests;
   requests = new AbortController();
+  const children = [...fallbackChildren];
+  fallbackChildren.clear();
   previousRequests.abort(new AccountChangedError());
+  for (const child of children) {
+    const controller = child.deref();
+    if (controller) controller.abort(new AccountChangedError());
+    else {
+      const entry = fallbackCleanup.get(child);
+      if (entry) removeFallback(entry);
+    }
+  }
   toast.dismiss();
   for (const listener of listeners) listener(userId, previousUserId);
 }
@@ -54,26 +79,25 @@ export function captureAccountRequest(signal?: AbortSignal): AccountRequest {
     if (typeof AbortSignal.any === "function") {
       combined = AbortSignal.any([epochSignal, signal]);
     } else {
+      for (const child of fallbackChildren) {
+        if (!child.deref()) removeFallback(fallbackCleanup.get(child)!);
+      }
       const controller = new AbortController();
-      const abortEpoch = () => {
-        controller.abort(epochSignal.reason);
-        dispose();
-      };
-      const abortCaller = () => {
-        controller.abort(signal.reason);
-        dispose();
-      };
-      let disposed = false;
+      const child = new WeakRef(controller);
+      const listener = forwardCallerAbort(child);
+      const entry = { child, caller: new WeakRef(signal), listener };
+      fallbackChildren.add(child);
+      fallbackCleanup.set(child, entry);
+      collectedFallbacks.register(controller, entry, child);
       dispose = () => {
-        if (disposed) return;
-        disposed = true;
-        epochSignal.removeEventListener("abort", abortEpoch);
-        signal.removeEventListener("abort", abortCaller);
+        removeFallback(entry);
+        // This self-contained cycle keeps the controller alive while its signal
+        // is in use, but is collectable with an abandoned request/response.
+        controller.signal.removeEventListener("abort", dispose);
       };
-      epochSignal.addEventListener("abort", abortEpoch, { once: true });
-      signal.addEventListener("abort", abortCaller, { once: true });
-      if (epochSignal.aborted) abortEpoch();
-      else if (signal.aborted) abortCaller();
+      controller.signal.addEventListener("abort", dispose, { once: true });
+      signal.addEventListener("abort", listener, { once: true });
+      if (signal.aborted) controller.abort(signal.reason);
       combined = controller.signal;
     }
   }
@@ -98,17 +122,4 @@ export class AccountChangedError extends DOMException {
 
 export function isAccountAbort(error: unknown): error is AccountChangedError {
   return error instanceof AccountChangedError;
-}
-
-// Raw streaming callers release their scope after EOF/cancellation. Native fetch
-// owns body cancellation; no Response methods or streams are replaced.
-const responseScopes = new WeakMap<Response, () => void>();
-export function retainAccountResponse(response: Response, dispose: () => void): Response {
-  if (response.body) responseScopes.set(response, dispose);
-  else dispose();
-  return response;
-}
-export function releaseAccountResponse(response: Response): void {
-  responseScopes.get(response)?.();
-  responseScopes.delete(response);
 }

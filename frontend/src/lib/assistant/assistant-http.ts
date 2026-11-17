@@ -18,7 +18,6 @@ import { assistantRequestErrorMessage } from "./request-error";
 import { billingError } from "./billing-error";
 import { captureNyxbotError, httpErrorCode, responseCorrelation, type ErrorCorrelation } from "./error-telemetry";
 import {
-  retainAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
 } from "./identity";
@@ -241,7 +240,6 @@ export async function assistantHttp(
   endpoint: string,
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
-  const ownsRequest = !options.accountRequest;
   const request =
     options.accountRequest ?? captureAccountRequest(options.signal);
   const guard = options.authorityGuard;
@@ -257,7 +255,7 @@ export async function assistantHttp(
   try {
     const response = await assistantHttpRequest(endpoint, options);
     request.assertCurrent();
-    return ownsRequest ? retainAccountResponse(response, request.dispose) : response;
+    return response;
   } catch (error) {
     request.dispose();
     throw error;

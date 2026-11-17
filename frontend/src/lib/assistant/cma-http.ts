@@ -1,6 +1,6 @@
 import { assistantHttp, type AssistantHttpRequest } from "./assistant-http";
 import { ApiError, apiErrorBody } from "@/lib/api-error";
-import { captureAccountRequest, releaseAccountResponse } from "./identity";
+import { captureAccountRequest } from "./identity";
 
 const MAX_CMA_JSON_BYTES = 2 * 1024 * 1024;
 
@@ -59,9 +59,8 @@ export async function cmaJson(
   const abort = () => timeout.abort(request.signal.reason);
   request.signal.addEventListener("abort", abort, { once: true });
   if (request.signal.aborted) abort();
-  let response: Response | undefined;
   try {
-    response = await assistantHttp(path, { ...options, signal: timeout.signal, errorFormat: "cma" });
+    const response = await assistantHttp(path, { ...options, signal: timeout.signal, errorFormat: "cma" });
     const result = await readCmaJson(response);
     request.assertCurrent();
     timeout.signal.throwIfAborted();
@@ -74,6 +73,5 @@ export async function cmaJson(
     clearTimeout(timer);
     request.signal.removeEventListener("abort", abort);
     request.dispose();
-    if (response) releaseAccountResponse(response);
   }
 }

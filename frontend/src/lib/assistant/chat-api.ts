@@ -1,5 +1,4 @@
 import { ApiError } from "@/lib/api-client";
-import { releaseAccountResponse } from "./identity";
 import type {
   ChatTarget,
   ChatUsageSummary,
@@ -199,7 +198,6 @@ export async function* readChatStreamFrames(
     }
   } finally {
     reader.releaseLock();
-    releaseAccountResponse(response);
   }
 }
 

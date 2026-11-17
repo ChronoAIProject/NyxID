@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { isAccountAbort, releaseAccountResponse } from "@/lib/assistant/identity";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { activityDecisionPresentation, type ActivityDecision } from "@/lib/assistant/activity-decision";
 import { useEffect, useState } from "react";
 import { RECEIPT_MAX_W } from "@/lib/assistant/banner";
@@ -164,10 +164,7 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
   useEffect(() => {
     const controller = new AbortController();
     assistantHttp(endpoint, { signal: controller.signal })
-      .then(async (response) => {
-        try { return await response.text(); }
-        finally { releaseAccountResponse(response); }
-      })
+      .then((response) => response.text())
       .then((value) => {
         if (!controller.signal.aborted) setText(value.slice(0, 4096));
       })

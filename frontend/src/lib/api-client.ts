@@ -3,7 +3,6 @@ import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
 import {
-  retainAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
 } from "./assistant/identity";
@@ -199,7 +198,6 @@ export async function apiFetch(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<Response> {
-  const ownsRequest = !options.accountRequest;
   const request =
     options.accountRequest ?? captureAccountRequest(options.signal);
   const guard = options.authorityGuard;
@@ -262,7 +260,7 @@ export async function apiFetch(
       throw error;
     }
 
-    return ownsRequest ? retainAccountResponse(response, request.dispose) : response;
+    return response;
   } catch (error) {
     request.dispose();
     throw error;

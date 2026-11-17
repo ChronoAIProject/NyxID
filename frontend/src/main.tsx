@@ -16,6 +16,7 @@ import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { createAccountQueryScope } from "./lib/account-query-cache";
 import { installAccountSessionSync } from "./lib/account-session-sync";
+import { AccountVerificationStatus } from "./components/account-verification-status";
 import { AccountBoundary } from "./components/account-boundary";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
@@ -168,6 +169,7 @@ function Root({ ready }: { ready: boolean }) {
   if (!ready && !isPublicPath(window.location.pathname)) return null;
   return (
     <>
+      <AccountVerificationStatus />
       <RouterProvider router={router} />
       <AccountBoundary><AccountRuntime ready={ready} /></AccountBoundary>
     </>

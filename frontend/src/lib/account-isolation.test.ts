@@ -19,7 +19,6 @@ import {
 import {
   AccountChangedError,
   isAccountAbort,
-  releaseAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
 } from "./assistant/identity";
@@ -377,7 +376,7 @@ describe("request epoch", () => {
   });
 
   it.each(["consume", "cancel", "switch"])(
-    "cleans fallback listeners when a response body ends through %s",
+    "cleans fallback caller listeners on epoch change after a raw body ends through %s",
     async (end) => {
       const originalAny = AbortSignal.any;
       Object.defineProperty(AbortSignal, "any", {
@@ -413,7 +412,8 @@ describe("request epoch", () => {
           await read;
           expect(cancelled).toHaveBeenCalledOnce();
         }
-        releaseAccountResponse(response);
+
+        useAuthStore.getState().setUser(person("B"));
         expect(add).toHaveBeenCalled();
         for (const [, listener] of add.mock.calls)
           expect(
@@ -450,7 +450,7 @@ describe("request epoch", () => {
       caller.abort(new DOMException("Caller cancelled", "AbortError"));
       await expect((async () => { const result = await clone.json(); account.assertCurrent(); return result; })()).rejects.toMatchObject({ name: "AbortError" });
       account.dispose();
-      releaseAccountResponse(response);
+
       for (const [, listener] of add.mock.calls)
         expect(
           remove.mock.calls.some(([, removed]) => removed === listener),
@@ -495,4 +495,66 @@ it("retries a failed pin-storage load on same-account confirmation and clears pr
   useAuthStore.getState().setUser(person("B"));
   expect(useAssistantPinsStore.getState().ids).toEqual([]);
   expect(localStorage.getItem(PIN_STORAGE_KEY)).toBeNull();
+});
+
+it("fallback raw responses have no epoch listeners, still abort unreleased requests and clean caller listeners", async () => {
+  const original = AbortSignal.any;
+  Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+  try {
+    useAuthStore.getState().setUser(person("A"));
+    const epoch = captureAccountRequest().signal;
+    const epochAdd = vi.spyOn(epoch, "addEventListener");
+    const caller = new AbortController();
+    const callerAdd = vi.spyOn(caller.signal, "addEventListener");
+    const callerRemove = vi.spyOn(caller.signal, "removeEventListener");
+    let combined!: AbortSignal;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init: RequestInit) => {
+      combined = init.signal!;
+      return new Response("unreleased A body");
+    }));
+    const response = await apiFetch("/unreleased", { signal: caller.signal });
+    expect(response.body).not.toBeNull();
+    expect(epochAdd).not.toHaveBeenCalled();
+    expect(combined.aborted).toBe(false);
+    useAuthStore.getState().setUser(person("B"));
+    expect(combined.aborted).toBe(true);
+    expect(isAccountAbort(combined.reason)).toBe(true);
+    for (const [, listener] of callerAdd.mock.calls)
+      expect(callerRemove.mock.calls.some(([, removed]) => removed === listener)).toBe(true);
+    const next = new AbortController();
+    const scope = captureAccountRequest(next.signal);
+    next.abort(new DOMException("Caller stopped", "AbortError"));
+    expect(scope.signal.reason).toBe(next.signal.reason);
+  } finally {
+    Object.defineProperty(AbortSignal, "any", { configurable: true, value: original });
+  }
+});
+
+it("prunes collected fallback refs and their caller listeners on the next insertion", () => {
+  const original = AbortSignal.any;
+  Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+  const refs: { value: unknown; collected: boolean; deref: ReturnType<typeof vi.fn> }[] = [];
+  vi.stubGlobal("WeakRef", class {
+    collected = false;
+    deref = vi.fn(() => this.collected ? undefined : this.value);
+    readonly value: unknown;
+    constructor(value: unknown) { this.value = value; refs.push(this); }
+  });
+  try {
+    const caller = new AbortController();
+    const add = vi.spyOn(caller.signal, "addEventListener");
+    const remove = vi.spyOn(caller.signal, "removeEventListener");
+    const abandoned = captureAccountRequest(caller.signal);
+    const child = refs.find((ref) => ref.value instanceof AbortController)!;
+    child.collected = true;
+    const next = captureAccountRequest(new AbortController().signal);
+    for (const [, listener] of add.mock.calls)
+      expect(remove.mock.calls.some(([, removed]) => removed === listener)).toBe(true);
+    const calls = child.deref.mock.calls.length;
+    const third = captureAccountRequest(new AbortController().signal);
+    expect(child.deref).toHaveBeenCalledTimes(calls); // Dead refs no longer in the registry.
+    abandoned.dispose(); next.dispose(); third.dispose();
+  } finally {
+    Object.defineProperty(AbortSignal, "any", { configurable: true, value: original });
+  }
 });

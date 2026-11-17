@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { captureAccountRequest, isAccountAbort, releaseAccountResponse } from "@/lib/assistant/identity";
+import { captureAccountRequest, isAccountAbort } from "@/lib/assistant/identity";
 import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
@@ -1103,9 +1103,8 @@ function PrivacyTab() {
     if (exporting) return;
     setExporting(true);
     const account = captureAccountRequest();
-    let response: Response | undefined;
     try {
-      response = await apiFetch("/users/me/export", { method: "POST" });
+      const response = await apiFetch("/users/me/export", { method: "POST" });
       const blob = await response.blob();
       await validateAccountExport(blob, response.headers);
       account.assertCurrent();
@@ -1159,7 +1158,6 @@ function PrivacyTab() {
       }
     } finally {
       account.dispose();
-      if (response) releaseAccountResponse(response);
       setExporting(false);
     }
   }
