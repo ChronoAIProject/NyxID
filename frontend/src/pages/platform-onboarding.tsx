@@ -525,6 +525,9 @@ function AnonymousDrafts() {
   const bindings = useOwnedBindings();
   const [selectedId, setSelectedId] = useState("");
   const selected = bindings.data?.find((binding) => binding.id === selectedId);
+  // Adjust before committing children so a removed chat cannot silently return
+  // as the selection later. A failed refetch retains the prior data and review.
+  if (bindings.isSuccess && selectedId && !selected) setSelectedId("");
   return (
     <DetailSection title={translateUi("Bring a Telegram draft into your account")}>
       <div className="space-y-3 p-4 text-14">

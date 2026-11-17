@@ -48,6 +48,13 @@ export async function installSetupFixture(page: Page) {
     if (method !== "GET") {
       state.writes.push({ path, method, body: request.postDataJSON() });
     }
+    if (
+      method === "POST" &&
+      path === `/onboarding/bindings/${setupBinding.id}/revoke`
+    ) {
+      state.bindings = [];
+      return route.fulfill({ status: 204 });
+    }
     if (method === "GET") {
       if (path === "/users/me") return route.fulfill({ json: state.actor });
       if (path === "/public/config")

@@ -7,7 +7,14 @@ import {
 } from "@tanstack/react-router";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
 import { router as appRouter } from "@/router";
 import { useAuthStore } from "@/stores/auth-store";
 import {
@@ -56,6 +63,8 @@ async function openSetups(setupsGate = Promise.resolve()) {
     saved: [] as ReturnType<typeof platformSetup>[],
     adoptionGate: Promise.resolve(),
     adoptionError: false,
+    bindingsError: false,
+    revocationBodies: [] as unknown[],
   };
   // Keep the actual route tree, lazy page, DashboardLayout, hooks and schemas.
   // A mocked Outlet would hide exactly the composition regression in #2437.
@@ -67,6 +76,20 @@ async function openSetups(setupsGate = Promise.resolve()) {
         "",
       );
       if (init?.method && init.method !== "GET") fixture.writes.push(path);
+      if (
+        path === `/onboarding/bindings/${setupBinding.id}/revoke` &&
+        init?.method === "POST"
+      ) {
+        fixture.revocationBodies.push(JSON.parse(init.body as string));
+        fixture.bindings = [];
+        return new Response(null, { status: 204 });
+      }
+      if (path === "/onboarding/bindings" && fixture.bindingsError) {
+        return Response.json(
+          { error: "unavailable", message: "Fixture bindings unavailable." },
+          { status: 503 },
+        );
+      }
       if (path === "/onboarding/setups") await setupsGate;
       const draft =
         fixture.drafts.find(
@@ -274,6 +297,70 @@ it("keeps one module when the saved-setups query inserts its asynchronous empty 
     gate.resolve();
   }
 });
+
+it("clears a revoked chat selection and requires reselecting a binding that reappears", async () => {
+  const { fixture } = await openSetups();
+  const user = await reviewDraft();
+  await user.click(screen.getByRole("button", { name: "Review revocation" }));
+  await user.click(
+    screen.getByRole("button", { name: "Revoke binding" }),
+  );
+  await screen.findByText(
+    "No active onboarding bindings. Use /help in the manager’s private chat to start onboarding.",
+  );
+  await expectSettled();
+  expect(screen.getByLabelText("Linked chat")).toHaveValue("");
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Adopt reviewed draft" }),
+  ).not.toBeInTheDocument();
+  expect(fixture.writes).toEqual([
+    `/onboarding/bindings/${setupBinding.id}/revoke`,
+  ]);
+  expect(fixture.revocationBodies).toEqual([
+    { generation: setupBinding.generation },
+  ]);
+  expectSingleModule();
+
+  fixture.bindings = [{ ...setupBinding }];
+  await act(() =>
+    client.invalidateQueries({
+      queryKey: ["onboarding", setupActor.id, "bindings"],
+    }),
+  );
+  await screen.findByRole("option", { name: /Telegram sender/ });
+  expect(screen.getByLabelText("Linked chat")).toHaveValue("");
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Adopt reviewed draft" }),
+  ).not.toBeInTheDocument();
+  expect(fixture.writes).toHaveLength(1);
+  expectSingleModule();
+
+  await user.selectOptions(
+    screen.getByLabelText("Linked chat"),
+    setupBinding.id,
+  );
+  expect(await screen.findByRole("checkbox")).not.toBeChecked();
+  expect(adoptionButton()).toBeDisabled();
+}, 20_000);
+
+it("retains the selected chat and review when a bindings refetch fails", async () => {
+  const { fixture } = await openSetups();
+  await reviewDraft();
+  fixture.bindingsError = true;
+  await act(() =>
+    client.invalidateQueries({
+      queryKey: ["onboarding", setupActor.id, "bindings"],
+    }),
+  );
+  await screen.findByText("Could not load your bindings.");
+  expect(screen.getByLabelText("Linked chat")).toHaveValue(setupBinding.id);
+  expect(screen.getByRole("checkbox")).toBeChecked();
+  expect(adoptionButton()).toBeEnabled();
+  expect(fixture.writes).toEqual([]);
+  expectSingleModule();
+}, 20_000);
 
 it("settles one rapid adoption, refreshes to empty and requires review for the next draft", async () => {
   const { fixture } = await openSetups();

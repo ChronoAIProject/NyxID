@@ -161,6 +161,41 @@ test("one reviewed adoption request stays disabled while pending and moves the d
   expect(fixture.pageErrors).toEqual([]);
 });
 
+test("revoking the selected linked chat clears its draft review", async ({
+  page,
+}) => {
+  const fixture = await installSetupFixture(page);
+  await page.goto("/onboarding/setups");
+  await selectChat(page);
+  await page.getByRole("checkbox", { name: reviewText }).check();
+  await expect(adopt(page)).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Review revocation", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Revoke binding", exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "No active onboarding bindings. Use /help in the manager’s private chat to start onboarding.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("combobox", { name: "Linked chat", exact: true }),
+  ).toHaveValue("");
+  await singleModule(page, 0);
+  expect(fixture.writes).toEqual([
+    {
+      path: `/onboarding/bindings/${setupBinding.id}/revoke`,
+      method: "POST",
+      body: { generation: setupBinding.generation },
+    },
+  ]);
+  expect(fixture.unexpected).toEqual([]);
+  expect(fixture.pageErrors).toEqual([]);
+});
+
 for (const key of ["Enter", "Space"] as const) {
   test(`rapid ${key} activation adopts the reviewed draft once`, async ({
     page,
