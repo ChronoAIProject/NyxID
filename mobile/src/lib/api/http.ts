@@ -315,7 +315,7 @@ async function requestRefreshAccessToken(
 
       if (payload && typeof payload === "object") {
         const data = payload as Partial<RefreshResponse>;
-        if (typeof data.access_token === "string" && data.access_token.length > 0) {
+        if (typeof data.access_token === "string" && data.access_token.trim().length > 0) {
           return {
             access_token: data.access_token,
             expires_in:
@@ -330,10 +330,10 @@ async function requestRefreshAccessToken(
         }
       }
 
-      return null;
+      throw buildApiError(null, response.status, response.headers);
     }
 
-    return null;
+    throw buildApiError(null, 409);
   };
 
   try {

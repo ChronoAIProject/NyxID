@@ -555,3 +555,22 @@ test("a temporary refresh failure keeps the session instead of signing out", asy
     assert.equal(env.session().refreshToken, before);
   }
 });
+
+for (const body of ['{}', '{"access_token":""}', 'null', '[]', '<html>captive portal</html>', '{"access_token":']) {
+  test(`P2 malformed successful refresh keeps stored credentials: ${body}`, async () => {
+    const env = setup(async url => url.endsWith('/auth/refresh')
+      ? new Response(body, {status:200})
+      : Response.json({error:'unauthorized'}, {status:401}), true);
+    const before=env.session();
+    await assert.rejects(env.request('/protected', {}));
+    assert.equal(env.invalidations(),0);
+    assert.equal(env.session().refreshToken,before.refreshToken);
+  });
+}
+for (const status of [409,429,500,502,503]) {
+  test(`P2 refresh HTTP ${status} is transient`, async () => {
+    const env=setup(async url=>Response.json({error:'temporarily_unavailable'}, {status:url.endsWith('/auth/refresh')?status:401}),true);
+    await assert.rejects(env.request('/protected',{}));
+    assert.equal(env.invalidations(),0);
+  });
+}
