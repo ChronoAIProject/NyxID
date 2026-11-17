@@ -1,3 +1,4 @@
+import { crashLifecycle } from "../../lib/crashReporting/runtime";
 import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
@@ -42,11 +43,13 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const queryClient = useQueryClient();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
+  useEffect(() => { void crashLifecycle?.setRestoring(isRestoring); }, [isRestoring]);
   const isSigningOutRef = useRef(false);
 
   const performSignOut = useCallback(async () => {
     if (isSigningOutRef.current) return;
     isSigningOutRef.current = true;
+    crashLifecycle?.disarm();
     setAuthAccountId(null);
     advanceAuthEpoch();
     const expectedGeneration = authSessionGeneration();

@@ -329,6 +329,7 @@ fn safe_item(row: &Document, fields: &[&str]) -> serde_json::Value {
 /// Additional scoped views of the same source are declared separately.
 fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
     match collection {
+        "client_error_reports" => Some(("account_activity", "client_error_reports")),
         "agent_key_login_requests" => Some(("account", "agent_key_login_requests")),
         "agent_service_bindings" => Some(("account", "agent_service_bindings")),
         "billing_wallet" => Some(("billing", "wallet")),
@@ -616,6 +617,20 @@ const AUTHORED_GROUP_MESSAGE_FIELDS: &[&str] = &["group_id", "role", "text", "cr
 
 fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecError> {
     Ok(match collection {
+        "client_error_reports" => &[
+            "received_at",
+            "expires_at",
+            "environment",
+            "severity",
+            "report.platform",
+            "report.kind",
+            "report.exception_class",
+            "report.native_signal",
+            "report.app_version",
+            "report.app_build",
+            "report.os_version",
+            "report.runtime",
+        ],
         "agent_key_login_requests" => &["approved_user_id", "status", "created_at", "expires_at"],
         "agent_service_bindings" => &["user_id", "created_at", "updated_at"],
         "api_key_credentials" => &["user_id", "kind", "is_active", "created_at", "expires_at"],

@@ -1,0 +1,10 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+group = 'dev.nyxid.crash'
+version = '1.0.0'
+android {
+  namespace 'dev.nyxid.crash'
+  defaultConfig { versionCode 1; versionName '1.0.0' }
+}

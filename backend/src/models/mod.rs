@@ -288,4 +288,8 @@ pub mod channel_turn_preparation;
 
 pub mod gateway_reply;
 
+pub mod client_error_report;
+
+pub mod client_release_registry;
+
 pub mod nyxbot_response_read;

@@ -3,6 +3,7 @@ import {
   type PublicAuthConfig,
 } from "../../features/auth/publicAuthConfig";
 import { requestJson } from "./http";
+import { cachePublicConfigHints } from "../publicConfigHints";
 
 const PUBLIC_AUTH_CONFIG_TIMEOUT_MS = 10_000;
 
@@ -35,7 +36,9 @@ export async function getPublicAuthConfig(
     if (timedOut) {
       throw new Error("Loading sign-in options timed out. Please try again.");
     }
-    return parsePublicAuthConfig(response);
+    const config = parsePublicAuthConfig(response);
+    cachePublicConfigHints(response);
+    return config;
   } catch {
     if (signal?.aborted) throw cancelledRequest();
     if (timedOut) {

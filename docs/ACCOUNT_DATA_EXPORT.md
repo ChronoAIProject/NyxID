@@ -68,7 +68,7 @@ user-visible metadata or content appropriate to that collection: service
 connections and service metadata; session lifecycle metadata; assistant
 private conversation titles, the person's explicitly owner-authored user inputs, assistant replies to web/mobile-origin turns in private conversations without per-message platform routing, and attachment metadata; channel message metadata
 and routing metadata; action, notification, machine-job and other account
-activity metadata; audit event type/time metadata for events authored by the
+activity metadata; consented crash and error report metadata (versions, categories and timestamps, without stack frames, native images or delivery state); audit event type/time metadata for events authored by the
 person; and billing wallet summary, received grants and usage rollups. Every
 source collection has a named field allowlist, owner predicate, subsection name
 and newest-first sort in `account_export_service.rs`; there is no generic
@@ -147,6 +147,7 @@ Every declared registry export view has one subsection; a source collection may 
 | `account_activity` | `assistant_voice_windows` | `user_id` |
 | `account_activity` | `assistant_wire_logs` | `user_id`, `conversation_id`, `created_at`, `expires_at` |
 | `account_activity` | `audit_log` | `event_type`, `created_at` |
+| `account_activity` | `client_error_reports` | `received_at`, `expires_at`, `environment`, `severity`, `report.platform`, `report.kind`, `report.exception_class`, `report.native_signal`, `report.app_version`, `report.app_build`, `report.os_version`, `report.runtime` |
 | `account_activity` | `feature_flag_overrides` | `created_at`, `updated_at` |
 | `account_activity` | `invite_codes` | `usages.user_id`, `usages.used_at`, `created_at`, `updated_at` |
 | `account_activity` | `invocation_diagnostics` | `actor_user_id`, `state`, `created_at`, `completed_at`, `expires_at` |

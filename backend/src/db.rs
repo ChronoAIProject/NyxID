@@ -220,6 +220,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     db.collection::<bson::Document>(crate::services::assistant_cma_slot_audit::COLLECTION)
         .create_indexes(crate::services::assistant_cma_slot_audit::indexes())
         .await?;
+    crate::services::crash_report_service::ensure_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .create_indexes(crate::services::assistant_cma_sandbox_service::indexes())
         .await?;

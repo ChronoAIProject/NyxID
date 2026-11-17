@@ -263,6 +263,7 @@ function setup(
     clearTimeout: (id: number) => timers.delete(id),
     useTheme: () => ({ mode: "dark" }),
     useSafeAreaInsets: () => ({ top: 40 }),
+    useDiagnosticsNotice: () => {},
     useAuthSession: () => ({ isAuthenticated: authenticated }),
     getAuthAccountId: () => accountId,
     getAuthEpoch: () => authEpoch,
@@ -538,6 +539,7 @@ function postLoginSession(env: ReturnType<typeof setup>) {
           clear() {},
         }),
       },
+      "../../lib/crashReporting/runtime": { crashLifecycle: { disarm() {}, setRestoring() {}, refresh() {} } },
       "../../lib/auth/authEpoch": { advanceAuthEpoch() {} },
       "../../lib/auth/authAccount": {
         getAuthAccountId: () => accountId,

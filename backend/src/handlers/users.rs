@@ -1857,12 +1857,18 @@ mod account_deletion_policy_tests;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyticsConsentRequest {
+    #[serde(default)]
+    pub policy_version: Option<String>,
     pub account_id: String,
     pub enabled: bool,
 }
 
 #[derive(serde::Serialize)]
 pub struct AnalyticsConsentResponse {
+    pub current_policy_version: String,
+    pub diagnostics_offered: bool,
+    pub diagnostics_available: bool,
+    pub diagnostics_status: crate::services::crash_report_service::DiagnosticsStatus,
     pub account_id: String,
     pub policy_version: Option<String>,
     pub revision: String,
@@ -1870,10 +1876,12 @@ pub struct AnalyticsConsentResponse {
     pub changed_at: Option<String>,
 }
 
-fn analytics_consent_response(
+async fn analytics_consent_response(
+    db: &mongodb::Database,
     account_id: &str,
     value: crate::models::user::AnalyticsConsent,
 ) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
+    let status = crate::services::crash_report_service::policy_status(db, account_id, &value).await;
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -1882,6 +1890,11 @@ fn analytics_consent_response(
     (
         headers,
         Json(AnalyticsConsentResponse {
+            current_policy_version: if status.offered() { "2" } else { "1" }.into(),
+            diagnostics_offered: status.offered(),
+            diagnostics_available: status
+                == crate::services::crash_report_service::DiagnosticsStatus::Available,
+            diagnostics_status: status,
             account_id: account_id.to_owned(),
             policy_version: value.policy_version,
             revision: value.revision,
@@ -1898,9 +1911,11 @@ pub async fn get_analytics_consent(
     super::login_client_context::require_first_party_human(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     Ok(analytics_consent_response(
+        &state.db,
         &actor,
         crate::services::analytics_consent_service::read(&state.db, &actor).await?,
-    ))
+    )
+    .await)
 }
 
 pub async fn set_analytics_consent(
@@ -1915,10 +1930,12 @@ pub async fn set_analytics_consent(
             "Account changed; reload before changing analytics permission".into(),
         ));
     }
-    Ok(analytics_consent_response(
-        &actor,
-        crate::services::analytics_consent_service::set(&state.db, &actor, body.enabled).await?,
-    ))
+    use crate::services::analytics_consent_service::{self as consent, PolicyVersion};
+    let value = match PolicyVersion::parse(body.policy_version.as_deref())? {
+        PolicyVersion::V1 => consent::set(&state.db, &actor, body.enabled).await?,
+        policy => consent::set_acknowledging(&state.db, &actor, body.enabled, policy).await?,
+    };
+    Ok(analytics_consent_response(&state.db, &actor, value).await)
 }
 
 #[cfg(test)]
@@ -1948,6 +1965,7 @@ mod analytics_tests {
                 State(state.clone()),
                 test_auth_user(&second),
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1965,6 +1983,7 @@ mod analytics_tests {
                 State(state.clone()),
                 agent,
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1977,6 +1996,7 @@ mod analytics_tests {
             State(state),
             test_auth_user(&first),
             Json(AnalyticsConsentRequest {
+                policy_version: None,
                 account_id: first.clone(),
                 enabled: true,
             }),

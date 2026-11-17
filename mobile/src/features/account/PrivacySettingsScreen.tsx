@@ -1,6 +1,6 @@
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useState } from "react";
-import { Switch } from "react-native";
+import { Alert, Switch } from "react-native";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChartColumn, Download, Smartphone } from "lucide-react-native";
 import { Directory, File, Paths } from "expo-file-system";
@@ -54,6 +54,10 @@ export function PrivacySettingsScreen(
       return permission;
     },
   });
+  const diagnosticsEnabled =
+    analyticsPermission.data?.diagnostics_available &&
+    deviceConsent.enabled &&
+    deviceConsent.policy === 2;
   const saveAnalytics = useMutation({
     mutationFn: (enabled: boolean) =>
       saveAnalyticsPermission(
@@ -62,6 +66,11 @@ export function PrivacySettingsScreen(
         requestJson,
         analyticsConsentState.getSnapshot,
         deviceConsent.setConsent,
+        analyticsPermission.data?.diagnostics_offered &&
+          (analyticsPermission.data?.policy_version === "2" ||
+            deviceConsent.policy === 2)
+          ? 2
+          : 1,
       ),
     onSuccess: () => {
       void analyticsPermission.refetch();
@@ -144,6 +153,39 @@ export function PrivacySettingsScreen(
       }
     },
   });
+  const reviewDiagnostics = useMutation({
+    mutationFn: () =>
+      saveAnalyticsPermission(
+        deviceConsent.accountId!,
+        true,
+        requestJson,
+        analyticsConsentState.getSnapshot,
+        deviceConsent.setConsent,
+        2,
+      ),
+    onSuccess: () => {
+      void analyticsPermission.refetch();
+    },
+    onError: () =>
+      setToast({
+        message: t("Could not save updated analytics permission."),
+        kind: "error",
+      }),
+  });
+  const review = () =>
+    Alert.alert(
+      t("Review updated analytics"),
+      t(
+        "Optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Review to allow updated analytics, or keep your current choice.",
+      ),
+      [
+        { text: t("Not now"), style: "cancel" },
+        {
+          text: t("Allow updated analytics"),
+          onPress: () => reviewDiagnostics.mutate(),
+        },
+      ],
+    );
   // The row names the setting; the switch shows its state. Only an error
   // needs words; a load disables the switch without placeholder text.
   const accountDetail = analyticsPermission.isFetching
@@ -211,11 +253,47 @@ export function PrivacySettingsScreen(
                     analyticsPermission.isError ||
                     analyticsPermission.isFetching)
                 }
-                onValueChange={deviceConsent.setConsent}
+                onValueChange={(value) =>
+                  deviceConsent.setConsent(
+                    value,
+                    deviceConsent.policy === 2 ? 2 : 1,
+                  )
+                }
               />
             }
           />
         </SettingsGroup>
+        {analyticsPermission.data?.diagnostics_offered === true && (
+          <SettingsGroup
+            title={t("Crash diagnostics")}
+            footer={t(
+              "iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured.",
+            )}
+          >
+            <SettingsRow
+              icon={ChartColumn}
+              label={t("Crash diagnostics")}
+              detail={t(
+                diagnosticsEnabled
+                  ? "Crash diagnostics enabled"
+                  : "Crash diagnostics need updated permission",
+              )}
+              chevron={false}
+            />
+            {!diagnosticsEnabled && (
+              <SettingsRow
+                label={t("Review updated analytics")}
+                onPress={
+                  analyticsPermission.data?.current_policy_version === "2" &&
+                  !reviewDiagnostics.isPending &&
+                  !saveAnalytics.isPending
+                    ? review
+                    : undefined
+                }
+              />
+            )}
+          </SettingsGroup>
+        )}
         {analyticsPermission.isError && (
           <PrimaryButton
             refreshLabelOnFontScaleChange

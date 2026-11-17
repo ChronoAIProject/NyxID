@@ -5,6 +5,7 @@
   "Allow account usage analytics": "允許帳號用量分析",
   "Allow for my account": "允許此帳戶使用",
   "Allow on this device": "允許此裝置使用",
+  "Allow updated analytics": "允許更新後的分析功能",
   "Allow usage analytics on this device": "允許此裝置的使用情況分析",
   "An https link to a square image. Your initial is shown until you add one.": "正方形圖片的 https 連結。新增前會顯示姓名首字母。",
   "App language": "應用程式語言",
@@ -17,8 +18,13 @@
   "Conversation": "對話",
   "Copy Recovery Codes": "複製復原碼",
   "Copy Setup Key": "複製設定金鑰",
+  "Could not save updated analytics permission.": "無法儲存更新後的分析授權。",
+  "Could not save updated analytics permission. This device remains off.": "無法儲存更新後的分析授權。本裝置保持關閉。",
   "Couldn't load active sessions": "無法載入使用中的工作階段",
   "Couldn't load your profile": "無法載入個人資料",
+  "Crash diagnostics": "當機診斷",
+  "Crash diagnostics enabled": "當機診斷已啟用",
+  "Crash diagnostics need updated permission": "當機診斷需要更新授權",
   "Creates a bounded JSON export. You can request one up to three times per hour.": "建立有大小限制的 JSON 匯出。每小時最多請求三次。",
   "Current password": "目前密碼",
   "Custom image": "自訂圖片",
@@ -65,6 +71,7 @@
   "Retry saving device choice": "重試儲存裝置選擇",
   "Retry saving language": "重試儲存語言",
   "Reveal Codes": "顯示代碼",
+  "Review updated analytics": "檢視更新後的分析功能",
   "Saved on this device. Dictation language is set separately in Voice settings. Messages stay in their original language.": "儲存在此裝置上。聽寫語言可在語音設定中另行選擇。訊息保留原始語言。",
   "Set Up Authenticator": "設定驗證器",
   "Setup key": "設定金鑰",
@@ -108,5 +115,6 @@
   "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.": "你的資料匯出暫時受到頻率限制。請在 {{minutes}} 分鐘後重試。",
   "Your data export is temporarily rate limited. Try again in {{seconds}} seconds.": "你的資料匯出暫時受到頻率限制。請在 {{seconds}} 秒後重試。",
   "Your name": "您的姓名",
-  "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您儲存的聲音（{{voice}}）已無法使用。請選擇聲音以繼續。"
+  "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您儲存的聲音（{{voice}}）已無法使用。請選擇聲音以繼續。",
+  "iOS includes native crashes and JavaScript errors. Android reports JavaScript errors and JavaScript fatal errors only; JVM and NDK crashes are not captured.": "iOS 包含原生當機和 JavaScript 錯誤。Android 僅回報 JavaScript 錯誤及 JavaScript 致命錯誤，不擷取 JVM 或 NDK 當機。"
 }

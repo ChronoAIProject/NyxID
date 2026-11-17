@@ -985,6 +985,7 @@ mod tests {
 
     fn test_config(key_hex: &str, prev_hex: Option<&str>) -> AppConfig {
         AppConfig {
+            crash_reporting: Default::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,

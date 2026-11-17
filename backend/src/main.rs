@@ -152,6 +152,7 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 pub struct AppState {
     pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
+    pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
@@ -1186,9 +1187,14 @@ async fn server_run(cli: Cli) {
 
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
+    let crash_reports = Arc::new(
+        services::crash_report_export::CrashConfig::from_config(&config)
+            .expect("Invalid crash reporting configuration"),
+    );
     let state = AppState {
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
+        crash_reports: crash_reports.clone(),
         #[cfg(test)]
         local_machine_platform: None,
         db: db.clone(),
@@ -1377,6 +1383,22 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
+    services::shutdown::process().spawn_worker(services::crash_report_service::public_config::run(
+        db.clone(),
+        services::shutdown::process(),
+    ));
+    services::shutdown::process().spawn_worker(
+        services::crash_report_service::releases::run_manifest_refresh(
+            db.clone(),
+            Arc::new(config.clone()),
+            services::shutdown::process(),
+        ),
+    );
+    services::shutdown::process().spawn_worker(services::crash_report_export::worker::run(
+        db.clone(),
+        crash_reports,
+        services::shutdown::process(),
+    ));
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(
