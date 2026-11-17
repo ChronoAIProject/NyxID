@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { ApiError, isApiError } from "./ApiError";
 
 /**
@@ -26,7 +27,6 @@ const ERROR_MESSAGES: Record<number, string> = {
   1005: "Too many requests. Please wait a moment and try again.",
 
   // ── Auth ──
-  2000: "Invalid email or password.",
   2001: "Your session has expired. Please sign in again.",
   2003: MOBILE_MFA_STEP_UP_MESSAGE,
 
@@ -78,6 +78,10 @@ export function resolveErrorMessage(error: unknown): string {
   if (!isApiError(error)) {
     if (error instanceof Error) return error.message;
     return "Something went wrong. Please try again.";
+  }
+
+  if (error.errorCode === 2000 || error.errorKey === "authentication_failed") {
+    return translateApp(error.message.replace(/^Authentication failed:\s*/i, ""));
   }
 
   // 1. Exact code match
