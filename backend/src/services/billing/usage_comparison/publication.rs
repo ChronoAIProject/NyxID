@@ -4,12 +4,12 @@ use crate::models::coordination::LEASE_COLLECTION_NAME;
 
 pub(super) enum Evidence {
     Parsed {
-        usage: CurrentUsage,
+        usage: Box<CurrentUsage>,
         projection: Option<UsageProjection>,
         complete: bool,
         blocked: Option<&'static str>,
     },
-    Finding(&'static str),
+    Finding(String),
     Failed(&'static str),
     Waiting(&'static str),
     Retired,
@@ -135,7 +135,14 @@ pub(super) async fn save(
                 } else {
                     observation::complete(target, coverage, folded, usage, now, pass)
                         .unwrap_or_else(|reason| {
-                            observation::waiting(target, coverage, now, pass, "unsupported", reason)
+                            observation::waiting(
+                                target,
+                                coverage,
+                                now,
+                                pass,
+                                "unsupported",
+                                &reason,
+                            )
                         })
                 }
             } else {
