@@ -210,11 +210,25 @@ pub async fn read_quick_access(
     db: &Database,
     user_id: &str,
 ) -> AppResult<Option<QuickAccessPreferences>> {
-    db.collection::<User>(COLLECTION_NAME)
+    let user = db
+        .collection::<User>(COLLECTION_NAME)
         .find_one(doc! { "_id": user_id })
         .await?
-        .map(|user| user.profile_config.quick_access)
-        .ok_or_else(|| AppError::NotFound("User not found".into()))
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    if !user.user_type.is_person() {
+        return Err(AppError::Forbidden(
+            "Quick access requires a person account".into(),
+        ));
+    }
+    Ok(user.profile_config.quick_access)
+}
+
+fn quick_access_person_filter(user_id: &str) -> bson::Document {
+    // Older person records predate user_type. Keep them compatible while
+    // fencing writes against organization subjects, including type changes.
+    doc! { "_id": user_id, "$or": [
+        { "user_type": "person" }, { "user_type": { "$exists": false } }
+    ] }
 }
 
 pub async fn save_quick_access(
@@ -226,7 +240,7 @@ pub async fn save_quick_access(
     let result = db
         .collection::<User>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": user_id },
+            quick_access_person_filter(user_id),
             doc! { "$set": {
                 "profile_config.quick_access": bson::to_bson(&preferences)
                     .map_err(|_| AppError::Internal("Could not encode quick access".into()))?,
@@ -235,6 +249,7 @@ pub async fn save_quick_access(
         )
         .await?;
     if result.matched_count == 0 {
+        read_quick_access(db, user_id).await?;
         return Err(AppError::NotFound("User not found".into()));
     }
     Ok(preferences)
@@ -245,7 +260,7 @@ pub async fn reset_quick_access(db: &Database, user_id: &str) -> AppResult<()> {
     let result = db
         .collection::<User>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": user_id },
+            quick_access_person_filter(user_id),
             doc! {
                 "$unset": { "profile_config.quick_access": "" },
                 "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
@@ -253,6 +268,7 @@ pub async fn reset_quick_access(db: &Database, user_id: &str) -> AppResult<()> {
         )
         .await?;
     if result.matched_count == 0 {
+        read_quick_access(db, user_id).await?;
         return Err(AppError::NotFound("User not found".into()));
     }
     Ok(())

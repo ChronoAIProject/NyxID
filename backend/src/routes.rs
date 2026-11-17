@@ -4136,3 +4136,6 @@ mod machine_external_runtime_tests;
 
 #[cfg(test)]
 mod refusal_throttle_tests;
+
+#[cfg(test)]
+mod quick_access_tests;

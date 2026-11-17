@@ -1120,6 +1120,58 @@ Possible error keys in the redirect:
 
 ### Users
 
+#### GET /api/v1/users/me/quick-access
+
+Returns the ordered account preference used by the Duo quick-access rail.
+All three quick-access methods require a first-party **person** session cookie
+or access JWT. API keys, delegated tokens (including `account:read`), service
+accounts, relay tokens, OAuth-client tokens and organization subjects are refused
+with 401 or 403. GET deliberately follows the human-only device-preference
+policy of `/users/me/analytics-consent`; it is not a delegated profile read.
+
+**Response (200):**
+
+```json
+{
+  "items": [
+    { "kind": "destination", "id": "new_chat" },
+    { "kind": "destination", "id": "notifications" },
+    { "kind": "destination", "id": "scan_qr" },
+    { "kind": "destination", "id": "recent_chats" },
+    { "kind": "destination", "id": "settings" }
+  ],
+  "customized": false
+}
+```
+
+#### PUT /api/v1/users/me/quick-access
+
+Saves the ordered list. The JSON body is `{ "items": [...] }`, with zero to
+12 unique entries. Each entry has a `kind` and `id`:
+
+| Kind | Accepted ID |
+|------|-------------|
+| `destination` | `new_chat`, `notifications`, `scan_qr`, `terminal_login_code`, `recent_chats`, `settings`, `automations`, `machines`, `plugins`, `activity`, `create_agent`, `agents`, `crews` |
+| `agent` | UUID, stored in canonical lowercase form |
+| `crew` | Valid `nyxg-` crew ID; `group` is accepted as an alias |
+
+Unknown kinds/destinations, malformed IDs, duplicates and oversized lists return
+400. Shape-valid agent/crew IDs are accepted without checking roster access:
+these inert preferences confer no access, and clients resolve them only against
+the authenticated person's authorized roster. Unavailable entries are not shown.
+The response has the GET shape with `customized: true`; an empty saved list is
+different from the default list.
+
+#### DELETE /api/v1/users/me/quick-access
+
+Removes the saved preference and returns the current default list with
+`customized: false`. All methods operate only on the authenticated person; there
+is no owner override. Storage is the existing users row at
+`profile_config.quick_access`, included in account export and removed with the
+person during erasure; no collection is added. These users preference routes,
+like their adjacent preference endpoints, are documented here rather than
+registered as utoipa paths.
+
 #### GET /api/v1/users/me
 
 Returns the profile of the currently authenticated user.
