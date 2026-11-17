@@ -12,6 +12,9 @@ use mongodb::event::{EventHandler, command::CommandEvent};
 use serde_json::json;
 use std::sync::Mutex;
 
+#[path = "tax_refresh_budget_tests.rs"]
+mod tax_refresh_budget_tests;
+
 #[derive(Default)]
 struct Provider {
     calls: Mutex<Vec<String>>,
@@ -108,6 +111,7 @@ impl LagoApi for Provider {
     }
     async fn tax_config(&self, c: &str, _: &str) -> AppResult<LagoTaxConfig> {
         self.call("tax", c)?;
+        tax_refresh_budget_tests::on_tax_read(c).await;
         self.race(Step::Taxes).await;
         Ok(billing::taxes::zero_config())
     }

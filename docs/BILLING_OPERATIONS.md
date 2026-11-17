@@ -107,6 +107,16 @@ or country policy in NyxID configuration.
    change the tax, wait for the profile refresh, and verify the bill before
    resuming. Do not edit tax assignments while running the demo.
 
+Reconciliation sweeps tax profiles before recovery and again after price
+synchronization. Each sweep selects up to 100 due wallets, oldest first.
+After selection, it starts refreshes for up to 20 seconds and lets the current
+refresh finish. Allow for selection, the 20-second budget, and one final
+refresh with up to five seconds of Lago time plus its MongoDB work. The sweep
+has no fixed wall-clock maximum. If wallets remain when the budget runs out,
+an info log records how many were attempted, completed, and left for the next
+sweep. The second sweep can pick them up in the same pass. A refresh error,
+including a Lago timeout, still counts as a failed unit in Integrity.
+
 NyxID reads the actual subscription's plan, including customized plan/charge tax
 assignments, and the customer's billing entity. Price synchronization round-trips
 charge IDs and omits response-only tax fields and `tax_codes` on existing
