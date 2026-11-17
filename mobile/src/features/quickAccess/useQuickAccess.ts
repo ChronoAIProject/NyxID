@@ -80,7 +80,7 @@ function ownsAction(authority: ActionAuthority) {
   return authority.account === getAuthAccountId() && authority.epoch === getAuthEpoch() && authority.generation === authSessionGeneration();
 }
 function assertAction(authority: ActionAuthority) {
-  if (!ownsAction(authority)) throw new Error("auth_session_changed");
+  if (!ownsAction(authority)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
 }
 
 /** What the list looks like the moment a change is made. */
@@ -103,9 +103,9 @@ export function quickAccessMutationHandlers(
     key[2] === getAuthEpoch() && (!change?.authority || ownsAction(change.authority));
   return {
     onMutate: async (change: QuickAccessChange & { authority?: ActionAuthority }) => {
-      if (!current(change)) throw new Error("auth_session_changed");
+      if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       await client.cancelQueries({ queryKey: key });
-      if (!current(change)) throw new Error("auth_session_changed");
+      if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       const previous = client.getQueryData<QuickAccessState>(key);
       client.setQueryData<QuickAccessState>(key, optimisticQuickAccess(change));
       return { previous };

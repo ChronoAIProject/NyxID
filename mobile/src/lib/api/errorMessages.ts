@@ -75,6 +75,7 @@ const BAD_REQUEST_OVERRIDES: Array<{ pattern: string; message: string }> = [
  *   5. Generic fallback string
  */
 export function resolveErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.name === "AbortError") return translateApp("Request cancelled");
   if (!isApiError(error)) {
     if (error instanceof Error) return error.message;
     return "Something went wrong. Please try again.";

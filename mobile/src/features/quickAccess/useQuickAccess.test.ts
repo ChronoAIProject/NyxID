@@ -450,7 +450,9 @@ test('P1-4 queued actions cannot dispatch or repopulate cache after account, epo
     h.mount(()=>module.useQuickAccess());h.value().save(saved.items);h.value().reset();
     await new Promise(r=>setImmediate(r));assert.deepEqual(requests,['a']);
     if(boundary==='account')account='b';if(boundary==='epoch')epoch++;if(boundary==='generation')generation++;
-    client.removeQueries();gate.resolve(saved);await Promise.allSettled(pending);
+    client.removeQueries();gate.resolve(saved);const results = await Promise.allSettled(pending);
+    assert.equal(results[1]?.status, 'rejected');
+    if (results[1]?.status === 'rejected') assert.equal(results[1].reason.name, 'AbortError');
     assert.deepEqual(requests,['a'],`${boundary}: queued action must never dispatch with successor credentials`);
     assert.equal(client.getQueryData(module.quickAccessKey(7)),undefined,'late callbacks must never recreate previous-account cache');
     h.unmount();client.clear();

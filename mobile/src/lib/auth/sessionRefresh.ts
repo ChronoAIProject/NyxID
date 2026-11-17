@@ -19,13 +19,13 @@ export function createSessionRefresh(deps: {
       if (!refreshed) {
         const current = await deps.load();
         if (current?.sessionGeneration !== session.sessionGeneration || current?.accessToken !== session.accessToken || current?.refreshToken !== session.refreshToken)
-          throw new Error('auth_session_changed');
+          throw Object.assign(new Error('auth_session_changed'), { name: 'AbortError' });
         return null;
       }
       const refreshToken = refreshed.refresh_token || session.refreshToken!;
       const committed = await deps.commit(session, { accessToken: refreshed.access_token, refreshToken,
         accessTokenExpiresAt: deps.expiresAt(refreshed.expires_in) });
-      if (!committed) throw new Error('auth_session_changed');
+      if (!committed) throw Object.assign(new Error('auth_session_changed'), { name: 'AbortError' });
       return { ...refreshed, refresh_token: refreshToken };
     })().finally(() => { if (flight === next) flight = null; });
     flight = next;
