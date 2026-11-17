@@ -87,10 +87,13 @@ it("creates no connection or Key grant on load; publication is explicit and name
   ]);
 });
 
-it("does not expose publication for shared, organization or destroyed Bots", () => {
+it("does not expose publication for shared, read-only, non-admin organization or destroyed Bots", () => {
   for (const fields of [
     { share_role: "manager" },
     { owner_kind: "org" },
+    { owner_kind: "org", org_role: "member" },
+    { owner_kind: "org", org_role: "viewer" },
+    { owner_kind: "org", org_role: "admin", can_maintain: false },
     { status: "destroyed" },
   ]) {
     show({ ...agent, ...fields } as AssistantAgent);
@@ -100,6 +103,20 @@ it("does not expose publication for shared, organization or destroyed Bots", () 
     cleanup();
   }
   expect(mocks.request).not.toHaveBeenCalled();
+});
+
+it("allows organization admins to explicitly publish the Bot's voice connection", async () => {
+  mocks.request.mockResolvedValueOnce({ service: null }).mockResolvedValue({ service });
+  show({ ...agent, owner_kind: "org", org_role: "admin", can_maintain: true });
+  const button = await screen.findByRole("button", { name: "Create voice connection" });
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  await userEvent.click(button);
+  await screen.findByRole("link", { name: "Manage Agent Key access" });
+  expect(mocks.request).toHaveBeenCalledWith(
+    `/assistant/nyxagent/agents/${id}/voice-service`,
+    { method: "PUT", authorityGuard: expect.any(Function) },
+  );
 });
 
 it("keeps publication disabled while the feature is off", () => {

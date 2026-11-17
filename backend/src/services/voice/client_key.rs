@@ -162,12 +162,7 @@ async fn resolve_for_caller(
     };
     let auth = &caller.auth;
     let thread = assistant_voice::thread(db, &key.user_id, conversation).await?;
-    if thread.shared_agent_thread
-        || thread
-            .agent_owner_id
-            .as_deref()
-            .is_some_and(|id| id != key.user_id)
-    {
+    if thread.shared_agent_thread {
         return Err(refused());
     }
     let agent = team::agent_for_conversation(db, &thread).await?;
@@ -298,7 +293,7 @@ pub async fn call_operation(
     // this transaction. Reuse its snapshot for the exact operation source.
     let service = db
         .collection(crate::models::user_service::COLLECTION_NAME)
-        .find_one(doc! {"_id":&binding.service_id,"user_id":&call.user_id})
+        .find_one(doc! {"_id":&binding.service_id})
         .session(&mut *session)
         .await?
         .ok_or_else(refused)?;
@@ -389,10 +384,23 @@ pub async fn fence_call(
         .collection::<crate::models::user_service::UserService>(
             crate::models::user_service::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&binding.service_id,"user_id":user})
+        .find_one(doc! {"_id":&binding.service_id})
         .session(&mut *session)
         .await?
         .ok_or_else(refused)?;
+    if service.user_id != user {
+        crate::services::org_membership_authority::fence_org(db, &service.user_id, session).await?;
+        crate::services::api_key_scope_service::validate_service_ids_with_session(
+            db,
+            user,
+            std::slice::from_ref(&service.id),
+            crate::services::api_key_scope_service::ScopeAuthorization::ActorPermissions {
+                actor_user_id: user,
+            },
+            session,
+        )
+        .await?;
+    }
     let mut fences = vec![
         (
             crate::models::downstream_service::COLLECTION_NAME,
@@ -409,11 +417,11 @@ pub async fn fence_call(
         ),
         (
             crate::models::assistant_agent::COLLECTION_NAME,
-            doc! {"_id":&binding.agent_id,"user_id":user,"destroyed_at":bson::Bson::Null},
+            doc! {"_id":&binding.agent_id,"user_id":&service.user_id,"destroyed_at":bson::Bson::Null},
         ),
         (
             crate::models::user_service::COLLECTION_NAME,
-            doc! {"_id":&binding.service_id,"user_id":user,"is_active":true,
+            doc! {"_id":&binding.service_id,"user_id":&service.user_id,"is_active":true,
             "source":super::access::BOUND_SOURCE,"source_id":&binding.agent_id,
             "deleted_at":bson::Bson::Null},
         ),

@@ -32,6 +32,44 @@ pub(super) async fn personal_owner(db: &Database, owner: &str) -> AppResult<()> 
     Ok(())
 }
 
+/// A device still acts as its personal Key owner. Organization Bots and
+/// connections retain their organization ownership and live membership ACL.
+pub(super) async fn agent_access(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+) -> AppResult<()> {
+    if agent.destroyed_at.is_some()
+        || (agent.user_id != actor && agent.is_nyxbot())
+        || !crate::services::org_agent_service::can_use(
+            &crate::services::org_agent_service::access(db, actor, &agent.user_id).await?,
+        )
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Voice Bot is unavailable".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn service_access(db: &Database, auth: &AuthUser, service: &UserService) -> AppResult<()> {
+    let access =
+        crate::services::org_agent_service::access(db, &auth.user_id.to_string(), &service.user_id)
+            .await?;
+    if !crate::services::org_agent_service::can_use(&access)
+        || !access.allows_resource(&service.id)
+        || (service.admin_only && !access.can_write())
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Voice connection is unavailable".into(),
+        ));
+    }
+    key_service::ensure_api_key_service_scope(
+        auth.api_key_service_scope(),
+        std::slice::from_ref(&service.id),
+    )
+}
+
 pub async fn services(db: &Database, auth: &AuthUser) -> AppResult<Vec<UserService>> {
     personal_owner(db, &auth.user_id.to_string()).await?;
     let denied = || AppError::ApiKeyScopeForbidden("This Key cannot use NyxBot Voice".into());
@@ -40,21 +78,21 @@ pub async fn services(db: &Database, auth: &AuthUser) -> AppResult<Vec<UserServi
         .find_one(doc! {"slug":SERVICE_SLUG,"is_active":true})
         .await?
         .ok_or_else(denied)?;
+    let owners =
+        crate::services::org_agent_service::visible_owners(db, &auth.user_id.to_string()).await?;
     let services: Vec<UserService> = db.collection::<UserService>(SERVICES).find(doc! {
-        "user_id":auth.user_id.to_string(),"catalog_service_id":&catalog.id,
+        "user_id":{"$in":owners},"catalog_service_id":&catalog.id,
         "source":BOUND_SOURCE,"source_id":{"$type":"string"},
         "is_active":true,"deleted_at":mongodb::bson::Bson::Null,"node_id":mongodb::bson::Bson::Null,
     }).await?.try_collect().await?;
-    let allowed = services
-        .into_iter()
-        .filter(|service| {
-            key_service::ensure_api_key_service_scope(
-                auth.api_key_service_scope(),
-                std::slice::from_ref(&service.id),
-            )
-            .is_ok()
-        })
-        .collect::<Vec<_>>();
+    let mut allowed = Vec::new();
+    for service in services {
+        match service_access(db, auth, &service).await {
+            Ok(()) => allowed.push(service),
+            Err(error) if super::client_key::permanent_authority_failure(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
     if allowed.is_empty() {
         return Err(denied());
     }
@@ -65,12 +103,8 @@ pub async fn authorize(
     auth: &AuthUser,
     agent: &AssistantAgent,
 ) -> AppResult<UserService> {
-    if agent.user_id != auth.user_id.to_string() || agent.destroyed_at.is_some() {
-        return Err(AppError::ApiKeyScopeForbidden(
-            "This Key cannot invoke the selected Bot".into(),
-        ));
-    }
     personal_owner(db, &auth.user_id.to_string()).await?;
+    agent_access(db, &auth.user_id.to_string(), agent).await?;
     let catalog = db
         .collection::<DownstreamService>(CATALOG)
         .find_one(doc! {"slug":SERVICE_SLUG,"is_active":true})
@@ -79,7 +113,7 @@ pub async fn authorize(
     let service = db
         .collection::<UserService>(SERVICES)
         .find_one(doc! {
-            "user_id":auth.user_id.to_string(),"catalog_service_id":&catalog.id,
+            "user_id":&agent.user_id,"catalog_service_id":&catalog.id,
             "source":BOUND_SOURCE,"source_id":&agent.id,"is_active":true,
             "deleted_at":mongodb::bson::Bson::Null,"node_id":mongodb::bson::Bson::Null,
         })
@@ -89,10 +123,7 @@ pub async fn authorize(
                 "This Key has no voice connection for the selected Bot".into(),
             )
         })?;
-    key_service::ensure_api_key_service_scope(
-        auth.api_key_service_scope(),
-        std::slice::from_ref(&service.id),
-    )?;
+    service_access(db, auth, &service).await?;
     Ok(service)
 }
 
@@ -103,12 +134,13 @@ pub(crate) async fn connection(db: &Database, auth: &AuthUser, id: &str) -> AppR
     let service = db
         .collection::<UserService>(SERVICES)
         .find_one(doc! {
-            "_id":id,"user_id":auth.user_id.to_string(),"source":BOUND_SOURCE,
+            "_id":id,"source":BOUND_SOURCE,
             "source_id":{"$type":"string"},"is_active":true,
             "deleted_at":mongodb::bson::Bson::Null,"node_id":mongodb::bson::Bson::Null,
         })
         .await?
         .ok_or_else(|| AppError::ApiKeyScopeForbidden("Voice connection is unavailable".into()))?;
+    service_access(db, auth, &service).await?;
     let catalog = db.collection::<DownstreamService>(CATALOG).find_one(doc! {
         "_id":service.catalog_service_id.as_deref().unwrap_or_default(),"slug":SERVICE_SLUG,"is_active":true,
     }).await?.ok_or_else(|| AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()))?;

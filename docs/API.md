@@ -9290,6 +9290,10 @@ exact `UserService.id` through existing Key service scope. The service URL is
 `/voice/sessions`, session status/control/stream and bounded announcements.
 Each connection fixes one Bot, and each call binds the actual login child
 credential. Existing browser routes remain first-party human only.
+Organization administrators may publish their organization's Bot connection;
+personal Keys granted that connection must retain live organization service
+access. Calls use the acting person's private thread, not the organization's
+or another member's conversation.
 See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
 independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
 work running; explicit Stop cancels it.

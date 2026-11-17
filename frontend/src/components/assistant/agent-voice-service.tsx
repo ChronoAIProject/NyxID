@@ -34,7 +34,8 @@ export function AgentVoiceService({
   if (
     !enabled ||
     !owner ||
-    agent.owner_kind === "org" ||
+    (agent.owner_kind === "org" && agent.org_role !== "admin") ||
+    agent.can_maintain === false ||
     agent.share_role ||
     agent.status === "destroyed"
   )

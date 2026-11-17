@@ -16,7 +16,19 @@ service scope. No new token type, permission table or hardcoded Bot is used.
 A catalog ID, display name, generic catalog connection or `llm-nyx` grant cannot
 select a Bot. A request cannot substitute another `agent_id` or `service_id`.
 All-services Keys retain their ordinary semantics; use selected-service access
-for a dedicated board. Organization and shared Bots are outside this service.
+for a dedicated board. Shared personal Bots are outside this service.
+
+An organization administrator can also publish a connection for an organization
+Bot through the same API. The connection and endpoint belong to the organization;
+publication requires the administrator's current service scope. A personal board
+Key can receive that exact organization connection through the existing service
+scope workflow. The acting person must remain an active Admin or Member with
+access to that service; Viewer access is insufficient. Discovery, call startup
+and ongoing call authorization recheck membership, role and effective service
+scope. The call and conversation belong to that acting person, while the Bot
+retains its organization identity and tool grants. Members never share each
+other's private calls or conversation history. Organization-owned Keys are still
+outside device voice; no organization is impersonated as a personal caller.
 
 The two grant directions are independent:
 
@@ -149,10 +161,12 @@ a role with `nyxid:feature_flags:admin` can enable these built-in flags; an
 ordinary person, org admin or feature-flag creator role alone cannot. Admin
 Feature Flags supports global, organization-cohort and individual-person
 overrides. A person override takes precedence over the cohort/global result.
-An org cohort enables eligible people, not org-owned Bots: this service is
-still limited to personal owned Bots. The seed changes none of these checks.
+An org cohort enables eligible people. Organization Bot connections additionally
+require the live organization authorization described above. The seed changes
+none of these checks.
 
-**Owner publication and device grant.** In the first-party app, the owner opens
+**Owner publication and device grant.** In the first-party app, the personal
+owner or an authorized organization administrator opens
 **Agent details → Access → Device voice** and publishes the desired Bot's
 connection. Then grant that exact connection to the device Agent Key with
 selected-service access and `proxy` scope (`read` too for `/keys` discovery).
@@ -166,7 +180,7 @@ or catalog ID substitutes for the published connection's `service_id`.
 `BASE_URL` has no trailing slash, `OWNER_TOKEN` is the owner's first-party session
 access token, `ADMIN_TOKEN` is an authorized flag reader's token, and `DEVICE_KEY`
 is the device's ordinary Agent Key or login child credential. Keep credentials
-out of logs. `BOT_ID` is the personal Bot UUID.
+out of logs. `BOT_ID` is the personal or organization Bot UUID.
 
 ```sh
 # Deployment created the active catalog row; default /catalog stays unchanged.
