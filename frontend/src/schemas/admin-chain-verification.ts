@@ -20,6 +20,8 @@ export const chainVerifyStatusSchema = z.object({
 
 export const startupDiagnosticSchema = z.object({
   code: z.string().min(1),
+  severity: z.enum(["info", "action"]).optional(),
+  technical_details: z.string().nullable().optional(),
   summary: z.string().min(1),
   detail: z.string().min(1),
   remediation: z.string().min(1),

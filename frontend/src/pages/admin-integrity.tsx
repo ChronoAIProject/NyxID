@@ -130,6 +130,38 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
   );
 }
 
+function DiagnosticEntry({
+  diagnostic,
+  action = false,
+}: {
+  readonly diagnostic: StartupDiagnostic;
+  readonly action?: boolean;
+}) {
+  useUiTranslation();
+  return (
+    <div className={action ? "space-y-2 text-14" : "space-y-2 text-14 text-muted-foreground"}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className={action ? "font-medium text-destructive" : "font-medium"}>
+          {diagnostic.summary}
+        </p>
+        <span className="text-13 text-muted-foreground">
+          {formatTimestamp(diagnostic.detected_at)}
+        </span>
+      </div>
+      <p className="text-muted-foreground">{diagnostic.detail}</p>
+      <p>{diagnostic.remediation}</p>
+      {diagnostic.technical_details ? (
+        <details>
+          <summary className="cursor-pointer">{translateUi("Details")}</summary>
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted px-4 py-3 font-mono type-code">
+            {diagnostic.technical_details}
+          </pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
 function StartupDiagnostics({
   diagnostics,
 }: {
@@ -139,18 +171,20 @@ function StartupDiagnostics({
   if (diagnostics.length === 0) return null;
 
   const informationalCodes = ["billing_usage_warming", "billing_usage_coverage"];
-  const informational = diagnostics.filter((item) => informationalCodes.includes(item.code));
-  const failures = diagnostics.filter((item) => !informationalCodes.includes(item.code));
+  const needsAction = (item: StartupDiagnostic) =>
+    item.severity ? item.severity === "action" : !informationalCodes.includes(item.code);
+  const informational = diagnostics.filter((item) => !needsAction(item));
+  const failures = diagnostics.filter(needsAction);
   return (
     <>
-      {informational.map((diagnostic) => (
+      {informational.map((diagnostic) => informationalCodes.includes(diagnostic.code) ? (
         <div key={diagnostic.code} role="status" className="space-y-1 text-14 text-muted-foreground">
           <p>{diagnostic.summary}{diagnostic.code === "billing_usage_warming" ? <> · {translateUi("Since {{value1}}", {
             value1: formatTimestamp(diagnostic.detected_at),
           })}</> : null}</p>
           <p>{diagnostic.detail}</p>
         </div>
-      ))}
+      ) : <DiagnosticEntry key={diagnostic.code} diagnostic={diagnostic} />)}
       {failures.length > 0 ? (
         <Card className="border-destructive/50">
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -162,18 +196,7 @@ function StartupDiagnostics({
           </CardHeader>
           <CardContent className="space-y-4">
             {failures.map((diagnostic) => (
-              <div key={diagnostic.code} className="space-y-2 text-14">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <p className="font-medium text-destructive">
-                    {diagnostic.summary}
-                  </p>
-                  <span className="text-13 text-muted-foreground">
-                    {formatTimestamp(diagnostic.detected_at)}
-                  </span>
-                </div>
-                <p className="text-muted-foreground">{diagnostic.detail}</p>
-                <p>{diagnostic.remediation}</p>
-              </div>
+              <DiagnosticEntry key={diagnostic.code} diagnostic={diagnostic} action />
             ))}
           </CardContent>
         </Card>

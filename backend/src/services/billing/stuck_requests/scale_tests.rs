@@ -173,24 +173,34 @@ async fn stuck_request_inventory_production_scale() {
         println!(
             "SCALE_RUST attempt={attempt} elapsed_ms={} detail={}",
             start.elapsed().as_millis(),
-            result[0].detail
-        );
-        assert!(
-            result[0].detail.contains("holdless_rows_at_least=94001"),
-            "{}",
-            result[0].detail
-        );
-        assert!(
-            result[0].detail.starts_with("complete=true"),
-            "{}",
-            result[0].detail
+            result[0].technical_details.as_ref().unwrap()
         );
         assert!(
             result[0]
-                .detail
+                .technical_details
+                .as_ref()
+                .unwrap()
+                .contains("holdless_rows_at_least=94001"),
+            "{}",
+            result[0].technical_details.as_ref().unwrap()
+        );
+        assert!(
+            result[0]
+                .technical_details
+                .as_ref()
+                .unwrap()
+                .starts_with("complete=true"),
+            "{}",
+            result[0].technical_details.as_ref().unwrap()
+        );
+        assert!(
+            result[0]
+                .technical_details
+                .as_ref()
+                .unwrap()
                 .contains("rows=6000 distinct_requests=6000"),
             "{}",
-            result[0].detail
+            result[0].technical_details.as_ref().unwrap()
         );
     }
     f.db.drop().await.unwrap();

@@ -4237,6 +4237,7 @@ async fn persist_exact_service_semantic_effect_diagnostic(
             doc! {
                 "$set": {
                     "active": true,
+                    "severity": "action",
                     "code": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
                     "summary": "Exact-approval semantic uniqueness is not enforced by a database index.",
                     "detail": detail,
@@ -6776,6 +6777,7 @@ mod tests {
             .await
             .expect("load repeated startup diagnostic")
             .expect("repeated startup diagnostic");
+        assert_eq!(active.get_str("severity").unwrap(), "action");
         assert_eq!(
             active.get_datetime("detected_at").unwrap(),
             &first_detected_at,

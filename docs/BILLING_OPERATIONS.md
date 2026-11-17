@@ -409,6 +409,68 @@ replaces the old reason and resumes the ordinary schedule; existing coverage
 waits still apply. Both versions read the unchanged observation schema and string
 reasons.
 
+## Billing inventories on Integrity
+
+`billing_hold_backlog` and `billing_stuck_requests` are read-only inventories.
+They have severity `info` whenever their evidence is readable and complete,
+regardless of reservation age or recovery eligibility. An incomplete, truncated
+or unreadable scan, invalid rows, or unreadable process-registry evidence makes
+the affected inventory `action`; unreadable recovery totals also make the
+forwarded-request inventory incomplete. The bounded count of rows with no holds
+remains a valid lower bound when its index-key limit is reached, so that count
+alone does not require action. Failing recovery steps are reported separately
+by `billing_reconcile_steps`, and unexplained holds by the hold observations.
+
+The summaries use “holds” because the inventory includes allowance units as
+well as credits. Sentences describe counts, hold kinds and the oldest creation-age
+bucket in plain English. Counts of billing rows are not counts of individual
+funding reservations: one meter row may reserve from several grants or allowance
+periods. The sweep can release unused holds from eligible reservations after
+rechecking them; it does not promise completion on the next pass. A request may
+have both eligible reservations and reservations belonging to running work, so
+these sentences retain that distinction. Live work has no new lifetime limit.
+
+Rows with no holds are not necessarily dead requests or eligible for cleanup.
+Their remaining count is a lower bound in sent request rows, with no money tied
+up in them. Cleanup's closed-row and request counts are cumulative completions
+for that category, not a subset of the currently remaining rows. Request counts
+are distinct within each described category; categories and hold kinds overlap.
+
+Information entries say “No action is needed. This inventory is read-only.”
+Action entries name the relevant checks: the row limit and backlog, query
+performance, stored billing fields and schemas, database access and indexes,
+process registry records, recovery counters, or the count query for rows with no
+holds. They direct the operator to the stages in Details, database health and
+available server logs, then to reload the page for a fresh read. These readers do
+not guarantee a dedicated server log line for every failure. Multiple causes
+combine fixed checks without repeating them, in at most two sentences.
+
+The exact technical inventory is retained in the additive `technical_details`
+field, collapsed under **Details** on the page. The `detail` field contains the
+short English sentences. Each diagnostic explicitly supplies `severity` as
+`info` or `action`. Older frontends ignore the additive fields and retain their
+previous diagnostic coloring; new frontends retain the previous code allowlist
+when an older backend omits severity. No operator step is required.
+
+For the hold backlog, each kind is an independent consistent snapshot. Age uses
+meter creation and database time. Held amounts exclude recorded returns and
+matching applied locks. Resources count positive outstanding holds; billing
+rows include zero-hold handoffs. Wallets and owners are distinct row identities.
+Allowance units remain separated by metric in Details; groups can overlap in
+resources and owners. Incomplete totals are not population totals. Each kind
+reads at most 10,000 rows within its existing query and client deadlines.
+
+The forwarded-request inventory classifies potential wallet, grant and allowance
+holds in one pinned snapshot, reading at most 10,000 distinct candidates in
+128-row pages within four seconds. Incomplete groups mean at least the reported
+counts and amounts. Its separate count examines at most 100,001 index keys per
+source and may undercount overlapping funding or returned holds. Siblings are
+bounded at 129 per row; locks and receipts are deducted in the same snapshot.
+Live ownership includes the registry's 45-second window plus a two-minute
+margin. Legacy eligibility requires an extra hour before every live generation's
+registration. Missing or unreadable registry evidence authorizes no cleanup.
+Reading either inventory changes no counters, quantities or charging decisions.
+
 ## Reconcile ownership and verification status
 
 The periodic billing maintenance pass acquires the MongoDB lease

@@ -1,5 +1,5 @@
 //! Provider-free, bounded sentences for Integrity.
-use super::super::BillingStartupDiagnostic;
+use super::super::{BillingStartupDiagnostic, DiagnosticSeverity};
 use super::*;
 
 pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDiagnostic>> {
@@ -36,6 +36,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
     }) else {
         return Ok(vec![item(
             "billing_usage_coverage",
+            DiagnosticSeverity::Info,
             "Usage comparison is warming",
             format!(
                 "Usage comparison is waiting for a successful check of recorded receipt-capture support. Earlier results are not current. {capture}"
@@ -123,7 +124,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
                 ));
             }
         }
-        items.push(item("billing_usage_drift","Delivered usage differs from provider usage",detail,
+        items.push(item("billing_usage_drift", DiagnosticSeverity::Action,"Delivered usage differs from provider usage",detail,
             "Investigate captured deliveries and provider intake. Comparison never repairs or charges usage.",now));
     }
     let mut unsupported = String::new();
@@ -150,7 +151,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
         ));
     }
     if !unsupported.is_empty() {
-        items.push(item("billing_usage_unsupported","Usage comparison needs attention",unsupported,
+        items.push(item("billing_usage_unsupported", DiagnosticSeverity::Action,"Usage comparison needs attention",unsupported,
         "Check the subscription and provider charge layout. Stable subscription findings are revisited daily.",now));
     }
     if !waits.is_empty() || !capture.is_empty() {
@@ -174,6 +175,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
         detail.push_str(&capture);
         items.push(item(
             "billing_usage_coverage",
+            DiagnosticSeverity::Info,
             "Usage comparison coverage and waits",
             detail,
             "Comparison resumes automatically when the stated wait ends.",
@@ -334,6 +336,7 @@ async fn capture_sample(db: &Database) -> AppResult<String> {
 }
 fn item(
     code: &str,
+    severity: DiagnosticSeverity,
     summary: &str,
     detail: String,
     remediation: &str,
@@ -346,6 +349,8 @@ fn item(
     }
     BillingStartupDiagnostic {
         code: code.into(),
+        severity,
+        technical_details: None,
         summary: summary.into(),
         detail: bounded,
         remediation: remediation.into(),
