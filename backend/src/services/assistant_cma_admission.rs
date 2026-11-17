@@ -15,7 +15,7 @@ use super::{
     assistant_cma_gateway::{
         CatalogCmaGateway, CmaGateway, validate_idempotency_key, validate_remote_id,
     },
-    assistant_cma_sandbox_service as sandboxes,
+    assistant_cma_legacy_service as legacy, assistant_cma_sandbox_service as sandboxes,
     proxy_service::ProxyTarget,
 };
 use crate::{
@@ -706,9 +706,6 @@ pub async fn admit(
     let deployment_fingerprint = gateway
         .deployment_fingerprint_for_target(owner, &target.service.id, &target.base_url)
         .await?;
-    if !matches!(operation, Operation::Read) && query.is_some_and(|q| !q.is_empty()) {
-        return Err(invalid());
-    }
     let keys_in_headers = headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("idempotency-key"))
@@ -718,11 +715,17 @@ pub async fn admit(
         return Err(invalid());
     }
     let key = keys_in_headers.first().map(|value| (*value).clone());
-    if !matches!(operation, Operation::Read) && !path.ends_with("/files") {
-        validate_idempotency_key(key.as_deref().ok_or_else(|| {
-            AppError::BadRequest("CMA changes require a stable Idempotency-Key".into())
-        })?)?;
-    }
+    let managed_validation = (|| -> AppResult<()> {
+        if !matches!(operation, Operation::Read) && query.is_some_and(|q| !q.is_empty()) {
+            return Err(invalid());
+        }
+        if !matches!(operation, Operation::Read) && !path.ends_with("/files") {
+            validate_idempotency_key(key.as_deref().ok_or_else(|| {
+                AppError::BadRequest("CMA changes require a stable Idempotency-Key".into())
+            })?)?;
+        }
+        Ok(())
+    })();
     let db = super::transaction_service::durable_database(db);
     let mut permit = CmaDispatchPermit {
         db: db.clone(),
@@ -740,6 +743,9 @@ pub async fn admit(
     };
     if matches!(operation, Operation::Read) {
         return Ok(permit);
+    }
+    if let Err(error) = managed_validation {
+        return legacy_after_managed_refusal(permit, headers, error).await;
     }
     let creates_sandbox = matches!(
         &operation,
@@ -778,25 +784,33 @@ pub async fn admit(
     } else {
         None
     };
-    if let Some(previous) = &pending_creation {
-        if previous.cma_service_id != target.service.id
-            || previous.path != path
-            || previous.method != method
-            || previous.deployment_fingerprint != deployment_fingerprint
-        {
-            return Err(drift());
-        }
-        if previous.request_hash != sandboxes::prepare_creation_request(body)?.hash {
-            if path == "/api/v1/sandboxes" && previous.submission_state == "confirmed_not_created" {
-                return Err(AppError::Conflict(
+    let pending_validation = (|| -> AppResult<()> {
+        if let Some(previous) = &pending_creation {
+            if previous.cma_service_id != target.service.id
+                || previous.path != path
+                || previous.method != method
+                || previous.deployment_fingerprint != deployment_fingerprint
+            {
+                return Err(drift());
+            }
+            if previous.request_hash != sandboxes::prepare_creation_request(body)?.hash {
+                if path == "/api/v1/sandboxes"
+                    && previous.submission_state == "confirmed_not_created"
+                {
+                    return Err(AppError::Conflict(
                     "cma_creation_authority_changed: the original request was confirmed not created; submit the corrected request with a new Idempotency-Key (CMA binds the original key to its original body)".into(),
                 ));
+                }
+                return Err(drift());
             }
-            return Err(drift());
+            if previous.submission_state == "confirmed" {
+                return Err(completed());
+            }
         }
-        if previous.submission_state == "confirmed" {
-            return Err(completed());
-        }
+        Ok(())
+    })();
+    if let Err(error) = pending_validation {
+        return legacy_after_managed_refusal(permit, headers, error).await;
     }
     let recovery = headers
         .iter()
@@ -829,28 +843,10 @@ pub async fn admit(
         )
         .await?
     } else {
-        let sandbox_id = match &operation {
-            Operation::CreateAgent {
-                sandbox: Some(id), ..
-            }
-            | Operation::Sandbox { id, .. } => id.clone(),
-            Operation::CreateAgent {
-                workspace: Some(id),
-                ..
-            }
-            | Operation::WorkspaceAgent { id } => {
-                permit.gateway.get_workspace_sandbox(owner, id).await?
-            }
-            Operation::Agent { id, .. } => {
-                let remote = permit.gateway.get_agent(owner, id).await?;
-                if remote.id != *id || remote.owner_id.as_deref().is_some_and(|id| id != owner) {
-                    return Err(unsupported());
-                }
-                remote.sandbox_id.ok_or_else(invalid)?
-            }
-            _ => return Err(invalid()),
+        let Some(parent) = resolve_proxy_parent(&permit, true).await? else {
+            return Ok(permit);
         };
-        sandboxes::resolve_created(&db, &permit.gateway, owner, &sandbox_id).await?
+        parent
     };
     let admits_work = creates_agent
         || matches!(
@@ -918,6 +914,105 @@ pub async fn admit(
     }
     permit.sandbox = Some(sandbox);
     Ok(permit)
+}
+
+// These requests used to stop before any parent lookup. Only a proven legacy
+// parent bypasses the managed validation; tracked refusals perform no writes.
+async fn legacy_after_managed_refusal(
+    permit: CmaDispatchPermit,
+    headers: &[(String, String)],
+    error: AppError,
+) -> AppResult<CmaDispatchPermit> {
+    if matches!(
+        permit.operation,
+        Operation::CreateSandbox
+            | Operation::CreateAgent {
+                sandbox: None,
+                workspace: None
+            }
+    ) || headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(RECOVERY_SUBMISSION_HEADER))
+    {
+        return Err(error);
+    }
+    if resolve_proxy_parent(&permit, false).await?.is_none() {
+        Ok(permit)
+    } else {
+        Err(error)
+    }
+}
+
+fn parent_read_error(error: super::assistant_cma_gateway::CmaGatewayError) -> AppError {
+    use super::assistant_cma_gateway::CmaGatewayError;
+    match error {
+        CmaGatewayError::Forbidden
+        | CmaGatewayError::NotFound
+        | CmaGatewayError::UpstreamAuthorizationUnavailable => sandboxes::missing_creation(),
+        error => error.into(),
+    }
+}
+
+async fn resolve_proxy_parent(
+    permit: &CmaDispatchPermit,
+    observe_tracked: bool,
+) -> AppResult<Option<AssistantCmaSandbox>> {
+    let owner = &permit.owner;
+    let mut evidence = None;
+    let sandbox_id = match &permit.operation {
+        Operation::CreateAgent {
+            sandbox: Some(id), ..
+        }
+        | Operation::Sandbox { id, .. } => id.clone(),
+        Operation::CreateAgent {
+            workspace: Some(id),
+            ..
+        }
+        | Operation::WorkspaceAgent { id } => {
+            let observed = permit
+                .gateway
+                .get_workspace_provenance(owner, id)
+                .await
+                .map_err(parent_read_error)?;
+            let id = observed.id.clone();
+            evidence = Some(observed);
+            id
+        }
+        Operation::Agent { id, .. } => {
+            let remote = permit
+                .gateway
+                .get_agent(owner, id)
+                .await
+                .map_err(parent_read_error)?;
+            if remote.id != *id || remote.owner_id.as_deref().is_some_and(|id| id != owner) {
+                return Err(sandboxes::missing_creation());
+            }
+            remote.sandbox_id.ok_or_else(invalid)?
+        }
+        _ => return Err(invalid()),
+    };
+    if let Some(row) =
+        sandboxes::find_created(&permit.db, &permit.gateway, owner, &sandbox_id).await?
+    {
+        return if observe_tracked {
+            sandboxes::observe(&permit.db, &permit.gateway, owner, &row.id, row.generation)
+                .await
+                .map(Some)
+        } else {
+            Ok(Some(row))
+        };
+    }
+    legacy::verify(
+        &permit.db,
+        &permit.gateway,
+        owner,
+        &sandbox_id,
+        evidence,
+        &permit.method,
+        &permit.path,
+    )
+    .await?;
+    Ok(None)
 }
 
 pub(super) fn require_available_parent(row: &AssistantCmaSandbox) -> AppResult<()> {
@@ -1588,6 +1683,11 @@ mod tests {
     mod fingerprint_regressions {
         use super::*;
         include!("assistant_cma_admission_fingerprint_tests.rs");
+
+        mod legacy_sandboxes {
+            use super::*;
+            include!("assistant_cma_legacy_tests.rs");
+        }
 
         mod writer_cutover {
             use super::*;

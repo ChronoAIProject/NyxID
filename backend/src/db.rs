@@ -99,6 +99,9 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 pub async fn initialize(db: &Database) -> Result<(), mongodb::error::Error> {
     ensure_indexes(db).await?;
     tracing::info!("MongoDB indexes verified");
+    if let Err(error) = crate::services::assistant_cma_legacy_service::initialize(db).await {
+        tracing::warn!(%error, "CMA legacy cutoff unavailable; untracked Sandboxes remain refused");
+    }
 
     backfill_downstream_service_types(db).await?;
     migrate_legacy_api_spec_url(db).await?;
