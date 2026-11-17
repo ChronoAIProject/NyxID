@@ -273,6 +273,30 @@ pub static JOINED_CHILD_SPECS: &[JoinedChildSpec] = &[
 
 pub static ENTRIES: &[Entry] = &[
     Entry {
+        collection: "client_error_reports",
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Section("account_activity"),
+        export_selector: ExportSelector::Person("user_id"),
+        why: "client_error_reports stores consented crash/error diagnostics linked to the reporting account by user_id (sanitized categories, versions and code locations; no message content); the local inventory erases them with the account, and crash_ttl otherwise expires them within 30 days (CRASH_REPORTS_RETENTION_DAYS, at most 30). Exports include diagnostic metadata without stack frames or native images.",
+    },
+    Entry {
+        collection: "client_error_report_counters",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("hourly anonymous crash-ingestion counters"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "client_error_report_counters stores hourly aggregate ingestion counts keyed only by time bucket, platform and outcome (no account, device or network identifiers); the counters expire after 30 days.",
+    },
+    Entry {
+        collection: "client_release_registry",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "client_release_registry stores shared app-release identities used to interpret crash reports; registered_by keeps only the opaque id of the administrator who registered a release (also in the audit log), retained as shared attribution without names or emails.",
+    },
+    Entry {
         collection: "agent_key_login_requests",
         owner: OwnerSelector::Fields(&["approved_user_id"]),
         erasure: Erasure::LocalInventory,

@@ -313,7 +313,11 @@ before parsing and stored/exported as normalized UTC RFC3339 values.
 closed report, derived fields, receive/expiry timestamps and fenced export state.
 Retention is 1–30 days (default 30); every read filters live expiry as well as the
 Mongo TTL. Personal erasure deletes these owner-linked rows through the existing
-erasure inventory and admission barrier. `client_error_report_counters` retains
+erasure inventory and admission barrier. The self-serve account export includes
+only report metadata: received_at, expires_at, environment, severity,
+report.platform, report.kind, report.exception_class, report.native_signal,
+report.app_version, report.app_build, report.os_version and report.runtime;
+counters and release-registry rows are excluded. `client_error_report_counters` retains
 only anonymous hourly platform/outcome counts, with a 30-day TTL. After rate
 limiting, insert failures count as `consent_denied` for confirmed consent denial,
 `invalid` for validation errors, and `unavailable` for unknown consent or other
