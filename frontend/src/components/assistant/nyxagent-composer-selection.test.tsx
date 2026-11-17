@@ -26,6 +26,7 @@ import { appI18n } from "@/i18n/instance";
 import zhCN from "@/i18n/locales/app/zh-CN";
 import zhTW from "@/i18n/locales/app/zh-TW";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import type { KeyInfo } from "@/types/keys";
@@ -45,6 +46,7 @@ const connection = {
   },
 } as KeyInfo;
 beforeEach(() => {
+  transitionAssistantIdentity("owner");
   state.data = [connection];
   state.error = false;
   state.fetching = false;

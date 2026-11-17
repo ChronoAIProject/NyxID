@@ -15,6 +15,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -38,6 +39,7 @@ let client: QueryClient;
 
 beforeEach(() => {
   useAuthStore.getState().setUser(null);
+  transitionAssistantIdentity("owner");
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   onSend.mockClear();
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
