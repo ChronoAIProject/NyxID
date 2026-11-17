@@ -611,3 +611,7 @@ pub(crate) mod durable_wake_tests;
 pub mod channel_turn_preparation;
 
 pub mod nyxbot_dispatch_identity;
+
+pub(crate) mod service_account_connection_audit;
+#[cfg(test)]
+mod service_account_connection_audit_tests;
