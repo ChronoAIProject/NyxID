@@ -1742,3 +1742,6 @@ async fn late_unscoped_direct_reply_uses_only_ordinary_delivery_records() {
 
 #[path = "nyxbot_gateway_reply_tests.rs"]
 mod gateway_reply_tests;
+
+#[path = "nyxbot_response_read_delivery_tests.rs"]
+mod response_read_delivery_tests;
