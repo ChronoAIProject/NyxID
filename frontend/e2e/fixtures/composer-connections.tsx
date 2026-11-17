@@ -22,15 +22,17 @@ export function ComposerConnectionsFixture() {
         Local fixture only; sends are recorded below without contacting a
         provider.
       </p>
-      <Button
-        type="button"
-        onClick={() => updateConnection("work", { credential_missing: true })}
-      >
-        Invalidate work connection
-      </Button>
-      <Button type="button" onClick={() => client.setQueryData(queryKey, keys)}>
-        Restore connections
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          onClick={() => updateConnection("work", { credential_missing: true })}
+        >
+          Invalidate work connection
+        </Button>
+        <Button type="button" onClick={() => client.setQueryData(queryKey, keys)}>
+          Restore connections
+        </Button>
+      </div>
       <NyxAgentComposer
         ownerUserId="fixture"
         draftKey="availability"
@@ -42,7 +44,15 @@ export function ComposerConnectionsFixture() {
           setSent((previous) => [...previous, text]);
         }}
       />
-      <output aria-label="Submitted messages">{JSON.stringify(sent)}</output>
+      <section className="space-y-2 rounded-xl border border-border p-4">
+        <h2>Local send log · {sent.length} messages</h2>
+        <p className="text-13 text-muted-foreground">
+          Test messages only. Nothing is sent to a real provider.
+        </p>
+        <output aria-label="Submitted messages" className="block whitespace-pre-wrap break-words">
+          {sent.length ? sent.join("\n\n") : "No messages sent yet."}
+        </output>
+      </section>
     </main>
   );
 }

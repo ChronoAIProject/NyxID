@@ -1140,7 +1140,7 @@ function DraftedChatComposer({
                 className={`relative flex min-w-0 flex-1 gap-x-1.5 gap-y-0.5 ${
                   expanded
                     ? "flex-col items-stretch"
-                    : "composer-compact items-start"
+                    : "composer-compact items-center"
                 }`}
               >
                 {!expanded && attachmentButton && (

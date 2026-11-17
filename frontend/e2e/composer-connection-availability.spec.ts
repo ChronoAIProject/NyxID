@@ -21,6 +21,20 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/e2e/fixtures/composer-connections.html");
 });
 
+test("compact composer controls share one vertical center line", async ({
+  page,
+}) => {
+  const centers = await page.locator(
+    '[data-composer-textbox], [data-composer-attachment], [data-composer-footer]',
+  ).evaluateAll((elements) =>
+    elements.map((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    }),
+  );
+  expect(Math.max(...centers) - Math.min(...centers)).toBeLessThan(0.5);
+});
+
 test("disabled choices expose reasons and keyboard skips them; unverified, refresh and fallback stay selectable", async ({
   page,
 }, testInfo) => {
@@ -101,7 +115,7 @@ test("live selection updates its label, refuses mouse and keyboard sends on inva
   await expect(input).toHaveText("Keep this draft");
   await input.press("Enter");
   await expect(input).toHaveText("Keep this draft");
-  await expect(page.getByLabel("Submitted messages")).toHaveText("[]");
+  await expect(page.getByLabel("Submitted messages")).toHaveText("No messages sent yet.");
   await page.screenshot({
     path: testInfo.outputPath("selected-connection-unavailable.png"),
     fullPage: true,
@@ -111,7 +125,7 @@ test("live selection updates its label, refuses mouse and keyboard sends on inva
   await dialog.getByRole("button", { name: /Personal documents/ }).click();
   await input.press("Enter");
   await expect(page.getByLabel("Submitted messages")).toHaveText(
-    JSON.stringify(["/service personal\nKeep this draft"]),
+    "/service personal\nKeep this draft",
   );
   await expect(chip).toHaveCount(0);
 });
