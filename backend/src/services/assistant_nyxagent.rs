@@ -6563,8 +6563,7 @@ pub async fn delete(
     let db = db.clone();
     let user_id = user_id.to_owned();
     let id = id.to_owned();
-    let audit_db = db.clone();
-    let (rows, children) = session
+    let (rows, _children) = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db;
@@ -6575,11 +6574,6 @@ pub async fn delete(
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    super::api_key_credential_service::audit_revocations(
-        &audit_db,
-        &children,
-        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-    );
     Ok(rows)
 }
 

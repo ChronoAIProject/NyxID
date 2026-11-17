@@ -259,7 +259,7 @@ export function AllowanceFunding({ rows }: { rows: BillingUsageRow[] }) {
             <div key={metric}>
               <dt className="capitalize">{billingMetricLabel(metric)}</dt>
               <dd>
-                {records.some((row) => row.allowance_quantity == null)
+                {records.some((row) => row.detail_retained === false || row.allowance_quantity == null)
                   ? t("Unavailable")
                   : number(
                       records.reduce(
@@ -298,13 +298,14 @@ export function ServiceUsage({
           (row) =>
             serviceCategory(catalog, row.service_slug ?? "") === category,
         );
+        const serviceCount = new Set(categoryRows.map((row) => row.service_id ?? row.service_slug ?? "unknown")).size;
         return (
           <section className="service-category" key={category}>
             <h4>
               {t(category)}
               <span>
-                {groupRows(catalog, categoryRows, "service").length}{" "}
-                {groupRows(catalog, categoryRows, "service").length === 1
+                {serviceCount}{" "}
+                {serviceCount === 1
                   ? t("service")
                   : t("services")}
               </span>

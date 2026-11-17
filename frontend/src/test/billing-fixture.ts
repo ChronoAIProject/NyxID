@@ -206,6 +206,7 @@ export function billingRow(
     grant_credits_micros: 2440,
     allowance_credits_micros: 0,
     allowance_quantity: 0,
+    detail_retained: true,
     ...overrides,
   };
 }

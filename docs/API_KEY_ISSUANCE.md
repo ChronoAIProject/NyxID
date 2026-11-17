@@ -69,3 +69,48 @@ old replicas against pending selections containing it. This is an all-replica
 cutover requirement, not a claim of mixed-version support or a runtime rollout
 flag. Expire or redeem such pending codes under the new version before any
 rollback. Existing key records require no lifetime rewrite.
+
+## Durable owner audit evidence
+
+Owner child revocation, parent rotation/deletion, operation-scope changes,
+scheduled-key activation, individual durable-grant revocation and permission-key
+creation/pause/revocation commit audit intents with their authority changes.
+The existing relay chains each occurrence once. Ordinary audit facts, including
+non-secret authorization-contract digests, are preserved; secrets and their
+hashes/prefixes never enter an intent. Authentication cleanup and grant
+reauthorization retain their previous audit paths for separate migrations.
+
+Parent deletion commits deactivation with the existing child revocations and
+one intent per changed child. An intent failure rolls back that unit. Existing
+callers supplying a transaction keep their boundary; standalone assistant-key
+and binding cleanup remains after commit, and a cleanup error can still be
+returned after the key is inactive. Scheduled-key preparation remains separate
+from its audited activation. No transaction spans provider or node I/O.
+
+Login-credential issuance has no per-key count cap. Expiry limits authorization,
+not the number of retained, unrevoked rows selected by parent deletion. The
+measured operating range for standalone deletion is up to 10,000 unrevoked
+children, one owner mutation at a time, production indexes, and no existing
+Machine confirmations or concurrent parent/child document writes. The MongoDB 8.0
+probe used a 1 GiB WiredTiger cache and completed in 29.25s with one
+transaction attempt. Its 20,000-child run committed in 83.77s; do not rely on
+that size under the default 60-second transaction lifetime. Expiry cleanup is
+periodic, so one commit past that lifetime is not a safe operating guarantee.
+
+Before exceeding the measured range, revoke obsolete children individually or
+run the ignored probe on an isolated replica set with representative authority
+and confirmation populations. Do the same under concurrent key/credential
+writes, including authentication last-use updates. Deletion holds the parent
+write until commit, so same-key authentication can wait on its last-use update.
+The range is operational guidance, not a new validation limit. A failed
+source transaction returns the existing database error with no partial parent,
+child or intent changes. MongoDB 8's 16 MiB limit is per BSON document/oplog
+entry, not the sum of all transaction writes.
+
+Through the Cargo slot wrapper and normal test environment, run
+`key_authority_large_parent_delete_probe -- --ignored --nocapture --test-threads=1`;
+`NYXID_PARENT_DELETE_PROBE_CHILDREN=10000` selects the documented size (the probe
+defaults to 20,000). Rotation keeps its existing child/binding transaction and
+has a separate ignored `key_authority_thousand_children_probe` for 1,000 children.
+Both probes print timings without speed assertions. Deterministic small-fixture
+rollback tests remain in the default suite.

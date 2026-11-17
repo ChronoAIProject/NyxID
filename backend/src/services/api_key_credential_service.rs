@@ -106,6 +106,15 @@ pub async fn issue(
 }
 
 pub async fn revoke(db: &Database, id: &str, reason: CredentialRevokedReason) -> AppResult<()> {
+    revoke_with_audit(db, id, reason, false).await
+}
+
+async fn revoke_with_audit(
+    db: &Database,
+    id: &str,
+    reason: CredentialRevokedReason,
+    required_audit: bool,
+) -> AppResult<()> {
     let transaction_db = db.clone();
     let id = id.to_owned();
     let mut session = db.client().start_session().await?;
@@ -113,15 +122,31 @@ pub async fn revoke(db: &Database, id: &str, reason: CredentialRevokedReason) ->
         .start_transaction()
         .and_run2(async move |session| {
             transactions::transaction_result(
-                revoke_in_session(&transaction_db, &id, reason, session).await,
+                revoke_source_with_audit(&transaction_db, &id, reason, required_audit, session)
+                    .await,
             )
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    if let Some(row) = row {
+    if !required_audit && let Some(row) = row {
         audit_revocations(db, &[row.credential], reason);
     }
     Ok(())
+}
+
+async fn revoke_source_with_audit(
+    db: &Database,
+    id: &str,
+    reason: CredentialRevokedReason,
+    required_audit: bool,
+    session: &mut ClientSession,
+) -> AppResult<Option<RevokedCredential>> {
+    let row = revoke_in_session(db, id, reason, session).await?;
+    if required_audit && let Some(row) = &row {
+        let intent = super::api_key_audit_service::child_revoked(&row.credential, reason)?;
+        super::security_effect_service::enqueue_in_session(db, session, &[intent]).await?;
+    }
+    Ok(row)
 }
 
 /// The source-row fence and exact child cancellation are already enqueued in
@@ -195,8 +220,27 @@ pub async fn revoke_children(
     reason: CredentialRevokedReason,
     session: Option<&mut ClientSession>,
 ) -> AppResult<Vec<ApiKeyCredential>> {
+    revoke_children_with_audit(db, key_id, reason, session, false).await
+}
+
+pub(crate) async fn revoke_children_audited(
+    db: &Database,
+    key_id: &str,
+    reason: CredentialRevokedReason,
+    session: Option<&mut ClientSession>,
+) -> AppResult<Vec<ApiKeyCredential>> {
+    revoke_children_with_audit(db, key_id, reason, session, true).await
+}
+
+async fn revoke_children_with_audit(
+    db: &Database,
+    key_id: &str,
+    reason: CredentialRevokedReason,
+    session: Option<&mut ClientSession>,
+    required_audit: bool,
+) -> AppResult<Vec<ApiKeyCredential>> {
     if let Some(session) = session {
-        return revoke_children_in_session(db, key_id, reason, session).await;
+        return revoke_children_in_session(db, key_id, reason, session, required_audit).await;
     }
     let db = db.clone();
     let key_id = key_id.to_owned();
@@ -205,7 +249,7 @@ pub async fn revoke_children(
         .start_transaction()
         .and_run2(async move |session| {
             transactions::transaction_result(
-                revoke_children_in_session(&db, &key_id, reason, session).await,
+                revoke_children_in_session(&db, &key_id, reason, session, required_audit).await,
             )
         })
         .await
@@ -217,6 +261,7 @@ async fn revoke_children_in_session(
     key_id: &str,
     reason: CredentialRevokedReason,
     session: &mut ClientSession,
+    required_audit: bool,
 ) -> AppResult<Vec<ApiKeyCredential>> {
     let collection = db.collection::<ApiKeyCredential>(COLLECTION_NAME);
     let filter = doc! {"api_key_id": key_id, "revoked_at": bson::Bson::Null};
@@ -227,6 +272,13 @@ async fn revoke_children_in_session(
         if let Some(result) = revoke_in_session(db, &row.id, reason, &mut *session).await? {
             revoked.push(result.credential);
         }
+    }
+    if required_audit {
+        let intents = revoked
+            .iter()
+            .map(|row| super::api_key_audit_service::child_revoked(row, reason))
+            .collect::<AppResult<Vec<_>>>()?;
+        super::security_effect_service::enqueue_in_session(db, session, &intents).await?;
     }
     Ok(revoked)
 }
@@ -276,5 +328,5 @@ pub async fn web_revoke(
         .find_one(doc! {"_id": credential_id, "api_key_id": key_id})
         .await?
         .ok_or(AppError::AgentKeyCredentialNotFound)?;
-    revoke(db, credential_id, CredentialRevokedReason::WebRevoke).await
+    revoke_with_audit(db, credential_id, CredentialRevokedReason::WebRevoke, true).await
 }

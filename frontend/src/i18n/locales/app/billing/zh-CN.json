@@ -247,6 +247,7 @@
   "NyxID provides the key.": "NyxID 提供密钥。",
   "NyxID's {{value0}} app": "NyxID 的 {{value0}} 应用",
   "NyxID's {{value0}} key": "NyxID 的 {{value0}} 密钥",
+  "Older than 30 days": "30 天之前",
   "One count per metered request": "每个计量请求计为一次",
   "Only an admin of {{value1}} can add credits to it.": "只有 {{value1}} 的管理员才能为其添加额度。",
   "Or enter an amount": "或输入金额",
