@@ -1,9 +1,9 @@
-import { releaseAccountResponse } from "./identity";
 import {
   cmaPublicText,
   type CmaTranscriptMessage,
   type CmaResourceEvent,
 } from "@/schemas/assistant-cma-agent";
+import { releaseAccountResponse } from "./identity";
 
 export interface CmaEventScope {
   agentId: string;

@@ -1,10 +1,11 @@
-import { AccountChangedError, releaseAccountResponse } from "./identity";
 import { z } from "zod";
 import { ApiError, apiFetch } from "@/lib/api-client";
 import { apiErrorBody } from "@/lib/api-error";
 import {
+  AccountChangedError,
   getAssistantIdentityUserId,
   getAssistantIdentityRevision,
+  releaseAccountResponse,
 } from "./identity";
 import {
   applyCmaEvent,

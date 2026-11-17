@@ -3,9 +3,9 @@
  * user hid the machine card. Width is shared; hidden thread IDs belong to the confirmed account.
  */
 
-import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 
 /** The preview column's share of the content area, in percent. */
 export const MACHINE_PANE_PERCENT = { min: 25, max: 75, default: 50 } as const;

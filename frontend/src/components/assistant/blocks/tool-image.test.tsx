@@ -1,8 +1,8 @@
-import { AccountChangedError } from "@/lib/assistant/identity";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ToolImage } from "./tool-image";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
+import { AccountChangedError } from "@/lib/assistant/identity";
 vi.mock("@/lib/assistant/assistant-http", () => {
   const assistantHttp = vi.fn();
   return { assistantHttp, assistantBlob: async (endpoint: string) => (await assistantHttp(endpoint)).blob() };

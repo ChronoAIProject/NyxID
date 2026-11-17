@@ -1,5 +1,6 @@
 import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
+import { subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
@@ -10,7 +11,6 @@ import type {
   NyxAgentConversationAgent,
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
-import { subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 import { isCmaOperationPending } from "@/schemas/cma-operation";
 import { useDecideApproval } from "@/hooks/use-approvals";

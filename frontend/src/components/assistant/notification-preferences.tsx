@@ -1,4 +1,3 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { useState } from "react";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -17,6 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { useNotificationsEnabled } from "@/hooks/use-assistant-notifications";
 import { useNyxBotSettings, useUpdateNyxBotSettings } from "@/hooks/use-nyxbot-agents";
 import { describeChanges } from "@/lib/grouped-form-changes";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { NOTIFICATION_PUSH_ROWS } from "@/lib/assistant/notification-presentation";
 import {
   DEFAULT_NOTIFICATION_PUSH,

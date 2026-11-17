@@ -1,7 +1,7 @@
-import { AccountChangedError } from "@/lib/assistant/identity";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { AccountChangedError } from "@/lib/assistant/identity";
 import { AuthoredSkillScopePreview } from "./authored-skill-scope-preview";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";

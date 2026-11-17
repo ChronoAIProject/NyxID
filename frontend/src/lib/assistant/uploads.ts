@@ -1,8 +1,8 @@
 import { ApiError, apiErrorBody, responseApiError } from "@/lib/api-error";
+import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort } from "./identity";
 import { apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { captureNyxbotError, httpErrorCode, responseCorrelation } from "./error-telemetry";
-import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort } from "./identity";
 import type { NyxbotErrorCode } from "@/lib/telemetry-schema";
 import {
   nyxAgentAttachmentSchema,

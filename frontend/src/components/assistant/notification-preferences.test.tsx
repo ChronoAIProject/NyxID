@@ -1,10 +1,10 @@
-import { AccountChangedError } from "@/lib/assistant/identity";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { AccountChangedError } from "@/lib/assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 import { NotificationPreferences } from "./notification-preferences";
 

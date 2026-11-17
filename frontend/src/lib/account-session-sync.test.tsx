@@ -83,7 +83,9 @@ it.each(["broadcast", "storage", "bfcache"])(
     );
     expect(screen.queryByText("A")).toBeNull();
     expect(screen.getByText("B")).toBeVisible();
-    expect(post).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ userId: "B" }),
+    );
   },
 );
 
@@ -100,6 +102,53 @@ it("ignores malformed and same-account hints, and broadcasts confirmed changes o
   expect(post).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ userId: "B" }),
   );
+});
+
+it.each([null, "B"])("broadcasts local identity %s while background verification is pending", async (id) => {
+  stop();
+  vi.useFakeTimers();
+  stop = installAccountSessionSync();
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  let resolve!: (response: Response) => void;
+  const fetch = vi.fn((url: string) => String(url).endsWith("/auth/logout")
+    ? Promise.resolve(new Response(null, { status: 204 }))
+    : new Promise<Response>((done) => { resolve = done; }));
+  vi.stubGlobal("fetch", fetch);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(post).not.toHaveBeenCalled();
+
+  if (id === null) await useAuthStore.getState().logout();
+  else useAuthStore.getState().setUser(person(id));
+  expect(post).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ userId: id }));
+  expect(JSON.parse(localStorage.getItem("nyxid:account-session")!)).toEqual(post.mock.calls[0]![0]);
+
+  // The held old-account response must not undo the newer local confirmation.
+  resolve(Response.json(person("A")));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(useAuthStore.getState().user?.id ?? null).toBe(id);
+  expect(post).toHaveBeenCalledOnce();
+});
+
+it("rebroadcasts a remote confirmation and ignores its echo at the originating identity", async () => {
+  const fetch = vi.fn().mockResolvedValue(Response.json(person("B")));
+  vi.stubGlobal("fetch", fetch);
+  receive({ data: { userId: "B", nonce: "origin-confirmed-B" } });
+  await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+  expect(useAuthStore.getState().user?.id).toBe("B");
+  expect(post).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ userId: "B" }));
+  const echo = post.mock.calls[0]![0];
+
+  // The originating tab is already B. Both delivery mechanisms ignore this
+  // receiver's new nonce because its confirmed target matches that identity.
+  receive({ data: echo });
+  window.dispatchEvent(new StorageEvent("storage", {
+    key: "nyxid:account-session", newValue: JSON.stringify(echo),
+  }));
+  await Promise.resolve();
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(post).toHaveBeenCalledOnce();
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
 });
 
 it("keeps same-account pages and drafts mounted through bfcache verification", async () => {

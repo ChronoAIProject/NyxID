@@ -10,7 +10,6 @@ export function installAccountSessionSync(): () => void {
   let channel: BroadcastChannel | undefined;
   try { channel = new BroadcastChannel(STORAGE_KEY); } catch { /* Storage fallback. */ }
   let disposed = false;
-  let remote = false;
   let lastAttempt = Date.now();
   type Attempt = { revision: number; evidence: boolean; target?: string | null; again: boolean; timer?: ReturnType<typeof setTimeout> };
   let pending: Attempt | undefined;
@@ -39,7 +38,6 @@ export function installAccountSessionSync(): () => void {
     const attempt: Attempt = { revision: getAssistantIdentityRevision(), evidence, target, again: false };
     pending = attempt;
     if (evidence) { hide(); armDeadline(attempt); }
-    remote = true;
     void useAuthStore.getState().verifySession().then((confirmed) => {
       if (disposed || pending !== attempt) return;
       clearTimeout(attempt.timer);
@@ -47,7 +45,7 @@ export function installAccountSessionSync(): () => void {
       if (attempt.evidence && !confirmed && attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
       if (attempt.again) verify(true, attempt.target);
       else reveal();
-    }).finally(() => { if (!pending) remote = false; });
+    });
   };
   const armDeadline = (attempt: Attempt) => {
     if (attempt.timer) return;
@@ -55,7 +53,6 @@ export function installAccountSessionSync(): () => void {
       if (disposed || pending !== attempt) return;
       pending = undefined;
       if (attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
-      remote = false;
       reveal();
     }, EVIDENCE_TIMEOUT_MS);
   };
@@ -85,7 +82,6 @@ export function installAccountSessionSync(): () => void {
   const stop = useAuthStore.subscribe((state, previous) => {
     if (state.user?.id === previous.user?.id) return;
     lastAttempt = Date.now();
-    if (remote) return;
     const hint = { userId: state.user?.id ?? null, nonce: crypto.randomUUID() };
     try { channel?.postMessage(hint); } catch { /* Storage fallback. */ }
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(hint)); } catch { /* Channel remains available. */ }

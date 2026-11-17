@@ -1,4 +1,3 @@
-import { AccountChangedError, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
@@ -11,6 +10,7 @@ import {
 } from "@/hooks/use-assistant-chat";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { capture } from "@/lib/telemetry";
+import { AccountChangedError, transitionAssistantIdentity } from "@/lib/assistant/identity";
 
 vi.mock("@/lib/telemetry", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/telemetry")>()),

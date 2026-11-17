@@ -1,4 +1,3 @@
-import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
@@ -15,6 +14,7 @@ import {
   removeUpload,
   uploadFile,
 } from "@/lib/assistant/uploads";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
 vi.mock("@/lib/assistant/uploads", async (importOriginal) => ({

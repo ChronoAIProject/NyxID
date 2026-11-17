@@ -1,5 +1,5 @@
-import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { useAssistantContextStore } from "./assistant-context-store";
 
 function resetStore() {

@@ -822,7 +822,6 @@ export class DirectAssistantTransport {
     const firstByteDeadline = this.now() + this.firstByteTimeoutMs;
     const account = captureAccountRequest(run.controller.signal);
     try {
-
       account.assertCurrent();
       const response = await this.withTimeout(
         this.fetchFn(DIRECT_COMPLETIONS_URL, {

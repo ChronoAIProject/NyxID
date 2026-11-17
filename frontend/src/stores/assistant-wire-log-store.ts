@@ -1,4 +1,3 @@
-import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import {
   createJSONStorage,
@@ -16,6 +15,7 @@ import {
   type AssistantWireLogExchange,
   type PersistedAssistantWireLogExchange,
 } from "@/schemas/assistant-wire-log";
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 
 export const ASSISTANT_WIRE_LOG_STORAGE_KEY = "nyxid.assistant.wirelog.v1";
 const MAX_ENTRIES = 100;

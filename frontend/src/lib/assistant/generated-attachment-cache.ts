@@ -1,6 +1,5 @@
-import { releaseAccountResponse } from "./identity";
 import { assistantHttp } from "./assistant-http";
-import { subscribeAssistantIdentity } from "./identity";
+import { releaseAccountResponse, subscribeAssistantIdentity } from "./identity";
 
 const FILE_BYTES = 8 * 1024 * 1024;
 const CACHE_BYTES = 32 * 1024 * 1024;

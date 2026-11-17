@@ -1,12 +1,12 @@
+import { ApiError, apiErrorBody, responseApiError, networkApiError } from "./api-error";
+import type { ApiErrorResponse } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
+import { isTelemetryActive } from "@/lib/telemetry";
 import {
   retainAccountResponse,
   captureAccountRequest,
   getAssistantIdentityRevision,
 } from "./assistant/identity";
-import { ApiError, apiErrorBody, responseApiError, networkApiError } from "./api-error";
-import type { ApiErrorResponse } from "@/types/api";
-import { useAuthStore } from "@/stores/auth-store";
-import { isTelemetryActive } from "@/lib/telemetry";
 import {
   currentCreditsActor,
   reportCreditsDenialHttp,

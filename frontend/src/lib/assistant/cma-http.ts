@@ -1,6 +1,6 @@
-import { captureAccountRequest, releaseAccountResponse } from "./identity";
 import { assistantHttp, type AssistantHttpRequest } from "./assistant-http";
 import { ApiError, apiErrorBody } from "@/lib/api-error";
+import { captureAccountRequest, releaseAccountResponse } from "./identity";
 
 const MAX_CMA_JSON_BYTES = 2 * 1024 * 1024;
 

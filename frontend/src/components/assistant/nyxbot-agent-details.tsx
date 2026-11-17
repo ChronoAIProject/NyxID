@@ -1,4 +1,3 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { OrgGuestGrantsAdoption } from "./org-guest-grants-adoption";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -7,6 +6,7 @@ import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useSavedLogins } from "@/hooks/use-saved-logins";
 import { describeChanges, changeList, labelValue, recordChanges } from "@/lib/grouped-form-changes";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
 import { useCompactTitle } from "@/lib/compact-title";
 import { CompactTitleProvider, CompactChrome, CompactScroll } from "@/components/ui/compact-title";

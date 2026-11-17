@@ -1,7 +1,7 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";

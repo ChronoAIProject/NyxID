@@ -1,8 +1,8 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useId, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import type { z } from "zod";
 import { DecisionReceipt } from "./decision-receipt";
 import { useQuery, useQueryClient } from "@tanstack/react-query";

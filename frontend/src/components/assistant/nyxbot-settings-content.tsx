@@ -1,9 +1,9 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactScroll } from "@/components/ui/compact-title";
 import { FormViewport } from "@/components/ui/form-viewport";
 import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { ChannelAdapterBindings } from "./channel-adapter-bindings";

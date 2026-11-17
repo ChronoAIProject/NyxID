@@ -3,6 +3,8 @@ import { useServiceCardView } from "@/stores/service-card-view-store";
 import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
 import { api, apiClient, ApiError } from "@/lib/api-client";
+import { bindAccountResourcePreferences } from "@/lib/account-resource-preferences";
+import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import {
   identify as telemetryIdentify,
   reset as telemetryReset,
@@ -14,9 +16,6 @@ import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { usePendingConnectStore } from "./pending-connect-store";
 import { useOAuthPopupStore } from "./oauth-popup-store";
 import { useMachinePaneStore } from "./machine-pane-store";
-import { bindAccountResourcePreferences } from "@/lib/account-resource-preferences";
-import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort } from "@/lib/assistant/identity";
-import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
@@ -182,7 +181,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // is authoritative while its replacement profile is still unconfirmed.
       const previousUser = get().user;
       clearAccountIdentity();
-      set({ user: null, isAuthenticated: false,
+      set({
+        user: null,
+        isAuthenticated: false,
         accountGeneration: get().accountGeneration + (previousUser ? 1 : 0),
       });
     } else {
@@ -238,7 +239,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
           useAssistantPinsStore.getState().bindAccount(null);
           clearAccountLocalState();
         }
-        set({ user: null, isAuthenticated: false, isLoading: false,
+        set({
+          user: null,
+          isAuthenticated: false,
+          isLoading: false,
           accountGeneration: get().accountGeneration + (get().user ? 1 : 0),
         });
       } else {
@@ -299,7 +303,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     } else {
       applyIdentityTransition(previousUser, user);
     }
-    set({ user, isAuthenticated: user !== null,
+    set({
+      user,
+      isAuthenticated: user !== null,
       accountGeneration:
         get().accountGeneration +
         (previousUser && previousUser.id !== user?.id ? 1 : 0),

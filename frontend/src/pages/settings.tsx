@@ -1,7 +1,7 @@
-import { captureAccountRequest, isAccountAbort, releaseAccountResponse } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
+import { captureAccountRequest, isAccountAbort, releaseAccountResponse } from "@/lib/assistant/identity";
 import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";

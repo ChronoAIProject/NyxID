@@ -1,10 +1,10 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { OrgChannelDisclosure } from "./org-channel-preview";
 import type { OrgChannelPreview } from "@/schemas/org-specialist-channel";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import {
   GroupedList,
   GroupedRow,

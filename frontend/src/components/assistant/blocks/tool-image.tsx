@@ -1,8 +1,8 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api-client";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { ImageOff } from "lucide-react";
 import { GeneratedAttachment } from "./generated-attachment";
 import { DocumentAttachment } from "./document-attachment";

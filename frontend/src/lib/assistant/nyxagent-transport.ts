@@ -1,10 +1,9 @@
-import { AccountChangedError } from "./identity";
-import { isAccountAbort } from "./identity";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { settledInterruptedTurn } from "./interrupted-turn";
 import { assistantTitleLanguage } from "@/lib/assistant/title-language";
+import { AccountChangedError, getAssistantIdentityUserId, isAccountAbort, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
 import { AssistantHttpError, assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
@@ -14,7 +13,6 @@ import {
   drainDirectSseBuffer,
   type DirectTurnState,
 } from "@/lib/assistant/direct-transport";
-import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import { isAdmittedSendError, markAdmitted } from "@/lib/assistant/send-admission";
 import { withAssistantTrace } from "@/lib/assistant/request-error";

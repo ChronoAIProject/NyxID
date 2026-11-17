@@ -1,7 +1,7 @@
-import { isAccountAbort } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { PreparedMicrophone, microphoneDevice, microphoneError } from "@/lib/microphone-capture";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import {

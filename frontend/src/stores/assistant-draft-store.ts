@@ -1,6 +1,6 @@
-import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 
 const STORAGE_KEY = "nyxid.assistant_drafts";
 const MAX_DRAFTS = 50;

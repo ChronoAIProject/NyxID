@@ -1,4 +1,3 @@
-import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
@@ -9,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { ChatComposer } from "./chat-composer";
 
 const baseProps = {
