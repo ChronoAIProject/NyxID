@@ -69,8 +69,9 @@ struct WatchService: Sendable {
   }
 
   /// `nil` when the feed isn't enabled for this account.
-  func feed(cursor: String? = nil, limit: Int = 20) async throws -> FeedPage? {
+  func feed(cursor: String? = nil, limit: Int = 20, unreadOnly: Bool = false) async throws -> FeedPage? {
     var query = [URLQueryItem(name: "limit", value: String(limit))]
+    if unreadOnly { query.append(URLQueryItem(name: "unread_only", value: "true")) }
     if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
     do {
       let page: FeedPage = try await api.get("/assistant/nyxagent/notifications", query: query)
@@ -84,6 +85,12 @@ struct WatchService: Sendable {
     guard !ids.isEmpty else { return }
     let _: MarkReadResult = try await api.post(
       "/assistant/nyxagent/notifications/read", body: MarkReadByIds(ids: Array(ids.prefix(100))))
+  }
+
+  /// Marks everything from one thread as seen (opening it reads it).
+  func markThreadRead(_ conversationId: String) async throws {
+    let _: MarkReadResult = try await api.post(
+      "/assistant/nyxagent/notifications/read", body: MarkReadBySource.conversation(conversationId))
   }
 
   // MARK: Account
@@ -120,18 +127,27 @@ struct WatchService: Sendable {
     return list.conversations.first?.id
   }
 
-  /// Recent threads across the person's agents, newest first.
-  func recentChats(limit: Int = 20) async throws -> [ConversationSummary] {
+  /// An agent's threads, newest first, without untouched empty ones.
+  func threads(agentId: String, limit: Int = 30) async throws -> [ConversationSummary] {
     let list: ConversationList = try await api.get(
       "/assistant/nyxagent/conversations",
-      query: [URLQueryItem(name: "limit", value: String(limit))])
-    return list.conversations.filter { $0.agent?.destroyed != true }
+      query: [
+        URLQueryItem(name: "agent_id", value: agentId),
+        URLQueryItem(name: "limit", value: String(limit)),
+      ])
+    return list.conversations
+      .filter { !$0.isEmpty }
+      .sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
   }
 
-  func history(conversationId: String, limit: Int = 12) async throws -> ConversationHistory {
-    try await api.get(
-      "/assistant/nyxagent/conversations/\(try PathSegment(conversationId))",
-      query: [URLQueryItem(name: "limit", value: String(limit))])
+  /// The newest `limit` messages of a thread, or those before `beforeSeq`.
+  func history(conversationId: String, limit: Int = 30, beforeSeq: Int? = nil) async throws
+    -> ConversationHistory
+  {
+    var query = [URLQueryItem(name: "limit", value: String(limit))]
+    if let beforeSeq { query.append(URLQueryItem(name: "before_seq", value: String(beforeSeq))) }
+    return try await api.get(
+      "/assistant/nyxagent/conversations/\(try PathSegment(conversationId))", query: query)
   }
 
   /// Sends a message and returns the thread it went to. The reply keeps

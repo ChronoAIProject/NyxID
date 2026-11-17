@@ -14,7 +14,7 @@ function unquote(value) {
 }
 
 function quote(value) {
-  return `"${String(value).replace(/"/g, '\\"')}"`;
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function syncWatchTarget(project, { bundleIdentifier, version, buildNumber }) {

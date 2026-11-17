@@ -3,11 +3,10 @@ import Observation
 import UserNotifications
 import WatchKit
 
-/// The three pages of the signed-in watch app.
+/// The two pages of the signed-in watch app.
 enum WatchPage: Hashable {
-  case inbox
+  case unread
   case agents
-  case chats
 }
 
 /// Who a chat screen talks to, and optionally which thread.
@@ -19,14 +18,19 @@ struct ChatTarget: Hashable {
   var conversationId: String?
   /// Sent as soon as the chat opens (from the Ask screen).
   var firstMessage: String?
+  /// Start a new thread instead of continuing one.
+  var fresh = false
 }
 
 enum WatchRoute: Hashable {
   /// The approvals waiting for a decision, starting at one of them.
   case approvals(startAt: String?)
   case feedItem(FeedItem)
-  /// "Tap to speak", addressed to an agent (NyxBot when nil).
-  case ask(agentId: String?)
+  /// One agent: New chat, then its threads.
+  case agent(String)
+  /// "Tap to speak", addressed to an agent (NyxBot when nil). `fresh`
+  /// starts a new thread; otherwise the agent's own thread continues.
+  case ask(agentId: String?, fresh: Bool)
   case chat(ChatTarget)
 }
 
@@ -50,10 +54,12 @@ final class WatchAppModel {
   }
 
   private(set) var phase: Phase = .loading
-  var page: WatchPage = .inbox
+  var page: WatchPage = .unread
   var path: [WatchRoute] = []
   var showingSettings = false
   private(set) var agents: [AgentSummary] = []
+  /// Unread NyxBot activity, newest first (empty when the feed is off).
+  private(set) var unread: [FeedItem] = []
   private(set) var profile: UserProfile?
   /// The code shown while signed out; the iPhone must send it back.
   private(set) var setupCode: String?
@@ -94,7 +100,7 @@ final class WatchAppModel {
       await Self.askForAlerts()
       if let route = launchRoute {
         launchRoute = nil
-        page = .inbox
+        page = .unread
         path = route
       }
       await refresh()
@@ -135,7 +141,7 @@ final class WatchAppModel {
           frontendURL = frontend
           setupCode = nil
           phase = .signedIn
-          page = .inbox
+          page = .unread
           path = []
           PhoneLink.shared.sayHello(code: nil)
           WKInterfaceDevice.current().play(.success)
@@ -180,9 +186,10 @@ final class WatchAppModel {
 
   private func didSignOut(reason: String?) {
     path = []
-    page = .inbox
+    page = .unread
     showingSettings = false
     agents = []
+    unread = []
     profile = nil
     ReplySpeaker.shared.stop()
     showSetup(reason: reason)
@@ -195,6 +202,32 @@ final class WatchAppModel {
     let (list, me) = await (agentList, account)
     if let list { agents = list }
     if let me { profile = me }
+    await refreshUnread()
+  }
+
+  /// Reloads unread activity; returns false when it couldn't be loaded.
+  @discardableResult
+  func refreshUnread() async -> Bool {
+    guard phase == .signedIn else { return false }
+    do {
+      unread = try await service.feed(limit: 50, unreadOnly: true)?.items ?? []
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /// Threads with unread activity.
+  var unreadThreadIds: Set<String> {
+    Set(unread.compactMap { $0.source?.conversationId })
+  }
+
+  /// Agents with unread activity in any of their threads.
+  var unreadAgentIds: Set<String> {
+    Set(unread.compactMap { item in
+      if item.actor?.type == "agent", let id = item.actor?.id { return id }
+      return item.source?.agentId
+    })
   }
 
   func agent(id: String?) -> AgentSummary? {
@@ -204,9 +237,10 @@ final class WatchAppModel {
 
   // MARK: Asking
 
-  /// Opens "Tap to speak" for an agent (NyxBot when nil).
-  func ask(agentId: String?) {
-    path.append(.ask(agentId: agentId))
+  /// Opens "Tap to speak" for an agent (NyxBot when nil). `fresh` starts
+  /// a new thread; the header mic continues the agent's own thread.
+  func ask(agentId: String?, fresh: Bool = false) {
+    path.append(.ask(agentId: agentId, fresh: fresh))
   }
 
   /// Leaves the Ask screen for the chat its question went to.
@@ -215,10 +249,10 @@ final class WatchAppModel {
     path.append(.chat(target))
   }
 
-  func chatTarget(for agent: AgentSummary, firstMessage: String? = nil) -> ChatTarget {
+  func chatTarget(for agent: AgentSummary, firstMessage: String? = nil, fresh: Bool = false) -> ChatTarget {
     ChatTarget(
       agentId: agent.id, agentName: agent.label, isNyxBot: agent.isNyxBot,
-      conversationId: agent.homeConversationId, firstMessage: firstMessage)
+      conversationId: fresh ? nil : agent.homeConversationId, firstMessage: firstMessage, fresh: fresh)
   }
 
   // MARK: Notification routing
@@ -241,7 +275,7 @@ final class WatchAppModel {
     open([.approvals(startAt: id)])
   }
 
-  func openInbox() {
+  func openUnread() {
     open([])
   }
 
@@ -251,7 +285,7 @@ final class WatchAppModel {
   private func open(_ route: [WatchRoute]) {
     switch phase {
     case .signedIn:
-      page = .inbox
+      page = .unread
       path = route
     case .loading:
       launchRoute = route

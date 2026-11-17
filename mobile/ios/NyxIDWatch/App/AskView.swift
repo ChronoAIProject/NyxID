@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// "Tap to speak": ask an agent something. The question goes to the agent's
-/// own thread, and the chat opens to follow the answer.
+/// own thread, or to a new one (`fresh`), and the chat opens to follow it.
 struct AskView: View {
   let agentId: String?
+  var fresh = false
 
   @Environment(WatchAppModel.self) private var model
   @State private var selectedId: String?
@@ -59,6 +60,7 @@ struct AskView: View {
           Text(agent?.label ?? "Agent")
             .font(.footnote.weight(.semibold))
             .lineLimit(1)
+            .minimumScaleFactor(0.75)
           Image(systemName: "chevron.down")
             .font(.caption2.weight(.bold))
             .foregroundStyle(.secondary)
@@ -86,7 +88,7 @@ struct AskView: View {
   private func send(_ raw: String) {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty, let agent else { return }
-    model.openChat(model.chatTarget(for: agent, firstMessage: text))
+    model.openChat(model.chatTarget(for: agent, firstMessage: text, fresh: fresh))
   }
 }
 

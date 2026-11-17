@@ -6,8 +6,6 @@ extension Color {
   static let nyxAccent = Color(red: 151 / 255, green: 117 / 255, blue: 250 / 255)
   /// Row and control surface on the watch's black.
   static let nyxSurface = Color(white: 0.13)
-  /// Waiting-on-you colour for approvals.
-  static let nyxAmber = Color(red: 245 / 255, green: 158 / 255, blue: 11 / 255)
   static let nyxDeny = Color.red
 }
 
@@ -97,6 +95,7 @@ struct TopBar<Title: View>: View {
         title
       }
       .lineLimit(1)
+      .minimumScaleFactor(0.7)
       .frame(maxWidth: Self.titleWidth, alignment: .leading)
       .fixedSize(horizontal: false, vertical: true)
     }

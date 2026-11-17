@@ -1,54 +1,58 @@
 # NyxID for Apple Watch
 
 A native SwiftUI watchOS app shipped inside the NyxID iPhone app, built around
-three things: notifications, agents and chats.
+two things: what is unread, and your agents and their threads.
 
 ## Experience
 
-Three vertical pages (Digital Crown or swipe). Each page header has the gear
-(Settings) on the left and a white mic on the right that starts a new chat.
+Two vertical pages (Digital Crown or swipe). Each page header has the gear
+(Settings) on the left and a white mic on the right that asks NyxBot in its own
+thread.
 
 | Page | Shows | Tap |
 | --- | --- | --- |
-| **Inbox** | One amber card for the approvals waiting ("2 approvals · Gmail · Calendar"), then the NyxBot feed (agent avatar, title, "agent · age", unread dot) | The card opens the approval queue; a feed entry opens a short preview and "Open chat" |
-| **Agents** | NyxBot and specialists (avatar, name, one-line tagline) | New chat with that agent |
-| **Chats** | Recent threads (avatar, title, age) | Continue that thread |
+| **Unread** | One card for the approvals waiting ("2 approvals · Gmail · Calendar"), then unread NyxBot activity, newest first (agent avatar, title, "agent · age", unread dot). "All caught up" when empty. Refreshes every 30 seconds while on screen | The card opens the approval queue; an entry opens its thread and marks it read (decisions and entries without a thread open a short preview) |
+| **Agents** | NyxBot and specialists (avatar, name, tagline), with a purple dot when an agent has unread activity | The agent: **New chat**, then its threads, newest first, with unread dots |
 
+- **Agent**: "New chat" starts a new thread with that agent; a thread row
+  (title on two lines, age) continues that thread. Untouched empty threads are
+  hidden.
 - **New chat**: an agent pill (tap to switch agents), a big mic ("Tap to
   speak"), one suggestion chip ("Plan my day" for NyxBot, "What's new?" for a
   specialist) and a keyboard button.
-- **Working**: the question, three dots and one status line taken from the
-  turn's tool activity ("Checking your calendar…"), then "You can lower your
-  wrist. We'll tap you when it's ready." and Stop. If the agent is waiting on an
-  approval, the line becomes "Needs your approval" with "Review ›"; anything
-  else that needs a decision says "Decide on iPhone".
-- **Reply**: the first sentence bold, the rest of the lead smaller, then up to
-  six list rows with times in their own column ("10:00 · Design review"). The
-  rest is behind "More ›". The bottom bar has speaker (read aloud), mic (reply)
-  and phone (continue in the iPhone or web app through Handoff).
+- **Thread**: the whole conversation, like a messages app: the person's
+  messages in bubbles on the right, the agent's replies in full on the left,
+  opening at the newest message. "Earlier" loads 30 older messages at a time
+  (`before_seq`). Opening a thread marks its notifications read.
+- **Working**: three dots and one status line taken from the turn's tool
+  activity ("Checking your calendar…") under the last message, and Stop. If the
+  agent is waiting on an approval, the line becomes "Needs your approval" with
+  "Review ›"; anything else that needs a decision says "Decide on iPhone".
+  The bottom bar has speaker (read the latest reply aloud), mic (reply) and
+  phone (continue in the iPhone or web app through Handoff).
 - **Approvals**: one card at a time ("1 OF 2"): what is asked, who
   asks, "Read-only" / "Makes changes" and how long it lasts. Swipe right or tap
   Allow, swipe left or tap Deny; the result screen offers "Next approval ›".
 - **Settings**: "Read replies aloud" (only with headphones), the account name
   and Sign out.
-- Detail screens put back and the screen's name (agent avatar and name, the
-  agent pill, "1 OF 2") in the top bar beside the clock. watchOS drops the
-  clock when that content is too wide, so it is capped at the screen width
-  minus about 117pt and long names truncate (`TopBar` in `App/Theme.swift`).
+- Detail screens put back and the screen's name (agent name, the agent pill,
+  "1 OF 2") in the top bar beside the clock. watchOS drops the clock when that
+  content is too wide, so it is capped at the screen width minus about 117pt;
+  names shrink a little before they truncate (`TopBar` in `App/Theme.swift`).
 - **Setup**: while signed out the watch shows "Connect to iPhone" and a
   six-digit code; see [Sign-in](#sign-in).
 - Agents look the same as on the iPhone and web: NyxBot wears the NyxID mark,
   other agents get initials in a muted colour derived from their id
   (`Core/AgentAvatarModel.swift` mirrors `mobile/src/components/agentAvatarModel.ts`).
-- Colour is earned (`DESIGN.md`): white for the main action, amber only for
-  approvals, purple only for unread dots and the working dots.
+- Colour is earned (`DESIGN.md`): white for the main action and the approvals
+  icon, purple only for unread dots and the working dots. No amber.
 - Screen and spoken text stay short; server error prose never reaches the
   watch ("Offline", "Already handled", "Busy. Try again soon").
 - When a reply arrives the watch taps; if the app isn't on screen it posts a
-  local notification with the brief reply. Replies are read aloud automatically
+  local notification with the start of the reply. Replies are read aloud automatically
   only when headphones are connected.
-- The feed needs `assistant:notifications`. Without it the Inbox shows
-  approvals only.
+- Unread activity needs `assistant:notifications`. Without it the Unread page
+  shows approvals only and agents show no dots.
 
 Phase 1 (this document) uses only plain HTTPS. A live voice call is a possible
 later phase; see [Not in phase 1](#not-in-phase-1).
@@ -130,25 +134,34 @@ API keys, so the watch session is a full account session, like the iPhone's.
 
 - `GET /assistant/nyxagent/agents` (NyxBot first; only `can_use` agents that
   aren't destroyed).
-- A new chat goes to the agent's home thread, else its newest thread, else a
-  new thread started by the first message. Chats and feed entries continue
-  their own thread.
+- The header mic continues the agent's home thread, else its newest thread,
+  else a new thread started by the first message. An agent's "New chat"
+  always starts a new thread (`agent_id` without `conversation_id`). Thread
+  rows and unread entries continue their own thread.
+- An agent's threads come from `GET /assistant/nyxagent/conversations?agent_id=`
+  (newest first; threads with `message_count: 0` hidden).
+- Unread is `GET /assistant/nyxagent/notifications?unread_only=true`; thread and
+  agent dots come from the same list. Opening a thread sends
+  `POST /assistant/nyxagent/notifications/read` with
+  `{"source":{"type":"conversation","id":…}}`.
 - Input is the system dictation sheet (`TextFieldLink`); the speech-recognition
   API isn't available on watchOS.
 - `POST /assistant/nyxagent/turns` returns a server-sent event stream. The
   watch reads only the response headers (`x-nyxid-conversation-id`) and drops
   the connection; the turn keeps running on the server.
-- It then polls `GET /assistant/nyxagent/conversations/{id}` every two seconds
+- A thread loads the newest 30 messages; "Earlier" passes the returned
+  `before_seq`. `Core/WatchPresentation.swift` `Transcript.merge` keeps the
+  person's messages and agent replies in order (events hidden, a streaming
+  reply replaced when it settles).
+- After sending, it polls `GET /assistant/nyxagent/conversations/{id}` every two seconds
   for up to ten minutes. The status line comes from `active_turn.activities`
   (`Core/ToolActivityText.swift` mirrors the iPhone's `describeToolActivity`).
   The reply is the newest assistant message after the person's message once
   `active_turn` is null. Stop is `POST /assistant/nyxagent/conversations/{id}/stop`.
-- `ReplyLayout` (`Core/WatchPresentation.swift`) shapes the reply for the
-  screen; `SpokenText.brief` gives the spoken form: the first paragraph, cut at
-  a sentence or word past 240 characters, with code and links named, not read
-  out.
-- The Chats page uses `GET /assistant/nyxagent/conversations` (newest first,
-  threads of destroyed agents hidden).
+- Replies show in full as plain text (`SpokenText.plain`); `SpokenText.brief`
+  gives the spoken form and the local notification: the first paragraph, cut
+  at a sentence or word past 240 characters, with code and links named, not
+  read out.
 
 ## Not in phase 1
 

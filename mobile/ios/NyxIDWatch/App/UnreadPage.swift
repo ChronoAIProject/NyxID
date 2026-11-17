@@ -1,16 +1,16 @@
 import SwiftUI
 
-/// Page 1: approvals waiting on the person (one card), then the NyxBot feed.
-struct InboxPage: View {
+/// Page 1: what needs the person. Approvals waiting (one card), then unread
+/// activity, newest first. Opening an entry opens its thread and reads it.
+struct UnreadPage: View {
   @Environment(WatchAppModel.self) private var model
   @State private var approvals: [ApprovalRequest] = []
-  @State private var items: [FeedItem] = []
   @State private var loaded = false
   @State private var problem: String?
 
   var body: some View {
     List {
-      PageHeader(title: "Inbox")
+      PageHeader(title: "Unread")
       if let problem {
         ProblemRow(message: problem) { Task { await load() } }
       }
@@ -18,57 +18,46 @@ struct InboxPage: View {
         NavigationLink(value: WatchRoute.approvals(startAt: nil)) {
           ApprovalStackRow(approvals: approvals)
         }
-        .listRowBackground(
-          RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .fill(Color.nyxAmber.opacity(0.14))
-            .overlay(
-              RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(Color.nyxAmber.opacity(0.35), lineWidth: 1)))
       }
-      ForEach(items) { item in
-        NavigationLink(value: WatchRoute.feedItem(item)) {
+      ForEach(model.unread) { item in
+        NavigationLink(value: item.route(in: model)) {
           FeedRow(item: item)
         }
       }
       if !loaded, problem == nil {
         ProgressView()
           .listRowBackground(Color.clear)
-      } else if loaded, problem == nil, approvals.isEmpty, items.isEmpty {
-        Text("All caught up")
-          .font(.footnote)
-          .foregroundStyle(.secondary)
-          .frame(maxWidth: .infinity)
-          .listRowBackground(Color.clear)
+      } else if loaded, problem == nil, approvals.isEmpty, model.unread.isEmpty {
+        VStack(spacing: 4) {
+          Image(systemName: "checkmark.circle")
+            .font(.title3)
+          Text("All caught up")
+            .font(.footnote)
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 16)
+        .listRowBackground(Color.clear)
       }
     }
-    .task { await load() }
+    // Loads now and every 30 seconds while the page is on screen.
+    .task {
+      while !Task.isCancelled {
+        await load()
+        try? await Task.sleep(nanoseconds: 30_000_000_000)
+      }
+    }
+    .onAppear { if loaded { Task { await load() } } }
     .refreshable { await load() }
   }
 
   private func load() async {
-    let service = model.service
-    async let pending = Self.capture { try await service.pendingApprovals() }
-    async let feed = Self.capture { try await service.feed(limit: 20) }
-    let (approvalResult, feedResult) = await (pending, feed)
-    var failure: Error?
-    switch approvalResult {
-    case let .success(list): approvals = list
-    case let .failure(error): failure = error
-    }
-    switch feedResult {
-    case let .success(page): items = page?.items ?? []
-    case let .failure(error): failure = failure ?? error
-    }
-    problem = failure.map { ($0 as? WatchAPIError)?.displayMessage ?? "Couldn't load" }
+    async let unreadLoaded = model.refreshUnread()
+    let pending = try? await model.service.pendingApprovals()
+    let feedOK = await unreadLoaded
+    if let pending { approvals = pending }
+    problem = (pending == nil || !feedOK) ? "Couldn't load" : nil
     loaded = true
-  }
-
-  private static func capture<T>(_ work: () async throws -> T) async -> Result<T, Error> {
-    do {
-      return .success(try await work())
-    } catch {
-      return .failure(error)
-    }
   }
 }
 
@@ -79,7 +68,7 @@ private struct ApprovalStackRow: View {
   var body: some View {
     HStack(spacing: 10) {
       ZStack {
-        Circle().fill(Color.nyxAmber)
+        Circle().fill(Color.white)
         Image(systemName: "checkmark.shield.fill")
           .font(.system(size: 15, weight: .semibold))
           .foregroundStyle(.black)
@@ -91,7 +80,7 @@ private struct ApprovalStackRow: View {
           .font(.body.weight(.semibold))
         Text(ApprovalRequest.servicesSummary(approvals))
           .font(.footnote)
-          .foregroundStyle(Color.nyxAmber)
+          .foregroundStyle(.secondary)
           .lineLimit(1)
       }
       Spacer(minLength: 0)
@@ -154,7 +143,7 @@ struct FeedItemView: View {
         if item.kind == "needs_decision" {
           Label("Decide on iPhone", systemImage: "iphone")
             .font(.footnote)
-            .foregroundStyle(Color.nyxAmber)
+            .foregroundStyle(.secondary)
         } else if let target = item.chatTarget(in: model) {
           Button("Open chat") {
             model.openChat(target)
@@ -209,6 +198,14 @@ extension FeedItem {
       return FeedAgent(id: agent.id, name: agent.label, isNyxBot: agent.isNyxBot)
     }
     return nil
+  }
+
+  /// Where tapping the entry goes: its thread when it has one, else a
+  /// short preview (decisions, automation runs without a thread).
+  @MainActor
+  func route(in model: WatchAppModel) -> WatchRoute {
+    if kind != "needs_decision", let target = chatTarget(in: model) { return .chat(target) }
+    return .feedItem(self)
   }
 
   /// The chat this entry came from, when it has one.

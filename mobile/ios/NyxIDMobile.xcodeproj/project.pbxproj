@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0A2251127A6B6228B9AE20BE /* InboxPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247AB95041F991AF60F839D5 /* InboxPage.swift */; };
+		0A2251127A6B6228B9AE20BE /* UnreadPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247AB95041F991AF60F839D5 /* UnreadPage.swift */; };
 		0D6B7E7E8435CAB53AB7C80E /* WatchAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B590E96E008EA03EE0EE5206 /* WatchAPI.swift */; };
 		0EC4B7E3C9F743D777521410 /* AgentAvatarModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3DBA33D27DF3607D22805B /* AgentAvatarModel.swift */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
@@ -73,7 +73,7 @@
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = NyxIDMobile/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = NyxIDMobile/Info.plist; sourceTree = "<group>"; };
 		1F3DBA33D27DF3607D22805B /* AgentAvatarModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentAvatarModel.swift; sourceTree = "<group>"; };
-		247AB95041F991AF60F839D5 /* InboxPage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = InboxPage.swift; sourceTree = "<group>"; };
+		247AB95041F991AF60F839D5 /* UnreadPage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UnreadPage.swift; sourceTree = "<group>"; };
 		30C3FB86ABB75EDC73A625A4 /* PhoneLink.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhoneLink.swift; sourceTree = "<group>"; };
 		429AFD0C10BA7BE61CA3EF9E /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		465E5F1A7EB13B9EDAB2809B /* ToolActivityText.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ToolActivityText.swift; sourceTree = "<group>"; };
@@ -164,7 +164,7 @@
 				A0D6CBA8A12FBB2EB2683922 /* AgentsPage.swift */,
 				4EEFF8D4AA258D991C3894FB /* ApprovalQueueView.swift */,
 				067E2D4A594AD63059DACAF0 /* AskView.swift */,
-				247AB95041F991AF60F839D5 /* InboxPage.swift */,
+				247AB95041F991AF60F839D5 /* UnreadPage.swift */,
 				071D9FE57F424545E6F07F1D /* Theme.swift */,
 			);
 			name = App;
@@ -552,7 +552,7 @@
 				858BE226DB20C2C3CEEEFB11 /* WatchPresentation.swift in Sources */,
 				957EC59CFFB9D11D16A4A532 /* ApprovalQueueView.swift in Sources */,
 				8050CC002D1ED680B6A03532 /* AskView.swift in Sources */,
-				0A2251127A6B6228B9AE20BE /* InboxPage.swift in Sources */,
+				0A2251127A6B6228B9AE20BE /* UnreadPage.swift in Sources */,
 				54B911F11E9A06E63D2084FC /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

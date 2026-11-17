@@ -3,62 +3,6 @@ import XCTest
 
 @testable import NyxIDWatchCore
 
-final class ReplyLayoutTests: XCTestCase {
-  func testHeadlineThenTimesInTheirOwnColumn() {
-    let reply = """
-      3 meetings today, 2 approvals waiting.
-
-      - 10:00 Design review · Ana
-      - 13:00 Lunch · Sam
-      - 16:30–17:00 Weekly sync
-      """
-    let layout = ReplyLayout.make(reply)
-    XCTAssertEqual(layout.lead, "3 meetings today, 2 approvals waiting.")
-    XCTAssertEqual(layout.rows, [
-      .init(time: "10:00", text: "Design review · Ana"),
-      .init(time: "13:00", text: "Lunch · Sam"),
-      .init(time: "16:30–17:00", text: "Weekly sync"),
-    ])
-    XCTAssertFalse(layout.hasMore)
-  }
-
-  func testTheFirstSentenceIsTheHeadline() {
-    let layout = ReplyLayout.make(
-      "You have 3 meetings today and 2 approvals waiting. The first is the design review at 10:00.")
-    XCTAssertEqual(layout.headline, "You have 3 meetings today and 2 approvals waiting.")
-    XCTAssertEqual(layout.detail, "The first is the design review at 10:00.")
-    XCTAssertNil(ReplyLayout.make("Done.").detail)
-    XCTAssertEqual(ReplyLayout.make("Version 2.1 is out").headline, "Version 2.1 is out")
-  }
-
-  func testListsWithoutTimesAndLeftoversGoToMore() {
-    let reply = "Done.\n\n1. Booked the hotel\n2) Sent the invite\n\nAnything else?"
-    let layout = ReplyLayout.make(reply)
-    XCTAssertEqual(layout.lead, "Done.")
-    XCTAssertEqual(layout.rows.map(\.text), ["Booked the hotel", "Sent the invite"])
-    XCTAssertNil(layout.rows.first?.time)
-    XCTAssertTrue(layout.hasMore)
-  }
-
-  func testLongListsAndLongLeadsAreCut() {
-    let items = (1...9).map { "- Item \($0)" }.joined(separator: "\n")
-    let layout = ReplyLayout.make("Here you go.\n\n" + items)
-    XCTAssertEqual(layout.rows.count, ReplyLayout.maxRows)
-    XCTAssertTrue(layout.hasMore)
-
-    let long = ReplyLayout.make(String(repeating: "A long sentence about the plan. ", count: 20))
-    XCTAssertLessThanOrEqual(long.lead.count, SpokenText.briefLimit)
-    XCTAssertTrue(long.hasMore)
-  }
-
-  func testAReplyThatIsOnlyAList() {
-    let layout = ReplyLayout.make("- 9:30 AM Standup\n- 2 PM Review")
-    XCTAssertEqual(layout.lead, "")
-    XCTAssertEqual(layout.rows.first, .init(time: "9:30 AM", text: "Standup"))
-    XCTAssertEqual(layout.rows.last, .init(time: nil, text: "2 PM Review"))
-  }
-}
-
 final class RelativeTimeTests: XCTestCase {
   private var calendar: Calendar {
     var calendar = Calendar(identifier: .gregorian)
@@ -175,5 +119,41 @@ final class WaitingStateTests: XCTestCase {
     XCTAssertFalse(card.waitingForApproval)
     let none = try history()
     XCTAssertFalse(none.needsDecision)
+  }
+}
+
+final class TranscriptTests: XCTestCase {
+  private func message(_ id: String, seq: Int, role: String, text: String, status: String = "completed")
+    throws -> ChatMessage
+  {
+    let json = """
+      {"id":"\(id)","seq":\(seq),"role":"\(role)","text":"\(text)","status":"\(status)",
+       "created_at":"2026-11-17T10:00:00Z"}
+      """
+    return try WatchJSON.decoder.decode(ChatMessage.self, from: Data(json.utf8))
+  }
+
+  func testPagesMergeOldestFirstAndLaterReadsWin() throws {
+    let newest = [
+      try message("m3", seq: 3, role: "user", text: "And the hotel?"),
+      try message("m4", seq: 4, role: "assistant", text: "", status: "streaming"),
+    ]
+    let earlier = [
+      try message("m1", seq: 1, role: "user", text: "Tokyo trip?"),
+      try message("m2", seq: 2, role: "assistant", text: "3 to 9 December."),
+      try message("e1", seq: 2, role: "event", text: "Subagent settled"),
+    ]
+    var shown = Transcript.merge([], newest)
+    XCTAssertEqual(shown.map(\.id), ["m3"], "an empty streaming reply waits")
+    shown = Transcript.merge(shown, earlier)
+    XCTAssertEqual(shown.map(\.id), ["m1", "m2", "m3"], "events are not shown")
+    shown = Transcript.merge(shown, [try message("m4", seq: 4, role: "assistant", text: "Shibuya, 6 nights.")])
+    XCTAssertEqual(shown.map(\.id), ["m1", "m2", "m3", "m4"])
+    XCTAssertEqual(shown.last?.text, "Shibuya, 6 nights.")
+  }
+
+  func testAFailedReplyStillShows() throws {
+    let shown = Transcript.merge([], [try message("m1", seq: 1, role: "assistant", text: "", status: "failed")])
+    XCTAssertEqual(shown.count, 1)
   }
 }

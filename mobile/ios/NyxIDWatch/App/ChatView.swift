@@ -3,8 +3,9 @@ import SwiftUI
 import UserNotifications
 import WatchKit
 
-/// Talk to one agent: send a question, follow the work as it happens, then
-/// read (and, with headphones, hear) the answer.
+/// One thread with an agent: the whole conversation, newest at the bottom,
+/// older messages on request. Send a message, follow the work as it
+/// happens, then read (and, with headphones, hear) the answer.
 @MainActor
 @Observable
 final class ChatModel {
@@ -26,9 +27,13 @@ final class ChatModel {
   let target: ChatTarget
   private let service: WatchService
   private(set) var conversationId: String?
-  /// The latest thing the person said, and the reply to it.
-  private(set) var asked: String?
-  private(set) var reply: ChatMessage?
+  /// Questions and replies, oldest first.
+  private(set) var messages: [ChatMessage] = []
+  /// Cursor for the page before the oldest loaded message.
+  private(set) var earlierCursor: Int?
+  private(set) var loadingEarlier = false
+  /// Just sent, not yet in the server's history.
+  private(set) var pendingQuestion: String?
   private(set) var status: Status = .loading
   /// "Listing events on Google Calendar…" while the agent works.
   private(set) var workingLine = "Thinking…"
@@ -39,6 +44,7 @@ final class ChatModel {
   private var sentFirstMessage = false
   private var lastSeq = 0
 
+  static let pageSize = 30
   static let pollInterval: UInt64 = 2_000_000_000
   static let followLimit: TimeInterval = 10 * 60
 
@@ -49,16 +55,21 @@ final class ChatModel {
     ReplySpeaker.shared.onChange = { [weak self] value in self?.speaking = value }
   }
 
+  var latestReply: ChatMessage? { messages.last(where: \.isReply) }
+  var isEmpty: Bool { messages.isEmpty && pendingQuestion == nil }
+
   func load() async {
     do {
-      if conversationId == nil, !target.agentId.isEmpty {
+      if conversationId == nil, !target.fresh, !target.agentId.isEmpty {
         conversationId = try await service.threadId(agentId: target.agentId, home: nil)
       }
       var turnActive = false
       if let id = conversationId {
-        let history = try await service.history(conversationId: id, limit: 8)
+        let history = try await service.history(conversationId: id, limit: Self.pageSize)
+        earlierCursor = history.beforeSeq
         apply(history)
         turnActive = history.conversation.activeTurn != nil
+        try? await service.markThreadRead(id)
       }
       if let first = target.firstMessage, !sentFirstMessage {
         sentFirstMessage = true
@@ -77,13 +88,22 @@ final class ChatModel {
     }
   }
 
+  func loadEarlier() async {
+    guard let id = conversationId, let cursor = earlierCursor, !loadingEarlier else { return }
+    loadingEarlier = true
+    defer { loadingEarlier = false }
+    guard let page = try? await service.history(conversationId: id, limit: Self.pageSize, beforeSeq: cursor)
+    else { return }
+    earlierCursor = page.beforeSeq
+    messages = Transcript.merge(messages, page.messages)
+  }
+
   func send(_ raw: String) async {
     let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty, !status.isBusy else { return }
     ReplySpeaker.shared.stop()
     let baseline = lastSeq
-    asked = text
-    reply = nil
+    pendingQuestion = text
     workingLine = "Thinking…"
     status = .sending
     let turn: TurnRequest
@@ -98,11 +118,14 @@ final class ChatModel {
       status = .working
       follow(after: baseline, announce: true)
     } catch let error as WatchAPIError where error.errorKey == "turn_active" {
+      pendingQuestion = nil
       status = .working
       follow(after: baseline, announce: false)
     } catch let error as WatchAPIError {
+      pendingQuestion = nil
       status = .problem(error.displayMessage)
     } catch {
+      pendingQuestion = nil
       status = .problem("Not sent")
     }
   }
@@ -114,7 +137,7 @@ final class ChatModel {
   }
 
   func speakReply() {
-    guard let reply, !reply.failed else { return }
+    guard let reply = latestReply, !reply.failed else { return }
     ReplySpeaker.shared.speak(reply.text)
   }
 
@@ -126,6 +149,9 @@ final class ChatModel {
     follower?.cancel()
     follower = nil
     ReplySpeaker.shared.stop()
+    if let id = conversationId {
+      Task { [service] in try? await service.markThreadRead(id) }
+    }
   }
 
   /// The web page for this chat, so the iPhone can pick it up (Handoff).
@@ -146,7 +172,7 @@ final class ChatModel {
       while !Task.isCancelled, Date() < deadline {
         try? await Task.sleep(nanoseconds: Self.pollInterval)
         guard let self, !Task.isCancelled, let id = self.conversationId else { return }
-        guard let history = try? await self.service.history(conversationId: id, limit: 8) else { continue }
+        guard let history = try? await self.service.history(conversationId: id, limit: 10) else { continue }
         self.apply(history)
         switch TurnProgress.evaluate(history, afterSeq: baseline) {
         case .working:
@@ -157,9 +183,10 @@ final class ChatModel {
         case .replied:
           self.status = .idle
           if announce { self.announceReply() }
+          try? await self.service.markThreadRead(id)
           return
         case .failed:
-          self.status = self.reply?.failed == true ? .idle : .problem("No answer")
+          self.status = .idle
           WKInterfaceDevice.current().play(.failure)
           return
         case .pending:
@@ -182,7 +209,8 @@ final class ChatModel {
     if WatchAppModel.shared.speakReplies, ReplySpeaker.headphonesConnected {
       speakReply()
     }
-    guard WKApplication.shared().applicationState != .active, let reply, !reply.failed else { return }
+    guard WKApplication.shared().applicationState != .active, let reply = latestReply, !reply.failed
+    else { return }
     let content = UNMutableNotificationContent()
     content.title = target.agentName
     content.body = SpokenText.brief(reply.text).text
@@ -191,17 +219,15 @@ final class ChatModel {
       UNNotificationRequest(identifier: "reply-\(reply.id)", content: content, trigger: nil))
   }
 
-  /// Keeps only the latest exchange: what was asked, and its reply.
   private func apply(_ history: ConversationHistory) {
-    lastSeq = history.messages.map(\.seq).max() ?? lastSeq
+    lastSeq = max(lastSeq, history.messages.map(\.seq).max() ?? 0)
     waitingForApproval = history.waitingForApproval
     waitingForCard = history.waitingForCard
-    let lastPerson = history.messages.last(where: \.isFromPerson)
-    if let lastPerson {
-      asked = lastPerson.text
-      reply = history.messages.last { $0.isReply && $0.seq > lastPerson.seq }
-    } else {
-      reply = history.messages.last(where: \.isReply)
+    messages = Transcript.merge(messages, history.messages)
+    if let pending = pendingQuestion,
+      messages.contains(where: { $0.isFromPerson && $0.text == pending })
+    {
+      pendingQuestion = nil
     }
   }
 }
@@ -229,31 +255,64 @@ struct ChatView: View {
       let model = chat ?? ChatModel(target: target, service: app.service)
       chat = model
       await model.load()
+      await app.refreshUnread()
     }
-    .onDisappear { chat?.leave() }
+    .onDisappear {
+      chat?.leave()
+      Task { await app.refreshUnread() }
+    }
   }
 }
 
 private struct ChatContent: View {
   let chat: ChatModel
-  @State private var showingFullReply = false
   @State private var handedOff = false
+  private static let bottomId = "bottom"
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 8) {
-        content
+    ScrollViewReader { proxy in
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 10) {
+          if chat.earlierCursor != nil {
+            Button {
+              Task { await chat.loadEarlier() }
+            } label: {
+              if chat.loadingEarlier {
+                ProgressView()
+              } else {
+                Text("Earlier")
+                  .font(.footnote.weight(.semibold))
+              }
+            }
+            .buttonStyle(PillButtonStyle())
+            .frame(maxWidth: .infinity)
+          }
+          ForEach(chat.messages) { message in
+            MessageView(message: message)
+              .id(message.id)
+          }
+          if let pending = chat.pendingQuestion {
+            QuestionBubble(text: pending)
+          }
+          footer
+          Color.clear.frame(height: 1).id(Self.bottomId)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 56)
       }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.bottom, 56)
+      .onChange(of: chat.messages.last?.id) { _, _ in
+        proxy.scrollTo(Self.bottomId, anchor: .bottom)
+      }
+      .onChange(of: chat.status) { _, _ in
+        proxy.scrollTo(Self.bottomId, anchor: .bottom)
+      }
+      .onAppear { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
     }
     .safeAreaInset(edge: .bottom, spacing: 0) {
       bottomBar
     }
     .topBar {
-      AgentBadge(
-        id: chat.target.agentId.isEmpty ? chat.target.agentName : chat.target.agentId,
-        name: chat.target.agentName, isNyxBot: chat.target.isNyxBot, size: 22)
+      // The name alone: beside the clock there is no room for an avatar too.
       Text(chat.target.agentName)
         .font(.headline)
         .lineLimit(1)
@@ -269,27 +328,18 @@ private struct ChatContent: View {
           .transition(.opacity)
       }
     }
-    .sheet(isPresented: $showingFullReply) {
-      ScrollView {
-        Text(SpokenText.plain(chat.reply?.text ?? ""))
-          .font(.footnote)
-          .frame(maxWidth: .infinity, alignment: .leading)
-      }
-    }
   }
 
+  /// Under the last message: the agent working, waiting on you, a problem,
+  /// or (in an empty thread) a nudge to talk.
   @ViewBuilder
-  private var content: some View {
+  private var footer: some View {
     switch chat.status {
     case .loading:
       ProgressView()
         .frame(maxWidth: .infinity)
     case .sending, .working:
-      if let asked = chat.asked {
-        QuestionBubble(text: asked)
-      }
       if chat.waitingForApproval {
-        // The work is held by a service approval this watch can decide.
         Text("Needs your approval")
           .font(.body.weight(.semibold))
         NavigationLink(value: WatchRoute.approvals(startAt: nil)) {
@@ -304,31 +354,24 @@ private struct ChatContent: View {
           .font(.body.weight(.semibold))
         Label("Decide on iPhone", systemImage: "iphone")
           .font(.footnote)
-          .foregroundStyle(Color.nyxAmber)
-      } else {
-        TypingDots()
-          .padding(.top, 2)
-        Text(chat.workingLine)
-          .font(.body.weight(.semibold))
-          .lineLimit(2)
-        Text("You can lower your wrist. We'll tap you when it's ready.")
-          .font(.footnote)
           .foregroundStyle(.secondary)
+      } else {
+        VStack(alignment: .leading, spacing: 4) {
+          TypingDots()
+          Text(chat.workingLine)
+            .font(.footnote.weight(.semibold))
+            .lineLimit(2)
+        }
       }
     case .idle:
-      if let reply = chat.reply {
-        ReplyBody(reply: reply) { showingFullReply = true }
-      } else if let asked = chat.asked {
-        QuestionBubble(text: asked)
-      } else {
-        Text("Tap the mic to ask")
+      if chat.isEmpty {
+        Text("Tap the mic to start")
           .font(.footnote)
           .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity)
+          .padding(.top, 20)
       }
     case let .problem(text):
-      if let reply = chat.reply {
-        ReplyBody(reply: reply) { showingFullReply = true }
-      }
       Label(text, systemImage: "exclamationmark.circle")
         .font(.footnote)
         .foregroundStyle(.orange)
@@ -354,10 +397,10 @@ private struct ChatContent: View {
           Image(systemName: chat.speaking ? "speaker.slash.fill" : "speaker.wave.2.fill")
         }
         .buttonStyle(CircleButtonStyle(size: 32))
-        .disabled(chat.reply == nil)
+        .disabled(chat.latestReply == nil)
         .accessibilityLabel(chat.speaking ? "Stop reading" : "Read aloud")
         Spacer()
-        TextFieldLink(prompt: Text("Ask \(chat.target.agentName)")) {
+        TextFieldLink(prompt: Text("Message \(chat.target.agentName)")) {
           Image(systemName: "mic.fill")
         } onSubmit: { text in
           Task { await chat.send(text) }
@@ -384,65 +427,38 @@ private struct ChatContent: View {
   }
 }
 
-/// What the person asked, right-aligned like a sent message.
+/// One message: the person's on the right in a bubble, the agent's in full
+/// on the left, like a messages app.
+private struct MessageView: View {
+  let message: ChatMessage
+
+  var body: some View {
+    if message.isFromPerson {
+      QuestionBubble(text: message.text)
+    } else if message.failed {
+      Label("Couldn't answer", systemImage: "exclamationmark.circle")
+        .font(.footnote)
+        .foregroundStyle(.orange)
+    } else {
+      Text(SpokenText.plain(message.text))
+        .font(.footnote)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(SpokenText.plain(message.text))
+    }
+  }
+}
+
+/// What the person said, right-aligned like a sent message.
 private struct QuestionBubble: View {
   let text: String
 
   var body: some View {
     Text(text)
       .font(.footnote)
-      .lineLimit(3)
       .padding(.horizontal, 10)
       .padding(.vertical, 6)
       .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.nyxSurface))
       .frame(maxWidth: .infinity, alignment: .trailing)
-  }
-}
-
-/// A headline, then the first list with times in their own column.
-private struct ReplyBody: View {
-  let reply: ChatMessage
-  let showAll: () -> Void
-
-  var body: some View {
-    if reply.failed {
-      Label("Couldn't answer", systemImage: "exclamationmark.circle")
-        .font(.footnote)
-        .foregroundStyle(.orange)
-    } else {
-      let layout = ReplyLayout.make(reply.text)
-      VStack(alignment: .leading, spacing: 6) {
-        if !layout.lead.isEmpty {
-          Text(layout.headline)
-            .font(.body.weight(.semibold))
-          if let detail = layout.detail {
-            Text(detail)
-              .font(.footnote)
-              .foregroundStyle(.secondary)
-          }
-        }
-        ForEach(Array(layout.rows.enumerated()), id: \.offset) { _, row in
-          HStack(alignment: .firstTextBaseline, spacing: 8) {
-            if let time = row.time {
-              Text(time)
-                .font(.footnote.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 40, alignment: .leading)
-            }
-            Text(row.text)
-              .font(.footnote)
-          }
-        }
-        if layout.hasMore {
-          Button(action: showAll) {
-            Text("More ›")
-              .font(.footnote.weight(.semibold))
-              .foregroundStyle(Color.nyxAccent)
-          }
-          .buttonStyle(.plain)
-          .accessibilityLabel("Show the full reply")
-        }
-      }
-    }
+      .padding(.leading, 18)
   }
 }

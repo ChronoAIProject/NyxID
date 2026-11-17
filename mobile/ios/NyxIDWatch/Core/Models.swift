@@ -166,6 +166,20 @@ struct MarkReadByIds: Encodable {
   let ids: [String]
 }
 
+/// Marks everything from one source (a thread) as seen.
+struct MarkReadBySource: Encodable {
+  struct Source: Encodable {
+    let type: String
+    let id: String
+  }
+
+  let source: Source
+
+  static func conversation(_ id: String) -> MarkReadBySource {
+    MarkReadBySource(source: Source(type: "conversation", id: id))
+  }
+}
+
 struct MarkReadResult: Decodable {
   let updated: Int
 }
@@ -238,7 +252,11 @@ struct ConversationSummary: Decodable, Equatable, Identifiable, Sendable {
   let id: String
   let title: String?
   let lastMessageAt: Date?
+  let messageCount: Int?
   let agent: ConversationAgent?
+
+  /// A thread with nothing in it yet (an agent's untouched home thread).
+  var isEmpty: Bool { messageCount == 0 }
 
   var label: String {
     let value = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -264,6 +282,8 @@ struct ConversationAgent: Decodable, Equatable, Sendable {
 struct ConversationHistory: Decodable, Equatable, Sendable {
   let conversation: ConversationState
   let messages: [ChatMessage]
+  /// Set when older messages exist: pass it back to load them.
+  let beforeSeq: Int?
   let acknowledgements: [PendingCard]?
   let approvals: [PendingCard]?
 

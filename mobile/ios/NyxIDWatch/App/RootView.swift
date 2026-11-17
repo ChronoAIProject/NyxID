@@ -59,7 +59,7 @@ struct SetUpView: View {
   }
 }
 
-/// Inbox, Agents and Chats as vertical pages (Digital Crown or swipe).
+/// Unread and Agents as vertical pages (Digital Crown or swipe).
 struct MainView: View {
   @Environment(WatchAppModel.self) private var model
 
@@ -67,19 +67,18 @@ struct MainView: View {
     @Bindable var model = model
     NavigationStack(path: $model.path) {
       TabView(selection: $model.page) {
-        InboxPage()
-          .tag(WatchPage.inbox)
+        UnreadPage()
+          .tag(WatchPage.unread)
         AgentsPage()
           .tag(WatchPage.agents)
-        ChatsPage()
-          .tag(WatchPage.chats)
       }
       .tabViewStyle(.verticalPage)
       .navigationDestination(for: WatchRoute.self) { route in
         switch route {
         case let .approvals(startAt): ApprovalQueueView(startAt: startAt)
         case let .feedItem(item): FeedItemView(item: item)
-        case let .ask(agentId): AskView(agentId: agentId)
+        case let .agent(id): AgentView(agentId: id)
+        case let .ask(agentId, fresh): AskView(agentId: agentId, fresh: fresh)
         case let .chat(target): ChatView(target: target)
         }
       }

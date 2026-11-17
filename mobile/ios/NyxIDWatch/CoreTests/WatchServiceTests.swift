@@ -134,23 +134,61 @@ final class WatchServiceTests: XCTestCase {
     XCTAssertEqual(agents.map(\.label), ["NyxBot", "Researcher"])
   }
 
-  func testRecentChatsNameTheirAgentAndHideDestroyedOnes() async throws {
+  func testAgentThreadsAreNewestFirstWithoutEmptyOnes() async throws {
     let transport = FakeTransport()
-    transport.on(
-      "GET", "/api/v1/assistant/nyxagent/conversations",
-      json: """
-        {"conversations":[
-          {"id":"nyxa-1","title":"Trip plan","title_source":"generated","last_message_at":"2026-11-16T10:00:00Z",
-           "active_turn":null,"agent":{"id":"b1","kind":"nyxbot","name":"nyxbot","display_name":null,"destroyed":false}},
-          {"id":"nyxa-2","title":"  ","last_message_at":null,
-           "agent":{"id":"s1","kind":"specialist","name":"research","display_name":"Researcher","destroyed":false}},
-          {"id":"nyxa-3","title":"Old","agent":{"id":"s2","kind":"specialist","name":"gone","display_name":null,"destroyed":true}}
-        ],"next_cursor":null}
-        """)
-    let chats = try await service(transport).recentChats()
-    XCTAssertEqual(chats.map(\.id), ["nyxa-1", "nyxa-2"])
-    XCTAssertEqual(chats.map(\.label), ["Trip plan", "New chat"])
-    XCTAssertEqual(chats.compactMap(\.agent?.label), ["NyxBot", "Researcher"])
+    transport.on("GET", "/api/v1/assistant/nyxagent/conversations") { request in
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      XCTAssertTrue(query.contains(URLQueryItem(name: "agent_id", value: "s1")))
+      return .init(
+        status: 200,
+        body: """
+          {"conversations":[
+            {"id":"nyxa-old","title":"Old trip","last_message_at":"2026-11-10T10:00:00Z","message_count":4},
+            {"id":"nyxa-home","title":"","last_message_at":"2026-11-17T10:00:00Z","message_count":0},
+            {"id":"nyxa-new","title":"  ","last_message_at":"2026-11-16T10:00:00Z","message_count":2}
+          ],"next_cursor":null}
+          """)
+    }
+    let threads = try await service(transport).threads(agentId: "s1")
+    XCTAssertEqual(threads.map(\.id), ["nyxa-new", "nyxa-old"])
+    XCTAssertEqual(threads.map(\.label), ["New chat", "Old trip"])
+  }
+
+  func testUnreadFeedAsksForUnreadOnly() async throws {
+    let transport = FakeTransport()
+    transport.on("GET", "/api/v1/assistant/nyxagent/notifications") { request in
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      XCTAssertTrue(query.contains(URLQueryItem(name: "unread_only", value: "true")))
+      return .init(status: 200, body: #"{"items":[],"next_cursor":null}"#)
+    }
+    let page = try await service(transport).feed(limit: 50, unreadOnly: true)
+    XCTAssertEqual(page?.items.count, 0)
+  }
+
+  func testOpeningAThreadMarksItsSourceRead() async throws {
+    let transport = FakeTransport()
+    transport.on("POST", "/api/v1/assistant/nyxagent/notifications/read") { request in
+      let source = request.jsonBody["source"] as? [String: Any]
+      XCTAssertEqual(source?["type"] as? String, "conversation")
+      XCTAssertEqual(source?["id"] as? String, "nyxa-1")
+      XCTAssertNil(request.jsonBody["ids"])
+      return .init(status: 200, body: #"{"updated":2}"#)
+    }
+    try await service(transport).markThreadRead("nyxa-1")
+    XCTAssertEqual(transport.calls("POST", "/api/v1/assistant/nyxagent/notifications/read").count, 1)
+  }
+
+  func testEarlierMessagesUseTheHistoryCursor() async throws {
+    let transport = FakeTransport()
+    transport.on("GET", "/api/v1/assistant/nyxagent/conversations/nyxa-1") { request in
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      XCTAssertTrue(query.contains(URLQueryItem(name: "before_seq", value: "41")))
+      return .init(
+        status: 200,
+        body: #"{"conversation":{"id":"nyxa-1","title":"t","active_turn":null},"messages":[],"before_seq":11}"#)
+    }
+    let page = try await service(transport).history(conversationId: "nyxa-1", beforeSeq: 41)
+    XCTAssertEqual(page.beforeSeq, 11)
   }
 
   func testAThreadIsFoundForAnAgentWithoutAHome() async throws {

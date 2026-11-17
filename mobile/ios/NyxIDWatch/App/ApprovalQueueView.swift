@@ -116,7 +116,7 @@ struct ApprovalQueueView: View {
       } else {
         Label("Review on iPhone", systemImage: "iphone")
           .font(.footnote)
-          .foregroundStyle(Color.nyxAmber)
+          .foregroundStyle(.secondary)
       }
     }
     .bottomBarBackdrop()

@@ -41,7 +41,7 @@ enum ApprovalNotification {
       return
     }
     if userInfo["notification_id"] != nil {
-      model.openInbox()
+      model.openUnread()
     }
   }
 }
