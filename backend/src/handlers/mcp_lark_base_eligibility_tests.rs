@@ -134,6 +134,7 @@ async fn assert_parity(
 
 #[tokio::test]
 async fn legacy_publication_second_connections_four_slugs_have_discovery_execution_parity() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in SLUGS {
         let u = second_connection(slug).await;
         let auth = authenticate(&u.f).await;
@@ -184,6 +185,7 @@ async fn legacy_publication_second_connections_four_slugs_have_discovery_executi
 
 #[tokio::test]
 async fn all_four_slugs_refuse_each_live_authority_and_contract_failure_in_both_paths() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in SLUGS {
         let u = second_connection(slug).await;
         let mut auth = authenticate(&u.f).await;
@@ -405,6 +407,7 @@ async fn all_four_slugs_refuse_each_live_authority_and_contract_failure_in_both_
 
 #[tokio::test]
 async fn managed_source_async_and_contract_snapshot_refusals_are_named() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = second_connection("api-lark").await;
     let auth = authenticate(&u.f).await;
     for node in [false, true] {
@@ -487,6 +490,7 @@ async fn managed_source_async_and_contract_snapshot_refusals_are_named() {
 
 #[tokio::test]
 async fn legacy_second_connection_empty_fields_uploads_original_bytes_creates_once_and_replays() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in SLUGS {
         let u = second_connection(slug).await;
         let auth = authenticate(&u.f).await;
@@ -544,6 +548,7 @@ async fn legacy_second_connection_empty_fields_uploads_original_bytes_creates_on
 #[tokio::test]
 async fn direct_and_meta_calls_name_override_and_unpublished_dependency_then_allow_cleared_override()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for meta in [false, true] {
         let u = setup("lark_2327_public_errors").await;
         let auth = authenticate(&u.f).await;

@@ -1,0 +1,12 @@
+{
+  "Chat width": "聊天宽度",
+  "Composer height": "输入框高度",
+  "No supported device language": "设备偏好的语言均不受支持",
+  "Shared with the selected app.": "已分享到所选应用。",
+  "Signs in with": "登录方式",
+  "Speech recognition isn't available right now. Check microphone access and your device's speech recognition service, then try again. You can keep typing.": "语音识别暂不可用。请检查麦克风权限和设备的语音识别服务，然后重试。你也可以继续打字。",
+  "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.": "语音识别暂不可用。请检查“设置 › 通用 › 键盘”中的听写已开启，然后重试。",
+  "Speech recognition needs a connection for your language. Check your connection and try again.": "此语言的语音识别需要联网。请检查网络连接后重试。",
+  "The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending.": "消息输入框的麦克风使用设备的语音识别，在可用时进行本地处理。识别文字会显示在消息中，您可在发送前编辑。",
+  "{{name}}, {{count}} pending": "{{name}}，{{count}} 项待处理"
+}

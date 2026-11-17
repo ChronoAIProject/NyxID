@@ -2,7 +2,7 @@ import "@/i18n";
 import { afterEach, expect, it } from "vitest";
 import { appI18n } from "@/i18n/instance";
 import { translateUi } from "@/i18n/use-ui-translation";
-import zhCN from "@/i18n/locales/zh-CN.json";
+import zhCN from "@/i18n/locales/app/zh-CN";
 import { ACCOUNT_SETTINGS_LABELS, type AccountSettingsSection } from "./account-settings-sections";
 import { BILLING_SECTION_LABELS, type BillingSection } from "./billing-sections";
 import { AGENT_PROFILE_FIELDS, type AgentDetailsSection } from "./assistant/agent-details-sections";

@@ -24,7 +24,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { router as appRouter } from "@/router";
 import { appI18n } from "@/i18n/instance";
 import { translateUi } from "@/i18n/use-ui-translation";
-import zhCN from "@/i18n/locales/zh-CN.json";
+import zhCN from "@/i18n/locales/app/zh-CN";
 import { SETTINGS_LABELS, AUTOMATION_BUDGET_ROWS, AUTOMATION_TIMEZONE_LABEL, SPECIALIST_ACCESS_LABELS } from "@/lib/assistant/nyxbot-settings-fields";
 import { ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
 import { NOTIFICATION_PUSH_ROWS } from "@/lib/assistant/notification-presentation";

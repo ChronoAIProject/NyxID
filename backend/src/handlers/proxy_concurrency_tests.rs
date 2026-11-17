@@ -109,6 +109,8 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
     let ctx = mcp_service::McpExecContext {
  strict_response_utf8: false,
         execution_permission: None,
+
+        attachment_owner_key: false,
         assistant_chat: None,
         response_body_limit: None,
         actor_user_id: None,
