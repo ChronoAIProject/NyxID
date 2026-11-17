@@ -165,3 +165,22 @@ test("NyxBot push switches appear only with the flag, one per kind, and save the
   assert.ok(loading.text("Turn on push notifications above to receive these on this device; the feed in Notifications always keeps them."));
   loading.harness.unmount();
 });
+
+test("P1-6 approval mode labels retranslate after module initialization", () => {
+  const env = setup(true, 1);
+  assert.ok(env.text("Writes only (default)"));
+  for (const [language, label, row] of [
+    ["zh-CN", "仅写入（默认）", "请求批准"],
+    ["zh-TW", "僅寫入（預設）", "請求批准"],
+  ] as const) {
+    env.language(language);
+    assert.ok(env.text(label), `${language} current mode must translate`);
+    env.row(row).props.onPress();
+    env.harness.flush();
+    assert.ok(env.all().some((node) =>
+      node.props.accessibilityRole === "menuitem" && node.props.accessibilityLabel === label));
+    env.all().find((node) => node.props.accessibilityRole === "menuitem")!.props.onPress();
+    env.harness.flush();
+  }
+  env.harness.unmount();
+});

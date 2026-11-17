@@ -59,17 +59,16 @@ class PushRegisterError extends Error {
   }
 }
 
-const APPROVAL_MODES = [
-  ["writes_only", translateApp("Writes only (default)")],
-  ["all", translateApp("All requests")],
-  ["off", translateApp("Off")],
-] as const;
-
 /** Settings › Notifications: delivery channels and the approval default. */
 export function NotificationSettingsScreen(
   _props: SheetScreenProps<"NotificationSettings">,
 ) {
   useAppLanguage();
+  const approvalModes = [
+    ["writes_only", translateApp("Writes only (default)")],
+    ["all", translateApp("All requests")],
+    ["off", translateApp("Off")],
+  ] as const;
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const queryClient = useQueryClient();
@@ -488,7 +487,7 @@ export function NotificationSettingsScreen(
               <SettingsMenuRow
                 label={translateApp("Request approval for")}
                 value={selectedApprovalMode}
-                options={APPROVAL_MODES.map(([value, label]) => ({
+                options={approvalModes.map(([value, label]) => ({
                   value,
                   label,
                 }))}
