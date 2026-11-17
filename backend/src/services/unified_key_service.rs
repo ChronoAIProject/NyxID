@@ -3655,6 +3655,30 @@ pub async fn disconnect_credentials_with_expected_siblings(
     options: DisconnectOptions,
     expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectResult> {
+    disconnect_credentials_with_audit(
+        db,
+        encryption_keys,
+        owner_id,
+        actor,
+        target,
+        options,
+        expected_siblings,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn disconnect_credentials_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    actor: &AuditActor,
+    target: DisconnectTarget<'_>,
+    options: DisconnectOptions,
+    expected_siblings: Option<&[(String, String, String)]>,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<DisconnectResult> {
     options.validate()?;
     let plan = build_disconnect_plan(
         db,
@@ -3692,6 +3716,7 @@ pub async fn disconnect_credentials_with_expected_siblings(
         db,
         keys: encryption_keys,
         owner: owner_id,
+        audit: plan.initiating_provider_token_id.as_deref().zip(audit),
         provider: plan.provider.as_ref(),
         scope: plan.scope,
         actor,
@@ -4341,6 +4366,10 @@ struct DisconnectClaim<'a> {
     cascade_record_count: usize,
     grant_effect_id: Option<&'a str>,
     remote_key_id: Option<&'a str>,
+    audit: Option<(
+        &'a str,
+        &'a crate::models::security_effect_intent::SecurityEffectIntent,
+    )>,
 }
 async fn claim_disconnect_source(
     context: &DisconnectClaim<'_>,
@@ -4358,6 +4387,7 @@ async fn claim_disconnect_source(
         cascade_record_count,
         grant_effect_id,
         remote_key_id,
+        audit,
     } = *context;
     let collection = match collection {
         USER_API_KEYS => USER_API_KEYS,
@@ -4468,34 +4498,15 @@ async fn claim_disconnect_source(
     } else {
         None
     };
-    let context = (db, collection, &raw, &effect);
+    let audit = audit
+        .filter(|(target, _)| collection == USER_PROVIDER_TOKENS && *target == id)
+        .map(|(_, audit)| audit);
+    let context = (db, collection, &raw, &effect, audit);
     let result = super::service_history::transaction::run_send(db, &context, |tx, context| {
-        let &(db, collection, raw, effect) = context;
-        Box::pin(async move {
-            let filter = doc! {"_id":raw.get("_id").cloned().unwrap_or(bson::Bson::Null),
-                "$expr":{"$eq":["$$ROOT",{"$literal":raw}]}};
-            let claimed = if collection == USER_API_KEYS {
-                super::service_history::collection::<bson::Document>(db, collection)
-                    .find_one_and_delete(filter).session(tx).await?
-            } else {
-                db.collection::<bson::Document>(collection).find_one_and_update(filter, vec![doc! {"$set":{
-                    "status":"revoked","api_key_encrypted":bson::Bson::Null,
-                    "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
-                    "secret_context_versions":{"$literal":{}},"updated_at":"$$NOW",
-                    "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
-                }}]).return_document(mongodb::options::ReturnDocument::Before).session(&mut **tx).await?
-            };
-            if claimed.is_none() {
-                return Err(super::api_key_mutation_service::abort_transaction(AppError::Conflict("Disconnect credential changed before removal".into())));
-            }
-            if let Some(effect) = effect {
-                db.collection::<bson::Document>(super::personal_erasure_service::provider::EFFECTS)
-                    .update_one(doc! {"_id":effect.get("_id").cloned()}, doc! {"$setOnInsert":effect})
-                    .upsert(true).session(&mut **tx).await?;
-            }
-            Ok(claimed)
-        })
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+        Box::pin(claim_disconnect_in_session(tx, context))
+    })
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(result.map(|row| {
         (
             row,
@@ -4505,6 +4516,57 @@ async fn claim_disconnect_source(
                 .map(str::to_owned),
         )
     }))
+}
+
+type DisconnectSource<'a> = (
+    &'a mongodb::Database,
+    &'a str,
+    &'a bson::Document,
+    &'a Option<bson::Document>,
+    Option<&'a crate::models::security_effect_intent::SecurityEffectIntent>,
+);
+async fn claim_disconnect_in_session(
+    tx: &mut super::service_history::transaction::Transaction,
+    context: &DisconnectSource<'_>,
+) -> mongodb::error::Result<Option<bson::Document>> {
+    let &(db, collection, raw, effect, audit) = context;
+    let filter = doc! {"_id":raw.get("_id").cloned().unwrap_or(bson::Bson::Null),
+    "$expr":{"$eq":["$$ROOT",{"$literal":raw}]}};
+    let claimed = if collection == USER_API_KEYS {
+        super::service_history::collection::<bson::Document>(db, collection)
+            .find_one_and_delete(filter)
+            .session(tx)
+            .await?
+    } else {
+        db.collection::<bson::Document>(collection).find_one_and_update(filter, vec![doc! {"$set":{
+                    "status":"revoked","api_key_encrypted":bson::Bson::Null,
+                    "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
+                    "secret_context_versions":{"$literal":{}},"updated_at":"$$NOW",
+                    "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
+                }}]).return_document(mongodb::options::ReturnDocument::Before).session(&mut **tx).await?
+    };
+    if claimed.is_none() {
+        return Err(super::api_key_mutation_service::abort_transaction(
+            AppError::Conflict("Disconnect credential changed before removal".into()),
+        ));
+    }
+    if let Some(effect) = effect {
+        db.collection::<bson::Document>(super::personal_erasure_service::provider::EFFECTS)
+            .update_one(
+                doc! {"_id":effect.get("_id").cloned()},
+                doc! {"$setOnInsert":effect},
+            )
+            .upsert(true)
+            .session(&mut **tx)
+            .await?;
+    }
+    if let Some(audit) = audit {
+        super::api_key_mutation_service::transaction_result(
+            super::security_effect_service::enqueue_in_session(db, tx, std::slice::from_ref(audit))
+                .await,
+        )?;
+    }
+    Ok(claimed)
 }
 
 enum RemoteCredentialSource<'a> {
@@ -7906,6 +7968,7 @@ mod tests {
             .unwrap();
         let actor = test_audit_actor(&owner);
         let context = super::DisconnectClaim {
+            audit: None,
             db: &db,
             keys: &keys,
             owner: &owner,
