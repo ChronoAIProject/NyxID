@@ -10,6 +10,7 @@ pub mod admin_helpers;
 pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;
+pub mod admin_personal_erasure;
 pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;

@@ -665,6 +665,18 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 
 NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
 
+### Upgrading large databases
+
+Before rolling out this version to a large database, pre-build the 23 erasure
+and export indexes using the exact owner and export-selector commands in the
+[personal-erasure inventory](security/PERSONAL_ERASURE_INVENTORY.md).
+This is required for large collections such as `refresh_tokens`, `nyxbot_events`,
+`assistant_messages`, `trigger_deliveries`, and channel receipts. Startup awaits
+these builds before either listener binds, so a long first build can exhaust
+readiness/startup probe allowances. Pre-building lets the current replicas keep
+serving during the build; startup then reuses the compatible existing indexes.
+No existing index needs to be dropped, renamed, or rebuilt.
+
 ### Collections Created
 
 NyxID uses 29 MongoDB collections, all created automatically at startup:
@@ -759,6 +771,16 @@ Private signing-key backups remain sensitive even after the public verifier is r
 ## Reverse Proxy Configuration
 
 NyxID should run behind a reverse proxy in production for TLS termination, load balancing, and `X-Forwarded-For` header injection.
+
+### Account export transport
+
+Do not compress `POST /api/v1/users/me/export` at any ingress, reverse proxy or
+CDN. Preserve its exact `Content-Length`, disable response buffering, and propagate
+upstream body errors so interrupted exports cannot be saved as complete. The
+frontend nginx configuration has an exact export location with gzip and buffering
+disabled; apply the same rule to any additional ingress. If an intermediary does
+encode a response, clients cannot compare its wire length to decoded bytes and
+must fall back to JSON or structural validation.
 
 ### Caddy (Recommended)
 
