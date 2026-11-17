@@ -123,7 +123,7 @@ export function NyxBotSettingsContent() {
       requested !== selected ||
       (rawSection !== undefined && rawSection !== selected)
     ))
-      void panel.update({ panelTab: selected }, "replace", { force: true });
+      void panel.update({ panelTab: selected }, "replace", { force: true, ifUnchanged: true });
   }, [requested, selected, rawSection, settled, panel]);
   const navigate = (section?: NyxBotSettingsSection) =>
     void panel.update({ panelTab: section }, "replace");

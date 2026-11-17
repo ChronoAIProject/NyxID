@@ -143,12 +143,12 @@ function SettingsContent({
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const availability = {};
   const current = accountSettingsSections.available(selected, availability);
-  function go(section?: AccountSettingsSection) {
-    if (presentation === "panel") void account.update({ panelTab: section }, "replace", { force: true });
+  function go(section?: AccountSettingsSection, ifUnchanged = false) {
+    if (presentation === "panel") void account.update({ panelTab: section }, "replace", { force: true, ifUnchanged });
     else void navigate({ to: "/settings", search: { ...searchParams, tab: section }, replace: true });
   }
   useEffect(() => {
-    if (settled && raw !== current) go(current);
+    if (settled && raw !== current) go(current, true);
   });
   const icons = { profile: UserRound, security: ShieldCheck, sessions: Monitor, mcp: Plug, display: Palette, privacy: LockKeyhole };
   function disclosures(parent?: AccountSettingsSection) {

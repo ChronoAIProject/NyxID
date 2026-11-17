@@ -82,3 +82,33 @@ it("allows a caller to force canonical URL replacement without naming a panel", 
   expect(router.state.location.searchStr).toContain("profile");
   expect(history.length).toBe(1);
 });
+
+it("does not let an old canonicalization replace a newer section within the same panel", async () => {
+  let account: ReturnType<typeof useAccountPanel> | undefined;
+  const root = createRootRoute();
+  const route = createRoute({ getParentRoute: () => root, path: "/assistant", validateSearch: withAccountPanelSearch(() => ({})), component: function Probe() { account = useAccountPanel(); return null; } });
+  const history = createMemoryHistory({ initialEntries: ["/assistant?panel=nyxbot&panelTab=notifications"] });
+  const router = createRouter({ routeTree: root.addChildren([route]), history });
+  render(<RouterProvider router={router} />);
+  await act(() => router.load());
+  const canonicalize = account!.update;
+  await act(() => router.navigate({ to: "/assistant", search: { panel: "nyxbot", panelTab: "tasks" }, replace: true }));
+  await act(() => canonicalize({ panelTab: undefined }, "replace", { force: true, ifUnchanged: true }));
+  expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "tasks" });
+  expect(history.length).toBe(1);
+});
+
+it("still consumes a pending top-up after a section changes when cleanup is not address-conditional", async () => {
+  let account: ReturnType<typeof useAccountPanel> | undefined;
+  const root = createRootRoute();
+  const route = createRoute({ getParentRoute: () => root, path: "/assistant", validateSearch: withAccountPanelSearch(() => ({})), component: function Probe() { account = useAccountPanel(); return null; } });
+  const history = createMemoryHistory({ initialEntries: ["/assistant?panel=billing&panelAction=topup"] });
+  const router = createRouter({ routeTree: root.addChildren([route]), history });
+  render(<RouterProvider router={router} />);
+  await act(() => router.load());
+  const consume = account!.update;
+  await act(() => router.navigate({ to: "/assistant", search: { panel: "billing", panelSection: "billing/benefits", panelAction: "topup" }, replace: true }));
+  await act(() => consume({ panelAction: undefined }, "replace", { force: true }));
+  expect(router.state.location.search).toEqual({ panel: "billing", panelSection: "billing/benefits" });
+  expect(history.length).toBe(1);
+});

@@ -310,7 +310,11 @@ function BillingContent({
     updateSearch({ section: next === tab ? undefined : next }, true, true);
   }
   useEffect(() => {
-    if (settled && rawSection !== section) updateSearch({ section }, true);
+    if (settled && rawSection !== section) {
+      if (presentation === "panel")
+        void account.update({ panelSection: section }, "replace", { force: true, ifUnchanged: true });
+      else updateSearch({ section }, true);
+    }
   });
   const walletActions = <BillingWalletActions
     wallet={wallet} loading={walletQuery.isLoading} unavailable={walletUnavailable} error={walletQuery.error}
