@@ -20,6 +20,7 @@ Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.m
 - NEVER use `#[serde(skip_serializing)]` on model fields -- prevents `insert_one(&struct)` from storing them
 - ALWAYS use `#[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]` on `DateTime<Utc>` fields; for `Option<DateTime<Utc>>` use the `bson_datetime::optional` helper (`models/bson_datetime.rs`)
 - IDs are UUID v4 stored as strings in MongoDB `_id`; each model has a `COLLECTION_NAME` constant
+- Every new production collection, and removal of a collection's last production use, must be registered in `services/personal_data_registry.rs` (owner selector, erasure and export disposition); its source-scan test enforces this. Personal collections also need local-inventory and owner-index coverage; see the registry header and `docs/security/PERSONAL_ERASURE_INVENTORY.md`.
 
 ### 2. Layer Architecture
 

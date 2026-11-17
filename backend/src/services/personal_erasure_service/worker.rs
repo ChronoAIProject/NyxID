@@ -7,10 +7,12 @@ const LEASE_SECONDS: i64 = 120;
 const RECONCILIATION_PAGE_CAP: usize = 64;
 const RECONCILIATION_REMOTE_RETRY_SECONDS: i64 = 5 * 60;
 const RECONCILIATION_QUIET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RECONCILIATION_ERROR_BACKOFF_START: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Default)]
 struct CompletedReconciliationSchedule {
     next_scan: Option<std::time::Instant>,
+    failures: u32,
 }
 
 impl CompletedReconciliationSchedule {
@@ -19,7 +21,16 @@ impl CompletedReconciliationSchedule {
     }
 
     fn scanned(&mut self, now: std::time::Instant, found: bool) {
+        self.failures = 0;
         self.next_scan = (!found).then_some(now + RECONCILIATION_QUIET_INTERVAL);
+    }
+
+    fn failed(&mut self, now: std::time::Instant) {
+        let backoff = RECONCILIATION_ERROR_BACKOFF_START
+            .saturating_mul(2_u32.saturating_pow(self.failures))
+            .min(RECONCILIATION_QUIET_INTERVAL);
+        self.next_scan = Some(now + backoff);
+        self.failures = self.failures.saturating_add(1);
     }
 }
 
@@ -29,7 +40,13 @@ async fn reconcile_completed_if_due(
     now: std::time::Instant,
 ) -> AppResult<()> {
     if schedule.due(now) {
-        let found = reconcile_completed_once(state).await?;
+        let found = match reconcile_completed_once(state).await {
+            Ok(found) => found,
+            Err(error) => {
+                schedule.failed(now);
+                return Err(error);
+            }
+        };
         schedule.scanned(now, found);
     }
     Ok(())
@@ -680,6 +697,53 @@ mod tests {
             schedule.due(start + RECONCILIATION_QUIET_INTERVAL + std::time::Duration::from_secs(1))
         );
         assert!(CompletedReconciliationSchedule::default().due(start));
+    }
+
+    #[test]
+    fn completed_reconciliation_errors_back_off_and_success_resets_the_streak() {
+        let mut now = std::time::Instant::now();
+        let mut schedule = CompletedReconciliationSchedule::default();
+        let mut attempts = 0;
+        for seconds in [30, 60, 120, 240, 480, 600, 600, 600] {
+            assert!(schedule.due(now));
+            let before = attempts;
+            for elapsed in 0..seconds {
+                let tick = now + std::time::Duration::from_secs(elapsed);
+                if schedule.due(tick) {
+                    // Each attempted failure produces one warning in the worker loop.
+                    attempts += 1;
+                    schedule.failed(tick);
+                }
+                assert!(!schedule.due(tick));
+            }
+            assert_eq!(attempts, before + 1);
+            now += std::time::Duration::from_secs(seconds);
+            assert!(!schedule.due(now - std::time::Duration::from_nanos(1)));
+            assert!(schedule.due(now));
+        }
+
+        schedule.failures = u32::MAX;
+        schedule.failed(now);
+        assert_eq!(schedule.failures, u32::MAX);
+        assert_eq!(
+            schedule.next_scan,
+            Some(now + RECONCILIATION_QUIET_INTERVAL)
+        );
+
+        schedule.scanned(now, false);
+        assert_eq!(schedule.failures, 0);
+        now += RECONCILIATION_QUIET_INTERVAL;
+        assert!(!schedule.due(now - std::time::Duration::from_nanos(1)));
+        assert!(schedule.due(now));
+        schedule.failed(now);
+        assert_eq!(schedule.failures, 1);
+        now += RECONCILIATION_ERROR_BACKOFF_START;
+        assert!(!schedule.due(now - std::time::Duration::from_nanos(1)));
+        assert!(schedule.due(now));
+
+        schedule.scanned(now, true);
+        assert_eq!(schedule.failures, 0);
+        assert!(schedule.due(now));
     }
 
     async fn cleanup_revision(db: &Database, user: &str) -> i64 {
