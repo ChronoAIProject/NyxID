@@ -168,6 +168,7 @@ frontend/src/i18n/locales/wizard-zh-CN.json
 frontend/src/i18n/locales/wizard-zh-TW.json
 frontend/src/i18n/use-ui-translation.ts
 frontend/src/i18n/wizard.ts
+frontend/src/lib/account-resource-preferences.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/api-error.ts
 frontend/src/lib/assistant/connect-watch.ts
@@ -208,6 +209,9 @@ frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
 frontend/src/stores/consent-store.ts
 frontend/src/stores/credits-denial-store.ts
+frontend/src/stores/machine-pane-store.ts
+frontend/src/stores/oauth-popup-store.ts
+frontend/src/stores/pending-connect-store.ts
 frontend/src/stores/service-card-view-store.ts
 frontend/src/stores/theme-store.ts
 frontend/src/types/options.ts
