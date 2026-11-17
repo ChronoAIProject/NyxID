@@ -1,6 +1,7 @@
 pub mod access_denial;
 pub mod memory_write;
 pub mod refresh;
+mod refusal_throttle;
 pub mod skill_draft;
 pub mod skill_read;
 pub mod voice_start;
@@ -222,7 +223,7 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
-    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    /// A rate-limit refusal with a bounded retry delay; preserves 1005.
     #[error("Rate limited")]
     RateLimitedWithRetry { retry_after: u64 },
 
@@ -1713,6 +1714,22 @@ impl AppError {
 }
 
 impl AppError {
+    pub(crate) fn quiet_rate_limit_response(retry_after: u64) -> Response {
+        let error = Self::RateLimitedWithRetry { retry_after };
+        let mut response = (error.status_code(), axum::Json(error.response_body())).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_str(
+                &error
+                    .retry_after_seconds()
+                    .expect("rate limit delay")
+                    .to_string(),
+            )
+            .expect("bounded numeric retry delay"),
+        );
+        response
+    }
+
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
             Self::BillingRecoveryFailed { source, .. }

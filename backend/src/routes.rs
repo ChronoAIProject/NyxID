@@ -2391,6 +2391,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Raw proxy handlers enforce their configured limits while buffering. Disable
     // the app-wide extractor cap so it cannot preempt them with an opaque 413.
     let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
+        .layer(axum::Extension(handlers::proxy::ingress::HttpIngress))
         .layer(DefaultBodyLimit::disable());
 
     let public_passthrough_routes =
@@ -4113,3 +4114,6 @@ mod retirement_tests {
 
 #[cfg(test)]
 mod machine_external_runtime_tests;
+
+#[cfg(test)]
+mod refusal_throttle_tests;
