@@ -266,7 +266,6 @@ struct ChatView: View {
 
 private struct ChatContent: View {
   let chat: ChatModel
-  @State private var handedOff = false
   private static let bottomId = "bottom"
 
   var body: some View {
@@ -317,16 +316,6 @@ private struct ChatContent: View {
         .font(.headline)
         .lineLimit(1)
         .accessibilityAddTraits(.isHeader)
-    }
-    .overlay {
-      if handedOff {
-        Label("Continue on iPhone", systemImage: "iphone")
-          .font(.footnote.weight(.semibold))
-          .padding(.horizontal, 12)
-          .padding(.vertical, 8)
-          .background(Capsule().fill(Color.nyxSurface))
-          .transition(.opacity)
-      }
     }
   }
 
@@ -409,17 +398,10 @@ private struct ChatContent: View {
         .disabled(chat.status == .loading)
         .accessibilityLabel("Speak")
         Spacer()
-        Button {
-          withAnimation { handedOff = true }
-          Task {
-            try? await Task.sleep(nanoseconds: 1_600_000_000)
-            withAnimation { handedOff = false }
-          }
-        } label: {
-          Image(systemName: "iphone")
-        }
-        .buttonStyle(CircleButtonStyle(size: 32))
-        .accessibilityLabel("Continue on iPhone")
+        // Same width as the speaker button, so the mic stays centred.
+        Color.clear
+          .frame(width: 32, height: 32)
+          .accessibilityHidden(true)
       }
     }
     .padding(.horizontal, 6)

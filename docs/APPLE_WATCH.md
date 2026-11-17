@@ -28,8 +28,11 @@ thread.
   activity ("Checking your calendar…") under the last message, and Stop. If the
   agent is waiting on an approval, the line becomes "Needs your approval" with
   "Review ›"; anything else that needs a decision says "Decide on iPhone".
-  The bottom bar has speaker (read the latest reply aloud), mic (reply) and
-  phone (continue in the iPhone or web app through Handoff).
+  The bottom bar has speaker (read the latest reply aloud) and mic (reply).
+- **Handoff** needs no button: while a thread is open, the watch advertises
+  its web address (`{frontend}/assistant?c=<id>`), so an iPhone or Mac on the
+  same Apple ID with Handoff on can continue it. It opens in Safari, because
+  the app's universal links cover the API hosts, not the web host.
 - **Approvals**: one card at a time ("1 OF 2"): what is asked, who
   asks, "Read-only" / "Makes changes" and how long it lasts. Swipe right or tap
   Allow, swipe left or tap Deny; the result screen offers "Next approval ›".
