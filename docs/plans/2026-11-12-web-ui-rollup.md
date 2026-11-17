@@ -600,17 +600,16 @@ passes and the 85 sidebar tests pass.
     worktree at c48c1de05 (14/15 each).
   - It is pre-existing and not in CI, and is recorded here, not changed.
 
-### Final pinned main (526de4b4d)
+### Pinned main (526de4b4d)
 
 Fable approved the merges up to 7961f0d7d with no findings. Root then pinned
-`main` 526de4b4d as the last snapshot for this integration. It adds two
-commits on 186e35678:
+`main` 526de4b4d for the next merge. It adds two commits on 186e35678:
 - 4a31e80ca, #2592: staging images published from `dev`; the backend image
   declares a numeric user.
 - 526de4b4d, #2517: privacy policy alignment and self-serve account export.
 
-Together they change 82 files (+27,415/−699). Later `main` advances are out of
-scope for this integration.
+Together they change 82 files (+27,415/−699). The two `main` commits that
+followed are merged in the next section.
 
 - **Merge commit 6d71b8a66** (parents 7961f0d7d, 526de4b4d). Opus ran
   `git merge --no-ff` of the pinned SHA. It had no conflicts, and its tree
@@ -652,8 +651,11 @@ scope for this integration.
     unaffected. The branch adds no collection, so main's registry rule needs
     no new entry.
 - **Wizard bundle.** None of the 55 files that differ from main is a wizard
-  hash input: the 216 files in `index.manifest` plus the four config inputs.
-  Main's committed hash and assets therefore stay fresh.
+  hash input. The inputs are the 216 files in `index.manifest` plus the five
+  additional hash inputs that `cli/tests/wizard_bundle_freshness.rs` lists:
+  `frontend/package-lock.json`, `frontend/vite.wizard.config.ts`,
+  `frontend/wizard.html`, `frontend/vite-plugins/wizard-manifest.ts` and
+  `.node-version`. Main's committed hash and assets therefore stay fresh.
 - **Validation on 6d71b8a66.** The log is
   `~/.heca/plans/wild-beach-rollup/validate-final-pin-2026-11-17.log`.
   - tsc passes.
@@ -673,6 +675,42 @@ scope for this integration.
     touches it.
   - The run left no untracked files and no `.tmp`.
   - The full Vitest suite and the backend tests run in CI.
+- Fable reviewed `7961f0d7d..14dc85b3a` and approved it with no findings.
+  CI, CodeQL and Release passed on 14dc85b3a.
+
+### Current main (66f29a7cd)
+
+`main` then had two more commits, so the branch was behind. Root asked for
+them to be merged as well. The tip was 66f29a7cd, and a merge-freeze ruleset
+created at 20:45 (+08:00) now blocks further updates to `main`. The two
+commits:
+- f976099e9, #2609: two startup migrations survive a crash (`db.rs`, new
+  startup migration tests, nextest config).
+- 66f29a7cd, #2603: a retry cannot slip in while a model approval is pending
+  (activity decision binding, permission dispatch proposals, their tests).
+
+They change 7 files, none of which this branch touches.
+
+- **Merge commit e348944ef** (parents 14dc85b3a, 66f29a7cd). Opus ran
+  `git merge --no-ff` of the exact SHA. It had no conflicts, and its tree
+  7ac74ff6d equals `git merge-tree --write-tree` of the two heads.
+  - The 7 incoming files are identical to main.
+  - All 55 files this branch changes are identical to 14dc85b3a.
+  - In e348944ef the `frontend`, `cli`, `mobile`, `sdk`, `docs`,
+    `integrations` and `.github` trees are identical to 14dc85b3a, so the
+    earlier frontend validation and both Fable reviews still apply.
+- **Interaction.** #2603 binds an approval proposal's activity inside the
+  proposal transaction and publishes the request-local flags only after the
+  commit. It changes no API shape and no user-visible string, so the
+  approval-card and receipt translations are unaffected. #2609 does not touch
+  the onboarding collection or the code paths Show suggestions uses.
+- **Checks.** `verify_adoption.py` and `verify_final_pin.py` pass against
+  66f29a7cd (12,261 keys per language; main still has 12,195 because these
+  commits change no catalog). `cargo fmt --check` passes. The full frontend
+  suite and browser matrix were not repeated, because no frontend file
+  changed; CI runs the backend and frontend suites on the pushed head.
+- **Doc correction.** The wizard bundle note above now lists the five
+  additional hash inputs; it previously said four.
 
 ## Milestones
 
