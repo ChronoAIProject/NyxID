@@ -416,13 +416,13 @@ test("on the Duo (folded or unfolded) a chat has no top bar in rail mode and its
   }
 });
 
-test("identity text refreshes native paragraph metrics after a live font-size change", () => {
+test("P9 identity retains base native paragraph identity", () => {
   const source = readFileSync(
     new URL("./ChatIdentityHeader.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /DynamicTypeText as Text/);
-  assert.doesNotMatch(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
+  assert.doesNotMatch(source, /DynamicTypeText as Text/);
+  assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
 });
 
 test("the compact identity keeps a fixed 32pt avatar and one tail-truncating title", () => {

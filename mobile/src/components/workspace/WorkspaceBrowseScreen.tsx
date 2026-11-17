@@ -1,4 +1,5 @@
-import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -141,11 +142,14 @@ function BrowseSearchField({
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
   const [textWidth, setTextWidth] = useState<number>();
-  const placeholder = fittingPlaceholder(
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
+  const placeholder = cornerWindow
+    ? fittingPlaceholder(
     placeholders,
     textWidth,
     SEARCH_FIELD.fontSize * fontScale,
-  );
+  )
+    : placeholders[0];
   return (
     <View
       style={[

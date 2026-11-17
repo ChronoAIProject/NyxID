@@ -1,10 +1,12 @@
-import { DynamicTypeText as Text } from "../DynamicTypeText";
+import { Text } from "react-native";
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
 import { useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
   StyleSheet,
-  View,
+  View
 } from "react-native";
 import {
   ChevronDown,
@@ -49,6 +51,7 @@ export function SidebarSectionHeader({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const [rowWidth, setRowWidth] = useState(0);
   const [labelWidth, setLabelWidth] = useState(0);
   const [metaWidth, setMetaWidth] = useState(0);
@@ -64,6 +67,90 @@ export function SidebarSectionHeader({
     refreshWidth + createWidth,
     styles.sectionRow.gap * 2 + styles.sectionRow.paddingRight,
   );
+  if (!cornerWindow) {
+    return (
+      <View style={baseStyles.sectionHeading}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t(
+            section === "agents"
+              ? expanded
+                ? "Collapse agents"
+                : "Expand agents"
+              : section === "crews"
+                ? expanded
+                  ? "Collapse crews"
+                  : "Expand crews"
+                : expanded
+                  ? "Collapse {{section}}"
+                  : "Expand {{section}}",
+            { section: label },
+          )}
+          accessibilityState={{ expanded, disabled }}
+          disabled={disabled}
+          accessibilityValue={{ text: String(count) }}
+          onPress={onPress}
+          style={baseStyles.sectionRow}
+        >
+          <Text
+            accessibilityRole="header"
+            style={[
+              baseStyles.section,
+              { color: disabled ? colors.textMuted : colors.textPrimary },
+            ]}
+          >
+            {label}
+          </Text>
+          <Text style={[baseStyles.sectionCount, { color: colors.textMuted }]}>
+            {count}
+          </Text>
+          <Chevron size={16} color={colors.textMuted} />
+        </Pressable>
+        {onRefresh ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t(
+              section === "agents"
+                ? "Refresh agents"
+                : section === "crews"
+                  ? "Refresh crews"
+                  : "Refresh {{section}}",
+              { section: label },
+            )}
+            accessibilityState={{
+              disabled: refreshDisabled || refreshing,
+              busy: refreshing,
+            }}
+            disabled={refreshDisabled || refreshing}
+            onPress={onRefresh}
+            style={[
+              baseStyles.createButton,
+              { opacity: refreshDisabled ? 0.4 : 1 },
+            ]}
+          >
+            {refreshing ? (
+              <ActivityIndicator size="small" color={colors.textSecondary} />
+            ) : (
+              <RefreshCw size={18} color={colors.textSecondary} />
+            )}
+          </Pressable>
+        ) : null}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={createLabel}
+          accessibilityState={{ disabled: createDisabled }}
+          disabled={createDisabled}
+          onPress={onCreate}
+          style={baseStyles.createButton}
+        >
+          <Plus
+            size={18}
+            color={createDisabled ? colors.textMuted : colors.textSecondary}
+          />
+        </Pressable>
+      </View>
+    );
+  }
   return (
     <View
       testID="sidebar-section-viewport"
@@ -72,7 +159,7 @@ export function SidebarSectionHeader({
       <View style={styles.sectionHeading}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(section === "agents" ? expanded ? "Collapse agents" : "Expand agents" : section === "crews" ? expanded ? "Collapse crews" : "Expand crews" : expanded ? "Collapse {{section}}" : "Expand {{section}}", { section: label })}
+          accessibilityLabel={t(section === "agents" ? expanded ? "Collapse agents" : "Expand agents" : section === "crews" ? expanded ? "Collapse crews" : "Expand crews" : expanded ? "Collapse {{section}}" : "Expand {{section}}", { section: label },)}
           accessibilityState={{ expanded, disabled }}
           disabled={disabled}
           accessibilityValue={{ text: String(count) }}
@@ -127,7 +214,7 @@ export function SidebarSectionHeader({
             accessibilityRole="button"
             accessibilityLabel={t(section === "agents" ? "Refresh agents" : section === "crews" ? "Refresh crews" : "Refresh {{section}}", {
               section: label,
-            })}
+            },)}
             onLayout={(event) =>
               setRefreshWidth(event.nativeEvent.layout.width)
             }
@@ -180,7 +267,7 @@ export function SidebarSectionHeader({
             numberOfLines={1}
             testID="sidebar-section-label-measure"
             onTextLayout={(event) =>
-              setLabelWidth((event.nativeEvent.lines[0]?.width ?? 0) + styles.section.padding * 2)
+              setLabelWidth((event.nativeEvent.lines[0]?.width ?? 0) + styles.section.padding * 2,)
             }
             style={styles.section}
           >
@@ -234,5 +321,30 @@ const styles = StyleSheet.create({
     flexGrow: 0,
     flexShrink: 1,
     minWidth: 0,
+  },
+});
+
+const baseStyles = StyleSheet.create({
+  sectionHeading: { flexDirection: "row", alignItems: "center" },
+  createButton: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+  },
+  sectionRow: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    minHeight: 44,
+    paddingRight: 10,
+    gap: 8,
+  },
+  sectionCount: { fontFamily: fonts.bodyRegular, fontSize: 11 },
+  section: {
+    ...sidebarSectionTitle,
+    padding: 12,
+    flex: 1,
   },
 });

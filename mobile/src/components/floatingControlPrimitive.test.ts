@@ -93,11 +93,11 @@ test("every floating control renders through the floating-control primitive", ()
 test("narrow and wide bars float the same glass controls", () => {
   // Every ChatIconButton in the bar floats, in every layout.
   const actions = read("features/assistant/ChatHeaderActions.tsx");
-  assert.equal(actions.match(/<ChatIconButton/g)!.length, 3);
-  assert.equal(actions.match(/^\s+floating$/gm)!.length, 3);
+  assert.equal(actions.match(/<ChatIconButton/g)!.length, 2);
+  assert.ok([...actions.matchAll(/<ChatIconButton\b[^>]*>/gs)].every(([tag])=>/\bfloating\b/.test(tag)));
   assert.doesNotMatch(actions, /floating=\{/);
   // The identity pill floats (compact) and crew options float everywhere.
-  assert.match(read("features/assistant/AssistantScreen.tsx"), /<ChatIdentity\s+compact\s+floating\s/);
+  assert.match(read("features/assistant/AssistantScreen.tsx"), /<ChatIdentity\s+compact=\{quickRail\}\s+floating\s/);
   const group = read("features/groups/GroupChatScreen.tsx");
   assert.doesNotMatch(group, /floating=\{/);
   assert.equal(group.match(/^\s+floating$/gm)!.length, 2);
@@ -115,7 +115,7 @@ test("every other workspace bar floats the chat bar's glass controls: Menu/Back,
     "app/WorkspaceHeader.tsx": /<FloatingButton \{\.\.\.controlProps\}>/,
     // The chat and crew bars (identity pill, Scan QR / New chat / More, crew
     // options).
-    "features/assistant/AssistantScreen.tsx": /<ChatHeaderActions[\s\S]*<ChatIdentity\s+compact\s+floating/,
+    "features/assistant/AssistantScreen.tsx": /<ChatHeaderActions[\s\S]*<ChatIdentity\s+compact=\{quickRail\}\s+floating/,
     "features/groups/GroupChatScreen.tsx": /floating\s*>\s*<MoreHorizontal/,
     // Edit pages' Save, in the workspace and in the Settings sheet.
     "features/assistant/AssistantDetailsScreen.tsx": /<SettingsHeaderButton/,

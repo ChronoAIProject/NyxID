@@ -1,4 +1,4 @@
-import { Platform } from "react-native";
+import { Text, Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {
@@ -12,7 +12,6 @@ import {
   WorkspaceQuickRailContext,
 } from "../../components/workspace/WorkspaceLayoutContext";
 import { Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
-import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NativeStackHeaderProps } from "@react-navigation/native-stack";
 import { ChevronDown } from "lucide-react-native";
@@ -67,7 +66,7 @@ function ChatHeaderContent({ options, back, route }: NativeStackHeaderProps) {
   const band = workspaceHeaderBand(
     insets.top,
     cornerSensor,
-    workspaceStatusCluster({ platform: Platform.OS, ...window, rightInset: insets.right }),
+    workspaceStatusCluster({ platform: Platform.OS, ...window, rightInset: insets.right, }),
     undefined,
     rail,
   );
@@ -159,8 +158,14 @@ export function ChatIdentity({
   const avatarSize = compact || floating ? "lg" : "xl";
   const control = {
     accessibilityLabel: status
-      ? translateApp("Chatting with {{name}}, {{details}}, {{status}}. Choose agent", { name: name, details: detail, status: translateApp(status) })
-      : translateApp("Chatting with {{name}}, {{details}}. Choose agent", { name: name, details: detail }),
+      ? translateApp(
+          "Chatting with {{name}}, {{details}}, {{status}}. Choose agent",
+          { name: name, details: detail, status: translateApp(status) },
+        )
+      : translateApp("Chatting with {{name}}, {{details}}. Choose agent", {
+          name: name,
+          details: detail,
+        }),
     disabled,
     onPress,
   };

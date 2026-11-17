@@ -1,9 +1,9 @@
-import { workspaceRecentLabel } from "./workspaceAccessibilityLabels";
-import { DynamicTypeText as Text } from "../DynamicTypeText";
-import { sidebarTextProps } from "./sidebarText";
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";import { workspaceRecentLabel } from "./workspaceAccessibilityLabels";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
-import { Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
+import {
+  Text, Pressable, StyleSheet, View, useWindowDimensions, } from "react-native";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { fonts } from "../../theme/designTokens";
@@ -40,7 +40,8 @@ export function WorkspaceRecentRow({
   useAppLanguage();
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
-  const stacked = fontScale >= RECENT_ROW_STACK_FONT_SCALE;
+  const stacked =
+    useContext(WorkspaceCornerSensorContext) && fontScale >= RECENT_ROW_STACK_FONT_SCALE;
   return (
     <Pressable
       accessibilityRole="button"
@@ -55,7 +56,6 @@ export function WorkspaceRecentRow({
       ]}
     >
       <Text
-        {...sidebarTextProps()}
         numberOfLines={1}
         style={[
           styles.title,
@@ -72,10 +72,7 @@ export function WorkspaceRecentRow({
       >
         {unread > 0 ? (
           <Text
-            {...sidebarTextProps()}
             testID="sidebar-unread-count"
-            numberOfLines={1}
-            ellipsizeMode="tail"
             style={[
               styles.count,
               {
@@ -89,8 +86,6 @@ export function WorkspaceRecentRow({
         ) : null}
         {item.status ? (
           <Text
-            {...sidebarTextProps()}
-            numberOfLines={1}
             style={[
               styles.status,
               stacked ? styles.statusStacked : null,
@@ -106,9 +101,7 @@ export function WorkspaceRecentRow({
           </Text>
         ) : null}
         <Text
-          {...sidebarTextProps()}
           numberOfLines={1}
-          ellipsizeMode="tail"
           style={[styles.time, { color: colors.textMuted }]}
         >
           {formatRelativeTimeFromMs(Date.parse(item.activityAt))}
@@ -137,10 +130,7 @@ export function WorkspaceRecents({
   return (
     <View testID="sidebar-recents">
       <Text
-        {...sidebarTextProps()}
         accessibilityRole="header"
-        numberOfLines={1}
-        ellipsizeMode="tail"
         style={[styles.heading, { color: colors.textPrimary }]}
       >
         {translateApp("Recents")}
@@ -163,9 +153,6 @@ export function WorkspaceRecents({
         />
       ) : !data.rows.length ? (
         <Text
-          {...sidebarTextProps()}
-          numberOfLines={1}
-          ellipsizeMode="tail"
           style={[styles.notice, { color: colors.textMuted }]}
         >
           {!data.online
@@ -184,9 +171,6 @@ export function WorkspaceRecents({
         style={styles.row}
       >
         <Text
-          {...sidebarTextProps()}
-          numberOfLines={1}
-          ellipsizeMode="tail"
           style={[styles.title, { color: colors.textMuted }]}
         >
           {translateApp("See all…")}

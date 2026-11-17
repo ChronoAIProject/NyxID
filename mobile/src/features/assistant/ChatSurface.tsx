@@ -14,8 +14,6 @@ export const chatSurfaceStyles = StyleSheet.create({
   fill: { flex: 1, minHeight: 0, minWidth: 0 },
   row: { flexDirection: "row", alignItems: "center", gap: 8 },
   iconButton: {
-    flexShrink: 0,
-    width: 44,
     minWidth: 44,
     minHeight: 44,
     alignItems: "center",

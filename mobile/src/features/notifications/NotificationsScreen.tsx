@@ -1,4 +1,5 @@
-import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "../../components/workspace/WorkspaceLayoutContext";import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -145,7 +146,7 @@ function toneColors(colors: ThemeColors, tone: NotificationTone) {
     case "success":
       return colors.successTone;
     default:
-      return { bg: colors.cardSoft, text: colors.textMuted, border: colors.border };
+      return { bg: colors.cardSoft, text: colors.textMuted, border: colors.border, };
   }
 }
 
@@ -179,6 +180,7 @@ export function NotificationRow({
   onPress: (item: AssistantNotification) => void;
 }) {
   useAppLanguage();
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const tone = notificationTone(item.kind);
@@ -252,16 +254,24 @@ export function NotificationRow({
           ]}
         >
           {item.kind === "chat_update" && item.platform ? (
-            <ChannelPlatformGlyph platform={item.platform} size={12} color={palette.text} />
+            <ChannelPlatformGlyph
+              platform={item.platform}
+              size={12}
+              color={palette.text}
+            />
           ) : (
-            <Icon testID={`notification-kind-icon-${item.kind}`} size={12} color={palette.text} />
+            <Icon
+              testID={`notification-kind-icon-${item.kind}`}
+              size={12}
+              color={palette.text}
+            />
           )}
         </View>
       </View>
       <View style={styles.body}>
         <View style={styles.titleLine}>
           <Text
-            numberOfLines={2}
+            numberOfLines={cornerWindow ? 2 : 3}
             ellipsizeMode="tail"
             style={[
               styles.title,
@@ -288,7 +298,7 @@ export function NotificationRow({
         </View>
         {item.preview ? (
           <Text
-            numberOfLines={3}
+            numberOfLines={cornerWindow ? 3 : 2}
             ellipsizeMode="tail"
             style={[styles.preview, { color: colors.textSecondary }]}
           >
@@ -313,7 +323,7 @@ export function NotificationRow({
             // Never squeezed out: the meta line wraps the time to a new line.
             <Text
               testID="notification-time"
-              numberOfLines={1}
+              numberOfLines={cornerWindow ? 1 : undefined}
               style={[styles.time, { color: colors.textMuted }]}
             >
               {time}
@@ -350,6 +360,7 @@ export function NotificationsScreen({
 }: WorkspaceScreenProps<"Notifications">) {
   const railIndicator = useRailScrollIndicator();
   useAppLanguage();
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   useWorkspaceBack({
@@ -450,14 +461,17 @@ export function NotificationsScreen({
   let empty: React.ReactNode;
   if (!enabled) {
     empty = (
-      <Notice message={translateApp(
+      <Notice
+        message={translateApp(
           "Notifications are not available for this account yet.",
         )}
       />
     );
   } else if (feed.isPending) {
     empty = (
-      <SkeletonRows rows={4} accessibilityLabel={translateApp("Loading notifications")}
+      <SkeletonRows
+        rows={4}
+        accessibilityLabel={translateApp("Loading notifications")}
       />
     );
   } else if (feed.isError) {
@@ -478,7 +492,9 @@ export function NotificationsScreen({
     // Not exhausted: an automatic hop is running or offered, never "all caught up".
     empty =
       autoHop || feed.isFetchingNextPage ? (
-        <SkeletonRows rows={2} accessibilityLabel={translateApp("Looking for updates")}
+        <SkeletonRows
+          rows={2}
+          accessibilityLabel={translateApp("Looking for updates")}
         />
       ) : (
         <SettingsGroup inset={false}>
@@ -566,9 +582,11 @@ export function NotificationsScreen({
           {/* The pinned bar grows less than the feed so rows keep the
               screen at the largest text sizes. */}
           <Text
-            numberOfLines={2}
+            numberOfLines={cornerWindow ? 2 : undefined}
             ellipsizeMode="tail"
-            maxFontSizeMultiplier={FEED_FOOTER_MAX_FONT_SCALE}
+            maxFontSizeMultiplier={
+              cornerWindow ? FEED_FOOTER_MAX_FONT_SCALE : undefined
+            }
             style={[
               styles.footerLabel,
               {

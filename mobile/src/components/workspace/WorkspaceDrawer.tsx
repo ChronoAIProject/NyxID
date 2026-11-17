@@ -1,10 +1,9 @@
-import { DynamicTypeText as Text } from "../DynamicTypeText";
-import { sidebarTextProps } from "./sidebarText";
+
 import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { WORKSPACE_HEADER_ROW } from "./workspaceHeaderMetrics";
 import { useEffect, useState, type Ref } from "react";
-import { AppState, Pressable, StyleSheet, View } from "react-native";
+import { Text, AppState, Pressable, StyleSheet, View } from "react-native";
 import {
   SafeAreaView,
   useSafeAreaInsets,
@@ -54,19 +53,19 @@ const destinations = [
   { route: "Automations",
     get label() {
       return translateApp("Automations");
-    }, Icon: CalendarClock },
+    }, Icon: CalendarClock, },
   { route: "Machines",
     get label() {
       return translateApp("Machines");
-    }, Icon: Monitor },
+    }, Icon: Monitor, },
   { route: "Plugins",
     get label() {
       return translateApp("Plugins");
-    }, Icon: Plug },
+    }, Icon: Plug, },
   { route: "Activity",
     get label() {
       return translateApp("Activity");
-    }, Icon: ShieldCheck },
+    }, Icon: ShieldCheck, },
 ] as const;
 
 type Props = {
@@ -188,17 +187,14 @@ export function WorkspaceDrawer({
         scrollHeader={
           <View>
             <Text
-                {...sidebarTextProps()}
                 accessibilityRole="header"
-                numberOfLines={1}
-                ellipsizeMode="tail"
                 style={[styles.section, { color: colors.textPrimary }]}
             >
               {t("Quick actions")}
             </Text>
             {(
               [
-                { label: translateApp("Scan QR code"), Icon: ScanQrCode, action: "scanner" },
+                { label: translateApp("Scan QR code"), Icon: ScanQrCode, action: "scanner", },
                 {
                   label: translateApp("Terminal login code"),
                   Icon: Terminal,
@@ -225,9 +221,6 @@ export function WorkspaceDrawer({
                   color={disabled ? colors.textMuted : colors.textSecondary}
                 />
                 <Text
-                  {...sidebarTextProps()}
-                  numberOfLines={1}
-                  ellipsizeMode="tail"
                   accessibilityLabel={t(label)}
                   style={[
                     styles.rowText,
@@ -239,10 +232,7 @@ export function WorkspaceDrawer({
               </Pressable>
             ))}
             <Text
-                {...sidebarTextProps()}
                 accessibilityRole="header"
-                numberOfLines={1}
-                ellipsizeMode="tail"
                 style={[styles.section, { color: colors.textPrimary }]}
             >
               {t("Workspace")}
@@ -275,7 +265,6 @@ export function WorkspaceDrawer({
                   color={disabled ? colors.textMuted : colors.textSecondary}
                 />
                 <Text
-                  {...sidebarTextProps()}
                   numberOfLines={1}
                   style={[
                     styles.rowText,
@@ -286,10 +275,7 @@ export function WorkspaceDrawer({
                 </Text>
                 {notifications.badge ? (
                   <Text
-                    {...sidebarTextProps()}
                     testID="sidebar-notifications-count"
-                    numberOfLines={1}
-                    ellipsizeMode="tail"
                     style={[
                       styles.count,
                       !disabled && notifications.needsDecision
@@ -319,7 +305,7 @@ export function WorkspaceDrawer({
                   key={t(item.label)}
                   accessibilityRole="button"
                   disabled={disabled}
-                  accessibilityLabel={(route === "Activity" && count ? translateApp("{{label}}, {{count}} pending", { label: t(item.label), count: count}) : t(item.label))}
+                  accessibilityLabel={route === "Activity" && count ? translateApp("{{label}}, {{count}} pending", { label: t(item.label), count: count,}) : t(item.label)}
                   accessibilityState={{ selected, disabled }}
                   onPress={() => onNavigate(route)}
                   style={({ pressed }) => [
@@ -335,7 +321,6 @@ export function WorkspaceDrawer({
                     color={disabled ? colors.textMuted : colors.textSecondary}
                   />
                   <Text
-                    {...sidebarTextProps()}
                     numberOfLines={1}
                     style={[
                       styles.rowText,
@@ -348,9 +333,6 @@ export function WorkspaceDrawer({
                   </Text>
                   {route === "Activity" && count ? (
                     <Text
-                      {...sidebarTextProps()}
-                      numberOfLines={1}
-                      ellipsizeMode="tail"
                       style={[
                         styles.count,
                         {
@@ -380,9 +362,6 @@ export function WorkspaceDrawer({
                 color={disabled ? colors.textMuted : colors.textSecondary}
               />
               <Text
-                {...sidebarTextProps()}
-                numberOfLines={1}
-                ellipsizeMode="tail"
                 accessibilityLabel={t("Create new agent")}
                 style={[
                   styles.rowText,
@@ -461,9 +440,6 @@ export function WorkspaceDrawer({
             color={disabled ? colors.textMuted : "#18181B"}
           />
           <Text
-            {...sidebarTextProps()}
-            numberOfLines={1}
-            ellipsizeMode="tail"
             maxFontSizeMultiplier={1.3}
             style={[styles.chatLabel, disabled && { color: colors.textMuted }]}
           >
@@ -514,9 +490,7 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     borderRadius: 8,
   },
-  rowText: { flex: 1,
-    minWidth: 0,
-    flexShrink: 1, fontFamily: fonts.bodySemi, fontSize: 15 },
+  rowText: { flex: 1, fontFamily: fonts.bodySemi, fontSize: 15 },
   count: {
     fontFamily: fonts.bodySemi,
     fontSize: 11,

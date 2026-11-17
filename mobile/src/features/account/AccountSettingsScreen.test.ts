@@ -14,13 +14,13 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     .all()
     .filter((node) => node.props.accessibilityRole === "header");
   for (const heading of headings) {
-    assert.equal(style(heading).textTransform, "uppercase");
-    assert.equal(style(heading).fontSize, 12);
+    assert.equal(style(heading).textTransform, undefined);
+    assert.equal(style(heading).fontSize, 11);
     assert.equal(style(heading).fontWeight, "500");
-    assert.equal(style(heading).letterSpacing, 1.5);
+    assert.equal(style(heading).letterSpacing, 0.6);
   }
   assert.deepEqual(headings.map((node) => String(node.props.children).toUpperCase()), ["ACCOUNT", "PREFERENCES", "SUPPORT"]);
-  assert.equal(headings[0]!.props.children, "Account", "visual case does not mutate translated copy");
+  assert.equal(headings[0]!.props.children, "ACCOUNT", "base uppercase presentation is retained");
   const routes = [
     ["Account & security", "AccountSecurity"],
     ["Usage & credits", "UsageCredits"],

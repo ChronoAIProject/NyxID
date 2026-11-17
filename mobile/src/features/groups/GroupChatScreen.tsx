@@ -1,4 +1,5 @@
-import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useContext } from "react";
+import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
@@ -158,6 +159,7 @@ function GroupChat({
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
   const chatColumn = useChatColumn();
+  const cornerWindow = Boolean(useContext(WorkspaceQuickRailContext));
   const {
     fontScale,
     width: windowWidth,
@@ -353,7 +355,9 @@ function GroupChat({
       handle: row.handle,
       label: row.item?.label ?? row.file.name,
       kind: row.kind,
-      detail: row.error ?? (row.item ? translateApp("Ready") : translateApp("Uploading…")),
+      detail:
+        row.error ??
+        (row.item ? translateApp("Ready") : translateApp("Uploading…")),
     })),
   ];
   function routeDraft(text: string) {
@@ -652,12 +656,12 @@ function GroupChat({
       return accepted;
     } catch (cause) {
       if (mounted.current && chat.available())
-        setLocalError(
-          () => (cause instanceof Error
+        setLocalError(() =>
+          cause instanceof Error
             ? cause.message
             : translateApp(
                 "The message was not delivered. Refresh the crew before trying again.",
-              )),
+              ),
         );
       return false;
     } finally {
@@ -766,7 +770,15 @@ function GroupChat({
             <Pressable
               key={member.id}
               accessibilityRole="button"
-              accessibilityLabel={(member.destroyed ? translateApp("{{title}}, destroyed, agent details", { title: title(member.id, member.name) }) : translateApp("{{title}}, agent details", { title: title(member.id, member.name) }))}
+              accessibilityLabel={
+                member.destroyed
+                  ? translateApp("{{title}}, destroyed, agent details", {
+                      title: title(member.id, member.name),
+                    })
+                  : translateApp("{{title}}, agent details", {
+                      title: title(member.id, member.name),
+                    })
+              }
               disabled={!onOpenAgent || chat.sending || uploads.session.sending}
               onPress={() => onOpenAgent?.(member.id)}
               style={[
@@ -794,7 +806,7 @@ function GroupChat({
       >
         <FlatList
           // Same as private chat: a live text-size change re-measures every row.
-          key={String(fontScale)}
+          key={cornerWindow ? String(fontScale) : undefined}
           ref={list}
           style={styles.fill}
           data={group ? (chat.data?.messages ?? []) : []}
@@ -841,7 +853,9 @@ function GroupChat({
           ListHeaderComponentStyle={styles.transcriptHeader}
           ListEmptyComponent={
             chat.isPending ? (
-              <SkeletonRows rows={4} accessibilityLabel={translateApp("Loading crew")}
+              <SkeletonRows
+                rows={4}
+                accessibilityLabel={translateApp("Loading crew")}
               />
             ) : group ? (
               <View style={styles.empty}>
@@ -881,7 +895,9 @@ function GroupChat({
                   accessibilityLabel={translateApp(
                     "Agents working. {{label}}",
                     {
-                      label: groupWorkingLabel(working.map((member) => title(member.id, member.name))),
+                      label: groupWorkingLabel(
+                        working.map((member) => title(member.id, member.name)),
+                      ),
                     },
                   )}
                   accessibilityLiveRegion="polite"
@@ -928,7 +944,9 @@ function GroupChat({
                           }
                           action={action}
                           name={
-                            member ? title(member.id, member.name) : translateApp("An agent")
+                            member
+                              ? title(member.id, member.name)
+                              : translateApp("An agent")
                           }
                           actorId={identity.data?.id}
                           organization={group?.owner?.type === "org"}
@@ -1114,7 +1132,11 @@ function GroupChat({
                     accessibilityLabel={translateApp(
                       "Remove unavailable recipient {{title}}",
                       {
-                        title: title(id, routingMembers.find((member) => member.id === id)?.name ?? id),
+                        title: title(
+                          id,
+                          routingMembers.find((member) => member.id === id)
+                            ?.name ?? id,
+                        ),
                       },
                     )}
                     disabled={blocked}
@@ -1124,11 +1146,14 @@ function GroupChat({
                     style={[styles.recipient, { borderColor: colors.danger }]}
                   >
                     <Label style={[styles.small, { color: colors.danger }]}>
-                      {translateApp("{{title}} · Unavailable", { title: title(
-                        id,
-                        routingMembers.find((member) => member.id === id)
-                          ?.name ?? id,
-                      )})}</Label>
+                      {translateApp("{{title}} · Unavailable", {
+                        title: title(
+                          id,
+                          routingMembers.find((member) => member.id === id)
+                            ?.name ?? id,
+                        ),
+                      })}
+                    </Label>
                     <X size={12} color={colors.danger} />
                   </Pressable>
                 ))}
@@ -1171,6 +1196,7 @@ function GroupChat({
                 editable={!blocked && (collaboration || !!liveMembers.length)}
                 // Phones: same one-row idle composer as private chats.
                 compactWhenIdle={
+                  cornerWindow &&
                   narrow &&
                   !dictation.active &&
                   uploads.files.length === 0 &&
@@ -1179,7 +1205,7 @@ function GroupChat({
                 }
                 renderActions={(mentionAction, layout) => (
                   <ChatComposerToolbar
-                    layout={layout}
+                    layout={cornerWindow ? layout : undefined}
                     dictation={dictation}
                     dictationDisabled={
                       blocked || uploads.picking || uploads.session.sending
@@ -1280,7 +1306,15 @@ function GroupChat({
                   <Pressable
                     key={member.id}
                     accessibilityRole="button"
-                    accessibilityLabel={(pickingRecipients === "header" ? translateApp("Message {{title}}", { title: title(member.id, member.name) }) : translateApp("Add recipient {{title}}", { title: title(member.id, member.name) }))}
+                    accessibilityLabel={
+                      pickingRecipients === "header"
+                        ? translateApp("Message {{title}}", {
+                            title: title(member.id, member.name),
+                          })
+                        : translateApp("Add recipient {{title}}", {
+                            title: title(member.id, member.name),
+                          })
+                    }
                     accessibilityState={{
                       selected: recipients.ids.includes(member.id),
                       disabled: blocked,
@@ -1380,29 +1414,43 @@ function GroupMessage({
             <AgentAvatar agent={message.agent} size="sm" />
           ) : null}
           <Label muted style={styles.messageLabel}>
-            {(user
-              ? message.author?.display_name ?? translateApp("You")
-              : (message.agent
+            {user
+              ? (message.author?.display_name ?? translateApp("You"))
+              : message.agent
                 ? title(message.agent.id, message.agent.name)
-                : translateApp("Agent")))}
+                : translateApp("Agent")}
           </Label>
         </View>
       </Pressable>
       {message.requester_user_id && (
-        <Label muted>{(message.execution_mode === "guest" ? translateApp("For {{name}} · Guest reply (agent owner pays)", { name: group?.participants?.find(
-            (person) => person.id === message.requester_user_id,
-          )?.display_name ?? translateApp("participant") }) : translateApp("For {{name}} · Requester access and billing", { name: group?.participants?.find(
-            (person) => person.id === message.requester_user_id,
-          )?.display_name ?? translateApp("participant") }))}
+        <Label muted>
+          {message.execution_mode === "guest"
+            ? translateApp("For {{name}} · Guest reply (agent owner pays)", {
+                name:
+                  group?.participants?.find(
+                    (person) => person.id === message.requester_user_id,
+                  )?.display_name ?? translateApp("participant"),
+              })
+            : translateApp("For {{name}} · Requester access and billing", {
+                name:
+                  group?.participants?.find(
+                    (person) => person.id === message.requester_user_id,
+                  )?.display_name ?? translateApp("participant"),
+              })}
         </Label>
       )}
       {user && !!message.recipient_agent_ids?.length && (
-        <Label muted style={styles.small}>{translateApp("to {{title}}", { title: message.recipient_agent_ids
-            .map((id) => {
-              const member = group?.members.find((row) => row.id === id);
-              return member ? title(id, member.name) : translateApp("a removed agent");
-            })
-            .join(", ") })}
+        <Label muted style={styles.small}>
+          {translateApp("to {{title}}", {
+            title: message.recipient_agent_ids
+              .map((id) => {
+                const member = group?.members.find((row) => row.id === id);
+                return member
+                  ? title(id, member.name)
+                  : translateApp("a removed agent");
+              })
+              .join(", "),
+          })}
         </Label>
       )}
     </>

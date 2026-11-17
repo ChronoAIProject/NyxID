@@ -1,5 +1,6 @@
 import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
 import { newAssistantChatParams } from "./assistantChatParams";
+import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp } from "../i18n/appTranslation";
 import { LanguageProvider } from "../i18n/LanguageProvider";
@@ -16,7 +17,7 @@ import {
   WorkspacePushShell,
 } from "../components/workspace/WorkspacePushShell";
 import { workspaceFocus } from "../lib/accessibility/workspaceFocus";
-import { getAuthAccountId, subscribeAuthAccount } from "../lib/auth/authAccount";
+import { getAuthAccountId, subscribeAuthAccount, } from "../lib/auth/authAccount";
 import { getAuthEpoch } from "../lib/auth/authEpoch";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
@@ -44,6 +45,7 @@ import {
   StyleSheet,
   Text,
   useWindowDimensions,
+  Platform,
   View,
 } from "react-native";
 import {
@@ -183,7 +185,8 @@ function getActiveRouteName(
 }
 
 export default function App() {
-  return <LanguageProvider><AppContent /></LanguageProvider>;
+  return ( <LanguageProvider><AppContent /></LanguageProvider>
+  );
 }
 
 function AppContent() {
@@ -482,7 +485,13 @@ function ThemedAppShell({
   const insets = useSafeAreaInsets();
   const { isAuthenticated } = useAuthSession();
   const sessionEpoch = getAuthEpoch();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const cornerWindow = workspaceCornerSensor({
+    platform: Platform.OS,
+    width,
+    height,
+    rightInset: insets.right,
+  });
   const persistentSidebar =
     isAuthenticated && workspaceSidebarLayout(width).persistent;
   const reviewDiagnostics = useCallback(() => {
@@ -497,7 +506,7 @@ function ThemedAppShell({
   // overlay drawer's accessibility state.)
   const [persistentSidebarOpen, setPersistentSidebarOpen, sidebarRestored] =
     useSidebarOpen();
-  const sidebarCollapsed = !persistentSidebarOpen;
+  const sidebarCollapsed = cornerWindow && !persistentSidebarOpen;
   const authenticatedNow = useRef(isAuthenticated);
   authenticatedNow.current = isAuthenticated && getAuthAccountId() !== null;
   const edgeBacks = useRef(new Map<symbol, () => void>());
@@ -545,7 +554,7 @@ function ThemedAppShell({
     },
     [],
   );
-  const priorSheet = useRef<{ open: boolean; content: string; tracked: boolean }>({
+  const priorSheet = useRef<{ open: boolean; content: string; tracked: boolean; }>({
     open: false,
     content: "",
     tracked: false,
@@ -629,7 +638,7 @@ function ThemedAppShell({
     cancelSelection,
     navigationRef,
     setCurrentRouteName,
-    isAuthenticated,
+    isAuthenticated
   ]);
   useEffect(() => {
     resetWorkspaceSession();
@@ -972,11 +981,11 @@ function ThemedAppShell({
           value={workspaceAccessibility}
         >
           <WorkspaceSidebarToggleContext.Provider
-            value={{ persistent: persistentSidebar, collapsed: sidebarCollapsed }}
+            value={{ persistent: persistentSidebar && cornerWindow, collapsed: sidebarCollapsed, }}
           >
           <AppNavigator
             onOpenMenu={() =>
-              persistentSidebar ? toggleSidebar() : changeSidebar(!drawerOpen)
+              persistentSidebar && cornerWindow ? toggleSidebar() : changeSidebar(!drawerOpen)
             }
             onNavigationGuardChange={onNavigationGuardChange}
             onEdgeBackChange={onEdgeBackChange}

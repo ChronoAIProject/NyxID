@@ -114,8 +114,8 @@ test("NyxBot push switches appear only with the flag, one per kind, and save the
       nyxbotNotifications: { enabled: true, push: { needs_decision: true } },
     },
   );
-  assert.equal(style(env.text("NyxBot notifications")).textTransform, "uppercase");
-  assert.equal(style(env.text("NyxBot notifications")).letterSpacing, 1.5);
+  assert.equal(style(env.text("NYXBOT NOTIFICATIONS")).textTransform, undefined);
+  assert.equal(style(env.text("NYXBOT NOTIFICATIONS")).letterSpacing, 0.6);
   const labels = [
     "Automation results",
     "Automation problems",

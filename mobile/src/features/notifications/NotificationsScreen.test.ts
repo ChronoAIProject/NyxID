@@ -31,6 +31,7 @@ const row = (id: string, overrides: Record<string, unknown>) =>
 
 function setup(options: {
   enabled?: boolean;
+  cornerWindow?: boolean;
   pages?: unknown[];
   pending?: boolean;
   error?: Error;
@@ -43,6 +44,7 @@ function setup(options: {
   const filters: NotificationFilter[] = [];
   const fetched: string[] = [];
   const h = hookHarness<E>({
+    "../../components/workspace/WorkspaceLayoutContext": {WorkspaceCornerSensorContext:{value:options.cornerWindow ?? false}},
     "react/jsx-runtime": {
       Fragment: "Fragment",
       jsx: (type: unknown, props: unknown) => ({ type, props }),
@@ -353,8 +355,9 @@ test("all filters use per-kind unread counts and the global read action lives af
   x.h.unmount();
 });
 
-test("a row grows with its text: two title lines and three body lines end in an ellipsis, the time always shows", () => {
+test("a Duo row grows with its text: two title lines and three body lines end in an ellipsis, the time always shows", () => {
   const x = setup({
+    cornerWindow:true,
     pages: [
       {
         as_of: AS_OF,
@@ -403,4 +406,40 @@ test("a row grows with its text: two title lines and three body lines end in an 
   // Live text-size changes re-measure every row (DynamicTypeText).
   const source = readFileSync(new URL("./NotificationsScreen.tsx", import.meta.url), "utf8");
   assert.match(source, /DynamicTypeText as Text/);
+});
+
+
+test("P9 ordinary notifications retain the base title, preview and footer scaling", () => {
+  const x = setup({
+    pages: [
+      {
+        as_of: AS_OF,
+        next_cursor: null,
+        items: [
+          row("ordinary", {
+            title: "Ordinary title",
+            preview: "Ordinary preview",
+          }),
+        ],
+      },
+    ],
+  });
+  const [rendered] = x.renderedRows();
+  const texts = nodes(rendered).filter((n) => n.type === "Text");
+  assert.equal(
+    texts.find((n) => text(n).includes("Ordinary title"))!.props.numberOfLines,
+    3,
+  );
+  assert.equal(
+    texts.find((n) => n.props.children === "Ordinary preview")!.props
+      .numberOfLines,
+    2,
+  );
+  const mark = x
+    .all()
+    .find((n) => n.props.testID === "notifications-mark-all")!;
+  const label = nodes(mark).find((n) => n.type === "Text")!;
+  assert.equal(label.props.maxFontSizeMultiplier, undefined);
+  assert.equal(label.props.numberOfLines, undefined);
+  x.h.unmount();
 });

@@ -183,11 +183,11 @@ test("on the folded Duo page bars sit flush at the top, left of the status colum
   h.unmount();
 });
 
-test("page titles re-measure after a live text-size change instead of keeping a stale ellipsis", () => {
+test("P9 page headers retain the base native paragraph identity", () => {
   const source = readFileSync(
     new URL("./WorkspacePageHeader.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /DynamicTypeText as Text/);
-  assert.doesNotMatch(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
+  assert.doesNotMatch(source, /DynamicTypeText as Text/);
+  assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
 });

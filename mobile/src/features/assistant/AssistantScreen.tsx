@@ -374,7 +374,7 @@ export function AssistantScreen({
     inputAttachments: assistant.inputAttachments,
   });
   const panelInsets = useSafeAreaInsets();
-  const widePanel = workspaceRightPanelLayout(
+  const widePanel = quickRail && workspaceRightPanelLayout(
     windowWidth,
     chatColumn.maxWidth,
     panelInsets.left + panelInsets.right,
@@ -879,7 +879,7 @@ export function AssistantScreen({
     // The Duo: More is always Chat details (Settings and Notifications are
     // on the rail; a live voice call keeps its own preferences control).
     // Wide windows keep Settings and Notifications in the persistent sidebar.
-    if (quickRail || (!narrowHeader && !hasVoice)) return openDetails();
+    if (quickRail || !hasVoice) return openDetails();
     const current = () =>
       getAuthEpoch() === voiceEpoch &&
       currentVoiceSurface.current === voiceSurfaceToken &&
@@ -904,26 +904,6 @@ export function AssistantScreen({
           if (stillCurrent()) openDetails();
         },
       },
-      ...(narrowHeader && bell.enabled && !quickRail
-        ? [
-            {
-              text: t("Notifications"),
-              onPress: () => {
-                if (stillCurrent()) openNotifications();
-              },
-            },
-          ]
-        : []),
-      ...(narrowHeader
-        ? [
-            {
-              text: t("Settings"),
-              onPress: () => {
-                if (stillCurrent()) openSettings();
-              },
-            },
-          ]
-        : []),
       { text: t("Cancel"), style: "cancel" },
     ]);
   }
@@ -977,7 +957,7 @@ export function AssistantScreen({
       headerTitle: () => (
         <WorkspaceHeaderVisibility>
           <ChatIdentity
-            compact
+            compact={quickRail}
             floating
             name={agentName}
             detail={headerDetail}
@@ -1564,7 +1544,7 @@ export function AssistantScreen({
           <FlatList
             // A live text-size change remounts the transcript: RN otherwise keeps
             // stale paragraph metrics and clips message, date and Markdown text.
-            key={transcriptListKey(assistant.conversationId, fontScale)}
+            key={quickRail ? transcriptListKey(assistant.conversationId, fontScale) : assistant.conversationId ?? "new-chat"}
             ref={transcript}
             style={styles.fill}
             data={messages}
@@ -1973,7 +1953,7 @@ export function AssistantScreen({
               // Phones: idle composers are one row; anything typed, attached,
               // uploading or dictating keeps the full two-row layout.
               compactWhenIdle={
-                narrowHeader &&
+                quickRail && narrowHeader &&
                 !dictation.active &&
                 uploads.files.length === 0 &&
                 !uploads.picking &&
@@ -1981,7 +1961,7 @@ export function AssistantScreen({
               }
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={layout}
+                  layout={quickRail ? layout : undefined}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||
@@ -2302,7 +2282,7 @@ function Sheet({
           styles.sheet,
           {
             backgroundColor: colors.bg,
-            paddingTop: band.paddingTop,
+            paddingTop: cornerSensor ? band.paddingTop : 20,
           },
         ]}
       >

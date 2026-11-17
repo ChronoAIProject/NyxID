@@ -58,18 +58,8 @@ export function ChatHeaderActions({
       testID="chat-header-actions"
       style={styles.actions}
     >
-      {layout === "narrow" ? (
-        <ChatIconButton
-          label={t("Scan QR code")}
-          onPress={onScanQr}
-          disabled={scanDisabled}
-          floating
-        >
-          <ScanQrCode size={21} color={colors.textPrimary} />
-        </ChatIconButton>
-      ) : (
-        notifications
-      )}
+      {
+        notifications}
       <ChatIconButton
         label={t("New chat")}
         onPress={onNewChat}
@@ -84,5 +74,5 @@ export function ChatHeaderActions({
 }
 
 const styles = StyleSheet.create({
-  actions: { flexDirection: "row", alignItems: "center", flexShrink: 0, gap: 8 },
+  actions: { flexDirection: "row", alignItems: "center", flexShrink: 0, gap: 8, },
 });
