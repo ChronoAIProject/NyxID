@@ -962,7 +962,9 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         let renewed = durable_operation_grant_service::reauthorize_scheduled_key(
             &db,
             &manager,
-            &owner.id,
+            &crate::services::audit_service::AuditActor::from_auth_user(
+                &crate::test_utils::test_auth_user(&owner.id),
+            ),
             &owner.id,
             &provisioned.key.id,
             &selections,
