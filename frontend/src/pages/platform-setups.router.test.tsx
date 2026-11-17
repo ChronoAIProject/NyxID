@@ -24,6 +24,9 @@ import {
   setupTemplates,
 } from "@/test/platform-setup-fixture";
 
+// Route loading may wait 10 seconds; give every case the same outer deadline.
+vi.setConfig({ testTimeout: 20_000 });
+
 const title = "Bring a Telegram draft into your account";
 const initialAuth = useAuthStore.getState();
 let client: QueryClient;
@@ -241,7 +244,7 @@ it("mounts one draft import page through direct entry, links and back/forward", 
     screen.queryByRole("button", { name: "Adopt reviewed draft" }),
   ).not.toBeInTheDocument();
   expect(fixture.writes).toEqual([]);
-}, 20_000);
+});
 
 it("resets reviewed adoption on a binding generation or account change without duplicating controls", async () => {
   const { fixture } = await openSetups();
@@ -280,7 +283,7 @@ it("resets reviewed adoption on a binding generation or account change without d
     screen.queryByText("Telegram cafe · revision 3"),
   ).not.toBeInTheDocument();
   expect(fixture.writes).toEqual([]);
-}, 20_000);
+});
 
 it("keeps one module when the saved-setups query inserts its asynchronous empty state", async () => {
   const gate = deferred();
@@ -343,7 +346,7 @@ it("clears a revoked chat selection and requires reselecting a binding that reap
   );
   expect(await screen.findByRole("checkbox")).not.toBeChecked();
   expect(adoptionButton()).toBeDisabled();
-}, 20_000);
+});
 
 it("retains the selected chat and review when a bindings refetch fails", async () => {
   const { fixture } = await openSetups();
@@ -360,7 +363,7 @@ it("retains the selected chat and review when a bindings refetch fails", async (
   expect(adoptionButton()).toBeEnabled();
   expect(fixture.writes).toEqual([]);
   expectSingleModule();
-}, 20_000);
+});
 
 it("settles one rapid adoption, refreshes to empty and requires review for the next draft", async () => {
   const { fixture } = await openSetups();
