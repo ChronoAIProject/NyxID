@@ -2,6 +2,7 @@
 //! including legacy pricing, ranking order, and pagination.
 use crate::services::billing::amounts::{credit_expr, legacy_credit_expr};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -902,7 +903,7 @@ fn exact_or_legacy_credit_expr(exact: Bson, legacy: Bson) -> Bson {
 /// Before the rollup marker exists, read both released legacy mirrors and the
 /// exact keys. Once the marker is durable, the covering index can use the
 /// plain exact path without per-document type inspection.
-fn rollup_credit_expr(field: &str, normalized: bool) -> Bson {
+pub(crate) fn rollup_credit_expr(field: &str, normalized: bool) -> Bson {
     if normalized {
         return format!("$query_{field}").into();
     }
@@ -1268,6 +1269,117 @@ async fn cached_rates(db: &mongodb::Database) -> AppResult<Document> {
 
 const MAX_READ_ATTEMPTS: usize = 8;
 
+#[derive(Clone)]
+pub(crate) struct RollupReadContext {
+    pub(crate) use_snapshot: bool,
+    pub(crate) folded_before: Option<DateTime<Utc>>,
+    pub(crate) daily_ready: bool,
+    pub(crate) rollup_normalized: bool,
+    pub(crate) fallback: bool,
+}
+
+/// Run a tiered usage read through the same bounded state/snapshot handover
+/// driver used by every usage reader. A busy fold may cause a retry, but the
+/// final conservative read always returns an answer instead of an internal
+/// error. The callback owns only the aggregation; authorization stays outside.
+pub(crate) async fn with_rollup_read<T, F, Fut>(
+    db: &mongodb::Database,
+    window_to: DateTime<Utc>,
+    reader: F,
+) -> AppResult<(
+    T,
+    Option<crate::models::usage_rollup_state::UsageRollupState>,
+    bool,
+)>
+where
+    F: FnMut(RollupReadContext) -> Fut,
+    Fut: Future<Output = AppResult<T>>,
+{
+    let snapshot = crate::services::billing::usage_rollup::supports_transactions(db).await?;
+    with_rollup_read_mode(db, window_to, snapshot, reader).await
+}
+
+async fn with_rollup_read_mode<T, F, Fut>(
+    db: &mongodb::Database,
+    window_to: DateTime<Utc>,
+    snapshot: bool,
+    mut reader: F,
+) -> AppResult<(
+    T,
+    Option<crate::models::usage_rollup_state::UsageRollupState>,
+    bool,
+)>
+where
+    F: FnMut(RollupReadContext) -> Fut,
+    Fut: Future<Output = AppResult<T>>,
+{
+    use crate::services::billing::usage_rollup;
+    let mut last_completed = None;
+    let mut daily_ready = false;
+    for attempt in 0..MAX_READ_ATTEMPTS {
+        let before = usage_rollup::state(db).await?;
+        let active = before.as_ref().is_some_and(|s| s.batch.is_some());
+        if !snapshot && active && attempt + 1 < MAX_READ_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+        // Idle reads validate the journal; active replica-set folds use a
+        // snapshot. Neither contention nor a short snapshot history may keep
+        // a dashboard request retrying until the complete-request timeout.
+        let use_snapshot = snapshot && active;
+        let folded_before = before.as_ref().and_then(|s| s.folded_before);
+        daily_ready = before.as_ref().is_some_and(|state| state.daily_ready);
+        let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
+        let context = RollupReadContext {
+            use_snapshot,
+            folded_before,
+            daily_ready,
+            rollup_normalized,
+            fallback: false,
+        };
+        let result = reader(context).await;
+        let result = match result {
+            Err(AppError::DatabaseError(error))
+                if use_snapshot
+                    && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
+            {
+                continue;
+            }
+            result => result?,
+        };
+        let after = usage_rollup::state(db).await?;
+        // A later claim can advance the upper bound past the requested end. In
+        // that case rebuild with the conservative edge path.
+        let range_safe = folded_before.is_none_or(|bound| bound > window_to)
+            || after
+                .as_ref()
+                .and_then(|s| s.folded_before)
+                .is_some_and(|bound| bound <= window_to);
+        if !range_safe {
+            continue;
+        }
+        let validated = usage_rollup::handover_valid(&before, &after, active, use_snapshot);
+        if validated {
+            return Ok((result, after, true));
+        }
+        last_completed = Some((result, after));
+    }
+    if let Some((result, state)) = last_completed {
+        return Ok((result, state, false));
+    }
+    // Persistent snapshot expiry (or a continually advancing fold) gets one
+    // ordinary read with conservative edges. It still returns an answer.
+    let context = RollupReadContext {
+        use_snapshot: false,
+        folded_before: None,
+        daily_ready,
+        rollup_normalized: crate::services::billing::exact_migration::rollup_ready(db).await?,
+        fallback: true,
+    };
+    let result = reader(context).await?;
+    Ok((result, usage_rollup::state(db).await?, false))
+}
+
 async fn fast_aggregate(
     db: &mongodb::Database,
     params: &UsageParams,
@@ -1281,86 +1393,33 @@ async fn fast_aggregate_with_mode(
     params: &UsageParams,
     snapshot: bool,
 ) -> AppResult<(Document, UsageFreshness)> {
-    use crate::services::billing::usage_rollup;
     let rates = cached_rates(db).await?;
     let operations = operation_keys(db).await?;
-    let mut last_completed = None;
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let before = usage_rollup::state(db).await?;
-        let active = before.as_ref().is_some_and(|s| s.batch.is_some());
-        if !snapshot && active && attempt + 1 < MAX_READ_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            continue;
-        }
-        // Idle reads validate the journal; active replica-set folds use a
-        // snapshot. Neither contention nor a short snapshot history may keep
-        // a dashboard request retrying until the complete-request timeout.
-        let use_snapshot = snapshot && active;
-        let bound = before.as_ref().and_then(|s| s.folded_before);
-        let daily_ready = before.as_ref().is_some_and(|state| state.daily_ready);
-        let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
-        let result = run_fast_pipeline(
-            db,
-            params,
-            rates.clone(),
-            operations.clone(),
-            bound,
-            daily_ready,
-            rollup_normalized,
-            use_snapshot,
-        )
-        .await;
-        let result = match result {
-            Err(AppError::DatabaseError(error))
-                if use_snapshot
-                    && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
-            {
-                continue;
+    let (result, state, validated) =
+        with_rollup_read_mode(db, params.window.to, snapshot, |context| {
+            let folded_before = context.folded_before;
+            // Only admin's conservative partial-hour edges require the hourly tier.
+            let daily_ready = context.daily_ready && !context.fallback;
+            let rollup_normalized = context.rollup_normalized;
+            let use_snapshot = context.use_snapshot;
+            let rates = rates.clone();
+            let operations = operations.clone();
+            async move {
+                run_fast_pipeline(
+                    db,
+                    params,
+                    rates,
+                    operations,
+                    folded_before,
+                    daily_ready,
+                    rollup_normalized,
+                    use_snapshot,
+                )
+                .await
             }
-            result => result?,
-        };
-        let after = usage_rollup::state(db).await?;
-        // A later claim can advance the upper bound past a historical custom
-        // end. In that case rebuild with raw edges even after a snapshot read.
-        let range_safe = bound.is_none_or(|b| b > params.window.to)
-            || after
-                .as_ref()
-                .and_then(|s| s.folded_before)
-                .is_some_and(|b| b <= params.window.to);
-        if !range_safe {
-            continue;
-        }
-        let validated = use_snapshot
-            || (!active
-                && after.as_ref().is_none_or(|s| s.batch.is_none())
-                && before.as_ref().map(|s| s.sequence).unwrap_or(0)
-                    == after.as_ref().map(|s| s.sequence).unwrap_or(0));
-        let completed = with_freshness(result, after, validated)?;
-        if validated {
-            return Ok(completed);
-        }
-        last_completed = Some(completed);
-    }
-    if let Some(completed) = last_completed {
-        return Ok(completed);
-    }
-    // Persistent snapshot expiry (or advancing custom edges): one ordinary
-    // read with conservative raw boundary hours guarantees a completed result.
-    // Standalone concurrent writes can skew it by an in-flight bounded batch;
-    // freshness explicitly reports that validation was not obtained.
-    let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
-    let result = run_fast_pipeline(
-        db,
-        params,
-        rates,
-        operations,
-        None,
-        false,
-        rollup_normalized,
-        false,
-    )
-    .await?;
-    with_freshness(result, usage_rollup::state(db).await?, false)
+        })
+        .await?;
+    with_freshness(result, state, validated)
 }
 
 #[allow(clippy::too_many_arguments)]

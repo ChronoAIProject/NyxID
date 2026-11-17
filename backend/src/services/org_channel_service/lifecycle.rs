@@ -141,7 +141,7 @@ pub(crate) async fn erase_hidden(db: &Database, filter: Document) -> AppResult<b
             return Ok(false);
         }
         let context = (db.clone(), row.user_id.clone(), row.id.clone());
-        let children = crate::services::transaction_service::run_db_only(
+        let _children = crate::services::transaction_service::run_db_only(
             db,
             &context,
             |tx, (db, actor, id)| {
@@ -168,11 +168,6 @@ pub(crate) async fn erase_hidden(db: &Database, filter: Document) -> AppResult<b
             },
         )
         .await?;
-        crate::services::api_key_credential_service::audit_revocations(
-            db,
-            &children,
-            crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-        );
     }
     Ok(false)
 }

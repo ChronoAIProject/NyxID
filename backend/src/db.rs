@@ -4719,6 +4719,8 @@ pub async fn migrate_to_unified_collections(
 async fn cleanup_duplicate_migration_services(
     db: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::service_history::{collection, context, transaction};
+
     // Find active migration-sourced UserService records with suffixed slugs
     // (the "-N" pattern produced by the slug collision resolver).
     let migration_services: Vec<UserService> =
@@ -4752,32 +4754,62 @@ async fn cleanup_duplicate_migration_services(
             None => continue, // No hyphen, not a suffixed slug
         };
 
-        // Verify the base slug record exists and is active for the same user + catalog service
-        let base_exists =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .find_one(doc! {
-                    "user_id": &svc.user_id,
-                    "slug": base_slug,
-                    "catalog_service_id": csid,
-                    "is_active": true,
-                })
-                .await?;
+        let deleted = context::scope(
+            context::system("duplicate_migration_cleanup"),
+            transaction::run(db, async |session| {
+                let services = collection::<UserService>(db, USER_SERVICES);
+                // Recheck eligibility and read current backing references in the
+                // deletion snapshot. A changed candidate can wait for the next run.
+                let Some(current) = services
+                    .find_one(doc! {
+                        "_id": &svc.id,
+                        "user_id": &svc.user_id,
+                        "slug": &svc.slug,
+                        "source": &svc.source,
+                        "catalog_service_id": csid,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok(false);
+                };
+                let base_exists = services
+                    .find_one(doc! {
+                        "user_id": &current.user_id,
+                        "slug": base_slug,
+                        "catalog_service_id": csid,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .is_some();
+                if !base_exists {
+                    return Ok(false);
+                }
 
-        if base_exists.is_none() {
+                // Keep the references and their cleanup atomic: a restart must
+                // never find the service gone with its backing rows left behind.
+                services
+                    .delete_one(doc! { "_id": &current.id })
+                    .session(&mut *session)
+                    .await?;
+                collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &current.endpoint_id })
+                    .session(&mut *session)
+                    .await?;
+                if let Some(ref ak_id) = current.api_key_id {
+                    collection::<UserApiKey>(db, USER_API_KEYS)
+                        .delete_one(doc! { "_id": ak_id })
+                        .session(&mut *session)
+                        .await?;
+                }
+                Ok(true)
+            }),
+        )
+        .await?;
+        if !deleted {
             continue;
-        }
-
-        // This is a migration-created suffix duplicate -- delete it and its associated records
-        let _ = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-            .delete_one(doc! { "_id": &svc.id })
-            .await;
-        let _ = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .delete_one(doc! { "_id": &svc.endpoint_id })
-            .await;
-        if let Some(ref ak_id) = svc.api_key_id {
-            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .delete_one(doc! { "_id": ak_id })
-                .await;
         }
 
         tracing::info!(
@@ -5662,6 +5694,8 @@ pub(crate) async fn migrate_service_connections(
 /// For bindings with no existing UserService (e.g. SSH-only services configured purely
 /// through NodeServiceBinding), create the full record set (endpoint + api_key + service).
 async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::service_history::{collection, context, transaction};
+
     let bindings: Vec<NodeServiceBinding> = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
         .find(doc! { "is_active": true })
@@ -5795,10 +5829,6 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             created_at: now,
             updated_at: now,
         };
-        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .insert_one(&endpoint)
-            .await?;
-
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
             secret_context_versions: Default::default(),
@@ -5828,18 +5858,6 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .insert_one(&api_key)
-                .await
-        {
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            return Err(e.into());
-        }
-
         // Create UserService with node routing
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
@@ -5891,22 +5909,36 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             rotation_predecessor_id: None,
             credential_verification: None,
         };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .insert_one(&user_service)
-                .await
-        {
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .delete_one(doc! { "_id": &api_key_id })
-                .await;
-            return Err(e.into());
+        let inserted = context::scope(
+            context::system("node_binding_migration"),
+            transaction::run(db, async |session| {
+                let keys = collection::<UserApiKey>(db, USER_API_KEYS);
+                let services = collection::<UserService>(db, USER_SERVICES);
+                // Another startup may have migrated this source after our reads.
+                if keys.find_one(doc! {
+                    "source": "migration_node_binding", "source_id": &binding.id,
+                }).session(&mut *session).await?.is_some()
+                    || services.find_one(doc! {
+                        "$or": [
+                            { "source": "migration_node_binding", "source_id": &binding.id },
+                            { "user_id": &binding.user_id, "catalog_service_id": &binding.service_id, "is_active": true },
+                        ],
+                    }).session(&mut *session).await?.is_some()
+                {
+                    return Ok(false);
+                }
+                // The source marker must never commit without the complete graph.
+                // Journal writes enlist in this transaction too; rollback needs no deletes.
+                collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .insert_one(&endpoint).session(&mut *session).await?;
+                keys.insert_one(&api_key).session(&mut *session).await?;
+                services.insert_one(&user_service).session(&mut *session).await?;
+                Ok(true)
+            }),
+        ).await?;
+        if inserted {
+            created += 1;
         }
-
-        created += 1;
     }
 
     if updated > 0 || created > 0 {
@@ -7049,3 +7081,6 @@ mod tests {
         assert_eq!(fields.delegation_token_scope, "custom:scope");
     }
 }
+
+#[cfg(test)]
+mod startup_migration_tests;

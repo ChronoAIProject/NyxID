@@ -351,6 +351,19 @@ pub async fn state(db: &Database) -> AppResult<Option<UsageRollupState>> {
     Ok(state)
 }
 
+pub fn handover_valid(
+    before: &Option<UsageRollupState>,
+    after: &Option<UsageRollupState>,
+    active: bool,
+    snapshot: bool,
+) -> bool {
+    snapshot
+        || (!active
+            && after.as_ref().is_none_or(|state| state.batch.is_none())
+            && before.as_ref().map(|state| state.sequence).unwrap_or(0)
+                == after.as_ref().map(|state| state.sequence).unwrap_or(0))
+}
+
 async fn required_state(db: &Database) -> AppResult<UsageRollupState> {
     state(db)
         .await?
@@ -1041,6 +1054,11 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
             None => return Ok(0),
         },
     };
+    #[cfg(test)]
+    if let Ok((claimed, resume)) = TEST_FOLD_PAUSE.try_with(Clone::clone) {
+        claimed.notify_one();
+        resume.notified().await;
+    }
     if supports_transactions(db).await? {
         let mut session = db.client().start_session().await?;
         let db = db.clone();
@@ -1129,3 +1147,8 @@ pub(super) mod retention;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_FOLD_PAUSE: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
+}
