@@ -114,3 +114,177 @@ async fn p2_2_quick_access_preserves_legacy_person_records() {
     );
     db.drop().await.unwrap();
 }
+#[tokio::test]
+async fn p1_5_quick_access_production_router_credential_matrix() {
+    use crate::crypto::token::hash_token;
+    use crate::services::service_account_service;
+    use mongodb::bson::{Document, doc};
+    let db = connect_test_database("quick_access_credentials_router")
+        .await
+        .expect("Mongo required");
+    let person = Uuid::new_v4();
+    let owner = person.to_string();
+    db.collection::<User>(COLLECTION_NAME)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let access = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &person,
+        "openid account:read",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let session = token_service::create_session(&db, &owner, None, None)
+        .await
+        .unwrap();
+    let raw_key = format!("nyxid_{}", Uuid::new_v4().simple());
+    let key_id = Uuid::new_v4().to_string();
+    db.collection::<Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
+        "_id": &key_id, "user_id": &owner, "name": "quick access fixture", "key_prefix": "nyxid_fixture",
+        "key_hash": hash_token(&raw_key), "scopes": "account:read", "is_active": true, "created_at": mongodb::bson::DateTime::now()
+    }).await.unwrap();
+    let delegated = jwt::generate_delegated_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &person,
+        "account:read",
+        "quick-access-client",
+        60,
+        None,
+    )
+    .unwrap();
+    let relay = jwt::generate_relay_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &person,
+        "account:read",
+        None,
+        &jwt::RelayAgentScope {
+            api_key_id: key_id,
+            api_key_name: "quick access fixture".into(),
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allow_all_nodes: true,
+        },
+    )
+    .unwrap();
+    let oauth = jwt::generate_oauth_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &person,
+        "account:read",
+        None,
+        None,
+        None,
+        None,
+        None,
+        "quick-access-oauth",
+    )
+    .unwrap();
+    let (service, secret) = service_account_service::create_service_account(
+        &db,
+        "quick access fixture",
+        None,
+        "account:read",
+        &[],
+        None,
+        &owner,
+    )
+    .await
+    .unwrap();
+    let service_token = service_account_service::authenticate_client_credentials(
+        &db,
+        &state.config,
+        &state.jwt_keys,
+        &service.client_id,
+        &secret,
+        Some("account:read"),
+    )
+    .await
+    .unwrap()
+    .access_token;
+    let (_, private) = build_router_with_state(state.clone());
+    let app = private.with_state(state);
+    for (kind, header, value, allowed) in [
+        (
+            "access JWT",
+            "authorization",
+            format!("Bearer {access}"),
+            true,
+        ),
+        (
+            "session cookie",
+            "cookie",
+            format!("nyx_session={}", session.session_token),
+            true,
+        ),
+        ("API key", "x-api-key", raw_key, false),
+        (
+            "delegated account:read",
+            "authorization",
+            format!("Bearer {delegated}"),
+            false,
+        ),
+        ("relay", "authorization", format!("Bearer {relay}"), false),
+        (
+            "OAuth-client",
+            "authorization",
+            format!("Bearer {oauth}"),
+            false,
+        ),
+        (
+            "service-account",
+            "authorization",
+            format!("Bearer {service_token}"),
+            false,
+        ),
+        ("anonymous", "authorization", "".into(), false),
+    ] {
+        for method in ["GET", "PUT", "DELETE"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/api/v1/users/me/quick-access")
+                        .header(header, &value)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"items":[]}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if allowed {
+                assert_eq!(response.status(), StatusCode::OK, "{kind} {method}");
+            } else {
+                assert!(
+                    matches!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    ),
+                    "{kind} {method}: {}",
+                    response.status()
+                );
+            }
+        }
+        let row = db
+            .collection::<User>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.profile_config.quick_access.is_none(),
+            "{kind} changed stored preference"
+        );
+    }
+    db.drop().await.unwrap();
+}
