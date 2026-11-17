@@ -25,7 +25,7 @@ test('held HTTP refresh from A cannot overwrite a new login B or logout', { time
     try {
       const pending = refresh(); await requested;
       if (replacement === 'b') await coordinator.persist(b); else await coordinator.clear();
-      release(); assert.equal(await pending, null);
+      release(); await assert.rejects(pending, /auth_session_changed/);
       assert.equal((await coordinator.load())?.accessToken ?? null, replacement === 'b' ? b.accessToken : null);
       assert.equal(actor(), replacement === 'b' ? 'b' : null);
     } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
@@ -37,12 +37,13 @@ test('single-flight is shared within a login and isolated across account switch'
   const refresh = createSessionRefresh({ load: coordinator.load, commit: coordinator.commitRefresh,
     request: (token) => new Promise((release) => { pending.push({ token, release }); }), expiresAt: (v) => v });
   const first = refresh(), shared = refresh();
+  const firstRejected = assert.rejects(first, /auth_session_changed/), sharedRejected = assert.rejects(shared, /auth_session_changed/);
   while (pending.length < 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(pending.length, 1);
   await coordinator.persist(b); const successor = refresh();
   while (pending.length < 2) await new Promise((resolve) => setImmediate(resolve));
   pending[0]!.release({ access_token: token('a','rotated'), refresh_token:'ra', expires_in:900 });
-  assert.equal(await first, null); assert.equal(await shared, null);
+  await firstRejected; await sharedRejected;
   pending[1]!.release({ access_token: token('b','rotated'), refresh_token:'rb', expires_in:900 });
   assert.ok(await successor); assert.equal(actor(), 'b');
   assert.equal((await coordinator.load())?.refreshToken, 'rb');
@@ -216,3 +217,17 @@ test(
     assert.equal((await coordinator.load())?.accessToken, a.accessToken);
   },
 );
+
+test('P1-3 a refused refresh from a replaced login is a stale operation, never a refusal of the successor', async () => {
+  for (const replacement of ['login', 'logout']) {
+    const { coordinator } = setup(); await coordinator.persist(a);
+    let release!: (value: null) => void;
+    const refresh = createSessionRefresh({ load: coordinator.load, commit: coordinator.commitRefresh,
+      request: () => new Promise<null>(resolve => { release = resolve; }), expiresAt: v => v });
+    const pending = refresh(); const rejected = assert.rejects(pending, /auth_session_changed/);
+    while (!release) await new Promise(resolve => setImmediate(resolve));
+    if (replacement === 'login') await coordinator.persist(b); else await coordinator.clear();
+    release(null); await rejected;
+    assert.equal((await coordinator.load())?.refreshToken ?? null, replacement === 'login' ? b.refreshToken : null);
+  }
+});

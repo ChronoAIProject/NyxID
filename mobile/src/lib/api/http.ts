@@ -367,6 +367,7 @@ export async function refreshAccessTokenIfNeeded(force = false): Promise<boolean
   }
 
   const refreshed = await refreshAccessTokenWithSingleFlight();
+  if (!refreshed && session.sessionGeneration === authSessionGeneration()) await invalidateSession();
   return Boolean(refreshed);
 }
 

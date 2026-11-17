@@ -16,11 +16,17 @@ export function createSessionRefresh(deps: {
     const next = { generation: session.sessionGeneration, token: session.accessToken, promise: Promise.resolve<RefreshResult | null>(null) };
     next.promise = (async () => {
       const refreshed = await deps.request(session.refreshToken!);
-      if (!refreshed) return null;
+      if (!refreshed) {
+        const current = await deps.load();
+        if (current?.sessionGeneration !== session.sessionGeneration || current?.accessToken !== session.accessToken || current?.refreshToken !== session.refreshToken)
+          throw new Error('auth_session_changed');
+        return null;
+      }
       const refreshToken = refreshed.refresh_token || session.refreshToken!;
       const committed = await deps.commit(session, { accessToken: refreshed.access_token, refreshToken,
         accessTokenExpiresAt: deps.expiresAt(refreshed.expires_in) });
-      return committed ? { ...refreshed, refresh_token: refreshToken } : null;
+      if (!committed) throw new Error('auth_session_changed');
+      return { ...refreshed, refresh_token: refreshToken };
     })().finally(() => { if (flight === next) flight = null; });
     flight = next;
     return next.promise;

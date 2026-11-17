@@ -117,6 +117,7 @@ export async function executeAuthenticatedRequest<
   await checkOwner();
   let response = await send();
   await checkOwner();
+  let refreshRefused = false;
   if (
     response.status === 401 &&
     requiresAuth &&
@@ -124,6 +125,7 @@ export async function executeAuthenticatedRequest<
   ) {
     const refreshed = await input.refresh();
     await checkOwner();
+    refreshRefused = !refreshed;
     if (refreshed) {
       headers.Authorization = `Bearer ${refreshed.access_token}`;
       response = await send();
@@ -140,7 +142,7 @@ export async function executeAuthenticatedRequest<
       /* The error boundary rejects non-JSON proxy bodies. */
     }
     if (
-      response.status === 401 &&
+      refreshRefused && response.status === 401 &&
       requiresAuth &&
       (options.invalidateSessionOnAuthFailure ?? true)
     ) {
