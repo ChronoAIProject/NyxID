@@ -1634,6 +1634,8 @@ pub struct ChainVerificationResponse {
 #[derive(Debug, Serialize)]
 pub struct StartupDiagnosticItem {
     pub code: String,
+    pub severity: crate::models::startup_diagnostic::DiagnosticSeverity,
+    pub technical_details: Option<String>,
     pub summary: String,
     pub detail: String,
     pub remediation: String,
@@ -1656,6 +1658,8 @@ async fn active_startup_diagnostics(
         .into_iter()
         .map(|diagnostic| StartupDiagnosticItem {
             code: diagnostic.code,
+            severity: diagnostic.severity,
+            technical_details: diagnostic.technical_details,
             summary: diagnostic.summary,
             detail: diagnostic.detail,
             remediation: diagnostic.remediation,
@@ -1668,6 +1672,8 @@ async fn active_startup_diagnostics(
             .into_iter()
             .map(|diagnostic| StartupDiagnosticItem {
                 code: diagnostic.code,
+                severity: diagnostic.severity,
+                technical_details: diagnostic.technical_details,
                 summary: diagnostic.summary,
                 detail: diagnostic.detail,
                 remediation: diagnostic.remediation,
@@ -1677,6 +1683,8 @@ async fn active_startup_diagnostics(
     if let Some(diagnostic) = crate::services::org_service::diagnostics::diagnostic(db).await? {
         items.push(StartupDiagnosticItem {
             code: diagnostic.code,
+            severity: diagnostic.severity,
+            technical_details: diagnostic.technical_details,
             summary: diagnostic.summary,
             detail: diagnostic.detail,
             remediation: diagnostic.remediation,
@@ -4541,3 +4549,7 @@ impl std::fmt::Debug for OAuthClientResponse {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "admin_integrity_tests.rs"]
+mod integrity_tests;
