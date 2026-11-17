@@ -198,6 +198,7 @@
   "The direct model did not respond. Try again.": "直接模型未响应，请重试。",
   "The message was not delivered": "消息未送达",
   "The original request is no longer available.": "原始请求已不可用。",
+  "The selected connection is unavailable. Choose another connection or remove it before sending.": "所选连接不可用。请在发送前选择其他连接或移除此连接。",
   "The service returned an error. No HTTP status is available.": "服务返回了错误，未提供 HTTP 状态。",
   "The tool reported an error.": "工具报告了错误。",
   "Thinking": "思考中",

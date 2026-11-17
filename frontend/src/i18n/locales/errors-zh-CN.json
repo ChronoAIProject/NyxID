@@ -353,7 +353,6 @@
   "The owner stopped this turn; wait for a new turn": "所有者已停止此轮次；请等待新的轮次",
   "The receipt is not ready yet; try again shortly": "回执尚未就绪，请稍后重试",
   "The request could not be completed. Check your input and try again.": "无法完成请求。请检查输入后重试。",
-  "The selected connection is unavailable. Choose another connection or remove it before sending.": "所选连接不可用。请在发送前选择其他连接或移除此连接。",
   "The selected model is not available. Choose another model in the model selector.": "所选模型不可用。请在模型选择器中选择其他模型。",
   "The voice request queue is full": "语音请求队列已满",
   "This assistant key is only valid while its conversation has a live turn; start or resume the conversation": "此助手密钥仅在其对话有进行中的轮次时有效；请开始或继续该对话",

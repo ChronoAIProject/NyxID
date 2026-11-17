@@ -110,7 +110,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     if (live.connectionId !== connectionId || (connectionId &&
       (live.error || !live.connection || reason))) {
       const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
-      toast.error(translateErrorMessage(message), {
+      toast.error(translateUi(message), {
         id: "composer-connection-unavailable",
         description: live.error ? translateUi("Could not load connections.")
           : reason ? formatComposerConnectionReason(reason) : translateUi("No longer listed"),

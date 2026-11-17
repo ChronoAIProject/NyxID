@@ -90,7 +90,3 @@ it.each([0, 503, 429, 401, 400])("translates HTTP %s fallback copy in both Chine
     expect(error.status).toBe(status);
   }
 });
-
-it("localizes the selected-connection refusal in Simplified Chinese", () => {
-  expect(translateErrorMessage("The selected connection is unavailable. Choose another connection or remove it before sending.", { lng: "zh-CN" })).toBe("所选连接不可用。请在发送前选择其他连接或移除此连接。");
-});

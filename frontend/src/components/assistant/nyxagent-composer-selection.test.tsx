@@ -22,6 +22,10 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
+import { appI18n } from "@/i18n/instance";
+import zhCN from "@/i18n/locales/app/zh-CN";
+import zhTW from "@/i18n/locales/app/zh-TW";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import type { KeyInfo } from "@/types/keys";
@@ -472,4 +476,32 @@ it.each(["api_key", "oauth2"])("checks wall-clock expiry after throttled timers 
       expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
     }
   } finally { vi.useRealTimers(); }
+});
+
+it.each([
+  ["zh-CN", zhCN, "所选连接不可用。请在发送前选择其他连接或移除此连接。"],
+  ["zh-TW", zhTW, "所選連線無法使用。請在傳送前選擇其他連線或移除此連線。"],
+] as const)("localizes the composer refusal toast through the app catalog in %s", async (language, catalog, expected) => {
+  const error = vi.spyOn(toast, "error").mockReturnValue("refused");
+  try {
+    const view = mount();
+    await choose();
+    state.data = [{ ...connection, credential_missing: true }];
+    view.rerender();
+    appI18n.addResourceBundle(language, "app", catalog, true, true);
+    await act(() => appI18n.changeLanguage(language));
+    const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
+    expect(translateUi(message)).toBe(expected);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: translateUi("Send message") }));
+    expect(error).toHaveBeenCalledExactlyOnceWith(expected, {
+      id: "composer-connection-unavailable",
+      description: translateUi("Credential missing"),
+    });
+    expect(screen.getByRole("textbox")).toHaveValue("Keep this draft");
+    expect(view.onSend).not.toHaveBeenCalled();
+  } finally {
+    error.mockRestore();
+    await act(() => appI18n.changeLanguage("en"));
+  }
 });

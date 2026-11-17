@@ -198,6 +198,7 @@
   "The direct model did not respond. Try again.": "The direct model did not respond. Try again.",
   "The message was not delivered": "The message was not delivered",
   "The original request is no longer available.": "The original request is no longer available.",
+  "The selected connection is unavailable. Choose another connection or remove it before sending.": "The selected connection is unavailable. Choose another connection or remove it before sending.",
   "The service returned an error. No HTTP status is available.": "The service returned an error. No HTTP status is available.",
   "The tool reported an error.": "The tool reported an error.",
   "Thinking": "Thinking",
