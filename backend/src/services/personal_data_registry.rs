@@ -3053,7 +3053,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::Retained(RetainedCategory::FinancialBilling),
         export: Export::Section("billing"),
         export_selector: ExportSelector::Person("billing_owner_id"),
-        why: "usage_meter links billable usage and numeric stream-recovery checkpoints to billing_owner_id; financial and billing retention preserves settlement evidence, while export exposes only its explicit billing metadata allowlist.",
+        why: "usage_meter links billable usage and numeric stream-recovery checkpoints to billing_owner_id; financial and billing retention preserves settlement evidence, while export exposes only its explicit billing metadata allowlist; individual usage rows expire 30 days after acknowledgement or counting through the usage_meter TTL.",
     },
     Entry {
         collection: "usage_rollup_daily",
