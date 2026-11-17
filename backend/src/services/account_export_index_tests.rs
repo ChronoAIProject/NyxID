@@ -595,7 +595,7 @@ mod export_index_coverage {
             "service_account_key_read_service replaces the single current key-read grant with _id=service account id.",
             "service_account_key_read_service.rs",
             [
-                ".replace_one(doc! {\"_id\": sa_id}, &grant)",
+                ".replace_one(doc! {\"_id\": &grant.service_account_id}, grant)",
                 ".upsert(true)"
             ]
         ),
