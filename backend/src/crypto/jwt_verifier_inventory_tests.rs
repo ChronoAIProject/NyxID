@@ -642,12 +642,20 @@ const ALLOWLIST: &[Verifier] = &[
     // Relay and callback receivers.
     v(
         "handlers/channel_relay.rs",
-        "resolve_reply_token_message_context",
+        "resolve_reply_token_message_context_classified",
         "validate_relay_reply_token",
         1,
-        "relay reply token at POST /channel-relay/reply",
-        "active inbound message, conversation, live agent API key and active bot; bot \
-         scope; JTI consumed once in reply_token_uses",
+        "per-inbound relay reply capability at reply, thread-reply and attachment reads",
+        "RS256 kid selection, issuer, reply audience/type and bounded lifetime; inbound \
+         message, conversation and platform binding; active unexpired ordinary API key \
+         and active bot with owner/platform scope. Durable adapters also check current \
+         key assignment. Carried claims bind thread dispatch and recheck expiry before \
+         unique JTI insert; \
+         ordinary non-durable replies consume here, attachment reads do not consume. \
+         Failed preflight Health requires the same verified message/key/platform binding. \
+         No OAuth consent authority: this is a callback capability. Unknown signing kid \
+         refuses 401; local key selection has no network outage; live-key database errors \
+         propagate as database errors, without dispatch or Health writes",
     ),
     v(
         "handlers/channel_relay.rs",

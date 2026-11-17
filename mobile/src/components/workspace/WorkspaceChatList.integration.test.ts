@@ -86,8 +86,11 @@ function chatsFor(agentId: string) {
 
 /** Render the component's stateless rows while leaving its modal as a boundary. */
 function elements(root: Element): Element[] {
-  if (typeof root.type === "function")
-    return elements((root.type as (props: unknown) => Element)(root.props));
+  if (typeof root.type === "function") {
+    // A stateless row part may render nothing (an empty unread pill).
+    const rendered = (root.type as (props: unknown) => Element | null)(root.props);
+    return rendered ? elements(rendered) : [];
+  }
   return [
     root,
     ...[root.props.children]
@@ -124,6 +127,10 @@ type SetupOptions = {
   agentsPending?: boolean;
   groupsPending?: boolean;
   agentsFetching?: boolean;
+  unread?: {
+    conversations: Record<string, number>;
+    groups: Record<string, number>;
+  };
 };
 
 function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
@@ -158,8 +165,10 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
   const historyState = options.history ?? "loaded";
   const props = {
     mode: options.mode,
+    disabled: false,
     visible: true,
     current,
+    unread: options.unread,
     onCreateAgent: () => creations.push("agent"),
     onCreateGroup: () => creations.push("group"),
     onSelect: (target: WorkspaceChatTarget) => {
@@ -354,6 +363,10 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     harness,
     setCurrent: (value: WorkspaceChatTarget) => {
       props.current = value;
+      harness.render();
+    },
+    disable: (next: boolean) => {
+      props.disabled = next;
       harness.render();
     },
     selections,
@@ -1452,5 +1465,140 @@ test("background agent polling never shows the refresh spinner", () => {
   assert.equal(env.scroll().props.refreshControl.props.refreshing, false);
   env.more("View all agents (9)");
   assert.equal(env.browser().refreshing, false);
+  env.harness.unmount();
+});
+
+test("thread, crew and channel-bot rows show the unread counts the notification summary attributes to them", () => {
+  const channels = Array.from({ length: 3 }, (_, index) =>
+    conversationSchema.parse({
+      id: conversationId(900 + index),
+      title: `Customer ${index + 1}`,
+      model: "nyxagent/chat",
+      message_count: 2,
+      active_turn: null,
+      created_at: "2026-10-01T00:00:00Z",
+      last_message_at: `2026-10-${String(20 - index).padStart(2, "0")}T00:00:00Z`,
+      agent: { id: "agent-1", name: "helper-1", display_name: "Agent 1", kind: "specialist" },
+      channel: {
+        platform: "telegram",
+        channel_agent_id: "bot-1",
+        bot_label: "Support bot",
+        chat_id: `chat-${index}`,
+        chat_title: `Customer ${index + 1}`,
+        chat_kind: "private",
+      },
+    }),
+  );
+  const own = chatsFor("agent-1").slice(0, 2);
+  const current = { kind: "agent" as const, agentId: "agent-1", conversationId: own[0]!.id };
+  const env = setup(current, {
+    chats: [...own, ...channels],
+    unread: {
+      conversations: { [own[1]!.id]: 2, [channels[0]!.id]: 1, [channels[2]!.id]: 105 },
+      groups: { [groups[7]!.id]: 3 },
+    },
+  });
+  const unreadRow = env.label("Open chat Agent 1 chat 2 with Agent 1, 2 unread");
+  const pill = elements(unreadRow).find((row) => row.props.testID === "sidebar-unread-count");
+  assert.ok(pill, "an unread thread carries a count pill");
+  assert.equal(content(pill!), "2");
+  const titleColor = (row: Element, text: string) =>
+    Object.assign({}, ...[elements(row).find((node) => node.type === "Text" && content(node) === text)!.props.style].flat()).color;
+  assert.equal(titleColor(unreadRow, "Agent 1 chat 2"), lightColors.textPrimary, "unread titles read like the current thread");
+  const readRow = env.label("Open chat Agent 1 chat 1 with Agent 1, current thread");
+  assert.equal(elements(readRow).some((row) => row.props.testID === "sidebar-unread-count"), false, "a read thread has no pill");
+  const bot = env.label("Expand chats for Support bot, Telegram · 3 chats, 106 unread");
+  assert.equal(content(elements(bot).find((row) => row.props.testID === "sidebar-unread-count")!), "99+", "a bot folds its chats' counts, capped");
+  env.press("Expand chats for Support bot, Telegram · 3 chats, 106 unread");
+  assert.ok(env.label("Open chat Customer 3 with Agent 1, 105 unread"));
+  const plainChild = env.label("Open chat Customer 2 with Agent 1");
+  assert.ok(plainChild, "a chat without unread keeps its plain label");
+  assert.equal(titleColor(plainChild, "Customer 2"), lightColors.textSecondary, "read titles stay secondary");
+  env.press("Expand crews");
+  assert.ok(env.groupRows().length > 0, "the crew preview is open");
+  const crew = env.label("Open crew Group 8, 3 unread");
+  assert.equal(content(elements(crew).find((row) => row.props.testID === "sidebar-unread-count")!), "3");
+  assert.equal(elements(env.label("Open crew Group 7")).some((row) => row.props.testID === "sidebar-unread-count"), false);
+  env.harness.unmount();
+  const plain = setup(current, { chats: [...own, ...channels] });
+  assert.equal(plain.all().some((row) => row.props.testID === "sidebar-unread-count"), false, "without markers no row shows a pill");
+  plain.harness.unmount();
+});
+
+
+test("critical writes disable chat, crew, agent and create rows with muted text and restore them in place", () => {
+  const env = setup({
+    kind: "agent",
+    agentId: "nyxbot",
+    conversationId: conversationId(1),
+  });
+  env.press("Expand crews");
+  env.disable(true);
+  const controls = [
+    ...env.agentRows(),
+    ...env.chatRows(),
+    ...env.groupRows(),
+    env.label("New agent"),
+    env.label("New crew"),
+    env.label("New chat with NyxBot"),
+  ];
+  assert.ok(env.chatRows().length > 0);
+  assert.ok(env.groupRows().length > 0);
+  for (const control of controls) {
+    assert.equal(
+      control.props.disabled,
+      true,
+      control.props.accessibilityLabel,
+    );
+    assert.equal(control.props.accessibilityState.disabled, true);
+    const style = Object.assign(
+      {},
+      ...[
+        typeof control.props.style === "function"
+          ? control.props.style({ pressed: false })
+          : control.props.style,
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
+    );
+    assert.ok((style.minHeight ?? style.height) >= 44);
+    assert.equal(style.opacity, undefined);
+    for (const text of elements(control).filter(
+      (node) => node.type === "Text",
+    )) {
+      const textStyle = Object.assign(
+        {},
+        ...[text.props.style].flat(Infinity).filter(Boolean),
+      );
+      assert.equal(textStyle.color, lightColors.textMuted);
+      assert.equal(textStyle.opacity, undefined);
+    }
+  }
+  env.disable(false);
+  assert.ok(
+    [...env.agentRows(), ...env.chatRows(), ...env.groupRows()].every(
+      (node) => node.props.disabled === false,
+    ),
+  );
+  env.chatRows()[0]!.props.onPress();
+  assert.equal(env.selections.length, 1);
+  env.harness.unmount();
+});
+
+test("an already open chat browser disables its selectable rows and New chat while keeping Close available", () => {
+  const env = setup({ kind: "agent", agentId: "nyxbot" });
+  env.more("View all chats");
+  env.disable(true);
+  const browser = env.browser();
+  for (const item of browser.items) {
+    const row = elements(browser.renderItem(item)).find(
+      (node) => node.type === "Pressable",
+    )!;
+    assert.equal(row.props.disabled, true);
+    assert.equal(row.props.accessibilityState.disabled, true);
+  }
+  assert.equal(browser.primaryAction.disabled, true);
+  browser.onClose();
+  env.harness.flush();
   env.harness.unmount();
 });

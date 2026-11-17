@@ -1,4 +1,6 @@
 import { ApiError } from "@/lib/api-client";
+import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import {
   assistantHttp,
   assistantJson,
@@ -131,11 +133,13 @@ export const chatHistoryApi = {
   },
 
   async deleteConversation(conversationId: string): Promise<void> {
+    const userId = getAssistantIdentityUserId();
     try {
       await assistantHttp(conversationPath(conversationId), {
         headers: { Accept: "application/json" },
         method: "DELETE",
       });
+      if (userId) useAssistantPinsStore.getState().remove(userId, conversationId);
     } catch (error) {
       return apiError(error);
     }

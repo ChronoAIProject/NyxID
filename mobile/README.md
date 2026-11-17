@@ -4,10 +4,13 @@ The native workspace for the [NyxID](../) auth/SSO platform, built around persis
 
 The first Web-to-RN increment and remaining migration work are documented in [RN Web parity scope](docs/RN_WEB_PARITY.md).
 
+[Native integration](docs/NATIVE_INTEGRATION.md) documents OAuth recovery, push, link associations, the certificate-mode SSH terminal, external owners and physical-device verification.
+
 ## What it does
 
 - **Chats with NyxBot and specialists.** Open saved conversations, receive streaming responses, review scoped confirmations, stop work, and recover history after a connection interruption.
 - **Connects services.** Browse the catalog, connect supported API-key, token-exchange, OAuth, or platform-key services, and manage existing connections under the server's permissions.
+- **Opens SSH terminals.** Active certificate-mode SSH connections use an offline xterm renderer and an authenticated native socket through a bound credential node. No token enters the WebView.
 - **Manages agents.** Create personal specialists, edit authorized profiles and grants, manage memory, and open agent conversations.
 - **Reviews approvals.** Receive push notifications, scan login QR codes, inspect the server's tool arguments and expiry, approve or deny requests, and revoke granted permissions.
 - **Customizes chat appearance.** Settings → Display offers Gray, Lavender, and Graphite bubbles, each with a light and a dark version, with live previews of both. The choice is saved on the device and applies to individual, specialist, and group chats, including messages being sent. User bubbles share three 18pt corners and a 4pt bottom-right corner.
@@ -62,7 +65,7 @@ App Store review checklist: [docs/APP_STORE_REVIEW_CHECKLIST.md](docs/APP_STORE_
 
 ### Per-profile vars (`DEV_*` / `PROD_*`)
 
-Each field falls back to the other profile if its primary is empty. Both empty for the canonical signal (`*_API_BASE_URL`) aborts the build.
+Each field except the Firebase file path and Android App Links opt-in falls back to the other profile if its primary is empty. Both empty for the canonical signal (`*_API_BASE_URL`) aborts the build. Firebase paths and the App Links opt-in stay profile-local. When `DEV_GOOGLE_SERVICES_FILE` is omitted, an existing `./google-services.json` is reused only if it contains the resolved dev Android package; an explicit empty value disables dev FCM. Firebase validation runs during Android native generation, so iOS builds do not require an Android Firebase file.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
@@ -70,11 +73,13 @@ Each field falls back to the other profile if its primary is empty. Both empty f
 | `*_FRONTEND_URL` | for web QR login / waitlist | Trusted frontend origin that creates login QR codes |
 | `*_IOS_BUNDLE_ID` | yes (one of dev/prod) | iOS bundle identifier (reverse-DNS) |
 | `*_ANDROID_PACKAGE` | yes (one of dev/prod) | Android application id |
+| `*_GOOGLE_SERVICES_FILE` | optional for dev; default for prod | Profile-specific Firebase JSON matching `*_ANDROID_PACKAGE`. Omitted dev paths reuse a matching `./google-services.json`; an explicit empty dev path disables FCM. Omitted or empty prod paths use `./google-services.json`. |
 | `*_APPLE_ASC_APP_ID` | only for submit | Numeric ASC App ID |
 | `*_IOS_BUILD_NUMBER` | for release builds | `CFBundleVersion` — bump per release |
 | `*_ANDROID_VERSION_CODE` | for release builds | Android `versionCode` — bump per release |
 | `*_UNIVERSAL_LINK_HOST` | optional | iOS `associatedDomains` + Android intent filter |
 | `*_UNIVERSAL_LINK_PATH_PREFIX` | optional | Android intent-filter path |
+| `*_ANDROID_HTTPS_APP_LINKS` | optional, default false | Profile-local HTTPS App Links opt-in for the selected API-only or API-plus-frontend host set. Enable only after every selected host serves valid Asset Links; see the native integration runbook. |
 | `*_LEGAL_BASE_URL` | for Privacy / Terms screens | Origin serving `/legal/{privacy,terms}.md` — same files the web dashboard renders. Empty = legal screens show an error. |
 | `*_ALLOWED_EMAILS` | optional | Comma-separated allowlist; empty = allow all signed-in users |
 | `*_TELEMETRY_DSN` / `*_TELEMETRY_HOST` / `*_SHARE_ANALYTICS` | optional | PostHog |
@@ -124,6 +129,7 @@ mobile/credentials/play-service-account.json  Play Console → API access → se
 | --- | --- |
 | `pnpm build:ios` / `pnpm build:android` | Build a release `.ipa` / `.aab` for the **prod** profile |
 | `pnpm build:ios:dev` / `pnpm build:android:dev` | Same but for the **dev** profile |
+| `pnpm android` | Clean-prebuild and install the **dev** Android profile (clears stale prod Firebase native files) |
 | `pnpm build:prod` | Both platforms (iOS then Android), prod |
 | `pnpm build:dev` | Both platforms, dev |
 | `pnpm submit:ios` | Upload the most recent `.ipa` to App Store Connect → TestFlight |
@@ -160,7 +166,7 @@ pnpm build:android
 └─ APP_ENV=prod node scripts/build-android.js
    1. expo prebuild --platform android --clean
    2. patch-android-build-gradle.js      # force androidx.core 1.15.0
-   3. ./gradlew bundleRelease            # signing via -Pandroid.injected.signing.*
+   3. ./gradlew bundleRelease            # signing properties come from the child environment; passwords never enter argv/logs
                                          # → android/app/build/outputs/bundle/release/app-release.aab
 ```
 

@@ -32,11 +32,12 @@ impl Transport<'_> {
         row: &LarkBaseWrite,
         phase: WriteState,
         method: reqwest::Method,
-        path: &str,
+        child: &ChildPath,
         query: Option<&str>,
         body: Option<bytes::Bytes>,
         content_type: &str,
     ) -> Result<Reply, NotSent> {
+        let path = child.logical.as_str();
         let canonical = super::super::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
         let (_, selected) = super::super::destination_routing::select_target(
             &self.target.service,
@@ -48,7 +49,10 @@ impl Transport<'_> {
                 .error()
                 .into());
         }
-        guard.revalidate_effect(row, phase).await?;
+        guard
+            .revalidate_effect(row, phase)
+            .await
+            .inspect_err(diagnostic::error)?;
         let mut headers = reqwest::header::HeaderMap::new();
         if body.is_some() {
             headers.insert(
@@ -57,7 +61,7 @@ impl Transport<'_> {
             );
         }
         let effect = guard.effect(row, phase);
-        let response = proxy::forward_request_with_egress_guard(
+        let response = proxy::forward_request_with_resource_proof(
             proxy::no_redirect_http_client(),
             self.target,
             method,
@@ -73,6 +77,10 @@ impl Transport<'_> {
             Vec::new(),
             self.permit,
             Some(&effect),
+            None,
+            None,
+            None,
+            child.route.as_ref(),
         )
         .await;
         match response {
@@ -94,18 +102,17 @@ impl Transport<'_> {
                 ))
             }
             Err(proxy::ForwardRequestError::PreDispatchRejected(error)) => Err(NotSent(error)),
-            // For these two direct HTTP auth paths, every Application error is
-            // before the create send: credential preparation (including tenant
-            // exchange) is at proxy_service.rs:4511-4559; request.send() is at
-            // :4628. Adapter-specific Application errors can follow a send, so
-            // other auth paths conservatively retain an unknown outcome.
+            // Credential preparation precedes send for these HTTP auth paths.
+            // With an execution permit, Application can also mean completion
+            // failed AFTER send; retain uncertainty in that case.
             Err(proxy::ForwardRequestError::Application(error))
                 if matches!(
                     self.target.auth_method.as_str(),
                     "bearer" | "token_exchange"
-                ) =>
+                ) && self.target.execution_permission.is_none()
+                    && !super::super::credential_verification::checking() =>
             {
-                Err(NotSent(error))
+                Err(NotSent(Failure::CredentialPreparation.error(error)))
             }
             Err(_) => Ok(Reply::Transport),
         }

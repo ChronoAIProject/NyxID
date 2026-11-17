@@ -8,6 +8,7 @@
   --line-page-title: 1.1;
   --line-metric: 1.25;
   --line-prose: 1.625;
+  --line-count: 1;
 }
 
 /* Semantic roles own size, weight and line height. Tokens remain canonical. */
@@ -93,6 +94,13 @@
   font-weight: 500;
   line-height: var(--line-body);
   @variant unthemed { line-height: inherit; }
+}
+
+/* Compact counters use their own role to keep bell glyphs visible. */
+@utility type-count-badge {
+  font-size: var(--text-10);
+  font-weight: 600;
+  line-height: var(--line-count);
 }
 
 @utility type-field-label {

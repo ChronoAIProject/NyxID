@@ -633,9 +633,9 @@ test("real transport preserves an owned session so malformed media answers recei
     );
     assert.notEqual(endSignal, startSignal);
     assert.deepEqual(f.controlStates, [
-      { startAborted: true, endAborted: false },
+      { startAborted: false, endAborted: false },
     ]);
-    assert.equal(startSignal.aborted, true);
+    assert.equal(startSignal.aborted, false);
     assert.equal(
       endSignal.aborted,
       true,
@@ -655,9 +655,12 @@ test("closing during a real POST still ends a late owned session with a malforme
     await Promise.resolve();
   assert.equal(f.calls.length, 1);
   await f.client.end();
-  assert.equal(f.calls[0]!.options?.signal?.aborted, true);
-  resolve({ session, sdp_answer: 7 });
+  assert.equal(f.calls[0]!.options?.signal?.aborted, false);
   await starting;
+  assert.equal(f.client.pendingStart, true);
+  resolve({ session, sdp_answer: 7 });
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.equal(f.client.pendingStart, false);
   assert.deepEqual(
     f.calls.map((call) => call.path),
     [`${root}/voice-sessions`, `${root}/voice-sessions/${sessionId}/control`],
@@ -671,9 +674,9 @@ test("closing during a real POST still ends a late owned session with a malforme
   );
   assert.notEqual(endSignal, startSignal);
   assert.deepEqual(f.controlStates, [
-    { startAborted: true, endAborted: false },
+    { startAborted: false, endAborted: false },
   ]);
-  assert.equal(startSignal.aborted, true);
+  assert.equal(startSignal.aborted, false);
   assert.equal(
     endSignal.aborted,
     true,

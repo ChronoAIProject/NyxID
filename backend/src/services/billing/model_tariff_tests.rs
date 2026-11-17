@@ -676,3 +676,121 @@ fn charge_vector_preserves_native_breakdown_and_modality_observability() {
         90
     );
 }
+
+#[tokio::test]
+async fn plain_image_and_family_tariff_publication_serves_overlap_and_refuses_unsupported_or_unrecorded_capabilities()
+ {
+    use crate::models::{security_capability_activation as activation, security_replica};
+    use crate::services::platform_model_execution::{certification, images};
+    for kind in ["plain", "image", "family"] {
+        let required = match kind {
+            "plain" => vec![READINESS],
+            "image" => vec![READINESS, images::READINESS],
+            _ => vec![READINESS, images::READINESS, certification::READINESS],
+        };
+        for capability in required {
+            let db =
+                crate::test_utils::connect_transaction_test_database("tariff_overlap_publication")
+                    .await;
+            platform_model_service::ensure_indexes(&db).await.unwrap();
+            ensure_indexes(&db).await.unwrap();
+            crate::services::role_service::seed_system_roles(&db)
+                .await
+                .unwrap();
+            let roles = crate::services::role_service::get_platform_role_ids(&db)
+                .await
+                .unwrap();
+            let id = Uuid::new_v4().to_string();
+            let mut user = crate::test_utils::test_user(&id, crate::models::user::UserType::Person);
+            user.role_ids.push(roles.admin);
+            db.collection(crate::models::user::COLLECTION_NAME)
+                .insert_one(user)
+                .await
+                .unwrap();
+            let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&id));
+            let model = platform_model_service::create(
+                &db,
+                &actor,
+                platform_model_service::NewModel {
+                    public_id: "nyxid/gpt-test".into(),
+                    display_name: "Test".into(),
+                    description: String::new(),
+                    family: crate::models::platform_model::ModelFamily::Openai,
+                    capabilities: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+            let (mut service, mut t, _) = fixture();
+            service.billing = None;
+            db.collection::<DownstreamService>(SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            db.collection::<PlatformModel>(MODELS)
+                .update_one(
+                    doc! {"_id":&model.id},
+                    doc! {"$set":{"billing_service_id":&service.id}},
+                )
+                .await
+                .unwrap();
+            if kind == "image" {
+                t.contract.fixture_sha256 = fixture_digest(include_str!(
+                    "../platform_model_execution/fixtures/responses-images-v1.json"
+                ));
+            }
+            if kind == "family" {
+                t.contract.version = "openai.responses.v2".into();
+                t.contract.fixture_sha256 =
+                    fixture_digest(certification::family_fixture(t.contract.family).unwrap());
+                t.source = format!(
+                    "contract-attested-v1:{} https://provider.example/verified",
+                    model.public_id
+                );
+            }
+            let mut input = NewTariff {
+                revision: model.revision,
+                lane: t.lane,
+                variant: t.variant,
+                contract: t.contract,
+                bounds: t.bounds,
+                components: t.components,
+                source: t.source,
+            };
+            security_readiness_service::ready_test_replica(&db).await;
+            security_readiness_service::stop_test_replica(&db).await;
+            let sibling = security_readiness_service::overlapping_test_replica(&db).await;
+            let created = create(&db, &actor, &model.id, input.clone()).await.unwrap();
+            input.revision = created.revision;
+            security_readiness_service::remove_test_replica_capability(&db, &sibling, capability)
+                .await;
+            assert!(
+                matches!(
+                    create(&db, &actor, &model.id, input.clone()).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{kind}/{capability}"
+            );
+            db.collection::<security_replica::SecurityReplica>(security_replica::COLLECTION_NAME)
+                .replace_one(doc! {"_id":&sibling.id}, &sibling)
+                .await
+                .unwrap();
+            db.collection::<bson::Document>(activation::COLLECTION_NAME)
+                .delete_one(doc! {"record_kind":activation::RECORD_KIND,"capability":capability})
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    create(&db, &actor, &model.id, input.clone()).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{kind}/{capability}"
+            );
+        }
+    }
+}
+
+fn fixture_digest(value: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(value.as_bytes()))
+}

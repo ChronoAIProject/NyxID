@@ -23,7 +23,14 @@ class ResourceWrapperTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="ci resources ")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.environment = {**os.environ, "RUNNER_TEMP": str(self.root)}
+        probes = self.root / "probes"
+        probes.mkdir()
+        for tool in ("rustc", "cargo"):
+            stub = probes / tool
+            stub.write_text("#!/bin/sh\nexit 1\n")
+            stub.chmod(0o755)
+        self.environment = {**os.environ, "RUNNER_TEMP": str(self.root),
+                            "PATH": str(probes) + os.pathsep + os.environ.get("PATH", "")}
 
     def invoke(self, source, *args):
         return subprocess.run(

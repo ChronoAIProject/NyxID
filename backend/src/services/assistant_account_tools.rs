@@ -303,6 +303,7 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     // Gated authoring is appended only by the actor-aware discovery helper.
     service.endpoints.retain(|e| {
         e.name != super::assistant_skill_authoring::TOOL_NAME
+            && e.name != "list_notifications"
             && (!chat.guest || e.name != "task_status")
     });
     if chat.collaboration_thread {
@@ -319,6 +320,20 @@ pub async fn virtual_service_for(
     chat: &acks::ChatAuthority,
 ) -> McpToolService {
     let mut service = virtual_service(chat);
+    if chat.is_orchestrator()
+        && !chat.guest
+        && !chat.collaboration_thread
+        && !super::assistant_service_execution::is_shared_chat(chat)
+        && super::assistant_notification_service::enabled(db, &chat.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        service.endpoints.extend(
+            super::assistant_team_tools::endpoints()
+                .into_iter()
+                .filter(|endpoint| endpoint.name == "list_notifications"),
+        );
+    }
     // Owner chats (NyxBot and specialists, which draft only for themselves)
     // need this rollout lookup. A flag-store failure hides authoring alone,
     // preserving the existing tools for every caller.

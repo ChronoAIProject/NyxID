@@ -601,3 +601,51 @@ async fn commonmark_edit_retains_authorized_row_and_fallback_health() {
     );
     cleanup(fixture).await;
 }
+
+#[tokio::test]
+async fn supplemental_local_reply_preserves_token_final_parts_and_edit_authority() {
+    Box::pin(async {
+        for commonmark in [false, true] {
+            let (fixture, server) = setup().await;
+            let sequence = std::sync::atomic::AtomicUsize::new(100);
+            Mock::given(path("/botbot-token/sendMessage")).respond_with(move |_: &wiremock::Request| {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"message_id":sequence.fetch_add(1,std::sync::atomic::Ordering::SeqCst)}}))
+            }).mount(&server).await;
+            Mock::given(path("/botbot-token/editMessageText")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true}))).mount(&server).await;
+            let token = valid_reply_token(&fixture);
+            let claims = jwt::validate_relay_reply_token(&fixture.state.jwt_keys, &fixture.state.config, &token).unwrap();
+            let before: Vec<bson::Document> = fixture.state.db.collection::<bson::Document>(REPLY_TOKEN_USES).find(doc!{}).await.unwrap().try_collect().await.unwrap();
+            let local = async_reply(State(fixture.state.clone()), HeaderMap::new(), OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))), Json(reply_request(&fixture.message.id))).await.unwrap().0;
+            assert!(!reply_token_has_been_consumed(&fixture.state, &claims.jti).await.unwrap());
+            let after: Vec<bson::Document> = fixture.state.db.collection::<bson::Document>(REPLY_TOKEN_USES).find(doc!{}).await.unwrap().try_collect().await.unwrap();
+            assert_eq!(before, after);
+            // Route-key sends cannot authorize token edits before the token's use.
+            let local_edit = || UpdateReplyRequest { message_id:local.platform_message_id.clone().unwrap(), outbound_message_id:Some(local.message_id.clone()), reply:body(Some("edited notice"),None) };
+            assert!(update_reply(State(fixture.state.clone()),bearer_headers(&token),OptionalAuthUser(None),Json(local_edit())).await.is_err());
+            let endpoint = if commonmark {"/reply/commonmark"} else {"/reply"};
+            let route = if commonmark {axum::routing::post(crate::handlers::channel_relay_request::commonmark_reply)} else {axum::routing::post(crate::handlers::channel_relay_request::reply)};
+            let final_text = "中文 English မြန်မာစာ\n".repeat(1200);
+            let response = axum::Router::new().route(endpoint, route).with_state(fixture.state.clone()).oneshot(Request::builder().method("POST").uri(endpoint).header("authorization",format!("Bearer {token}")).header("content-type","application/json").body(Body::from(payload(&fixture,&final_text))).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            let result: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(),8192).await.unwrap()).unwrap();
+            let final_id=result["message_id"].as_str().unwrap();
+            let receipts: Vec<bson::Document> = fixture.state.db.collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME).find(doc!{"inbound_message_id":&fixture.message.id}).await.unwrap().try_collect().await.unwrap();
+            assert_eq!(receipts.len(),2);
+            let final_receipt=receipts.iter().find(|d|d.get_array("parts").unwrap().iter().any(|p|p.as_document().unwrap().get_str("outbound_message_id")==Ok(final_id))).unwrap();
+            assert!(final_receipt.get_bool("complete").unwrap());
+            assert!(final_receipt.get_array("parts").unwrap().iter().all(|p| p.as_document().unwrap().get_str("outbound_message_id")!=Ok(local.message_id.as_str())));
+            let requests=server.received_requests().await.unwrap();
+            let parts:Vec<serde_json::Value>=requests.iter().map(|r|serde_json::from_slice(&r.body).unwrap()).collect();
+            assert!(parts.len()>3);
+            assert_eq!(parts.iter().skip(1).map(|p|p["text"].as_str().unwrap()).collect::<String>(),if commonmark { final_text.trim_end() } else { &final_text });
+            for part in parts { assert_eq!(part["reply_to_message_id"],42);assert_eq!(part["message_thread_id"],123); }
+            // Existing edit authority is the same inbound/route, not a JTI-to-row
+            // binding: after final use both of its authorized outbound rows edit.
+            let _ = update_reply(State(fixture.state.clone()),bearer_headers(&token),OptionalAuthUser(None),Json(local_edit())).await.unwrap();
+            let _ = update_reply(State(fixture.state.clone()),bearer_headers(&token),OptionalAuthUser(None),Json(UpdateReplyRequest {message_id:result["platform_message_id"].as_str().unwrap().into(),outbound_message_id:Some(final_id.into()),reply:body(Some("edited final"),None)})).await.unwrap();
+            assert!(update_reply(State(fixture.state.clone()),bearer_headers(&token),OptionalAuthUser(None),Json(UpdateReplyRequest {message_id:"999".into(),outbound_message_id:Some(uuid::Uuid::new_v4().to_string()),reply:body(Some("refused"),None)})).await.is_err());
+            assert_eq!(fixture.state.db.collection::<bson::Document>(REPLY_TOKEN_USES).count_documents(doc!{}).await.unwrap(),before.len() as u64+1);
+            cleanup(fixture).await;
+        }
+    }).await;
+}

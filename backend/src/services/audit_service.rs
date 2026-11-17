@@ -12,6 +12,13 @@ use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::mw::auth::AuthUser;
 use crate::services::audit_chain_service;
 
+pub mod required;
+pub(crate) use required::append_intent;
+
+#[cfg(test)]
+#[path = "audit_intent_tests.rs"]
+mod durability_tests;
+
 static AUDIT_CHAIN_HMAC_KEY: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -88,7 +95,7 @@ pub fn log_async(
         api_key_id,
         api_key_name,
     );
-    tokio::spawn(async move {
+    super::shutdown::process().spawn_cleanup(async move {
         let _ = write_audit_entry(db, entry, event_type).await;
     });
 }

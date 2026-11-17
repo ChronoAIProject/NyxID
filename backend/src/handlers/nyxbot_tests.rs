@@ -5,11 +5,17 @@ use crate::{
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
         user::{COLLECTION_NAME as USERS, UserType},
     },
-    test_utils::{connect_transaction_test_database, test_app_state, test_user},
+    test_utils::{
+        connect_transaction_test_database, connect_transaction_test_database_with_command_handler,
+        test_app_state, test_user,
+    },
 };
 use axum::{Router, response::sse::Event, routing::post};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+#[path = "nyxbot_fence_tests.rs"]
+mod fence_tests;
 
 #[path = "nyxbot_provider_refusal_tests.rs"]
 mod provider_refusal_tests;
@@ -29,6 +35,9 @@ mod routing_tests;
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 
+#[path = "nyxbot_notification_cleanup_tests.rs"]
+mod notification_cleanup_tests;
+
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
@@ -36,6 +45,8 @@ mod x_bus_tests;
 mod custom_event_tests;
 #[path = "nyxbot_org_channel_tests.rs"]
 mod org_channel_tests;
+#[path = "nyxbot_org_restore_tests.rs"]
+mod org_restore_tests;
 
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
@@ -114,7 +125,52 @@ async fn setup_with_reply_impl(
     reply: &'static str,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = Box::pin(connect_transaction_test_database(name)).await;
+    setup_with_database(db, reply).await
+}
+
+pub(super) async fn setup_with_command_monitor(
+    name: &str,
+) -> (
+    (AppState, Calls, tokio::task::JoinHandle<()>),
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = commands.clone();
+    let handler = mongodb::event::EventHandler::callback(move |event| {
+        if let mongodb::event::command::CommandEvent::Started(event) = event
+            && matches!(event.command_name.as_str(), "find" | "aggregate")
+        {
+            recorded
+                .lock()
+                .unwrap()
+                .push(event.command_name.to_string());
+        }
+    });
+    let db = connect_transaction_test_database_with_command_handler(name, handler).await;
+    (
+        (setup_with_database(db, "Here is your answer").await),
+        commands,
+    )
+}
+
+async fn setup_with_database(
+    db: mongodb::Database,
+    reply: &'static str,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     Box::pin(engine::ensure_indexes(&db)).await.unwrap();
+    db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(mongodb::bson::doc! {"event_type": 1, "created_at": -1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .name("event_type_1_created_at_-1".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
     Box::pin(async {
         db.collection(USERS)
             .insert_one(test_user(OWNER, UserType::Person))
@@ -311,6 +367,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: None,
         gateway_source: None,
@@ -379,6 +436,13 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         delivery_seen_at: None,
         delivery_checked_at: None,
         delivery_notified_at: None,
+        org_restore_next_attempt_at: None,
+        org_restore_attempts: 0,
+        org_restore_rule_version: 0,
+        org_restore_last_reason: None,
+        org_restore_claim_id: None,
+        org_restore_lease_until: None,
+        org_restored_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -570,11 +634,35 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
             .iter()
             .any(|refusal| refusal["field"] == "model")
     );
+    let bound_epoch = load_channel(&state, OWNER, &row.id)
+        .await
+        .unwrap()
+        .notification_epoch;
+    assert_eq!(bound_epoch, row.notification_epoch);
     // Re-binding the same ID is idempotent; another ID conflicts.
     let again = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1").await;
     assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .notification_epoch,
+        bound_epoch
+    );
     let conflict = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_2").await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let same_channel = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":&row.id},
+    )
+    .await;
+    let retained = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":Uuid::new_v4().to_string()},
+    )
+    .await;
     let deleted = delete_binding(
         State(state.clone()),
         Path("bnd_1".into()),
@@ -585,6 +673,8 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert_eq!(saved.binding_id.as_deref(), Some("bnd_1"));
     assert_eq!(saved.status, "active");
+    // Unbinding keeps the link and purges nothing, so the notification epoch is unchanged.
+    assert_eq!(saved.notification_epoch, bound_epoch);
     assert!(
         key_service::validate_api_key(&state.db, &agent_key)
             .await
@@ -634,6 +724,8 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
         StatusCode::OK
     );
     assert!(!format!("{saved:?}").contains(&agent_key));
+    crate::test_utils::assert_notification_probe(&state.db, &same_channel, true).await;
+    crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;
     server.abort();
 }
 
@@ -1664,6 +1756,7 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        dispatch_identity: None,
         trace_request_id: None,
         media: None,
         source_media_declared: None,
@@ -1817,6 +1910,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        dispatch_identity: None,
         trace_request_id: None,
         media: None,
         source_media_declared: None,
@@ -3423,6 +3517,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            notification_epoch: 0,
             execution_policy_revision: 0,
             org_specialist: None,
             gateway_source: None,
@@ -3480,6 +3575,13 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             delivery_seen_at: None,
             delivery_checked_at: None,
             delivery_notified_at: None,
+            org_restore_next_attempt_at: None,
+            org_restore_attempts: 0,
+            org_restore_rule_version: 0,
+            org_restore_last_reason: None,
+            org_restore_claim_id: None,
+            org_restore_lease_until: None,
+            org_restored_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -4488,6 +4590,7 @@ async fn mock_gateway_with_routing(
     let callback_base = base.clone();
     let create = {
         let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
+        let create_behavior = routing_behavior.clone();
         move |headers: HeaderMap, Json(body): Json<Value>| async move {
             if !routing_tests::request_matches_schema("ChannelCreateRequest", &body) {
                 return (
@@ -4506,10 +4609,16 @@ async fn mock_gateway_with_routing(
                 &claims
             ));
             assert_eq!(claims.sub, body["profile"]["metadata"]["owner"]["subject"]);
+            let mut recorded_body = body.clone();
+            recorded_body["_test_creator_subject"] = json!(claims.sub.clone());
             calls
                 .lock()
                 .await
-                .push(("POST".into(), "/channels".into(), body.clone()));
+                .push(("POST".into(), "/channels".into(), recorded_body));
+            if create_behavior.pause_create.load(Ordering::SeqCst) {
+                create_behavior.arrived.notify_one();
+                create_behavior.resume.notified().await;
+            }
             let key = Zeroizing::new(
                 body["credentials"]["agent_key"]
                     .as_str()
@@ -6075,7 +6184,7 @@ async fn replaced_hosted_watch_cannot_claim_or_settle_new_request() {
         .unwrap();
     complete_hosted_setup(&state, &old_link.id, &bot_id).await;
     channel_bot_watch(&state, &old).await.unwrap();
-    assert!(!claim(&state, &old, doc! {}).await.unwrap());
+    assert!(claim(&state, &old, doc! {}).await.unwrap().is_none());
     super::settle(&state, &old, Some("expired")).await;
     let retained = state
         .db
@@ -7460,6 +7569,156 @@ async fn onboarding_2318_human_patch_reports_the_final_linked_agent() {
             .unwrap()
             .agent_id,
         Some(specialist.id)
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[test]
+fn provider_conversation_delete_keeps_its_status_vocabulary() {
+    // A binding that changed after the handler's own check answers like that
+    // check (bare 404), never with a new 409.
+    assert_eq!(
+        conversation_delete_response(Ok(())).status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Conflict("Channel binding changed".into())))
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        conversation_delete_response(Err(AppError::Internal("unavailable".into()))).status(),
+        AppError::Internal("unavailable".into())
+            .into_response()
+            .status()
+    );
+}
+
+#[tokio::test]
+async fn durable_wake_watch_survives_crash_after_source_settlement() {
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("wake_watch_crash").await;
+    let now = bson::DateTime::now();
+    let link_id = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&link_id,"user_id":&f.owner,"service_slug":"api-github",
+            "service_id":Uuid::new_v4().to_string(),"token_hash":"hash","status":"completed",
+            "created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::minutes(15))})
+        .await.unwrap();
+    watch_connect_link(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &link_id,
+        LEGACY_PROVENANCE,
+    )
+    .await
+    .unwrap();
+    crate::services::durable_wake_tests::drop_after("watch_settled", process_watches(&f.state))
+        .await;
+    process_watches(&f.state).await.unwrap();
+    let row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(
+        row.pending_events.len(),
+        1,
+        "a surviving watch sweep must retain the continuation"
+    );
+    process_watches(&f.state).await.unwrap();
+    assert_eq!(
+        engine::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_review_deleted_chat_still_links_bot_and_settles_once() {
+    let (state, _, server) = setup("wake_deleted_chat").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &agent,
+    )
+    .await
+    .unwrap();
+    let (link, watch) = pending_creation_watch(&state, &home.id, &agent).await;
+    let bot = bot_doc("lark", "Created after chat deletion");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    complete_hosted_setup(&state, &link.id, &bot_id).await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .delete_one(doc! {"_id":&home.id})
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    let linked = active_for_bot(&state, OWNER, &bot_id).await.unwrap();
+    assert!(
+        linked.is_some(),
+        "deleted wake destination must not prevent bot linking"
+    );
+    let linked = linked.unwrap();
+    assert_eq!(linked.agent_id.as_deref(), Some(agent.id.as_str()));
+    let finished = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find_one(doc! {"_id":&watch.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, "done");
+    process_watches(&state).await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"_id":&watch.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "done"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .count_documents(doc! {"channel_bot_id":&bot_id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        active_for_bot(&state, OWNER, &bot_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .link_code_hash
+            == linked.link_code_hash
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .count_documents(doc! {"pending_events.wake.watch_id":&watch.id})
+            .await
+            .unwrap(),
+        0
     );
     server.abort();
     state.db.drop().await.unwrap();

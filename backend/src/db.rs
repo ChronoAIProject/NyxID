@@ -318,8 +318,11 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     .map_err(|_| mongodb::error::Error::custom("Attachment retention index migration failed"))?;
     crate::services::assistant_channel_media::ensure_indexes(db).await?;
     crate::services::service_history::relay::ensure_indexes(db).await?;
+    crate::services::security_effect_service::ensure_indexes(db).await?;
+    crate::services::node_credential_delivery::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    crate::services::assistant_notification_service::ensure_indexes(db).await?;
     crate::services::cma_session_origin::ensure_indexes(db).await?;
     crate::services::assistant_invocation_service::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
@@ -408,6 +411,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+
+    crate::services::org_service::cascade::ensure_indexes(db).await?;
+    crate::services::org_service::diagnostics::ensure_indexes(db).await?;
 
     // ── users ──
     let users = db.collection::<mongodb::bson::Document>("users");
@@ -3371,7 +3377,38 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     // ── usage_meter ──
+    crate::services::billing::usage_delivery::ensure_indexes(db).await?;
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+    usage_meter.create_indexes(billing_hold_indexes()).await?;
+    usage_meter
+        .create_indexes(crate::services::billing::stuck_requests::indexes())
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"realtime_session.recover_after":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("realtime_session_recovery".to_owned())
+                        .partial_filter_expression(doc! {
+                            "realtime_session.closed":false, "status":"forwarded", "released":false,
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    usage_meter.create_index(
+        IndexModel::builder()
+            .keys(doc! {"usage_checkpoint.recover_after":1,"_id":1})
+            .options(IndexOptions::builder()
+                .name("usage_checkpoint_recovery".to_owned())
+                .partial_filter_expression(doc! {
+                    "usage_checkpoint.final_report":true, "usage_checkpoint.recovered":false,
+                    "status":"forwarded", "released":false,
+                }).build())
+            .build(),
+    ).await?;
     usage_meter
         .create_index(
             IndexModel::builder()
@@ -3908,6 +3945,35 @@ pub(crate) async fn backfill_service_endpoint_operation_generations(
         )
         .await?;
     Ok(())
+}
+
+pub(crate) fn billing_hold_indexes() -> Vec<IndexModel> {
+    [
+        (
+            doc! {"wallet_id":1,"released":1,"_id":1},
+            doc! {"released":false},
+        ),
+        (
+            doc! {"funding.grant_reservations.grant_id":1,"funding.settled":1,"_id":1},
+            doc! {"funding.grant_reservations.grant_id":{"$exists":true}},
+        ),
+        (
+            doc! {"funding.allowance_reservations.period_id":1,"funding.settled":1,"_id":1},
+            doc! {"funding.allowance_reservations.period_id":{"$exists":true}},
+        ),
+    ]
+    .into_iter()
+    .map(|(keys, partial)| {
+        IndexModel::builder()
+            .keys(keys)
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(partial)
+                    .build(),
+            )
+            .build()
+    })
+    .collect()
 }
 
 async fn ensure_exact_service_semantic_effect_index(

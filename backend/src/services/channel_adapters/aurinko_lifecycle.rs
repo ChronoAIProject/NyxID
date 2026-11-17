@@ -412,6 +412,7 @@ impl AurinkoAdapter {
             .await?;
         if let Some(existing) = existing {
             if existing.status == "submitted" {
+                crate::services::channel_turn_preparation::effect().await?;
                 return Ok(existing.platform_reply_message_id);
             }
             return Err(AppError::Conflict("Aurinko reply was already attempted; delivery may be uncertain. Check the mailbox before taking further action.".into()));
@@ -516,6 +517,7 @@ impl AurinkoAdapter {
         };
         // A unique index on (bot_id, platform_message_id) fences JWT and API-key
         // callers and survives process crashes. There is deliberately no TTL.
+        crate::services::channel_turn_preparation::effect().await?;
         db.collection::<EmailSend>(SENDS).insert_one(&send).await?;
         let response = self
             .request(

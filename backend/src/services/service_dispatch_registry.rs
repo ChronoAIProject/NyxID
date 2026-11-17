@@ -277,6 +277,7 @@ mod tests {
         service.base_url = base_url.clone();
         service.slug = "connection-alias".into();
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some("cma".into()),
             execution_request: None,
             execution_permission: None,
@@ -340,6 +341,7 @@ mod tests {
             None,
             admission,
             caller,
+            None,
         )
         .await
     }

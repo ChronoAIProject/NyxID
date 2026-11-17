@@ -51,6 +51,75 @@ async fn save(state: &crate::AppState, plan: &Plan) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn activated_model_dispatch_serves_same_name_overlap_and_rejects_unsupported_generation() {
+    use crate::models::security_replica::{COLLECTION_NAME, SecurityReplica};
+    use crate::services::security_readiness_service as readiness;
+    let (state, mut plan, mut request) = fixture(Native::Responses, false).await;
+    upgrade(&mut plan, "gpt-6-astra");
+    request.body["model"] = json!(plan.model.public_id);
+    save(&state, &plan).await;
+    let replicas = state.db.collection::<SecurityReplica>(COLLECTION_NAME);
+    let mut overlap = replicas.find_one(doc! {}).await.unwrap().unwrap();
+    overlap.id = uuid::Uuid::new_v4().to_string();
+    overlap.generation_id = overlap.id.clone();
+    replicas.insert_one(&overlap).await.unwrap();
+    let report = readiness::report(&state.db, certification::READINESS)
+        .await
+        .unwrap();
+    assert!(report.activated && report.serving_ready && report.serving_with_roster_warnings);
+    assert!(!report.ready);
+    readiness::require_flag_enable(&state.db, registry::FLAG)
+        .await
+        .unwrap();
+    registry::require_execution_ready(&state.db).await.unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wire(Native::Responses)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let runtime = Runtime::mocked(&server.uri());
+    let context = context(&state, &runtime, &Allowed);
+    let accepted = dispatch(&context, &plan, &request).await.unwrap();
+    let result = consume(&context, &plan, accepted, None).await.unwrap();
+    assert_eq!(result["choices"][0]["message"]["content"], "Hello");
+    let usage = state.db.collection::<UsageMeterRow>("usage_meter");
+    let rows: Vec<_> = usage
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), plan.tariff.tariff().components.len());
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.pending_platform_usage.is_some()
+                || row.model_tariff.as_ref().unwrap().evidence.is_some())
+            .count(),
+        1
+    );
+    replicas
+        .update_one(
+            doc! {"_id": &overlap.id},
+            doc! {"$pull": {"capabilities": certification::READINESS}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        dispatch(&context, &plan, &request).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    // Exactly one HTTP effect and no additional component charges after refusal.
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        usage.count_documents(doc! {}).await.unwrap(),
+        rows.len() as u64
+    );
+}
+
 #[test]
 fn family_contracts_accept_current_and_future_names_without_loosening_identity() {
     for (native, vertex, name) in [

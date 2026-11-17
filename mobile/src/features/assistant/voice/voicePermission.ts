@@ -6,11 +6,17 @@ type ForegroundApp = {
   ): { remove(): void };
 };
 
-/** iOS permission can resolve before its transient inactive state has ended. */
+export const VOICE_FOREGROUND_TIMEOUT_MS = 5000;
+
+/** Permission results can arrive before the native permission activity has resumed NyxID. */
 export function waitForVoiceForeground(
   AppState: ForegroundApp,
   signal: AbortSignal,
   valid: () => boolean,
+  options: {
+    allowInitialBackground?: boolean;
+    waitWhileInactive?: boolean;
+  } = {},
 ) {
   if (signal.aborted || !valid())
     return Promise.reject(new Error("Voice start was cancelled."));
@@ -29,24 +35,32 @@ export function waitForVoiceForeground(
       else resolve();
     };
     const aborted = () => finish(new Error("Voice start was cancelled."));
-    const changed = (state: string) => {
+    const changed = (state: string, initial = false) => {
       if (signal.aborted || !valid()) aborted();
       else if (state === "active") finish();
-      else if (state === "background")
+      else if (
+        state === "background" &&
+        !(initial && options.allowInitialBackground)
+      )
         finish(new Error("Keep NyxID open to start a voice call."));
+      else if (state === "inactive" && options.waitWhileInactive) {
+        // iOS can keep an alert/overlay up indefinitely without backgrounding.
+        clearTimeout(timeout);
+        timeout = undefined;
+      } else if (!timeout)
+        timeout = setTimeout(
+          () =>
+            finish(
+              new Error(
+                "NyxID did not return to the foreground. Open the app and try voice again.",
+              ),
+            ),
+          VOICE_FOREGROUND_TIMEOUT_MS,
+        );
     };
     signal.addEventListener("abort", aborted, { once: true });
     subscription = AppState.addEventListener("change", changed);
-    timeout = setTimeout(
-      () =>
-        finish(
-          new Error(
-            "NyxID did not return to the foreground. Open the app and try voice again.",
-          ),
-        ),
-      5000,
-    );
     // Cover a state or abort transition between the first check and subscribing.
-    changed(AppState.currentState);
+    changed(AppState.currentState, true);
   });
 }

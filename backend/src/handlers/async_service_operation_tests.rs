@@ -3961,9 +3961,7 @@ async fn async_voice_result_waits_then_publishes_to_original_visible_thread_once
             .state,
         RequestState::Claimed
     );
-    voice::publish_completed_results(&a.f.state.db)
-        .await
-        .unwrap();
+    voice::publish_completed_results(&a.f.state).await.unwrap();
     assert!(
         voice::get(&a.f.state.db, &a.f.owner, &visible.id, &request.id)
             .await
@@ -3981,12 +3979,8 @@ async fn async_voice_result_waits_then_publishes_to_original_visible_thread_once
         Some(request.id.as_str())
     );
     finish(&a, &row, "sandbox finished").await;
-    voice::publish_completed_results(&a.f.state.db)
-        .await
-        .unwrap();
-    voice::publish_completed_results(&a.f.state.db)
-        .await
-        .unwrap();
+    voice::publish_completed_results(&a.f.state).await.unwrap();
+    voice::publish_completed_results(&a.f.state).await.unwrap();
     let completed = voice::get(&a.f.state.db, &a.f.owner, &visible.id, &request.id)
         .await
         .unwrap();
@@ -4180,7 +4174,7 @@ async fn async_voice_cancel_stops_hidden_watch_and_calls_cancel() {
             .iter()
             .any(|p| p.ends_with("/cancel"))
     );
-    crate::services::assistant_voice::publish_completed_results(&a.f.state.db)
+    crate::services::assistant_voice::publish_completed_results(&a.f.state)
         .await
         .unwrap();
     let done =

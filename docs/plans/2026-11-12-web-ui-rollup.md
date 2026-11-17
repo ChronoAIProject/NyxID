@@ -434,6 +434,127 @@ Validation:
 - full CI on the new head;
 - a Fable re-review, requested through root.
 
+## Main integration (2026-11-17)
+
+On user instruction, latest `main` is merged into this branch.
+- Incoming main: c48c1de05, 85 commits since the merge base 31f3d8969.
+- Branch head: fcb07a14b, the head Fable approved; 11 commits.
+- Safety branch: `backup/nyxid-ui-rollup-before-main-20261117` at fcb07a14b.
+- Root started `git merge --no-ff --no-commit c48c1de05`. Opus owns the
+  resolution, review and final merge commit. No force-push and no history
+  rewrite.
+
+### Conflicts and decisions
+
+- **Catalogs** (`en.json`, `zh-CN.json` and `zh-TW.json` modify/delete, plus
+  `app/en-overrides.json`). Main #2570 (abd2fecf5) split the catalogs into
+  sorted per-area files and deleted the legacy single-file catalogs. Resolution:
+  - Ran the repository's `npm run adopt:i18n` with `MERGE_HEAD` set: branch
+    HEAD, base 31f3d8969, onto c48c1de05. It reported 12,244 app keys, no
+    divergence and no legacy imports to rewrite.
+  - `npm ci` was not needed: `package-lock.json` is unchanged between base and
+    main, and the 614 installed top-level packages match it exactly.
+  - Verified independently against root's baseline
+    (`~/.heca/plans/wild-beach-rollup/localization-merge-baseline-2026-11-17.json`)
+    and main, using `~/.heca/plans/wild-beach-rollup/verify_adoption.py`. In
+    each of en, zh-CN and zh-TW:
+    - all 81 branch-added keys are present, with identical values and
+      `{{placeholder}}` sets;
+    - none of the 15 deleted fragments came back;
+    - no main key was lost or changed;
+    - the final count is main 12,178 + 81 − 15 = 12,244, with nothing
+      unexplained.
+  - Owning areas follow the documented rules (literal references; keys used
+    from several areas go to `shared`):
+    - `assistant`: 36 keys;
+    - `assistant-agents`: 28 keys;
+    - `assistant-approvals`: 12 keys;
+    - `shared`: 3 keys (the bypass reasons);
+    - `unattributed`: 2 keys, the plural forms `Show {{count}} more_one/_other`,
+      which have no literal reference. Main keeps 10 of its own plural forms
+      there too.
+  - The barrels eagerly merge every area, so placement does not affect runtime
+    availability.
+  - None of the 15 deleted fragments appears as a literal anywhere in `src`
+    outside the catalogs, in any quoting style. Main has not reintroduced one,
+    including through constants used by dynamic calls.
+- **`assistant-sidebar.tsx`** (2 hunks). Main #2452 (3b209194d) added
+  persistent pins, Rename and parent ordering; main #2364 added unread markers
+  on chat rows. Decision:
+  - Order an agent's own chats with `pinnedConversationsFirst`, as main does.
+  - Apply the #2050 fold to that ordered list.
+  - In the collapsed view, show the first five chats plus every pinned chat
+    (hiding an explicit pin would defeat it).
+  - Always keep the open, running, drafted and unread chats visible. #2050
+    requires unread indicators to keep working, and main now marks unread
+    rows.
+  - Keep the toggle, its accessibility and the `useShallow` draft-ID selector.
+  - Keep main's pins, Rename, unread markers and parent ordering everywhere.
+- **`assistant-sidebar.test.tsx`** (1 hunk). `renderAgents` takes both sides'
+  options (`activeConversationId` and `onRename`). Both sides' tests stay, and
+  new tests cover pinned chats beyond the first five and unread chats.
+- **`dashboard.tsx` / `dashboard.test.tsx`** (content conflict, add/add).
+  Main #2423 (f22e7048e) fixed #2217 independently and closed it. It counts
+  `n.is_connected`, the same condition as the Nodes badge. Decision:
+  - Keep main's count line.
+  - Keep this branch's translated `{{online}}/{{total}} online` label (main
+    still renders English there) and the lowercase mock node statuses.
+  - Revert the now-redundant `nodeStatusKey` helper (`status-contract.ts`,
+    `node-status-badge.tsx`) to main's versions (FI-007). The badge test is
+    kept only as a component-level check of its rendered status.
+  - The test file keeps main's suite and adds this branch's mixed-status case
+    and a zh-CN label assertion.
+- **Auto-merged overlaps checked by Opus.** `routes.rs`, `nyxbot-api.ts`,
+  `assistant-chat-page.tsx` and `CLAUDE.md` equal main plus exactly this
+  branch's original edits.
+- **Issue references.** #2217 is closed by main #2423, and the reporter closed
+  #2218 on 2026-11-13 without a PR. The PR switches both to `Refs`, keeping
+  #2218's large-text hardening and regression coverage. #2314 and #2050 stay
+  `Closes`; #2001 stays `Refs`.
+
+### Integration review log
+
+Implementer: Sol-M, Heca `codex` `gpt-6.1-sol`, full access. Its Codex session
+log records `reasoning_effort: xhigh`, inherited from `~/.codex/config.toml`.
+
+Sol-M round 1, approved by Opus:
+- **Sidebar.** The net diff against main is exactly the #2050 fold on main's
+  pinned-first order: the five-chat limit, pinned, open, running, drafted and
+  unread chats kept visible, the `useShallow` draft-ID selector, the
+  toggle, and the whole-phrase channel label.
+- **Sidebar tests.** All of main's tests remain. The only lines that differ
+  are:
+  - a named `appI18n` import, which keeps the side-effect import;
+  - a language reset in `afterEach`;
+  - the union of both `renderAgents` option sets;
+  - `activeConversationId ?? thread.id`.
+  New cases cover pinned chats beyond five, unread chats beyond five and
+  pinned order when expanded.
+- **Dashboard.** The net diff against main is only the translated label. The
+  merged test keeps main's three tests, uses the real `translateUi`, and adds
+  the mixed-status `1/4 online` case and a zh-CN `1/4 在线` assertion.
+- **Reverted helper.** `status-contract.ts`, its test and
+  `node-status-badge.tsx` are byte-identical to main. The badge test checks
+  the rendered labels.
+- **Sol-M's validation:**
+  - tsc passes, with no fixes needed;
+  - `sync:i18n` changed nothing on either run (12,244 keys, file hashes
+    stable);
+  - `check:i18n` passes (1,338 files, 14,221 static calls);
+  - lint has 0 errors;
+  - targeted Vitest passes 206/206;
+  - the full Vitest suite passes 20,511/20,511 at bounded concurrency;
+  - the build passes;
+  - Playwright passes 103/103: sidebar threads 12, pins 8, rail 1,
+    workspace sidebar 40, suggestions 13, multilingual 4, Telegram 25.
+- **Full-suite timeouts.** The first default-concurrency full run timed out in
+  9 tests of main's new `test/i18n-adopt-integration.test.ts`. That file
+  passes 37/37 on its own, and the whole suite passed at lower concurrency
+  with the same timeouts. It is load-sensitive, not a merge regression.
+
+Finding sent back: restore main's three-line `threads` formatting in
+`AgentRow`, so the net diff has no cosmetic noise.
+
 ## Milestones
 
 - Audit of #2001/#2067 sent to root; #2001 audit comment posted; #2067 closed

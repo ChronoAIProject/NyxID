@@ -55,7 +55,7 @@ import {
 import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import { Switch } from "@/components/ui/switch";
 import { MachineGrantPicker } from "./machine-grant-picker";
-import { useKeys } from "@/hooks/use-keys";
+import { useAgentGrantServices } from "@/hooks/use-agent-grant-services";
 import { useCreateNyxBotAgent } from "@/hooks/use-nyxbot-agents";
 import {
   ASSISTANT_AGENT_DISPLAY_NAME_MAX,
@@ -91,25 +91,14 @@ export function ServiceGrantPicker({
   readonly footer?: React.ReactNode;
 }) {
   useUiTranslation();
-  const keys = useKeys({ includeTools: true });
+  const keys = useAgentGrantServices(org);
   const models = usePlatformModels();
   const [search, setSearch] = useState("");
-  const inventory = (keys.data ?? [])
-    .filter(
-      (key) =>
-        key.is_active &&
-        (!org ||
-          (key.credential_source?.type === "org" &&
-            key.credential_source.org_id === org &&
-            key.credential_source.allowed)),
-    )
-    .map((key) => ({
-      slug: org ? key.id : key.slug,
-      label: key.label,
-      unavailable: key.execution_unavailable_reason ??
-        (key.credential_missing || (key.credential_binding === "platform" && key.platform_key_available === false)
-          ? "credential unavailable" : undefined),
-    }));
+  const inventory = (keys.data ?? []).map((service) => ({
+    slug: org ? service.id : service.slug,
+    label: service.label,
+    unavailable: service.executable ? undefined : "credential or node unavailable",
+  }));
   inventory.push(...(models.data?.pages.flatMap((page) => page.models.map((model) => ({
     slug: model.id, label: model.display_name, unavailable: undefined,
   }))) ?? []));

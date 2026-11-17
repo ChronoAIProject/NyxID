@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAssistantLayoutStore } from "@/stores/assistant-layout-store";
+import { useThemeStore } from "@/stores/theme-store";
 import { AssistantShell } from "./assistant-shell";
 import { ThreadHeader } from "./nyxbot-agent-panels";
 import { AssistantWireLogAction } from "./assistant-wire-log-panel";
@@ -44,7 +45,8 @@ vi.mock("./cma-agent-panel", () => ({ CmaAgentPanel: ({ agentId, responseId }: {
 }));
 vi.mock("./assistant-account-panel", () => ({ AssistantAccountPanel: () => null }));
 vi.mock("./offline-banner", () => ({ OfflineBanner: () => null }));
-vi.mock("./assistant-search", () => ({ AssistantSearchButton: () => null, AssistantSearchDialog: () => null }));
+vi.mock("./assistant-search", () => ({ AssistantSearchButton: () => <button aria-label="Search" />, AssistantSearchDialog: () => null }));
+vi.mock("./notifications-bell", () => ({ NotificationsBell: () => <button aria-label="Notifications" /> }));
 vi.mock("@tanstack/react-router", () => ({
   useRouter: () => ({ subscribe: () => () => {} }),
   Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
@@ -56,6 +58,32 @@ beforeEach(() => {
 });
 
 afterEach(() => useAuthStore.setState(initialAuth, true));
+
+it.each(["sidebar", "mobile", "drawer"])("keeps the %s header actions in one non-wrapping cluster at narrow widths", (variant) => {
+  viewport.desktop = variant === "sidebar";
+  const prior = useThemeStore.getState().sidebarWidths;
+  useThemeStore.setState({ sidebarWidths: { ...prior, assistant: 160 } });
+  try {
+    const view = render(<AssistantShell title="Chat" sidebar={null} headerActions={<button aria-label="Extra action" />}><p>Transcript</p></AssistantShell>);
+    if (variant === "drawer") fireEvent.click(screen.getByRole("button", { name: "Open chats" }));
+    const header = variant === "mobile"
+      ? view.container.querySelector("header")!
+      : [...view.container.querySelectorAll("aside[data-tour=sidebar]")].at(-1)!.firstElementChild!;
+    const actions = header.querySelector("[data-header-actions]")!;
+    expect(actions).not.toBeNull();
+    expect(actions).toHaveClass("flex-nowrap", "shrink-0", "-ml-1.5");
+    expect(header).toHaveClass("flex-wrap", "justify-between");
+    expect(actions).not.toHaveClass("ml-auto");
+    // justify-between places the cluster at the end of a shared flex line;
+    // on a wrapped line the negative margin aligns the first glyph with the brand.
+    expect(actions).not.toHaveClass("justify-end", "self-end");
+    for (const button of header.querySelectorAll("button")) expect(actions).toContainElement(button);
+    expect(within(actions as HTMLElement).getByRole("button", { name: "Search" })).toBeInTheDocument();
+    expect(actions.parentElement).toBe(header);
+  } finally {
+    useThemeStore.setState({ sidebarWidths: prior });
+  }
+});
 
 function setOwner() {
   useAuthStore.getState().setUser({

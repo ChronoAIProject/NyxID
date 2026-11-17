@@ -57,7 +57,12 @@ export function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fet
     return dependencies[name];
   };
   const http = loadModule<HttpModule>("./http.ts", {
-    require: requireDependency, fetch, __DEV__: false, setTimeout,
+    require: requireDependency,
+    fetch,
+    __DEV__: false,
+    AbortController,
+    setTimeout,
+    clearTimeout,
   });
   dependencies["./http"] = http;
   const { mobileApi } = loadModule<MobileApiModule>("./mobileApi.ts", { require: requireDependency });

@@ -257,3 +257,127 @@ test("Recents shares real history/live APIs with visibility, foreground, network
   h.unmount();
   assert.equal(removed, true);
 });
+
+test("Recents rows show the unread counts the summary attributes to their thread or crew", () => {
+  const rows = [recent(0), recent(1), { ...recent(2), key: "crew:g", title: "Launch crew", target: { kind: "group" as const, groupId: `nyxg-${"e".repeat(32)}` } }];
+  const h = hookHarness<E>({
+    "react/jsx-runtime": jsx,
+    "react-native": native,
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "../../lib/time": { formatRelativeTimeFromMs },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
+    "./useWorkspaceRecents": { useWorkspaceRecents: () => ({ rows, online: true }) },
+  });
+  const { WorkspaceRecents, WorkspaceRecentRow, recentUnread } = h.load(
+    fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url)),
+  ) as any;
+  const unread = {
+    conversations: { [`nyxa-${"1".padStart(32, "0")}`]: 4 },
+    groups: { [`nyxg-${"e".repeat(32)}`]: 120 },
+  };
+  h.mount(() => WorkspaceRecents({ visible: true, unread, onSelect() {}, onSeeAll() {} }));
+  const rendered = elements(h.value())
+    .filter((n) => n.type === WorkspaceRecentRow)
+    .map((n) => WorkspaceRecentRow(n.props));
+  assert.deepEqual(
+    rendered.map((row) => row.props.accessibilityLabel),
+    ["Open recent Thread 0", "Open recent Thread 1, 4 unread", "Open recent Launch crew, 120 unread"],
+  );
+  const pills = rendered.map((row) => elements(row).find((n) => n.props.testID === "sidebar-unread-count"));
+  assert.equal(pills[0], undefined);
+  assert.equal(pills[1]!.props.children, "4");
+  assert.equal(pills[2]!.props.children, "99+");
+  assert.equal(recentUnread({ target: { kind: "home" } }, unread), 0);
+  assert.equal(recentUnread({ target: { kind: "agent", agentId: "helper" } }, unread), 0, "an agent target without a thread has no marker");
+  h.unmount();
+  const bare = hookHarness<E>({
+    "react/jsx-runtime": jsx,
+    "react-native": native,
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "../../lib/time": { formatRelativeTimeFromMs },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
+    "./useWorkspaceRecents": { useWorkspaceRecents: () => ({ rows, online: true }) },
+  });
+  const plain = bare.load(fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url))) as any;
+  bare.mount(() => plain.WorkspaceRecents({ visible: true, onSelect() {}, onSeeAll() {} }));
+  const plainRows = elements(bare.value()).filter((n) => n.type === plain.WorkspaceRecentRow).map((n) => plain.WorkspaceRecentRow(n.props));
+  assert.ok(plainRows.every((row) => !elements(row).some((n) => n.props.testID === "sidebar-unread-count")), "no markers without a summary");
+  bare.unmount();
+});
+
+
+test("recent rows and See all disable with muted text during a critical write and recover without remounting", () => {
+  type RecentProps = Parameters<
+    typeof import("./WorkspaceRecents").WorkspaceRecents
+  >[0];
+  type RowProps = Parameters<
+    typeof import("./WorkspaceRecents").WorkspaceRecentRow
+  >[0];
+  const h = hookHarness<E>({
+    "react/jsx-runtime": jsx,
+    "react-native": native,
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "../../lib/time": { formatRelativeTimeFromMs },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
+    "./useWorkspaceRecents": {
+      useWorkspaceRecents: () => ({
+        rows: [{ ...recent(0), status: "Needs you" }],
+        online: true,
+      }),
+    },
+  });
+  const { WorkspaceRecents, WorkspaceRecentRow } = h.load(
+    fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url)),
+  ) as {
+    WorkspaceRecents: (props: RecentProps) => E;
+    WorkspaceRecentRow: (props: RowProps) => E;
+  };
+  let selected = 0;
+  const props: RecentProps = {
+    visible: true,
+    disabled: true,
+    onSelect: () => {
+      selected++;
+    },
+    onSeeAll() {},
+  };
+  h.mount(() => WorkspaceRecents(props));
+  const rows = () =>
+    elements(h.value())
+      .filter((node) => node.type === WorkspaceRecentRow)
+      .map((node) => WorkspaceRecentRow(node.props as RowProps));
+  const seeAll = () =>
+    elements(h.value()).find(
+      (node) => node.props.accessibilityLabel === "See all recent chats",
+    )!;
+  for (const control of [...rows(), seeAll()]) {
+    assert.equal(control.props.disabled, true);
+    assert.equal(control.props.accessibilityState.disabled, true);
+    const style = Object.assign(
+      {},
+      ...[
+        typeof control.props.style === "function"
+          ? control.props.style({ pressed: false })
+          : control.props.style,
+      ].flat(Infinity),
+    );
+    assert.ok(style.minHeight >= 44);
+    for (const label of elements(control).filter(
+      (node) => node.type === "Text",
+    )) {
+      const textStyle = Object.assign(
+        {},
+        ...[label.props.style].flat(Infinity).filter(Boolean),
+      );
+      assert.equal(textStyle.color, lightColors.textMuted);
+      assert.equal(textStyle.opacity, undefined);
+    }
+  }
+  props.disabled = false;
+  h.render();
+  assert.equal(rows()[0]!.props.disabled, false);
+  assert.equal(seeAll().props.disabled, false);
+  rows()[0]!.props.onPress();
+  assert.equal(selected, 1);
+  h.unmount();
+});

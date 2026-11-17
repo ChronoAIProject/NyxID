@@ -513,6 +513,7 @@ pub(crate) async fn dispatch_model(
         )
         .await?,
     );
+    super::shutdown::diagnostics::resolved_proxy(&target.0);
     strip_identity(&mut target.0);
     let call_id = call_id.to_owned();
     let mut quote =

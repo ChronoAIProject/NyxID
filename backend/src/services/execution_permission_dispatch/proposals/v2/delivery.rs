@@ -59,7 +59,7 @@ pub(crate) async fn fence_resume(
     {
         return Err(AppError::ClientDisconnected);
     }
-    crate::services::security_readiness_service::require(db, READINESS).await?;
+    crate::services::security_readiness_service::require_serving(db, READINESS).await?;
     let row = db
         .collection::<ApprovalRequest>(REQUESTS)
         .find_one(doc! {"_id":&resume.request_id})
@@ -95,7 +95,7 @@ pub(super) async fn claim_inner(
     {
         return Ok(None);
     }
-    crate::services::security_readiness_service::require(db, READINESS).await?;
+    crate::services::security_readiness_service::require_serving(db, READINESS).await?;
     let raw = Zeroizing::new(
         keys.decrypt_with_aad(
             &p.payload.as_ref().ok_or_else(conflict)?.bytes,

@@ -2,6 +2,8 @@
 
 pub const AGENT_DETAILS_GRANTS: &str = "grants";
 pub const AGENT_DETAILS_SKILLS: &str = "skills";
+/// The agent's Chats settings (channel bots and their chats).
+pub const AGENT_DETAILS_CHANNELS: &str = "channels";
 
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
@@ -15,6 +17,7 @@ pub enum AssistantPage<'a> {
         group: &'a str,
     },
     Approvals,
+    ApprovalSettings,
     Conversation {
         conversation: &'a str,
     },
@@ -80,6 +83,7 @@ impl AssistantPage<'_> {
                 "/assistant".into()
             }
             Self::Approvals => "/assistant/approvals".into(),
+            Self::ApprovalSettings => "/approvals/settings".into(),
             Self::Conversation { conversation } => {
                 query.append_pair("c", conversation);
                 "/assistant".into()

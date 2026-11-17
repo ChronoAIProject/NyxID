@@ -200,6 +200,8 @@ export function useTranscriptScrollFollow(
       clearTimeout(revealDeadline.current);
     };
   }, []);
+  // An abandoned render can advance the shared scope ref without committing
+  // its key. Restart the deadline when that generation changes as well.
   useLayoutEffect(() => {
     cancelReveal();
     initial.current = { viewport: false, content: false, done: false };
@@ -216,7 +218,7 @@ export function useTranscriptScrollFollow(
       cancelReveal();
       clearTimeout(revealDeadline.current);
     };
-  }, [follower, scopeKey]);
+  }, [follower, scopeKey, generation]);
   useLayoutEffect(() => {
     if (!focused) {
       // Native navigation can animate a retained offscreen UIScrollView to

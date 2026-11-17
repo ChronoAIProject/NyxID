@@ -42,6 +42,8 @@ describe("typography policy", () => {
         "line-height": expect.stringMatching(/^var\(--line-[\w-]+\)$/),
       });
     }
+    expect(found.get(TEXT_STYLES.countBadge)).toEqual({ "font-size": "var(--text-10)", "font-weight": "600", "line-height": "var(--line-count)" });
+    expect(readFileSync("src/typography.css", "utf8")).toContain("--line-count: 1;");
     expect(found.get(TEXT_STYLES.fieldLabel)).toEqual({ "font-size": "var(--text-14)", "font-weight": "500", "line-height": "var(--line-body)" });
   });
   it.each([
@@ -134,6 +136,12 @@ describe("typography policy", () => {
     expect(typographyViolations("app.css", "html { --text-12: 0.75rem; }")).toHaveLength(1);
     expect(typographyViolations("other.css", ".label {font-size: var(--text-11);}")).toHaveLength(1);
     expect(typographyViolations("other.css", ".label {@apply text-sm;}")).toHaveLength(1);
+  });
+  it("limits the compact-count size exception to its shared role", () => {
+    expect(typographyViolations("typography.css", "@utility type-count-badge {font-size:var(--text-10);font-weight:600;line-height:var(--line-count)}")).toEqual([]);
+    expect(typographyViolations("other.css", ".counter {font-size:var(--text-10)}")).not.toEqual([]);
+    expect(typographyViolations("typography.css", "@utility type-body {font-size:var(--text-10)}")).not.toEqual([]);
+    expect(typographyViolations("typography.css", "@utility type-count-badge {font-size:var(--text-9)}")).not.toEqual([]);
   });
   it("permits canonical CSS and explicitly unthemed public assignments", () => {
     expect(typographyViolations("app.css", "@theme {--text-12: 0.75rem;} .body {font-size: var(--text-14);}")).toEqual([]);

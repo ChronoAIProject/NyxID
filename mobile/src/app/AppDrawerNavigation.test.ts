@@ -9,6 +9,7 @@ import ts from "typescript";
 import {
   type NavigationAction,
   type NavigationState,
+  type PartialState,
 } from "@react-navigation/routers";
 import {
   openWorkspaceSheetAction,
@@ -46,6 +47,7 @@ function elements(root: Element): Element[] {
 
 import {
   fixture,
+  hydrate,
   apply,
   content,
   pushContent,
@@ -55,6 +57,12 @@ import {
   workspaceContentAnimation,
   workspaceSidebarLayout,
 } from "../components/workspace/workspacePushState";
+import {
+  deferred,
+  hookHarness,
+} from "../features/assistant/assistantHookTestHarness";
+import { createSessionCoordinator } from "../lib/auth/sessionCoordinator";
+import { decodeJwtSub } from "../lib/auth/jwt";
 
 /** Extract actual declarations so App's splash/network/push startup effects never execute. */
 function shellSource() {
@@ -66,6 +74,39 @@ function shellSource() {
     true,
     ts.ScriptKind.TSX,
   );
+  const app = source.statements.find(
+    (node): node is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(node) && node.name?.text === "App",
+  );
+  assert.ok(app?.body);
+  const names = new Set([
+    "navigationGuardsRef",
+    "criticalNavigationGuards",
+    "navigationGuardRevision",
+    "onNavigationGuardChange",
+    "isNavigationBlocked",
+  ]);
+  const guardDeclarations = app.body.statements.filter(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some((declaration) =>
+        ts.isIdentifier(declaration.name)
+          ? names.has(declaration.name.text)
+          : ts.isArrayBindingPattern(declaration.name) &&
+            declaration.name.elements.some(
+              (element) =>
+                ts.isBindingElement(element) &&
+                ts.isIdentifier(element.name) &&
+                names.has(element.name.text),
+            ),
+      ),
+  );
+  assert.equal(guardDeclarations.length, names.size);
+  const guardSource = `function AppGuardState() {
+    ${guardDeclarations.map((node) => node.getText(source)).join("\n")}
+    return { onNavigationGuardChange, isNavigationBlocked };
+  }
+exports.AppGuardState = AppGuardState;`;
   return (
     ["getActiveRouteName", "ThemedAppShell"]
       .map((name) => {
@@ -75,22 +116,42 @@ function shellSource() {
         assert.ok(declaration, `Missing actual App declaration ${name}`);
         return declaration.getText(source);
       })
-      .join("\n") + "\nexports.ThemedAppShell = ThemedAppShell;"
+      .join("\n") +
+    "\nexports.ThemedAppShell = ThemedAppShell;\n" +
+    guardSource
   );
 }
 
-function setup(deferFade = false, initialWidth = 390) {
+function setup(
+  deferFade = false,
+  initialWidth = 390,
+  initiallyAuthenticated = true,
+) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
   let timerId = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let rootState = fixture();
-  let authenticated = true;
+  let authenticated = initiallyAuthenticated;
+  let accountId: string | null = initiallyAuthenticated ? "account-a" : null;
+  const accountListeners = new Set<() => void>();
   let width = initialWidth;
-  let navigationBlocked = false;
+  const testGuard = Symbol("critical-write");
+  let appGuards!: {
+    onNavigationGuardChange: (
+      id: symbol,
+      blocked: boolean,
+      critical?: boolean,
+    ) => void;
+    isNavigationBlocked: () => boolean;
+  };
   let authEpoch = 0;
   let ready = true;
   let rootReads = 0;
+  let routeName: string | undefined = "Assistant";
+  const setCurrentRouteName = (name: string | undefined) => {
+    routeName = name;
+  };
   let cursor = 0;
   let dirty = false;
   let rendered!: Element;
@@ -135,6 +196,13 @@ function setup(deferFade = false, initialWidth = 390) {
         },
       ] as const;
     },
+    useMemo: <T>(factory: () => T, dependencies: unknown[]) => {
+      const i = cursor++;
+      const previous = slots[i] as { value: T; dependencies: unknown[] } | undefined;
+      if (!previous || !same(previous.dependencies, dependencies))
+        slots[i] = { value: factory(), dependencies };
+      return (slots[i] as { value: T }).value;
+    },
     useCallback: <T>(callback: T, dependencies: unknown[]) => {
       const i = cursor++;
       const previous = slots[i] as
@@ -166,7 +234,10 @@ function setup(deferFade = false, initialWidth = 390) {
           }
         : props,
   });
-  const exports: { ThemedAppShell?: (props: object) => Element } = {};
+  const exports: {
+    ThemedAppShell?: (props: object) => Element;
+    AppGuardState?: () => typeof appGuards;
+  } = {};
   const output = ts.transpileModule(shellSource(), {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -193,6 +264,12 @@ function setup(deferFade = false, initialWidth = 390) {
     useTheme: () => ({ mode: "dark" }),
     useSafeAreaInsets: () => ({ top: 40 }),
     useAuthSession: () => ({ isAuthenticated: authenticated }),
+    getAuthAccountId: () => accountId,
+    getAuthEpoch: () => authEpoch,
+    subscribeAuthAccount: (listener: () => void) => {
+      accountListeners.add(listener);
+      return () => accountListeners.delete(listener);
+    },
     useWindowDimensions: () => ({ width, height: 1024 }),
     workspaceSidebarLayout,
     findNodeHandle: () => 300,
@@ -225,13 +302,20 @@ function setup(deferFade = false, initialWidth = 390) {
   });
   const component = exports.ThemedAppShell;
   assert.ok(component);
+  const currentRoute = (
+    state: NavigationState | PartialState<NavigationState> = rootState,
+  ): { name: string; params?: object } => {
+    const route = state.routes[state.index ?? 0];
+    assert.ok(route, "the navigator has an active route");
+    return route.state ? currentRoute(route.state) : route;
+  };
   const navigationRef = {
     isReady: () => ready,
     getRootState: () => {
       rootReads++;
       return rootState;
     },
-    getCurrentRoute: () => ({ name: "Assistant" }),
+    getCurrentRoute: () => currentRoute(),
     dispatch: (action: NavigationAction) => {
       sequence.push("swap");
       dispatched.push(action);
@@ -244,13 +328,15 @@ function setup(deferFade = false, initialWidth = 390) {
       if (dirty) {
         dirty = false;
         cursor = 0;
+        appGuards = exports.AppGuardState!();
         rendered = component!({
           navigationRef,
-          currentRouteName: "Assistant",
-          setCurrentRouteName: () => {},
+          currentRouteName: routeName,
+          setCurrentRouteName,
           flushPendingNotificationNavigation: () => {},
-          onNavigationGuardChange: () => {},
-          navigationBlocked,
+          onNavigationGuardChange: appGuards.onNavigationGuardChange,
+          navigationBlocked: appGuards.isNavigationBlocked(),
+          isNavigationBlocked: appGuards.isNavigationBlocked,
           pushToast: null,
         });
       }
@@ -311,6 +397,7 @@ function setup(deferFade = false, initialWidth = 390) {
       };
     },
     shell: () => find("WorkspacePushShell"),
+    accessibilityValue: () => find("WorkspaceAccessibilityProvider").props.value,
     navigator: () => find("AppNavigator"),
     commitLast: (paint = true) => {
       rootState = apply(rootState, dispatched.at(-1)!);
@@ -344,12 +431,48 @@ function setup(deferFade = false, initialWidth = 390) {
       rootState = state;
     },
     state: () => rootState,
+    routeName: () => routeName,
     rootReads: () => rootReads,
-    authenticate: (next: boolean) => {
+    changeAccount: (next: string | null, batchSignOut = false) => {
+      if (batchSignOut) {
+        accountId = null;
+        for (const listener of accountListeners) listener();
+        authEpoch++;
+      }
+      accountId = next;
+      authEpoch++;
+      for (const listener of accountListeners) listener();
+      dirty = true;
+      flush();
+    },
+    authenticate: (
+      next: boolean,
+      trackBeforeEffects = false,
+      commitScreenEffects?: () => void,
+    ) => {
       if (authenticated !== next) authEpoch++;
       authenticated = next;
+      accountId = next ? "account-a" : null;
       if (!next) focus.setModalActive(nativeMenuOwner, false);
       dirty = true;
+      if (trackBeforeEffects || commitScreenEffects) {
+        dirty = false;
+        cursor = 0;
+        appGuards = exports.AppGuardState!();
+        rendered = component!({
+          navigationRef,
+          currentRouteName: routeName,
+          setCurrentRouteName,
+          flushPendingNotificationNavigation: () => {},
+          onNavigationGuardChange: appGuards.onNavigationGuardChange,
+          navigationBlocked: appGuards.isNavigationBlocked(),
+          isNavigationBlocked: appGuards.isNavigationBlocked,
+          pushToast: null,
+        });
+        if (trackBeforeEffects)
+          find("NavigationContainer").props.onStateChange();
+        commitScreenEffects?.();
+      }
       flush();
     },
     readiness: (next: boolean) => {
@@ -361,12 +484,151 @@ function setup(deferFade = false, initialWidth = 390) {
       flush();
     },
     blockNavigation: (blocked: boolean) => {
-      navigationBlocked = blocked;
-      dirty = true;
+      appGuards.onNavigationGuardChange(testGuard, blocked, true);
       flush();
     },
+    guardWithoutRender: (blocked: boolean) =>
+      appGuards.onNavigationGuardChange(testGuard, blocked, true),
+    liveGetter: () => appGuards.isNavigationBlocked,
     hasDrawer: () =>
       elements(rendered).some((item) => item.type === "WorkspaceDrawer"),
+  };
+}
+
+/**
+ * Run the actual login and push activation effects, holding only native/API I/O.
+ * This verifies JS navigation liveness, not OS modal dismissal or native touch.
+ */
+function postLoginSession(env: ReturnType<typeof setup>) {
+  type AuthValue = ReturnType<
+    typeof import("../features/auth/AuthSessionContext").useAuthSession
+  >;
+  type Provider =
+    typeof import("../features/auth/AuthSessionContext").AuthSessionProvider;
+  const permission = deferred<{ status: "granted" | "denied" }>();
+  const registration = deferred<void>();
+  const refresh = deferred<boolean>();
+  const stored = new Map<string, string>();
+  const storage = {
+    getItemAsync: async (key: string) => stored.get(key) ?? null,
+    setItemAsync: async (key: string, value: string) => {
+      stored.set(key, value);
+    },
+    deleteItemAsync: async (key: string) => {
+      stored.delete(key);
+    },
+  };
+  const session = createSessionCoordinator(storage, () => {});
+  let accountId: string | null = null;
+  let permissionRequests = 0;
+  let registrationRequests = 0;
+  let refreshRequests = 0;
+  const h = hookHarness<AuthValue>(
+    {
+      "react-native": {
+        Platform: { OS: "ios" },
+        AppState: {
+          currentState: "active",
+          addEventListener: () => ({ remove() {} }),
+        },
+      },
+      "@tanstack/react-query": {
+        useQueryClient: () => ({
+          cancelQueries: async () => {},
+          clear() {},
+        }),
+      },
+      "../../lib/auth/authEpoch": { advanceAuthEpoch() {} },
+      "../../lib/auth/authAccount": {
+        getAuthAccountId: () => accountId,
+        setAuthAccountId: (next: string | null) => {
+          accountId = next;
+        },
+      },
+      "../../lib/auth/sessionStore": {
+        loadStoredAuthSession: session.load,
+        persistAuthSession: session.persist,
+        clearStoredAuthSession: session.clear,
+        authSessionGeneration: session.generation,
+      },
+      "../../lib/api/http": {
+        setSessionInvalidationListener() {},
+        refreshAccessTokenIfNeeded: () => {
+          refreshRequests++;
+          return refresh.promise;
+        },
+      },
+      "../../lib/env": { ALLOWED_EMAILS: [] },
+      "../../lib/telemetry": {
+        identify() {},
+        shutdownTelemetry() {},
+      },
+      "../../lib/auth/jwt": { decodeJwtSub },
+      "../../lib/consent": {
+        useMobileConsent: () => ({
+          enabled: false,
+          isHydrated: true,
+          accountId: null,
+        }),
+      },
+      "../../lib/notifications/approvalRefreshSignal": {},
+      "./notificationDestination": {},
+      "../env": {},
+      "expo-notifications": {
+        getPermissionsAsync: async () => ({ status: "undetermined" }),
+        requestPermissionsAsync: () => {
+          permissionRequests++;
+          return permission.promise;
+        },
+        getDevicePushTokenAsync: async () => ({
+          type: "ios",
+          data: "test-device-push-token",
+        }),
+      },
+      "expo-secure-store": storage,
+      "expo-task-manager": {},
+      "../api/mobileApi": {
+        mobileApi: {
+          registerPushToken: () => {
+            registrationRequests++;
+            return registration.promise;
+          },
+        },
+      },
+      "./approvalRefreshSignal": {},
+      "../auth/authAccount": { getAuthAccountId: () => accountId },
+    },
+    { __DEV__: false },
+  );
+  h.mock(
+    "../../lib/notifications/pushNotifications",
+    h.load(
+      fileURLToPath(
+        new URL("../lib/notifications/pushNotifications.ts", import.meta.url),
+      ),
+    ),
+  );
+  const { AuthSessionProvider } = h.load(
+    fileURLToPath(
+      new URL("../features/auth/AuthSessionContext.tsx", import.meta.url),
+    ),
+  ) as { AuthSessionProvider: Provider };
+  h.mount(() => {
+    const value = AuthSessionProvider({ children: null }).props
+      .value as AuthValue;
+    env.authenticate(value.isAuthenticated);
+    return value;
+  });
+  return {
+    h,
+    permission,
+    registration,
+    refresh,
+    counts: () => ({
+      permissionRequests,
+      registrationRequests,
+      refreshRequests,
+    }),
   };
 }
 
@@ -962,4 +1224,737 @@ test("critical writes block persistent sidebar Settings and QR/terminal sheet sh
   x.blockNavigation(false);
   x.drawer().props.onNavigate("AccountSettings");
   assert.equal(x.dispatched.length, 1);
+});
+
+for (const outcome of [
+  "granted",
+  "denied",
+  "permission-error",
+  "registration-error",
+] as const) {
+  test(`first login keeps drawer navigation usable during pending notification activation (${outcome})`, async (t) => {
+    const env = setup(false, 390, false);
+    const login = postLoginSession(env);
+    t.after(() => {
+      login.permission.resolve({ status: "denied" });
+      login.registration.resolve();
+      login.refresh.resolve(false);
+      login.h.unmount();
+    });
+    await login.h.settle();
+    assert.equal(login.h.value().isRestoring, false);
+    assert.equal(env.hasDrawer(), false);
+    let completed = false;
+    const signingIn = login.h
+      .value()
+      .signInWithSession({
+        accessToken: `test.${Buffer.from(
+          JSON.stringify({ sub: "newly-signed-in-user" }),
+        ).toString("base64url")}.test`,
+      })
+      .then(() => {
+        completed = true;
+      });
+    await login.h.settle();
+    assert.equal(login.h.value().isAuthenticated, true);
+    assert.equal(completed, false, "notification activation remains pending");
+    assert.deepEqual(login.counts(), {
+      permissionRequests: 1,
+      registrationRequests: 0,
+      refreshRequests: 1,
+    });
+    env.readyNavigation();
+
+    const useDrawer = (route: "Machines" | "Automations" | "Activity") => {
+      const before = env.dispatched.length;
+      env.open();
+      assert.equal(env.shell().props.visible, true);
+      assert.equal(env.shell().props.presented, true);
+      env.drawer().props.onNavigate(route);
+      assert.equal(env.dispatched.length, before + 1);
+      env.commitLast();
+      assert.equal(env.shell().props.visible, false);
+      env.drawer().props.onDismiss();
+      env.flush();
+      assert.equal(env.shell().props.presented, false);
+      env.open();
+      assert.equal(env.shell().props.visible, true);
+      // Same close callback used by the actual shell's exposed-page Pressable.
+      env.shell().props.onOpenChange(false);
+      env.flush();
+      env.drawer().props.onDismiss();
+      env.flush();
+      assert.equal(env.shell().props.presented, false);
+    };
+
+    useDrawer("Machines");
+    if (outcome === "permission-error") {
+      login.permission.reject(new Error("native permission unavailable"));
+    } else {
+      login.permission.resolve({
+        status: outcome === "denied" ? "denied" : "granted",
+      });
+    }
+    await login.h.settle();
+    if (outcome === "granted" || outcome === "registration-error") {
+      assert.equal(login.counts().registrationRequests, 1);
+      assert.equal(
+        completed,
+        false,
+        "backend push registration remains pending",
+      );
+      useDrawer("Automations");
+      if (outcome === "registration-error") {
+        login.registration.reject(new Error("push registration offline"));
+      } else login.registration.resolve();
+    } else assert.equal(login.counts().registrationRequests, 0);
+    await signingIn;
+    await login.h.settle();
+    assert.equal(completed, true);
+    assert.equal(login.h.value().isAuthenticated, true);
+    useDrawer("Activity");
+    login.refresh.resolve(false);
+    await login.h.settle();
+    assert.equal(env.shell().props.visible, false);
+    assert.equal(env.shell().props.presented, false);
+  });
+}
+
+
+for (const width of [390, 900, 1194]) {
+  test(`critical writes registered after opening disable the ${width}pt drawer and settle without reopening`, () => {
+    const env = setup(false, width);
+    if (width < 900) env.open();
+    assert.equal(env.drawer().props.disabled, false);
+    const getter = env.liveGetter();
+    env
+      .navigator()
+      .props.onNavigationGuardChange(Symbol.for("late-write"), true, true);
+    env.flush();
+    assert.equal(env.drawer().props.disabled, true);
+    assert.equal(env.drawer().props.visible, true);
+    assert.equal(
+      env.liveGetter(),
+      getter,
+      "getter stays stable across App renders",
+    );
+    env.drawer().props.onNavigate("Machines");
+    env.drawer().props.onQuickAction("scanner");
+    assert.equal(env.dispatched.length, 0);
+    env
+      .navigator()
+      .props.onNavigationGuardChange(Symbol.for("late-write"), false);
+    env.flush();
+    assert.equal(env.drawer().props.disabled, false);
+    assert.equal(env.drawer().props.visible, true);
+    env.drawer().props.onNavigate("Machines");
+    assert.equal(env.dispatched.length, 1);
+  });
+}
+
+test("a critical write cannot trap a compact drawer: menu toggle and exposed-sliver close remain available", () => {
+  for (const close of ["menu", "sliver"] as const) {
+    const env = setup();
+    env.open();
+    env.blockNavigation(true);
+    assert.equal(env.drawer().props.disabled, true);
+    if (close === "menu") env.navigator().props.onOpenMenu();
+    else env.shell().props.onOpenChange(false);
+    env.flush();
+    assert.equal(env.shell().props.visible, false, close);
+    env.drawer().props.onDismiss();
+    env.flush();
+    assert.equal(env.shell().props.presented, false, close);
+    assert.equal(env.dispatched.length, 0);
+  }
+});
+
+for (const action of [
+  "destination",
+  "chat",
+  "quick action",
+  "settings",
+  "search",
+  "create agent",
+  "create crew",
+] as const) {
+  test(`drawer ${action} reads the live guard when it changes between render and tap`, () => {
+    const env = setup();
+    env.open();
+    const props = env.drawer().props;
+    const invoke = (props: Element["props"]) => {
+      if (action === "destination") props.onNavigate("Machines");
+      else if (action === "chat") props.onOpenChat({ kind: "home" });
+      else if (action === "quick action") props.onQuickAction("terminal");
+      else if (action === "settings") props.onNavigate("AccountSettings");
+      else if (action === "search") props.onBrowse("WorkspaceSearch");
+      else if (action === "create agent") props.onCreateAgent();
+      else props.onCreateGroup();
+    };
+    env.guardWithoutRender(true);
+    invoke(props);
+    assert.equal(env.dispatched.length, 0);
+    env.flush();
+    assert.equal(env.drawer().props.disabled, true);
+    const blockedProps = env.drawer().props;
+    env.guardWithoutRender(false);
+    invoke(blockedProps);
+    assert.equal(
+      env.dispatched.length,
+      1,
+      "release takes effect before the next render",
+    );
+    env.flush();
+    assert.equal(env.drawer().props.disabled, false);
+  });
+}
+
+test("a guard registered during fade cancels the delayed dispatch and restores visible content", () => {
+  const env = setup(true);
+  env.open();
+  env.drawer().props.onNavigate("Machines");
+  env.guardWithoutRender(true);
+  env.finishFade();
+  env.flush();
+  assert.equal(env.dispatched.length, 0);
+  assert.equal(env.watchdogs().length, 0);
+  assert.equal(env.shell().props.visible, true);
+  assert.equal(env.sequence.at(-1), "fade in");
+  env.blockNavigation(false);
+  env.drawer().props.onNavigate("Plugins");
+  env.finishFade();
+  assert.equal(env.dispatched.length, 1);
+});
+
+test("first sign-in Home loading keeps destinations and quick actions usable", async (t) => {
+  const env = setup(false, 390, false);
+  const login = postLoginSession(env);
+  t.after(() => {
+    login.permission.resolve({ status: "denied" });
+    login.registration.resolve();
+    login.refresh.resolve(false);
+    login.h.unmount();
+  });
+  await login.h.settle();
+  void login.h.value().signInWithSession({
+    accessToken: `test.${Buffer.from(JSON.stringify({ sub: "first-login-home" })).toString("base64url")}.test`,
+  });
+  await login.h.settle();
+  assert.equal(login.h.value().isAuthenticated, true);
+  // Execute Home's actual disabled input alongside the actual App guard registry.
+  // The screen harness separately covers this input through a full Home render.
+  const filename = fileURLToPath(
+    new URL("../features/assistant/AssistantScreen.tsx", import.meta.url),
+  );
+  const source = ts.createSourceFile(
+    filename,
+    readFileSync(filename, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let disabledInput: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "useWorkspaceBack"
+    ) {
+      const input = node.arguments[0];
+      if (input && ts.isObjectLiteralExpression(input)) {
+        const property = input.properties.find(
+          (item) =>
+            ts.isPropertyAssignment(item) &&
+            item.name.getText(source) === "disabled",
+        );
+        if (property && ts.isPropertyAssignment(property))
+          disabledInput = property.initializer;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(disabledInput);
+  const disabled: unknown = runInNewContext(
+    `(${disabledInput.getText(source)})`,
+    {
+      assistant: { loading: true, sending: false, conversationId: undefined },
+      uploads: { session: { sending: false } },
+    },
+  );
+  assert.equal(disabled, false);
+  env
+    .navigator()
+    .props.onNavigationGuardChange(Symbol("Home"), disabled, disabled);
+  env.flush();
+  env.open();
+  assert.equal(env.drawer().props.disabled, false);
+  assert.equal(env.shell().props.visible, true);
+  env.drawer().props.onQuickAction("scanner");
+  env.drawer().props.onQuickAction("terminal");
+  assert.equal(env.dispatched.length, 2);
+  env.drawer().props.onNavigate("Machines");
+  assert.equal(env.dispatched.length, 3);
+  env.commitLast();
+  env.drawer().props.onDismiss();
+  env.flush();
+  env.open();
+  env.drawer().props.onNavigate("Automations");
+  assert.equal(env.dispatched.length, 4);
+});
+
+
+test("menu opening and edge reveal check live critical guards before their next render", () => {
+  for (const path of ["menu", "edge"] as const) {
+    const env = setup();
+    const reveal =
+      path === "menu"
+        ? env.navigator().props.onOpenMenu
+        : env.shell().props.onRevealStart;
+    env.guardWithoutRender(true);
+    reveal();
+    env.flush();
+    assert.equal(env.shell().props.presented, false);
+    const blockedReveal =
+      path === "menu"
+        ? env.navigator().props.onOpenMenu
+        : env.shell().props.onRevealStart;
+    env.guardWithoutRender(false);
+    blockedReveal();
+    env.flush();
+    assert.equal(env.shell().props.presented, true);
+    assert.equal(env.drawer().props.disabled, false);
+  }
+});
+
+test("real workspace guard lifecycle releases re-render App and recover drawer actions", () => {
+  type HeaderModule = {
+    useWorkspaceBack: typeof import("./WorkspaceHeader").useWorkspaceBack;
+    WorkspaceNavigationGuardContext: {
+      value: import("./WorkspaceHeader").WorkspaceNavigationGuardChange;
+    };
+    WorkspaceSessionContext: { value: boolean };
+  };
+  for (const release of ["settle", "blur", "unmount", "signout"] as const) {
+    const env = setup();
+    env.open();
+    let focused = true;
+    const props = { active: false, disabled: true, onBack() {} };
+    const page = hookHarness<void>({
+      "@react-navigation/native": {
+        useNavigation: () => ({ setOptions() {}, goBack() {}, dispatch() {} }),
+        useIsFocused: () => focused,
+        usePreventRemove() {},
+      },
+      "react-native": {
+        StyleSheet: { create: (styles: unknown) => styles },
+        BackHandler: { addEventListener: () => ({ remove() {} }) },
+      },
+      "lucide-react-native": {},
+      "../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+      "../lib/accessibility/WorkspaceInteractionSurface": {},
+      "../lib/accessibility/workspaceFocus": {},
+    });
+    const header = page.load(
+      fileURLToPath(new URL("./WorkspaceHeader.tsx", import.meta.url)),
+    ) as HeaderModule;
+    header.WorkspaceNavigationGuardContext.value =
+      env.navigator().props.onNavigationGuardChange;
+    page.mount(() => header.useWorkspaceBack(props));
+    env.flush();
+    assert.equal(env.drawer().props.disabled, true);
+    if (release === "settle") props.disabled = false;
+    else if (release === "blur") focused = false;
+    else if (release === "signout")
+      header.WorkspaceSessionContext.value = false;
+    if (release === "unmount") page.unmount();
+    else page.render();
+    env.flush();
+    assert.equal(env.drawer().props.disabled, false, release);
+    env.drawer().props.onNavigate("Machines");
+    assert.equal(env.dispatched.length, 1, release);
+    if (release !== "unmount") page.unmount();
+  }
+});
+
+
+test("workspace accessibility context keeps its identity through unrelated shell renders", () => {
+  const env = setup();
+  const initial = env.accessibilityValue();
+  env.blockNavigation(true);
+  assert.equal(
+    env.accessibilityValue(),
+    initial,
+    "guard updates do not invalidate every header",
+  );
+  env.navigator().props.onEdgeBackChange(Symbol("editor"), () => {});
+  env.flush();
+  assert.equal(env.accessibilityValue(), initial);
+  env.blockNavigation(false);
+  env.open();
+  const open = env.accessibilityValue();
+  assert.notEqual(open, initial);
+  assert.equal(open.sidebarOpen, true);
+  env.blockNavigation(true);
+  assert.equal(env.accessibilityValue(), open);
+  env.navigator().props.onOpenMenu();
+  env.flush();
+  env.drawer().props.onDismiss();
+  env.flush();
+  const closed = env.accessibilityValue();
+  assert.notEqual(closed, open);
+  assert.equal(closed.sidebarOpen, false);
+});
+
+for (const ordering of [
+  "reset-before-tracking",
+  "tracking-before-reset",
+] as const) {
+  test(`Settings sign-out then sign-in recovers menu and drawer destination with ${ordering}`, () => {
+    const env = setup();
+    env.readyNavigation();
+    env.open();
+    env.drawer().props.onNavigate("AccountSettings");
+    env.commitLast();
+    assert.equal(env.shell().props.obscured, true);
+    const auth = hydrate({ routes: [{ name: "Auth" }] });
+    if (ordering === "reset-before-tracking") {
+      env.authenticate(false);
+      env.setState(auth);
+      env.changedNavigation();
+    } else {
+      env.setState(auth);
+      env.authenticate(false, true);
+    }
+    env.authenticate(true);
+    env.setState(
+      hydrate({
+        routes: [
+          {
+            name: "Workspace",
+            state: {
+              routes: [{ name: "Assistant", params: { home: true } }],
+            },
+          },
+        ],
+      }),
+    );
+    env.changedNavigation();
+    env.open();
+    assert.equal(
+      env.shell().props.visible,
+      true,
+      "Open navigation must work in the new session",
+    );
+    const count = env.dispatched.length;
+    env.drawer().props.onNavigate("Plugins");
+    assert.equal(
+      env.dispatched.length,
+      count + 1,
+      "a visible drawer destination must dispatch",
+    );
+    env.commitLast();
+    assert.equal(content(env.state()).routes.at(-1)?.name, "Plugins");
+    assert.equal(env.shell().props.visible, false);
+  });
+}
+
+for (const transition of ["account-switch", "batched-same-account"] as const) {
+  test(`${transition} resets the Settings drawer latch without an authentication render`, () => {
+    const env = setup();
+    env.readyNavigation();
+    env.open();
+    env.drawer().props.onNavigate("AccountSettings");
+    env.commitLast();
+    assert.equal(env.shell().props.obscured, true);
+    const sheetContext = env.accessibilityValue();
+    env.changeAccount(
+      transition === "account-switch" ? "account-b" : "account-a",
+      transition === "batched-same-account",
+    );
+    assert.equal(env.shell().props.visible, false);
+    assert.equal(env.shell().props.presented, false);
+    assert.equal(env.accessibilityValue().sheetOpen, true);
+    assert.equal(env.accessibilityValue().primaryKey, sheetContext.primaryKey);
+    env.setState(fixture());
+    env.changedNavigation();
+    env.open();
+    assert.equal(env.shell().props.visible, true);
+    const count = env.dispatched.length;
+    env.drawer().props.onNavigate("Plugins");
+    assert.equal(env.dispatched.length, count + 1);
+    env.commitLast();
+    assert.equal(content(env.state()).routes.at(-1)?.name, "Plugins");
+  });
+}
+
+function mountWorkspaceBackScreen(
+  env: ReturnType<typeof setup>,
+  onBack: () => void,
+) {
+  type HeaderModule = {
+    useWorkspaceBack: typeof import("./WorkspaceHeader").useWorkspaceBack;
+    WorkspaceNavigationGuardContext: {
+      value: import("./WorkspaceHeader").WorkspaceNavigationGuardChange;
+    };
+    WorkspaceEdgeBackContext: {
+      value: import("./WorkspaceHeader").WorkspaceEdgeBackChange;
+    };
+  };
+  const props = { active: true, disabled: true, onBack };
+  const page = hookHarness<void>({
+    "@react-navigation/native": {
+      useNavigation: () => ({ setOptions() {}, goBack() {}, dispatch() {} }),
+      useIsFocused: () => true,
+      usePreventRemove() {},
+    },
+    "react-native": {
+      StyleSheet: { create: (styles: unknown) => styles },
+      BackHandler: { addEventListener: () => ({ remove() {} }) },
+    },
+    "lucide-react-native": {},
+    "../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../lib/accessibility/WorkspaceInteractionSurface": {},
+    "../lib/accessibility/workspaceFocus": {},
+  });
+  const header = page.load(
+    fileURLToPath(new URL("./WorkspaceHeader.tsx", import.meta.url)),
+  ) as HeaderModule;
+  header.WorkspaceNavigationGuardContext.value =
+    env.navigator().props.onNavigationGuardChange;
+  header.WorkspaceEdgeBackContext.value =
+    env.navigator().props.onEdgeBackChange;
+  page.mount(() => header.useWorkspaceBack(props));
+  return { props, render: page.render, unmount: page.unmount };
+}
+
+test("sign-in commit and account switches preserve mounted screen guards and edge-back callbacks", () => {
+  const env = setup(false, 390, false);
+  let backCalls = 0;
+  let screen: ReturnType<typeof mountWorkspaceBackScreen> | undefined;
+  env.authenticate(true, false, () => {
+    screen = mountWorkspaceBackScreen(env, () => backCalls++);
+    assert.equal(
+      env.liveGetter()(),
+      true,
+      "child registers before the parent reset",
+    );
+  });
+  assert.ok(screen);
+  for (const boundary of ["sign-in", "account-switch"] as const) {
+    if (boundary === "account-switch") env.changeAccount("account-b");
+    assert.equal(env.liveGetter()(), true, boundary);
+    assert.equal(env.drawer().props.disabled, true, boundary);
+    assert.equal(typeof env.shell().props.onEdgeBack, "function", boundary);
+    env.navigator().props.onOpenMenu();
+    env.drawer().props.onNavigate("Plugins");
+    env.flush();
+    assert.equal(env.shell().props.presented, false, boundary);
+    assert.equal(env.dispatched.length, 0, boundary);
+  }
+  screen.props.disabled = false;
+  screen.render();
+  env.flush();
+  assert.equal(env.liveGetter()(), false);
+  env.shell().props.onEdgeBack();
+  assert.equal(
+    backCalls,
+    1,
+    "the registered edge-back survives the resets and write settlement",
+  );
+  env.open();
+  env.drawer().props.onNavigate("Plugins");
+  assert.equal(env.dispatched.length, 1);
+  screen.unmount();
+  env.flush();
+  assert.equal(env.shell().props.onEdgeBack, undefined);
+});
+
+test("unmounting the old session's screen releases its guard and edge-back before the next sign-in", () => {
+  const env = setup();
+  const screen = mountWorkspaceBackScreen(env, () => {});
+  env.flush();
+  assert.equal(env.liveGetter()(), true);
+  assert.equal(typeof env.shell().props.onEdgeBack, "function");
+  env.authenticate(false);
+  screen.unmount();
+  env.flush();
+  assert.equal(env.liveGetter()(), false);
+  assert.equal(env.shell().props.onEdgeBack, undefined);
+  env.authenticate(true);
+  assert.equal(env.drawer().props.disabled, false);
+  env.open();
+  assert.equal(env.shell().props.visible, true);
+  env.drawer().props.onNavigate("Plugins");
+  assert.equal(env.dispatched.length, 1);
+});
+
+test("account switch preserves a mounted sheet's accessibility and obscured focus context", () => {
+  const env = setup();
+  env.readyNavigation();
+  env.open();
+  env.drawer().props.onNavigate("AccountSettings");
+  env.commitLast();
+  const scope = env.accessibilityValue().primaryKey;
+  env.changeAccount("account-b");
+  assert.equal(env.accessibilityValue().sheetOpen, true);
+  assert.equal(env.accessibilityValue().primaryKey, scope);
+  assert.equal(env.shell().props.obscured, true);
+  env.drawer().props.onDismiss();
+  env.flush();
+  env.focus.register(Symbol("new account header"), () => 77, true, scope);
+  env.focus.restore(env.focus.capture(scope));
+  env.flushFocus();
+  assert.deepEqual(
+    env.focused,
+    [],
+    "the live sheet still obscures its underlying header",
+  );
+  env.setState(apply(env.state(), dismissWorkspaceSheetAction(env.state())));
+  env.changedNavigation();
+  env.flushFocus();
+  assert.equal(env.accessibilityValue().sheetOpen, false);
+  assert.deepEqual(env.focused, [77]);
+});
+
+test("session reset uses neutral navigation context only before navigator readiness", () => {
+  const env = setup();
+  env.open();
+  env.drawer().props.onNavigate("AccountSettings");
+  env.commitLast();
+  assert.equal(env.accessibilityValue().sheetOpen, true);
+  env.readiness(false);
+  env.changeAccount("account-b");
+  assert.equal(env.accessibilityValue().sheetOpen, false);
+  assert.equal(env.accessibilityValue().primaryKey, undefined);
+  assert.equal(env.shell().props.obscured, false);
+});
+
+test("account changes cancel pending drawer dispatches and their selection watchdogs", () => {
+  for (const phase of ["fade", "paint"] as const) {
+    const env = setup(true);
+    env.open();
+    env.drawer().props.onNavigate("Plugins");
+    if (phase === "paint") {
+      env.finishFade();
+      env.commitLast(false);
+    }
+    assert.equal(env.watchdogs().length, 1);
+    const count = env.dispatched.length;
+    env.changeAccount("account-b");
+    assert.equal(env.watchdogs().length, 0);
+    assert.equal(env.shell().props.visible, false);
+    assert.equal(env.shell().props.presented, false);
+    env.finishFade();
+    env.expireWatchdog();
+    assert.equal(env.dispatched.length, count, phase);
+    env.open();
+    env.drawer().props.onNavigate("Machines");
+    env.finishFade();
+    assert.equal(env.dispatched.length, count + 1, phase);
+    env.commitLast();
+    assert.equal(content(env.state()).routes.at(-1)?.name, "Machines");
+  }
+});
+
+test("a prior session's paint callback cannot settle a new account's drawer selection", () => {
+  const env = setup(true);
+  const oldPaint = env.navigator().props.onWorkspacePagePainted;
+  env.changeAccount("account-b");
+  env.open();
+  env.drawer().props.onNavigate("Plugins");
+  env.finishFade();
+  const next = apply(env.state(), env.dispatched.at(-1)!);
+  oldPaint(workspaceContentIdentity(next));
+  env.setState(next);
+  env.changedNavigation();
+  assert.equal(
+    env.shell().props.visible,
+    true,
+    "only the current session may confirm paint",
+  );
+  env.paint();
+  assert.equal(env.shell().props.visible, false);
+});
+
+test("sign-out account invalidation fences menu and quick actions before the auth UI changes", () => {
+  const env = setup();
+  env.readyNavigation();
+  env.open();
+  const quickAction = env.drawer().props.onQuickAction;
+  env.changeAccount(null);
+  assert.equal(
+    env.hasDrawer(),
+    true,
+    "authentication UI has not committed yet",
+  );
+  assert.equal(env.shell().props.presented, false);
+  env.open();
+  env.shell().props.onRevealStart();
+  quickAction("scanner");
+  env.drawer().props.onNavigate("AccountSettings");
+  env.flush();
+  assert.equal(env.shell().props.presented, false);
+  assert.equal(env.dispatched.length, 0);
+  env.setState(hydrate({ routes: [{ name: "Auth" }] }));
+  env.changedNavigation();
+  assert.equal(env.routeName(), "Auth");
+  assert.equal(env.accessibilityValue().sheetOpen, false);
+  env.changeAccount("account-b");
+  env.setState(fixture());
+  env.changedNavigation();
+  env.open();
+  assert.equal(env.shell().props.visible, true);
+  env.drawer().props.onQuickAction("scanner");
+  assert.equal(env.dispatched.length, 1);
+});
+
+test("session boundaries clear selected chat metadata and stale drawer focus restoration", () => {
+  const env = setup();
+  env.setState(pushContent(env.state(), "GroupChat", { groupId: "private-a" }));
+  env.readyNavigation();
+  assert.equal(env.drawer().props.currentChat.groupId, "private-a");
+  assert.equal(env.routeName(), "GroupChat");
+  const scope = env.accessibilityValue().primaryKey;
+  const oldOwner = Symbol("old account header");
+  env.focus.register(oldOwner, () => 71, true, scope);
+  env.focus.invoked(oldOwner);
+  env.open();
+  env.shell().props.onOpenChange(false);
+  env.flush();
+  env.drawer().props.onDismiss();
+  env.flush();
+  env.changeAccount("account-b");
+  assert.equal(env.drawer().props.currentChat, undefined);
+  assert.equal(env.accessibilityValue().primaryKey, scope);
+  env.flushFocus();
+  assert.deepEqual(env.focused, []);
+  env.setState(
+    hydrate({
+      routes: [
+        {
+          name: "Workspace",
+          state: {
+            routes: [{ name: "Assistant", params: { home: true } }],
+          },
+        },
+      ],
+    }),
+  );
+  env.changedNavigation();
+  assert.equal(env.routeName(), "Assistant");
+  assert.equal(env.drawer().props.currentChat.kind, "home");
+  env.focus.register(
+    Symbol("new account header"),
+    () => 72,
+    true,
+    env.accessibilityValue().primaryKey,
+  );
+  env.open();
+  env.shell().props.onOpenChange(false);
+  env.flush();
+  env.drawer().props.onDismiss();
+  env.flush();
+  env.flushFocus();
+  assert.deepEqual(env.focused, [72]);
 });

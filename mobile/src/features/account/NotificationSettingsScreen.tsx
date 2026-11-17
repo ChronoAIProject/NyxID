@@ -34,6 +34,13 @@ import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { approvalDeliveryWarning } from "./approvalDeliveryPolicy";
+import type { NotificationPushPreferences } from "../notifications/notificationContracts";
+import {
+  useNotificationPushPreferences,
+  useNotificationsEnabled,
+  useUpdateNotificationPushPreferences,
+} from "../notifications/useNotifications";
+import { NyxBotPushSwitches } from "./NyxBotPushSwitches";
 
 // Push-register failure modes are surfaced as a tagged error so the
 // caller can branch on `reason` (e.g. iOS denial → Alert + Linking
@@ -104,6 +111,18 @@ export function NotificationSettingsScreen(
   });
 
   const [isTelegramLinkVisible, setIsTelegramLinkVisible] = useState(false);
+
+  // NyxBot notification pushes: hidden until the flag is on for this person.
+  const nyxbotNotifications = useNotificationsEnabled(true);
+  const pushPreferences = useNotificationPushPreferences(nyxbotNotifications);
+  const pushPreferenceMutation = useUpdateNotificationPushPreferences();
+  const saveNyxBotPush = (next: NotificationPushPreferences) => {
+    pushPreferenceMutation.mutate(next, {
+      onSuccess: () =>
+        showToast("NyxBot notification settings updated", "success"),
+      onError: (error) => showToast(resolveErrorMessage(error), "error"),
+    });
+  };
 
   // Manual re-registration when the device isn't on the user's account
   // (permission denied at first launch, token fetch failed, or original
@@ -414,6 +433,16 @@ export function NotificationSettingsScreen(
                 />
               )}
             </SettingsGroup>
+            {nyxbotNotifications ? (
+              <NyxBotPushSwitches
+                preferences={pushPreferences.data}
+                saving={pushPreferenceMutation.isPending}
+                pushReady={
+                  notifSettings.push_enabled && notifSettings.push_device_count > 0
+                }
+                onSave={saveNyxBotPush}
+              />
+            ) : null}
             <SettingsGroup
               title="Approval requests"
               inset={false}

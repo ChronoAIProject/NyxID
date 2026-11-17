@@ -9,7 +9,7 @@ import { setForegroundNotificationHandler } from "../lib/notifications/pushNotif
 /** Foreground content and retained actions belong to the account at arrival. */
 export function useForegroundNotificationToast(
   openChallenge: (id: string) => void,
-  open: (url: string) => void,
+  open: (url: string, notificationId?: string | null) => void,
 ) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [toastKey, setToastKey] = useState(0);
@@ -29,7 +29,7 @@ export function useForegroundNotificationToast(
       const action = notification.challengeId
         ? () => openChallenge(notification.challengeId!)
         : notification.url
-          ? () => open(notification.url!)
+          ? () => open(notification.url!, notification.notificationId)
           : undefined;
       setToast({
         message,

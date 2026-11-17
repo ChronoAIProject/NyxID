@@ -1,0 +1,12 @@
+{
+  "Authorization completed. Your connection is ready.": "授權已完成，連線已就緒。",
+  "Authorization failed. Try authorizing this connection again.": "授權失敗。請重新授權此連線。",
+  "Authorization isn't finished. Continue authorization or check again.": "授權尚未完成。請繼續授權或再次檢查。",
+  "Authorization was declined. Retry when you're ready to grant access.": "授權已被拒絕。準備好授予存取權限後，請重試。",
+  "Continue authorization": "繼續授權",
+  "Open terminal": "開啟終端機",
+  "Retry authorization": "重試授權",
+  "This service has no OAuth provider configured.": "此服務未設定 OAuth 提供者。",
+  "We couldn't confirm authorization yet. Check again in a moment.": "暫時無法確認授權。請稍後再次檢查。",
+  "Your browser is signed in to a different NyxID account. Sign out of NyxID in that browser, then retry with this account.": "瀏覽器登入了另一個 NyxID 帳號。請在該瀏覽器中登出 NyxID，然後使用目前帳號重試。"
+}

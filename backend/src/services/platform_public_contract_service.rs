@@ -1366,6 +1366,7 @@ pub(crate) async fn dispatch_probe(
         )
         .await?,
     );
+    super::shutdown::diagnostics::resolved_proxy(&target.0);
     proxy::strip_identity(&mut target.0);
     let metered = state.billing.open_required(&route).await?;
     let mut session = state.db.client().start_session().await?;

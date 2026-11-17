@@ -278,7 +278,7 @@ tokio::task_local! {
 pub(crate) fn spawn_reconcile(db: Database, catalog: Option<String>) {
     #[cfg(test)]
     let pause = BACKGROUND_PAUSE.try_with(Clone::clone).ok();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         #[cfg(test)]
         if let Some((entered, release)) = pause {
             entered.notify_one();

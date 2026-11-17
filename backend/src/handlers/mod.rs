@@ -85,6 +85,7 @@ pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
+pub(crate) mod mobile_redirect;
 pub mod node_admin;
 pub mod node_agent;
 pub mod node_ws;
@@ -156,6 +157,7 @@ pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
 pub mod assistant_group;
+pub mod assistant_notifications;
 pub mod assistant_nyxagent;
 pub mod assistant_onboarding;
 pub mod assistant_platform_models;

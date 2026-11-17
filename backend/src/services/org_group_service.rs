@@ -554,6 +554,9 @@ pub async fn update(
                     ));
                 }
                 if !removed.is_empty() {
+                    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+                        .delete_many(doc! {"source.group_id":&before.id,"user_id":{"$in":&removed}})
+                        .session(&mut *session).await?;
                     Box::pin(delete_threads_in_session(db, &before, Some(&removed), &mut *session)).await?;
                     db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
                         .delete_many(doc! {"group_id": &before.id, "actor_user_id": {"$in": &removed}})
@@ -693,6 +696,12 @@ pub(crate) async fn delete_contents(
                     return Err(missing());
                 }
                 Box::pin(delete_threads_in_session(db, group, None, &mut *session)).await?;
+                db.collection::<bson::Document>(
+                    crate::models::assistant_notification::COLLECTION_NAME,
+                )
+                .delete_many(doc! {"source.group_id":&group.id})
+                .session(&mut *session)
+                .await?;
                 for collection in [
                     assistant_group::MESSAGES_COLLECTION_NAME,
                     assistant_group::REQUESTS_COLLECTION_NAME,
@@ -775,6 +784,10 @@ async fn delete_threads_in_session(
                 .session(&mut *session)
                 .await?;
         }
+        db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+            .delete_many(doc! {"source.conversation_id":&row.id})
+            .session(&mut *session)
+            .await?;
         db.collection::<bson::Document>(crate::models::assistant_checkpoint::COLLECTION_NAME)
             .delete_one(doc! {"_id":&row.id,"user_id":&row.user_id})
             .session(&mut *session)
@@ -918,8 +931,8 @@ pub(crate) async fn append_with_hook(
                     activities: Vec::new(),
                     org_group: true,
                     id,
-                    group_id: group.id,
-                    user_id: group.user_id,
+                    group_id: group.id.clone(),
+                    user_id: group.user_id.clone(),
                     seq: group.message_count,
                     author_user_id: Some(access.actor.clone()),
                     author_display_name: Some(name.clone()),
@@ -937,6 +950,16 @@ pub(crate) async fn append_with_hook(
                     .insert_one(&message)
                     .session(&mut *session)
                     .await?;
+                if agent.is_some() && matches!(role.as_str(), "agent" | "notice") {
+                    super::assistant_notification_service::record_group_reply_in_session(
+                        &db,
+                        session,
+                        &access.actor,
+                        &group,
+                        &message,
+                    )
+                    .await?;
+                }
                 if let Some(mut request) = enqueue.clone() {
                     request.message_seq = message.seq;
                     db.collection::<crate::models::assistant_group::GroupRequest>(

@@ -42,6 +42,7 @@ pub mod assistant_service;
 pub mod assistant_skill_authoring;
 pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
+pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
@@ -94,6 +95,7 @@ pub mod channel_routing_service;
 pub mod channel_send_service;
 pub mod channel_text;
 pub mod channel_text_delivery;
+pub mod channel_text_preparation;
 pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
@@ -155,6 +157,7 @@ pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 pub mod mfa_service;
+pub mod node_credential_delivery;
 pub mod node_dispatch;
 #[cfg(test)]
 mod node_dispatch_tests;
@@ -238,6 +241,7 @@ pub mod proxy_discovery_service;
 pub mod proxy_http_response;
 pub mod proxy_service;
 pub mod push_service;
+pub mod raw_attachment_tool;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub(crate) mod record_field_service;
@@ -246,6 +250,7 @@ pub mod resource_adapter;
 pub mod resource_request_proof;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod security_effect_service;
 pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
@@ -263,6 +268,9 @@ pub mod social_token_exchange_service;
 pub mod sse_parser;
 pub(crate) mod ssh_ca_record_service;
 pub mod ssh_service;
+mod startup_seed_service;
+#[cfg(test)]
+mod startup_seed_tests;
 pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
@@ -300,6 +308,7 @@ pub mod inference_voice;
 mod inference_voice_tests;
 pub mod options_service;
 pub mod platform_key_service;
+mod service_account_grant_audit;
 pub mod service_account_scope_service;
 
 pub mod channel_platform_catalog_service;
@@ -315,6 +324,7 @@ pub mod assistant_instruction_context;
 pub mod assistant_job_service_use;
 pub mod assistant_live;
 pub mod assistant_native_execution;
+pub mod assistant_notification_service;
 pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
@@ -331,8 +341,10 @@ pub mod assistant_steering;
 pub mod assistant_task_status;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
+pub mod assistant_wake_service;
 pub mod channel_image_audience;
 pub mod channel_image_delivery;
+pub mod channel_image_preparation;
 pub mod channel_retry_ingress;
 pub(crate) mod channel_turn_context;
 pub mod channel_turn_delivery;
@@ -553,6 +565,7 @@ pub(crate) mod nyxbot_chat_settings_service;
 pub(crate) mod nyxbot_event_binding_service;
 pub(crate) mod nyxbot_gateway_host_move;
 pub(crate) mod nyxbot_gateway_release_service;
+pub(crate) mod nyxbot_thread_mutation;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;
@@ -590,3 +603,17 @@ pub mod platform_model_credentials;
 
 pub mod assistant_tool_result_service;
 pub(crate) mod catalog_endpoint_service;
+pub(crate) mod channel_supplemental_delivery;
+
+pub mod shutdown;
+
+#[cfg(test)]
+pub(crate) mod durable_wake_tests;
+
+pub mod channel_turn_preparation;
+
+pub mod nyxbot_dispatch_identity;
+
+pub(crate) mod service_account_connection_audit;
+#[cfg(test)]
+mod service_account_connection_audit_tests;

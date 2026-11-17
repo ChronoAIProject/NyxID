@@ -389,6 +389,7 @@ pub async fn create_user(
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<CreateUserResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     // Validate email format
     let email = body.email.trim().to_string();
@@ -410,26 +411,17 @@ pub async fn create_user(
         ));
     }
 
-    let user = admin_user_service::create_user(
+    let user = admin_user_service::create_user_as(
         &state.db,
         &email,
         &body.password,
         body.display_name.as_deref(),
         &body.role,
+        &actor,
     )
     .await?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.created",
-        Some(serde_json::json!({
-            "target_user_id": &user.id,
-            "target_email": &user.email,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -557,30 +549,17 @@ pub async fn update_user(
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserItem>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    let updated = admin_user_service::update_user(
+    let updated = admin_user_service::update_user_as(
         &state.db,
         &user_id,
         body.display_name.as_deref(),
         body.email.as_deref(),
         body.avatar_url.as_deref(),
+        &actor,
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.updated",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "target_email": &updated.email,
-            "changes": {
-                "display_name": body.display_name,
-                "email": body.email,
-                "avatar_url": body.avatar_url,
-            }
-        })),
-    );
 
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
     Ok(Json(user_to_admin_item(updated, platform_role)))
@@ -597,6 +576,7 @@ pub async fn set_user_role(
     Json(body): Json<SetRoleRequest>,
 ) -> AppResult<Json<RoleUpdateResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     let admin_id = auth_user.user_id.to_string();
 
@@ -616,18 +596,9 @@ pub async fn set_user_role(
     };
 
     let updated =
-        admin_user_service::set_platform_role(&state.db, &admin_id, &user_id, &role).await?;
+        admin_user_service::set_platform_role_as(&state.db, &admin_id, &user_id, &role, &actor)
+            .await?;
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.role_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -654,20 +625,12 @@ pub async fn set_user_status(
     Json(body): Json<SetStatusRequest>,
 ) -> AppResult<Json<StatusUpdateResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.status_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "is_active": body.is_active,
-        })),
-    );
+    admin_user_service::set_user_active_as(&state.db, &admin_id, &user_id, body.is_active, &actor)
+        .await?;
 
     // `is_active=false` is the suspend path; `is_active=true` is unsuspend.
     // There is no dedicated suspend/unsuspend route — this single endpoint
@@ -703,15 +666,9 @@ pub async fn force_password_reset(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    let _token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.password_reset",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    let _token = admin_user_service::force_password_reset_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(AdminActionResponse {
         message: "Password reset initiated".to_string(),
@@ -1093,15 +1050,9 @@ pub async fn verify_user_email(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    admin_user_service::verify_email(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.email_verified",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    admin_user_service::verify_email_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(VerifyEmailResponse {
         id: user_id,
@@ -1152,6 +1103,7 @@ pub async fn revoke_user_sessions(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<RevokeSessionsResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     // Verify user exists
     let _target = state
@@ -1161,17 +1113,8 @@ pub async fn revoke_user_sessions(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let revoked_count = admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.sessions_revoked",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "revoked_count": revoked_count,
-        })),
-    );
+    let revoked_count =
+        admin_user_service::revoke_all_user_sessions_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(RevokeSessionsResponse {
         revoked_count,
@@ -1685,6 +1628,7 @@ pub struct ChainVerificationResponse {
     pub chains: Vec<ChainVerifyStatusItem>,
     pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
+    pub security_effects: crate::services::security_effect_service::SecurityEffectDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -1730,6 +1674,15 @@ async fn active_startup_diagnostics(
                 detected_at: diagnostic.detected_at,
             }),
     );
+    if let Some(diagnostic) = crate::services::org_service::diagnostics::diagnostic(db).await? {
+        items.push(StartupDiagnosticItem {
+            code: diagnostic.code,
+            summary: diagnostic.summary,
+            detail: diagnostic.detail,
+            remediation: diagnostic.remediation,
+            detected_at: diagnostic.detected_at,
+        });
+    }
     Ok(items)
 }
 
@@ -1787,6 +1740,7 @@ pub async fn get_chain_verification(
         chains: items,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+        security_effects: crate::services::security_effect_service::diagnostics(&state.db).await?,
     }))
 }
 
@@ -1817,6 +1771,7 @@ pub async fn run_chain_verification(
         chains,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+        security_effects: crate::services::security_effect_service::diagnostics(&state.db).await?,
     }))
 }
 
@@ -1847,6 +1802,7 @@ pub async fn update_broker_settings(
     require_admin(&state, &auth_user).await?;
 
     let changed_fields = broker_settings_changed_fields(&body);
+    let verified_at = tokio::time::Instant::now();
     let settings = platform_settings_service::update_broker_settings(
         &state.db,
         platform_settings_service::BrokerSettingsPatch {
@@ -1856,7 +1812,7 @@ pub async fn update_broker_settings(
     )
     .await?;
     let policy = platform_settings_service::BrokerPolicy::from_settings(&state.config, &settings);
-    state.set_broker_policy_if_fresh(policy);
+    state.set_broker_policy_verified_at(policy, verified_at);
 
     if !changed_fields.is_empty() {
         audit_service::log_for_user(
@@ -2372,7 +2328,7 @@ pub async fn create_oauth_client(
     Ok(Json(oauth_client_response(
         client,
         raw_secret,
-        state.broker_require_admin_capability(),
+        state.broker_policy().broker_require_admin_capability,
     )))
 }
 
@@ -2503,7 +2459,7 @@ pub async fn update_oauth_client(
     Ok(Json(oauth_client_response(
         updated,
         None,
-        state.broker_require_admin_capability(),
+        state.broker_policy().broker_require_admin_capability,
     )))
 }
 
@@ -4275,8 +4231,8 @@ mod operator_route_tests {
         .expect("admin can update broker settings");
         assert!(updated.0.broker_require_sender_constraint.effective);
         assert!(!updated.0.broker_require_admin_capability.effective);
-        assert!(state.broker_require_sender_constraint());
-        assert!(!state.broker_require_admin_capability());
+        assert!(state.broker_require_sender_constraint().await.unwrap());
+        assert!(!state.broker_require_admin_capability().await.unwrap());
         let current_policy = state.broker_policy();
         let stale_policy = platform_settings_service::BrokerPolicy {
             revision: current_policy.revision - 1,
@@ -4312,8 +4268,8 @@ mod operator_route_tests {
         .expect("admin can clear broker settings");
         assert!(!cleared.0.broker_require_sender_constraint.effective);
         assert!(cleared.0.broker_require_admin_capability.effective);
-        assert!(!state.broker_require_sender_constraint());
-        assert!(state.broker_require_admin_capability());
+        assert!(!state.broker_require_sender_constraint().await.unwrap());
+        assert!(state.broker_require_admin_capability().await.unwrap());
 
         let stored = db
             .collection::<mongodb::bson::Document>(PLATFORM_SETTINGS)
@@ -4395,7 +4351,7 @@ mod operator_route_tests {
         )
         .await
         .expect("admin can enable runtime admin-capability requirement");
-        assert!(state.broker_require_admin_capability());
+        assert!(state.broker_require_admin_capability().await.unwrap());
 
         let response = crate::handlers::oauth::register_client(
             State(state),

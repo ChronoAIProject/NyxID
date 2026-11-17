@@ -434,6 +434,8 @@ Every proxy call routed through an org carries the routing context in its audit 
 }
 ```
 
+Organization creation/profile updates, role-scope changes, membership add/update/revoke and invitation issue/cancel/redeem commit a bounded audit intent with the source mutation; invite redemption commits its claim and membership in the same transaction. Role-scope sets preserve the resulting list when it fits; longer lists keep an ordered prefix within an 8 KiB BSON-array budget plus count, truncation marker and SHA-256 of the submitted IDs joined in order with newlines. The existing relay chains each occurrence once, preserving each event’s existing facts within the audit string bounds—never an invitation nonce or join URL.
+
 Personal-routed calls record `routed_via: "personal"` and omit the org fields. Audit writes are fire-and-forget (`audit_service::log_async`) so audit failures never block the proxy request — degraded audit storage degrades observability, not availability.
 
 ---
@@ -497,7 +499,7 @@ General API keys can also call the nine AI-service inventory GETs listed below. 
 
 **Last-admin guard.** `PATCH` and `DELETE` on a member refuse to remove the last active admin. An admin who tries to demote or revoke themselves while they are the only admin gets `409 Conflict` with the message "cannot remove or demote the last active admin". The intent is to keep the org recoverable: `DELETE /orgs/{id}` also requires a current admin and would otherwise leave any owned services / keys / policies stranded. Admins who actually want to dissolve the org must `DELETE /orgs/{id}` instead, which cascades memberships once the live blockers are clear.
 
-`POST /orgs` rejects API keys at the human-only router. Its handler also rejects org-owned actors with `OrgCannotAuthenticate` as defense in depth, and rolls back the org user insert if the membership-create step fails for any other reason — no matter what, no zero-admin org row is ever left behind.
+`POST /orgs` rejects API keys at the human-only router. Its handler also rejects org-owned actors with `OrgCannotAuthenticate` as defense in depth, and commits the org user, its slug/defaults, creator-admin membership, enrollment writes and required audit intent together. A failure before commit leaves none of those writes; post-commit response-enrichment failures can still return an error while the organization and its audit evidence persist. This path does not provision a wallet.
 
 ### Invites
 
@@ -763,6 +765,8 @@ Org-policy decisions include `policy_owner_user_id: "<org_user_id>"` in the audi
 
 `DELETE /orgs/{id}` (admin only) refuses to proceed while the org still owns *live* resources, then cascade-deletes dead state.
 
+After those checks, a metadata-only `deletion_audit` marker and `org_deletion_requested` audit intent commit together before cleanup; retries reuse the marker, which grants no authority and does not schedule recovery. The final org-row delete and `org_deleted` intent commit together, so an interrupted cascade retains requested evidence without claiming completion; earlier cleanup is not rolled back if a later step fails. Retrying the same request can finish interrupted cleanup: join parents survive until their children are removed, and active admin memberships survive until the final org-row transaction. The marker grants no authority, and no worker resumes deletion automatically.
+
 ### Live blockers (must be empty)
 
 Each blocker filter uses the same live-state semantics as the corresponding API delete path. Soft-deleted rows (those that linger in the collection with `is_active = false` or `status = "revoked"`) are NOT counted as blockers — otherwise an org that ever held a service would be permanently undeletable.
@@ -830,13 +834,19 @@ Without that OAuth client deactivation, deleting the OIDC service would leave th
 - org_invites    (all rows for the org, redeemed or pending)
 ```
 
-These rows are dead state once the org is gone — no API call could read or mutate them again. Cascading them stops the database from accumulating orphans referencing the deleted org user_id. Five collections key off something other than `user_id` and need a snapshot-then-delete pattern:
+These rows are dead state once the org is gone. Cleanup retains the rows needed to find each remaining child on a fresh request:
 
-- **`channel_event_logs`** keys off `conversation_id`. The cascade snapshots the org's conversation ids first, then issues `delete_many({ conversation_id: $in: [...] })`. Without that ordering the logs would lose their only path back to the org.
-- **`service_account_tokens`** keys off `service_account_id`. The cascade snapshots the org's owned `service_accounts._id` set first, then issues `delete_many({ service_account_id: $in: [...] })`. The standard `service_account_service::delete_service_account` path only marks tokens as `revoked: true` rather than deleting them, so without this cascade the token rows would outlive the org. Mirrors the same cleanup that `admin_user_service::delete_user` already does for normal person users.
-- **SA-owned `user_provider_tokens`** reuse the same SA-id snapshot. `UserProviderToken.user_id` is overloaded to hold either a real user_id or a service-account id (admin-on-behalf provider connect stores tokens under `sa.id` — see `handlers/admin_sa_providers`). After the snapshot is collected, the cascade also issues `delete_many({ user_id: { $in: sa_ids } })` against `user_provider_tokens`, plus the same against `oauth_states.user_id` / `oauth_states.target_user_id` to clean up any in-flight admin-on-behalf flows.
-- **`service_endpoints` and `service_provider_requirements`** key off `service_id`. The cascade snapshots the org's owned `downstream_services._id` set first, then issues `delete_many({ service_id: $in: [...] })` against both child collections. Without that ordering the children would survive the parent service tombstones forever and remain reachable via `endpoints.rs` lookups that gate on `service.created_by` (which now resolves to a deleted user).
-- **`refresh_tokens` and `consents`** both key off `client_id` (the developer-app OAuth client). The cascade snapshots the org's owned `oauth_clients._id` set once and reuses it for both `delete_many({ client_id: $in: [...] })` calls. The refresh-token cascade is belt-and-suspenders on top of the live `is_active` validation in `token_service::refresh_tokens` (see "OAuth refresh-token validation" below). The consent cascade is the only path that removes them — there is no DELETE handler that targets consents by client, and otherwise the rows would remain enumerable on every user's `/consents` page and the admin listing after the issuing org is gone.
+- **Service accounts:** discover up to 100 inactive, owned parents; remove their tokens, provider tokens and pending OAuth states, then delete only those selected parents with the original owner/inactive filters.
+- **Catalog services:** discover up to 100 inactive, owned parents; remove endpoints and provider requirements, then delete only those selected parents. Both explicit ownership and the legacy creator fallback are respected.
+- **OAuth clients:** the existing per-client transaction requires an inactive, org-owned client, advances its Machine security revision and retains the bounded Machine cancellation outbox protocol. It then removes refresh tokens, consents and **unused** authorization codes before deleting that exact client. A child-delete failure rolls back this client unit; a reactivation that won first retains its children and returns the existing conflict. Used authorization codes retain their existing lifetime. Client-child indexes keep these deletes scoped to that client's rows.
+- **Conversations:** legacy event logs are removed before their conversation parents. Hidden assistant conversations keep their existing settlement checks and per-conversation cleanup transactions; recovery receipts and financial evidence retain their own protocols.
+- **Memberships:** ordinary and revoked memberships leave in the existing 100-row transactions with enrollment repair receipts. All active admins remain until the final org-row/completion-audit transaction, so competing deleting admins cannot remove each other's retry authority. Their enrollment repair receipts commit in that final transaction too.
+
+The measured operating range for the blocking request is up to 20,000 refresh-token rows, 1,000 consents and 1,000 unused codes per client under approximately 25 rotating token updates per second, and 1,000 retained admins without membership churn in the final unit. These are operating guidelines, not new input limits. Above that population or write load, use a quiet maintenance window and the ordinary revocation/expiry paths before retrying; do not delete join parents manually. If an existing transaction exhausts its retry budget on a definite write failure, the caller gets the existing database error (500/1007), that unit rolls back, and earlier cleanup remains committed and retryable. An unconfirmed commit can already have committed the whole unit; retrying resolves that existing uncertainty against durable state.
+
+The Integrity page reports organizations whose deletion marker is at least 15 minutes old, using database time and one bounded, read-only query. It shows up to five ids, the oldest age, and an exact count through 1,000 (a stated lower bound above that). An active org admin should retry the existing delete endpoint. If the final transaction already committed but its response was lost, the next request returns the existing 404 because the organization is gone.
+
+Deletion still has no admission fence: another writer can create or reactivate an org resource during cleanup. Avoid concurrent provisioning while deleting an organization. Old replicas retain the earlier deletion order until replaced; the retry guarantee does not repair children whose parent was already lost to an old interrupted deletion.
 
 ### OAuth refresh-token validation
 

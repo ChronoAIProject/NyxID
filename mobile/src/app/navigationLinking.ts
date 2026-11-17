@@ -51,7 +51,19 @@ export const navigationLinkingConfig: NonNullable<
           },
         },
         Services: "services",
+        SshTerminal: {
+          path: "ssh/:serviceId/terminal",
+          parse: {
+            serviceId: String,
+            connectionId: String,
+            principal: String,
+          },
+        },
         Activity: { path: "activity", parse: { challengeId: String } },
+        Notifications: {
+          path: "notifications",
+          alias: ["assistant/notifications"],
+        },
         AgentDetail: { path: "agents/:agentId", parse: { agentId: String } },
         GroupEditor: {
           path: "groups/edit/:groupId?",

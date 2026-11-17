@@ -2,6 +2,7 @@ import { z } from "zod";
 import { requestJson } from "./http";
 import type { RequestOptions } from "./authenticatedTransport";
 import {
+  grantServiceSchema,
   agentCreateSchema,
   agentDetailSchema,
   agentSchema,
@@ -12,6 +13,11 @@ import {
 const ROOT = "/assistant/nyxagent";
 const agentPath = (id: string) => `${ROOT}/agents/${encodeURIComponent(id)}`;
 export const agentsApi = {
+  async grantServices(org?: string, signal?: AbortSignal) {
+    return z.object({ services: z.array(grantServiceSchema) }).parse(
+      await requestJson(`${ROOT}/grant-services${org ? `?org=${encodeURIComponent(org)}` : ""}`, { signal }),
+    ).services;
+  },
   async list(signal?: AbortSignal) {
     return z
       .object({

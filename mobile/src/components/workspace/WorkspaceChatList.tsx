@@ -28,6 +28,10 @@ import type { AssistantAgent } from "../../features/agents/agentContracts";
 import type { AssistantConversation } from "../../features/assistant/assistantTypes";
 import type { Group } from "../../features/groups/groupContracts";
 import { chatAgentLabel } from "../../features/assistant/assistantAgentContext";
+import {
+  EMPTY_NOTIFICATION_MARKERS,
+  type NotificationMarkers,
+} from "../../features/notifications/notificationPresentation";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { useGroupsLive } from "../../features/groups/useGroupsLive";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
@@ -55,11 +59,15 @@ import {
 
 type Props = {
   mode?: "drawer" | "picker";
+  disabled?: boolean;
   scrollFooter?: ReactNode;
   scrollHeader?: ReactNode;
   scrollProps?: ScrollViewProps;
   visible: boolean;
   current?: WorkspaceChatTarget;
+  /** Unread notification counts per thread and crew from the one summary
+   * the sidebar already holds; rows draw their markers from it. */
+  unread?: NotificationMarkers;
   onSelect: (target: WorkspaceChatTarget) => void;
   onCreateAgent: () => void;
   onCreateGroup: () => void;
@@ -74,11 +82,13 @@ type Browser =
 
 export function WorkspaceChatList({
   mode = "drawer",
+  disabled = false,
   scrollFooter,
   scrollHeader,
   scrollProps,
   visible,
   current,
+  unread: markers = EMPTY_NOTIFICATION_MARKERS,
   onSelect,
   onCreateAgent,
   onCreateGroup,
@@ -325,20 +335,24 @@ export function WorkspaceChatList({
       .join(" · ");
   const chatRow = (row: AssistantConversation) => (
     <ChatRow
+      disabled={disabled}
       key={row.id}
       label={threadTitle(row)}
       detail={formatRelativeTimeFromMs(Date.parse(row.last_message_at))}
       status={threadStatus(row)}
       selected={selectedChatId === row.id}
+      unread={markers.conversations[row.id]}
       onPress={() => openChat(row.id)}
-      accessibilityLabel={`Open chat ${threadTitle(row)} with ${agent ? chatAgentLabel(agent) : "agent"}${threadStatus(row) ? `, ${threadStatus(row)}` : ""}${selectedChatId === row.id ? ", current thread" : ""}`}
+      accessibilityLabel={`Open chat ${threadTitle(row)} with ${agent ? chatAgentLabel(agent) : "agent"}${threadStatus(row) ? `, ${threadStatus(row)}` : ""}${selectedChatId === row.id ? ", current thread" : ""}${unreadSuffix(markers.conversations[row.id])}`}
     />
   );
   const groupRow = (row: Group) => (
     <GroupChatRow
+      disabled={disabled}
       key={row.id}
       group={row}
       selected={current?.kind === "group" && current.groupId === row.id}
+      unread={markers.groups[row.id]}
       onPress={() => openGroup(row)}
     />
   );
@@ -374,6 +388,7 @@ export function WorkspaceChatList({
   const startChat =
     canStartChat && agent ? (
       <ChatRow
+        disabled={disabled}
         label={`New chat with ${chatAgentLabel(agent)}`}
         create
         selected={
@@ -387,6 +402,7 @@ export function WorkspaceChatList({
     ) : null;
   const currentRow = missingCurrent ? (
     <ChatRow
+      disabled={disabled}
       label="Current chat"
       selected
       onPress={() => openChat(selectedChatId)}
@@ -409,13 +425,14 @@ export function WorkspaceChatList({
   if (mode === "drawer")
     rows.push(
       <SectionHeading
+        disabled={disabled}
         key="agents"
         label="Agents"
         count={`${allAgents.length} total`}
         expanded={sections.agents}
         createLabel="New agent"
         onCreate={onCreateAgent}
-        createDisabled={!active}
+        createDisabled={disabled || !active}
         onRefresh={() => void refreshAgents()}
         refreshing={refreshingAgents}
         refreshDisabled={!active}
@@ -435,6 +452,7 @@ export function WorkspaceChatList({
           ? !allAgents.some((row) => row.id === current.agentId)
           : !chats.some((row) => row.id === current.conversationId)) ? (
           <ChatRow
+            disabled={disabled}
             label="Current chat"
             selected
             onPress={() => onSelect(current)}
@@ -499,6 +517,7 @@ export function WorkspaceChatList({
           }
         >
           <DisclosureRow
+            disabled={disabled}
             agent={row}
             label={chatAgentLabel(row)}
             detail={
@@ -562,6 +581,11 @@ export function WorkspaceChatList({
                 ? "Running"
                 : undefined;
             const platform = channelPlatformName(bot.platform);
+            const botUnread = bot.threads.reduce(
+              (total, thread) =>
+                total + (markers.conversations[thread.id] ?? 0),
+              0,
+            );
             const update = (nextOpen: boolean, nextShown = shown) =>
               setChannelDisclosures((value) => ({
                 ...value,
@@ -574,16 +598,21 @@ export function WorkspaceChatList({
             return (
               <View key={key}>
                 <DisclosureRow
+                  disabled={disabled}
                   label={bot.label}
                   detail={`${platform} · ${bot.threads.length} ${bot.threads.length === 1 ? "chat" : "chats"}${status ? ` · ${status}` : ""}`}
                   expanded={Boolean(open)}
                   selected={holdsActive}
+                  unread={botUnread}
                   onPress={() => update(!open)}
                   kind="group"
                 />
                 {open ? (
                   <View
-                    style={[styles.children, { borderColor: colors.borderSoft }]}
+                    style={[
+                      styles.children,
+                      { borderColor: colors.borderSoft },
+                    ]}
                   >
                     {[
                       ...new Set(
@@ -635,6 +664,7 @@ export function WorkspaceChatList({
                     })}
                     {hidden > 0 ? (
                       <MoreButton
+                        disabled={disabled}
                         label={`Show ${Math.min(hidden, DRAWER_PREVIEW_LIMIT * 4)} more`}
                         onPress={() =>
                           update(true, shown + DRAWER_PREVIEW_LIMIT * 4)
@@ -658,6 +688,7 @@ export function WorkspaceChatList({
           {row.can_use !== false &&
           (threads.own.length > previewChats.length || history.hasNextPage) ? (
             <MoreButton
+              disabled={disabled}
               label="View all chats"
               onPress={() => setBrowser({ kind: "chats", fromAgents: false })}
             />
@@ -669,6 +700,7 @@ export function WorkspaceChatList({
     if (allAgents.length > DRAWER_PREVIEW_LIMIT)
       rows.push(
         <MoreButton
+          disabled={disabled}
           key="all-agents"
           label={`View all agents (${allAgents.length})`}
           onPress={() => setBrowser({ kind: "agents" })}
@@ -678,13 +710,14 @@ export function WorkspaceChatList({
   if (mode === "drawer")
     rows.push(
       <SectionHeading
+        disabled={disabled}
         key="crews"
         label="Crews"
         count={allGroups.length}
         expanded={sections.groups}
         createLabel="New crew"
         onCreate={onCreateGroup}
-        createDisabled={!active}
+        createDisabled={disabled || !active}
         onPress={() =>
           setSections((value) => ({ ...value, groups: !value.groups }))
         }
@@ -712,6 +745,7 @@ export function WorkspaceChatList({
         ).map(groupRow)}
         {allGroups.length > DRAWER_PREVIEW_LIMIT ? (
           <MoreButton
+            disabled={disabled}
             label={`View all crews (${allGroups.length})`}
             onPress={() => setBrowser({ kind: "groups" })}
           />
@@ -800,6 +834,7 @@ export function WorkspaceChatList({
           renderItem={(row) =>
             "agent" in row ? (
               <DisclosureRow
+                disabled={disabled}
                 agent={row.agent}
                 label={chatAgentLabel(row.agent)}
                 detail={agentRowDetail(row.agent)}
@@ -843,11 +878,13 @@ export function WorkspaceChatList({
             browser.kind === "chats"
               ? canStartChat && agent
                 ? {
+                    disabled,
                     label: "New chat",
                     accessibilityLabel: `New chat with ${chatAgentLabel(agent)}`,
                     onPress: () => openChat(),
                   }
                 : {
+                    disabled,
                     label: "Choose another agent",
                     accessibilityLabel: "Choose another agent",
                     onPress: () => setBrowser({ kind: "agents" }),
@@ -898,7 +935,7 @@ export function WorkspaceChatList({
                           ? "Retry older chats"
                           : "Load older chats"
                     }
-                    disabled={!active || history.isFetchingNextPage}
+                    disabled={disabled || !active || history.isFetchingNextPage}
                     onPress={() => void history.fetchNextPage()}
                   />
                 ) : null}
@@ -916,6 +953,7 @@ function SectionHeading({
   count,
   expanded,
   onPress,
+  disabled = false,
   createLabel,
   onCreate,
   createDisabled,
@@ -927,6 +965,7 @@ function SectionHeading({
   count: number | string;
   expanded: boolean;
   onPress: () => void;
+  disabled?: boolean;
   createLabel: string;
   onCreate: () => void;
   createDisabled: boolean;
@@ -941,14 +980,18 @@ function SectionHeading({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${label.toLowerCase()}`}
-        accessibilityState={{ expanded }}
+        accessibilityState={{ expanded, disabled }}
+        disabled={disabled}
         accessibilityValue={{ text: String(count) }}
         onPress={onPress}
         style={styles.sectionRow}
       >
         <Text
           accessibilityRole="header"
-          style={[styles.section, { color: colors.textPrimary }]}
+          style={[
+            styles.section,
+            { color: disabled ? colors.textMuted : colors.textPrimary },
+          ]}
         >
           {label}
         </Text>
@@ -982,9 +1025,12 @@ function SectionHeading({
         accessibilityState={{ disabled: createDisabled }}
         disabled={createDisabled}
         onPress={onCreate}
-        style={[styles.createButton, { opacity: createDisabled ? 0.4 : 1 }]}
+        style={styles.createButton}
       >
-        <Plus size={18} color={colors.textSecondary} />
+        <Plus
+          size={18}
+          color={createDisabled ? colors.textMuted : colors.textSecondary}
+        />
       </Pressable>
     </View>
   );
@@ -1010,7 +1056,7 @@ function MoreButton({
       <Text
         style={[
           styles.moreText,
-          { color: colors.primaryOnTint, opacity: disabled ? 0.5 : 1 },
+          { color: disabled ? colors.textMuted : colors.primaryOnTint },
         ]}
       >
         {label}
@@ -1018,21 +1064,57 @@ function MoreButton({
     </Pressable>
   );
 }
+/** "N unread" for accessibility labels; empty when nothing is unread. */
+export function unreadSuffix(unread: number | undefined): string {
+  return unread && unread > 0 ? `, ${unread} unread` : "";
+}
+
+/** The compact count pill a sidebar row shows for its unread notifications. */
+function UnreadCount({
+  count,
+  disabled = false,
+}: {
+  count: number | undefined;
+  disabled?: boolean;
+}) {
+  const { colors } = useTheme();
+  if (!count || count <= 0) return null;
+  return (
+    <Text
+      testID="sidebar-unread-count"
+      style={[
+        styles.count,
+        {
+          color: disabled ? colors.textMuted : colors.textPrimary,
+          backgroundColor: colors.navActive,
+        },
+      ]}
+    >
+      {count > 99 ? "99+" : String(count)}
+    </Text>
+  );
+}
+
 function GroupChatRow({
   group,
   selected,
+  unread,
   onPress,
+  disabled = false,
 }: {
   group: Group;
   selected: boolean;
+  unread?: number;
   onPress: () => void;
+  disabled?: boolean;
 }) {
   const { colors } = useTheme();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open crew ${group.name}${group.working_agent_ids.length ? `, ${group.working_agent_ids.length} running` : ""}${selected ? ", current crew" : ""}`}
-      accessibilityState={{ selected }}
+      accessibilityLabel={`Open crew ${group.name}${group.working_agent_ids.length ? `, ${group.working_agent_ids.length} running` : ""}${selected ? ", current crew" : ""}${unreadSuffix(unread)}`}
+      accessibilityState={{ selected, disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
@@ -1049,7 +1131,10 @@ function GroupChatRow({
       <View style={styles.label}>
         <Text
           numberOfLines={1}
-          style={[styles.name, { color: colors.textPrimary }]}
+          style={[
+            styles.name,
+            { color: disabled ? colors.textMuted : colors.textPrimary },
+          ]}
         >
           {group.name}
         </Text>
@@ -1066,6 +1151,7 @@ function GroupChatRow({
           {selected ? " · Current" : ""}
         </Text>
       </View>
+      <UnreadCount count={unread} disabled={disabled} />
       <ChevronRight size={16} color={colors.textMuted} />
     </Pressable>
   );
@@ -1078,7 +1164,9 @@ function DisclosureRow({
   accessibilityDetail,
   expanded,
   selected,
+  unread,
   onPress,
+  disabled = false,
   kind,
 }: {
   label: string;
@@ -1086,7 +1174,10 @@ function DisclosureRow({
   accessibilityDetail?: string;
   expanded: boolean;
   selected: boolean;
+  /** Unread notifications across the chats this row folds. */
+  unread?: number;
   onPress: () => void;
+  disabled?: boolean;
   kind: "agent" | "group";
   agent?: AssistantAgent;
 }) {
@@ -1095,8 +1186,9 @@ function DisclosureRow({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} chats for ${label}${(accessibilityDetail ?? detail) ? `, ${accessibilityDetail ?? detail}` : ""}`}
-      accessibilityState={{ expanded, selected }}
+      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} chats for ${label}${(accessibilityDetail ?? detail) ? `, ${accessibilityDetail ?? detail}` : ""}${unreadSuffix(unread)}`}
+      accessibilityState={{ expanded, selected, disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
@@ -1117,7 +1209,10 @@ function DisclosureRow({
       <View style={styles.label}>
         <Text
           numberOfLines={1}
-          style={[styles.name, { color: colors.textPrimary }]}
+          style={[
+            styles.name,
+            { color: disabled ? colors.textMuted : colors.textPrimary },
+          ]}
         >
           {label}
         </Text>
@@ -1135,7 +1230,7 @@ function DisclosureRow({
                 style={[
                   styles.channelBadge,
                   {
-                    color: colors.textSecondary,
+                    color: disabled ? colors.textMuted : colors.textSecondary,
                     backgroundColor: colors.navActive,
                   },
                 ]}
@@ -1154,6 +1249,7 @@ function DisclosureRow({
           </Text>
         ) : null}
       </View>
+      <UnreadCount count={unread} disabled={disabled} />
       <Chevron size={16} color={colors.textMuted} />
     </Pressable>
   );
@@ -1163,7 +1259,9 @@ function ChatRow({
   label,
   detail,
   selected,
+  unread,
   onPress,
+  disabled = false,
   accessibilityLabel,
   status,
   create,
@@ -1171,7 +1269,9 @@ function ChatRow({
   label: string;
   detail?: string;
   selected: boolean;
+  unread?: number;
   onPress: () => void;
+  disabled?: boolean;
   accessibilityLabel?: string;
   status?: string;
   create?: boolean;
@@ -1181,7 +1281,8 @@ function ChatRow({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel || `Open ${label.toLowerCase()}`}
-      accessibilityState={{ selected }}
+      accessibilityState={{ selected, disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.chat,
@@ -1199,8 +1300,12 @@ function ChatRow({
             style={[
               styles.chatTitle,
               {
-                color: selected ? colors.textPrimary : colors.textSecondary,
-                fontFamily: selected ? fonts.bodySemi : fonts.body,
+                color: disabled
+                  ? colors.textMuted
+                  : selected || unread
+                    ? colors.textPrimary
+                    : colors.textSecondary,
+                fontFamily: selected || unread ? fonts.bodySemi : fonts.body,
               },
             ]}
           >
@@ -1220,8 +1325,11 @@ function ChatRow({
             style={[
               styles.detail,
               {
-                color:
-                  status === "Needs you" ? colors.warning : colors.primaryOnTint,
+                color: disabled
+                  ? colors.textMuted
+                  : status === "Needs you"
+                    ? colors.warning
+                    : colors.primaryOnTint,
               },
             ]}
           >
@@ -1229,6 +1337,7 @@ function ChatRow({
           </Text>
         ) : null}
       </View>
+      <UnreadCount count={unread} disabled={disabled} />
     </Pressable>
   );
 }
@@ -1301,6 +1410,14 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   sectionCount: { fontFamily: fonts.bodyRegular, fontSize: 11 },
+  count: {
+    fontFamily: fonts.bodySemi,
+    fontSize: 11,
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    overflow: "hidden",
+  },
   section: {
     ...sidebarSectionTitle,
     padding: 12,

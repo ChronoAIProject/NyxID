@@ -293,6 +293,17 @@ impl CredentialStore {
         let mut map = HashMap::new();
 
         for (slug, cred_config) in &config.credentials {
+            // A keychain write can outlive its config commit. Reconnect without
+            // publishing uncertain material so durable server retry can finish it.
+            if config
+                .credential_generation_fences
+                .0
+                .get(slug)
+                .is_some_and(|slots| !slots.is_empty())
+            {
+                continue;
+            }
+
             match cred_config.injection_method.as_str() {
                 "ifttt_webhook" => {
                     let key = backend.load_credential_value(

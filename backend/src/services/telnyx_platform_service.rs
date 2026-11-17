@@ -460,22 +460,23 @@ pub(crate) fn execute<'a>(
                 None,
             );
         }
-        let worker = tokio::spawn(worker::run(worker::Exchange {
-            db: db.clone(),
-            billing,
-            target,
-            contract: c,
-            body,
-            handle,
-            proof: ManagedEgressProof {
-                catalog: catalog_digest,
-                request: request_digest,
-            },
-            lease,
-            guard,
-            #[cfg(test)]
-            hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
-        }));
+        let worker =
+            crate::services::shutdown::process().spawn_cleanup(worker::run(worker::Exchange {
+                db: db.clone(),
+                billing,
+                target,
+                contract: c,
+                body,
+                handle,
+                proof: ManagedEgressProof {
+                    catalog: catalog_digest,
+                    request: request_digest,
+                },
+                lease,
+                guard,
+                #[cfg(test)]
+                hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
+            }));
         worker.await.map_err(|_| {
             ManagedExecutionError::OutcomeUnknown(AppError::ManagedExecutionPending(execution_id))
         })?
@@ -703,6 +704,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.billing = Some(fixture_billing());
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,

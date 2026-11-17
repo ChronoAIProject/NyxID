@@ -1760,3 +1760,15 @@ it.each([
   expect(screen.getByLabelText("Failed")).toBeVisible();
   expect(screen.getByText(`${copy} The assistant can continue after a failed step.`)).toBeVisible();
 });
+
+it.each(["field_read_transport", "field_missing", "eligibility:flag_off", "ledger:uncertain"])("shows a closed Lark attachment diagnostic %s", (reason) => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "lark", name: "api-lark-bot-3__bitable_record_create_with_attachments", status: "error", startedAt: 1, failure: { kind: "tool_error", reason } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByText(new RegExp(`Lark attachment write: ${reason}`))).toBeVisible();
+});
+it("does not expose arbitrary Lark failure text", () => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "lark", name: "api-lark-bot-3__bitable_media_upload", status: "error", startedAt: 1, failure: { kind: "tool_error", reason: "field_missing:private field" } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByText(/The tool reported an error/)).toBeVisible();
+  expect(screen.queryByText(/private field/)).toBeNull();
+});

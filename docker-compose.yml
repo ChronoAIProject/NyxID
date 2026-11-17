@@ -6,6 +6,7 @@
 #   docker-compose.override.yml  -- auto-loaded for local development
 #                                   (adds Mailpit, exposes Mongo on 27018,
 #                                   sets a hardcoded dev password)
+#   docker-compose.test.yml      -- explicitly loaded for disposable test data
 #   docker-compose.prod.yml      -- explicitly loaded for production deploy
 #                                   (adds backend + frontend, enforces an
 #                                   env-driven Mongo password)

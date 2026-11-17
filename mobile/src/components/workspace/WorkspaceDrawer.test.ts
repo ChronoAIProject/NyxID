@@ -9,9 +9,33 @@ import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 type E = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): E[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
-function setup() {
+const MARKERS = { conversations: { [`nyxa-${"a".repeat(32)}`]: 2 }, groups: {} };
+function setup(
+  notifications: {
+    enabled: boolean;
+    unread?: number;
+    needsDecision?: number;
+  } = { enabled: false },
+  onPrimary = lightColors.onPrimary,
+) {
   const events: string[] = [];
+  let disabled = false;
+  const indicatorCalls: boolean[] = [];
   const h = hookHarness<E>({
+    "../../features/notifications/useNotifications": {
+      useNotificationIndicator: (active: boolean) => {
+        indicatorCalls.push(active);
+        const unread = notifications.unread ?? 0;
+        return {
+          enabled: notifications.enabled,
+          live: false,
+          unread,
+          needsDecision: notifications.needsDecision ?? 0,
+          badge: unread > 9 ? "9+" : unread > 0 ? String(unread) : "",
+          markers: MARKERS,
+        };
+      },
+    },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -33,6 +57,7 @@ function setup() {
     "expo-linear-gradient": { LinearGradient: "Gradient" },
     "lucide-react-native": Object.fromEntries(
       [
+        "Bell",
         "CalendarClock",
         "Monitor",
         "Plug",
@@ -54,7 +79,9 @@ function setup() {
     "../../lib/notifications/approvalRefreshSignal": {
       subscribeToApprovalRefreshSignals: () => () => {},
     },
-    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "../../theme/ThemeContext": {
+      useTheme: () => ({ colors: { ...lightColors, onPrimary } }),
+    },
     "../brand/NyxidLogo": { NyxidLogo: "Logo" },
     "./WorkspaceChatList": { WorkspaceChatList: "ChatList" },
     "./WorkspaceRecents": { WorkspaceRecents: "Recents" },
@@ -66,6 +93,7 @@ function setup() {
   h.mount(() =>
     Drawer({
       visible: true,
+      disabled,
       onHome: () => events.push("home"),
       onQuickAction: (kind: string) => events.push(kind),
       onNavigate: (name: string) => events.push(name),
@@ -87,11 +115,58 @@ function setup() {
   return {
     h,
     events,
+    disable: (next: boolean) => {
+      disabled = next;
+      h.render();
+    },
     all,
     label,
+    indicatorCalls,
     list: () => all().find((n) => n.type === "ChatList")!,
   };
 }
+test("the Notifications row appears only with the flag, counts unread capped at 9+, turns amber for decisions and navigates", () => {
+  const off = setup({ enabled: false, unread: 4 });
+  assert.equal(
+    off.all().some((n) => n.props.accessibilityLabel?.startsWith("Notifications")),
+    false,
+    "hidden while the flag is off",
+  );
+  assert.deepEqual(off.indicatorCalls, [true], "the indicator follows the visible sidebar");
+  off.h.unmount();
+  const on = setup({ enabled: true, unread: 12, needsDecision: 1 });
+  const row = on.label("Notifications, 12 unread, 1 needs your decision");
+  const header = nodes(on.list().props.scrollHeader);
+  assert.equal(
+    header.filter((n) => n.type === "Pressable").map((n) => n.props.accessibilityLabel)[2],
+    "Notifications, 12 unread, 1 needs your decision",
+    "Notifications leads the Workspace destinations",
+  );
+  const count = nodes(row).find((n) => n.props.testID === "sidebar-notifications-count")!;
+  assert.equal(count.props.children, "9+");
+  assert.equal(on.list().props.unread, MARKERS, "thread rows read the indicator's markers, one summary for the sidebar");
+  const recents = nodes(on.list().props.scrollFooter).find((n) => n.type === "Recents")!;
+  assert.equal(recents.props.unread, MARKERS);
+  assert.equal(count.props.style[1].backgroundColor, lightColors.warningTone.bg);
+  assert.equal(count.props.style[1].color, lightColors.warningTone.text);
+  row.props.onPress();
+  assert.deepEqual(on.events, ["Notifications"]);
+  on.h.unmount();
+  const quiet = setup({ enabled: true, unread: 2 });
+  const plain = nodes(quiet.label("Notifications, 2 unread")).find(
+    (n) => n.props.testID === "sidebar-notifications-count",
+  )!;
+  assert.equal(plain.props.children, "2");
+  assert.equal(plain.props.style[1].backgroundColor, lightColors.navActive);
+  quiet.h.unmount();
+  const empty = setup({ enabled: true });
+  assert.equal(
+    nodes(empty.label("Notifications")).some((n) => n.props.testID === "sidebar-notifications-count"),
+    false,
+    "no badge without unread rows",
+  );
+  empty.h.unmount();
+});
 test("sidebar header uses the logo and circular Search; Home is exclusive to logo and pinned Chat", () => {
   const x = setup();
   const search = x.label("Search");
@@ -197,9 +272,9 @@ test("absolute bottom controls reserve their measured height and safe inset abov
     }
   }
   const pill = x.label("New chat");
-  const style = pill.props.style({ pressed: false })[0];
+  const style = Object.assign({}, ...pill.props.style({ pressed: false }));
   assert.equal(style.minHeight, 52);
-  assert.equal(style.backgroundColor, "#FFFFFF");
+  assert.equal(style.backgroundColor, lightColors.onPrimary);
   const gear = x.label("Settings");
   assert.ok(gear.props.style[0].height >= 44);
   x.h.unmount();
@@ -247,5 +322,83 @@ test("sidebar logo and Search are centered in the shared slab header row", () =>
     (row.props.style.height - search.props.style.height) / 2 +
     search.props.style.height / 2;
   assert.ok(Math.abs(center - WORKSPACE_HEADER_ROW_HEIGHT / 2) <= 0.5);
+  x.h.unmount();
+});
+
+
+test("drawer navigation controls expose disabled state with muted labels and 44pt targets until a write settles", () => {
+  const env = setup({ enabled: true, unread: 2 });
+  env.disable(true);
+  const controls = env.all().filter((node) => node.type === "Pressable");
+  assert.equal(controls.length, 12);
+  for (const control of controls) {
+    assert.equal(
+      control.props.disabled,
+      true,
+      control.props.accessibilityLabel,
+    );
+    assert.equal(control.props.accessibilityState.disabled, true);
+    const style = Object.assign(
+      {},
+      ...[
+        typeof control.props.style === "function"
+          ? control.props.style({ pressed: false })
+          : control.props.style,
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
+    );
+    assert.ok(
+      (style.minHeight ?? style.height) >= 44,
+      control.props.accessibilityLabel,
+    );
+    assert.equal(style.opacity, undefined);
+    for (const label of nodes(control).filter(
+      (node) =>
+        node.type === "Text" &&
+        node.props.testID !== "sidebar-notifications-count",
+    )) {
+      const textStyle = Object.assign(
+        {},
+        ...[label.props.style].flat(Infinity).filter(Boolean),
+      );
+      assert.equal(
+        textStyle.color,
+        lightColors.textMuted,
+        String(label.props.children),
+      );
+      assert.equal(textStyle.opacity, undefined);
+    }
+  }
+  assert.equal(env.list().props.disabled, true);
+  assert.equal(env.list().props.scrollFooter.props.disabled, true);
+  env.disable(false);
+  assert.ok(
+    env
+      .all()
+      .filter((node) => node.type === "Pressable")
+      .every((node) => node.props.disabled === false),
+  );
+  assert.equal(env.list().props.disabled, false);
+  env.label("Settings").props.onPress();
+  env.label("Scan QR code").props.onPress();
+  assert.deepEqual(env.events, ["AccountSettings", "scanner"]);
+  env.h.unmount();
+});
+
+test("New chat uses the theme on-primary surface token instead of a literal white", () => {
+  const x = setup({ enabled: false }, "theme-on-primary-sentinel");
+  const pill = x.label("New chat");
+  const style = pill.props.style({ pressed: false });
+  assert.equal(
+    Object.assign({}, ...style).backgroundColor,
+    "theme-on-primary-sentinel",
+  );
+  x.disable(true);
+  assert.equal(
+    Object.assign({}, ...x.label("New chat").props.style({ pressed: false }))
+      .backgroundColor,
+    lightColors.navActive,
+  );
   x.h.unmount();
 });

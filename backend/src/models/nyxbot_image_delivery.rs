@@ -37,6 +37,8 @@ pub struct NyxbotImageDelivery {
     pub attachment_id: String,
     pub audience_key: String,
     pub state: ImageDeliveryState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<Box<super::image_preparation::Preparation>>,
     pub attempt: Option<String>,
     pub code: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

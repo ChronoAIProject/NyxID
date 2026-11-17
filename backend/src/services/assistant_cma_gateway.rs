@@ -476,13 +476,14 @@ impl CatalogCmaGateway {
         Ok(catalog_execution_fingerprint(&catalog))
     }
 
-    /// A fresh human recovery uses the saved request through the same catalog
-    /// admission and final dispatch hooks as ordinary CMA execution.
+    /// Recovery uses the saved request through the same catalog admission and
+    /// final dispatch hooks. Only the explicit management lane needs its flag.
     pub(super) async fn replay_creation(
         &self,
         keys: &crate::crypto::aes::EncryptionKeys,
         creation: &crate::models::assistant_cma_creation::AssistantCmaCreation,
         body: &[u8],
+        access: super::assistant_cma_admission::CreationRecoveryAccess,
     ) -> crate::errors::AppResult<()> {
         use super::{proxy_service, service_dispatch_registry as registry};
         let owner_id = &creation.user_id;
@@ -584,7 +585,12 @@ impl CatalogCmaGateway {
         let request = request
             .build()
             .map_err(|_| CmaGatewayError::InvalidRequest)?;
-        super::assistant_cma_agent_service::require_enabled(&self.db, owner_id).await?;
+        if matches!(
+            access,
+            super::assistant_cma_admission::CreationRecoveryAccess::Management
+        ) {
+            super::assistant_cma_agent_service::require_enabled(&self.db, owner_id).await?;
+        }
         super::assistant_cma_admission::require_recovery_current(&self.db, creation).await?;
         let guard = registry::verify(Some(&admission), &target, Some(&caller))?
             .ok_or(CmaGatewayError::ConfigurationRequired)?;

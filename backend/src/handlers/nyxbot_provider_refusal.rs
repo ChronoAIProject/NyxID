@@ -24,6 +24,7 @@ pub(super) enum Endpoint {
     Responses,
     Events,
     ResponseGet,
+    Dispatches,
 }
 impl Endpoint {
     fn name(self) -> &'static str {
@@ -33,6 +34,7 @@ impl Endpoint {
             Self::Responses => "responses",
             Self::Events => "events",
             Self::ResponseGet => "response_get",
+            Self::Dispatches => "dispatches",
         }
     }
 }
@@ -42,6 +44,7 @@ struct Context {
     channel: Option<String>,
     binding_match: Option<bool>,
     partition_known: bool,
+    partition: Option<String>,
     event_hash: Option<String>,
 }
 tokio::task_local! { static CONTEXT: RefCell<Context>; }
@@ -62,6 +65,28 @@ pub(super) fn binding(matches: bool) {
 }
 pub(super) fn partition_known() {
     update(|c| c.partition_known = true);
+}
+pub(super) fn partition(value: &str) {
+    if super::valid_partition(value) {
+        update(|c| c.partition = Some(value.into()));
+    }
+}
+
+async fn partition_history(db: &mongodb::Database, channel: &str, partition: &str) -> &'static str {
+    // Uses the existing (channel_id, partition, event_id) index, only on a
+    // throttled refusal. Absence is inconclusive: events have finite retention.
+    let lookup = async {
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+            .find_one(bson::doc! {"channel_id":channel,"partition":partition})
+            .projection(bson::doc! {"_id":1})
+            .max_time(Duration::from_millis(100))
+            .await
+    };
+    match tokio::time::timeout(Duration::from_millis(250), lookup).await {
+        Ok(Ok(Some(_))) => "retained_event",
+        Ok(Ok(None)) => "no_retained_event",
+        _ => "unavailable",
+    }
 }
 pub(super) fn event(value: &str) {
     // Hash only bounded correlation IDs; never retain their raw value.
@@ -87,7 +112,7 @@ pub(super) fn error(error: AppError) -> Response {
 }
 
 // A fixed number of slots; no unauthenticated identifiers or database work.
-static WARN_AFTER: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static WARN_AFTER: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 fn warn(endpoint: Endpoint, status: StatusCode, code: &str) {
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let slot = &WARN_AFTER[endpoint as usize];
@@ -130,7 +155,7 @@ pub(super) async fn scope(
         let key = format!("{}:{}:{}", context.channel.as_deref().unwrap_or(&actor.user_id), endpoint.name(), code);
         let mut data = serde_json::json!({"endpoint":endpoint.name(), "status":response.status().as_u16(),
             "code":code,"partition_known":context.partition_known});
-        if let Some(channel) = context.channel { data["channel_agent_id"] = channel.into(); }
+        if let Some(channel) = &context.channel { data["channel_agent_id"] = channel.clone().into(); }
         if matches!(endpoint, Endpoint::ConversationPut) {
             data["binding_match"] = context.binding_match.map_or(serde_json::Value::String("unknown".into()), serde_json::Value::Bool);
         }
@@ -138,6 +163,15 @@ pub(super) async fn scope(
         // Diagnostics cannot hold a provider request indefinitely or alter its outcome.
         let result = tokio::time::timeout(Duration::from_secs(1), async {
             if RateWindowStore::admit(db, "nyxbot-provider-refused-v1", &key, 1, Duration::from_secs(60)).await?.allowed {
+                if let (Some(channel), Some(partition)) = (&context.channel, &context.partition) {
+                    if let Some(hash) = audit_service::keyed_fingerprint(audit_service::audit_chain_hmac_key(),
+                        b"nyxbot-provider-partition-v1",format!("{channel}\0{partition}").as_bytes()) {
+                        data["partition_correlation_hash"] = hash.into();
+                    }
+                    if matches!(endpoint,Endpoint::Responses) && code == "conversation_not_found" && !context.partition_known {
+                        data["partition_history"] = partition_history(db,channel,partition).await.into();
+                    }
+                }
                 audit_service::log_actor_event(db.clone(), &actor, "nyxbot_provider_refused", Some(data)).await?;
             }
             Ok::<_, AppError>(())

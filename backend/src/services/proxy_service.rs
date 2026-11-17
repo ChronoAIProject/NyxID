@@ -70,6 +70,8 @@ pub struct ProxyTarget {
     /// Server-resolved catalog identity; absent only for custom endpoints.
     /// A missing catalog row or failed lookup must fail resolution.
     pub catalog_slug: Option<String>,
+    /// Privacy eligibility from the loaded catalog row, before user projection.
+    pub(crate) catalog_is_public: bool,
     pub(crate) execution_request:
         Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
     pub(crate) execution_permission:
@@ -1251,6 +1253,7 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -1280,6 +1283,7 @@ pub async fn resolve_admin_proxy_target(
     let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
         catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
@@ -1375,6 +1379,7 @@ pub async fn resolve_curation_proxy_target(
     };
     Ok((
         ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -1498,6 +1503,7 @@ pub async fn resolve_proxy_target(
             super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -1553,6 +1559,7 @@ pub async fn resolve_proxy_target(
         super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
         catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
@@ -1585,6 +1592,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     if super::platform_key_service::no_auth_platform_service(&service) {
         super::platform_key_service::require(db, &service, owner_id).await?;
         return Ok(ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -1618,6 +1626,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
         catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
@@ -1728,6 +1737,9 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(
+                    &service,
+                ),
                 catalog_slug: Some(service.slug.clone()),
                 execution_request: None,
                 execution_permission: None,
@@ -1805,6 +1817,7 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -3287,6 +3300,7 @@ async fn finish_resolution(
         };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
             catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
@@ -3335,6 +3349,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
             catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
@@ -3444,6 +3459,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
             catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
@@ -3491,7 +3507,7 @@ async fn finish_resolution(
         // Fire-and-forget: update last_used_at only for execution materialization.
         let db_clone = db.clone();
         let key_id = api_key.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             user_api_key_service::touch_last_used(&db_clone, &key_id).await;
         });
         credential
@@ -3515,6 +3531,7 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
             catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
@@ -3598,6 +3615,7 @@ struct CatalogProxyAuthorization {
     managed_target: Option<(String, String, Option<String>)>,
     catalog_id: Option<String>,
     catalog_slug: Option<String>,
+    catalog_is_public: bool,
     billing: Option<crate::models::service_billing::ServiceBilling>,
     auth_scheme: Option<String>,
     platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
@@ -3668,6 +3686,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
         managed_target,
         catalog_id: Some(service.id.clone()),
         catalog_slug: Some(service.slug.clone()),
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
         billing: service.billing.clone(),
         auth_scheme: service.auth_scheme.clone(),
         platform_key: service.platform_key.clone(),
@@ -3884,7 +3903,7 @@ pub async fn resolve_agent_credential_override_identity(
     if credential.is_some() {
         let db_clone = db.clone();
         let key_id = api_key.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             user_api_key_service::touch_last_used(&db_clone, &key_id).await;
         });
     }
@@ -4544,6 +4563,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -4567,6 +4587,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     resource_proof: Option<&'a super::resource_request_proof::ReadProofIssuer<'a>>,
     admission: Option<&'a super::service_dispatch_registry::DispatchAdmission>,
     dispatch_caller: Option<&'a super::service_dispatch_registry::DispatchCaller<'a>>,
+    catalog_route: Option<&'a super::lark_attachment_tool::routing::BotRoute>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
         client,
@@ -4587,6 +4608,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
         resource_proof,
         admission,
         dispatch_caller,
+        catalog_route,
     ))
 }
 
@@ -4610,6 +4632,7 @@ async fn forward_request_with_egress_guard_inner(
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
     admission: Option<&super::service_dispatch_registry::DispatchAdmission>,
     dispatch_caller: Option<&super::service_dispatch_registry::DispatchCaller<'_>>,
+    catalog_route: Option<&super::lark_attachment_tool::routing::BotRoute>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     let mut operation = crate::turn_trace::Operation::start(
         crate::turn_trace::TurnContext::current(),
@@ -4674,18 +4697,26 @@ async fn forward_request_with_egress_guard_inner(
     // could change DNS to point to a private IP after validation. Consider using a custom
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
+    // Scope/permission/admission identities retain the existing logical path.
+    // This capability only changes the wire prefix for two trusted bot calls;
+    // it independently verifies the final destination policy and exact path.
+    let wire_path = match catalog_route {
+        Some(route) => route.forwarding_path(target, method.as_str(), path, &prepared.path)
+            .map_err(ForwardRequestError::PreDispatchRejected)?,
+        None => prepared.path.as_str(),
+    };
     let url = if let Some(q) = prepared.query.as_deref() {
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            prepared.path,
+            wire_path,
             q
         )
     } else {
         format!(
             "{}/{}",
             target.base_url.trim_end_matches('/'),
-            prepared.path
+            wire_path
         )
     };
 
@@ -7412,6 +7443,7 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -8399,6 +8431,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect_err("a renamed CMA connection still needs a resource permit");
@@ -8881,6 +8914,7 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -9292,6 +9326,7 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -9541,6 +9576,7 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -9983,6 +10019,7 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10008,6 +10045,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10033,6 +10071,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10055,6 +10094,7 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10077,6 +10117,7 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10099,6 +10140,7 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10155,6 +10197,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10179,6 +10222,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -10406,6 +10450,7 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,

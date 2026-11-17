@@ -20,6 +20,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
   let lastLevel = '';
   let diagnosticsTimer;
   let inputListeners = [];
+  let outputListeners = [];
   const diagnosticStates = new Map();
   const pendingPCM = new Set();
   const iceWaiters = new Set();
@@ -111,10 +112,15 @@ export const VOICE_MEDIA_ENGINE = String.raw`
         if (Number.isFinite(audio.currentTime) && audio.currentTime >= 0 && audio.currentTime <= 1830) counts.current_time_ms = Math.floor(audio.currentTime * 1000);
         diagnostic(id, 'openai_playback', 'ready', counts);
       }
+      // Match native media: a terminal audio transport cannot remain Listening.
+      // Temporary disconnections may recover without ending the call.
+      if (['failed', 'closed'].includes(connection.connectionState) || ['failed', 'closed'].includes(connection.iceConnectionState))
+        fail('WebRTC negotiation failed.');
     };
     const sampleStats = async () => {
       if (!alive(id) || peer !== connection || pending) return;
       states();
+      if (!alive(id) || peer !== connection) return;
       if (typeof connection.getStats !== 'function') {
         diagnostic(id, 'openai_stats', 'unavailable');
         return;
@@ -160,8 +166,14 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       }
     };
     events.onopen = states;
-    events.onclose = states;
-    events.onerror = states;
+    const channelFailed = () => {
+      if (!alive(id) || peer !== connection) return;
+      states();
+      if (alive(id) && peer === connection) fail('WebRTC negotiation failed.');
+    };
+    events.onclose = channelFailed;
+    events.onerror = channelFailed;
+    connection.onconnectionstatechange = states;
     connection.oniceconnectionstatechange = states;
     void sampleStats();
     diagnosticsTimer = setInterval(() => { void sampleStats(); }, 2000);
@@ -190,8 +202,8 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     meterTimer = setInterval(() => {
       if (!alive(id) || own !== meterGeneration) return;
       try {
-        const input = loudness(inputMeter);
-        const output = loudness(outputMeter);
+        const input = capturing ? loudness(inputMeter) : 0;
+        const output = speakerMuted ? 0 : loudness(outputMeter);
         const key = input + ':' + output;
         if (key === lastLevel) return;
         lastLevel = key;
@@ -253,6 +265,11 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       track.removeEventListener?.('unmute', changed);
     }
     inputListeners = [];
+    for (const { track, ended } of outputListeners) {
+      track.removeEventListener?.('ended', ended);
+      track.stop?.();
+    }
+    outputListeners = [];
     stopMeter();
     for (const reject of iceWaiters) reject(new Error('cancelled'));
     iceWaiters.clear();
@@ -479,12 +496,15 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     meterOpenAIInput(id, localMedia);
     localPeer.ontrack = ({ track, streams }) => {
       if (!alive(id)) return;
+      const ended = () => {
+        if (alive(id) && peer === localPeer) fail('WebRTC negotiation failed.');
+      };
+      track.addEventListener?.('ended', ended);
+      outputListeners.push({ track, ended });
+      if (track.readyState === 'ended') { ended(); return; }
       audio.srcObject = streams[0] || new MediaStream([track]);
       meterOpenAIOutput(id, audio.srcObject);
       void playOpenAI(id, audio);
-    };
-    localPeer.onconnectionstatechange = () => {
-      if (alive(id) && localPeer.connectionState === 'failed') fail('WebRTC negotiation failed.');
     };
     const events = localPeer.createDataChannel('oai-events');
     events.onmessage = ({ data }) => {

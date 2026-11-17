@@ -21,6 +21,16 @@ use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
 pub(crate) const MAX_PAYLOAD: usize = 256 * 1024;
 
+#[cfg(test)]
+pub(crate) type ModelApprovalHook = std::sync::Arc<
+    dyn Fn(Database, ApprovalRequest) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static MODEL_APPROVAL_DELAY: std::time::Duration;
+    pub(crate) static MODEL_APPROVAL_PREPARE: ModelApprovalHook;
+}
+
 fn missing() -> AppError {
     AppError::NotFound("Permission request not found".into())
 }
@@ -273,7 +283,7 @@ pub(super) async fn create(
         );
         return Ok(None);
     }
-    super::super::security_readiness_service::require(db, READINESS).await?;
+    super::super::security_readiness_service::require_serving(db, READINESS).await?;
     let task = chat.execution_task.as_ref().ok_or_else(refused)?.clone();
     if task.actor_user_id != chat.user_id || task.audience != audience {
         return Err(refused());
@@ -476,29 +486,58 @@ pub(super) async fn create(
         exact_service: None,
         created_at: now,
     };
+    #[cfg(test)]
+    if let Ok(hook) = MODEL_APPROVAL_PREPARE.try_with(Clone::clone) {
+        hook(db.clone(), request.clone()).await;
+    }
+    let result = async {
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db,chat,&request,snapshot),|session,(db,chat,request,snapshot)|Box::pin(async move {
         let result:AppResult<ApprovalRequest>=async {
             require_enrolled(db,&chat.user_id,Some(session)).await?;
             let p=proposal(request)?;
-            AssistantVersion::of(request)?.require(db).await?;
+            AssistantVersion::of(request)?.require_serving(db).await?;
             tasks::fence(db,session,&p.task).await?;
             let (row,_,_)=Box::pin(acks::fence(db,chat,session)).await?;
             super::super::assistant_access_policy::require_same_live_turn(chat,&row)?;
             snapshot.fence(db,session).await?;
             fence_endpoint(db,session,p).await?;
             let collection=db.collection::<ApprovalRequest>(REQUESTS);
+            // Reused and new proposals both end this model turn. Keep the claim
+            // transactional so the watcher cannot beat an uncommitted insert.
+            crate::services::assistant_model_observer::before_approval_request(Some(&mut *session)).await?;
             if let Some(existing)=collection.find_one(assistant_selector(doc!{"execution_proposal.v1.gap_key":&p.gap_key})).sort(doc!{"created_at":-1}).session(&mut *session).await? {
                 // Denial is task-bound. A pending or dispatched effect is never queued twice.
                 return Ok(existing);
             }
             if collection.count_documents(assistant_selector(doc!{"user_id":&chat.user_id,"execution_proposal.v1.task.task":bson::to_bson(&p.task.task).map_err(encoding)?})).session(&mut *session).await?>=32 {return Err(AppError::Forbidden("Too many permission requests for this task".into()));}
+            #[cfg(test)]
+            if let Ok(delay) = MODEL_APPROVAL_DELAY.try_with(|delay| *delay) {
+                eprintln!("model approval claim-to-insert stress: {} ms", delay.as_millis());
+                tokio::time::sleep(delay).await;
+            }
             collection.insert_one(*request).session(&mut *session).await?;
             audit(db,session,&chat.user_id,"execution_permission_requested",&request.id).await?;
             Ok((*request).clone())
         }.await;
         super::super::api_key_mutation_service::transaction_result(result)
-    })).await.map_err(super::super::api_key_mutation_service::map_transaction_error).map(Some)
+    })).await.map_err(super::super::api_key_mutation_service::map_transaction_error)
+    }.await;
+    if result.is_err() {
+        // The transaction has ended: no approval can still commit behind this
+        // refusal. Preserve the base's terminal model outcome on failure too.
+        // The creation error is what the caller must see; a failure to record
+        // the refusal must not replace it.
+        if let Err(error) =
+            crate::services::assistant_model_observer::failed_approval_proposal().await
+        {
+            tracing::warn!(
+                error_code = error.error_code(),
+                "Model approval refusal was not recorded after a failed proposal"
+            );
+        }
+    }
+    result.map(Some)
 }
 
 pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&Proposal> {
@@ -559,9 +598,9 @@ pub(crate) async fn decide(
             "A bounded decision idempotency key is required".into(),
         ));
     }
-    super::super::security_readiness_service::require(&state.db, READINESS).await?;
-    super::super::security_readiness_service::require(&state.db, super::READINESS).await?;
-    super::super::security_readiness_service::require(
+    super::super::security_readiness_service::require_serving(&state.db, READINESS).await?;
+    super::super::security_readiness_service::require_serving(&state.db, super::READINESS).await?;
+    super::super::security_readiness_service::require_serving(
         &state.db,
         super::super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
     )
@@ -581,7 +620,7 @@ pub(crate) async fn decide(
     }
     let p = proposal(&row)?;
     let version = AssistantVersion::of(&row)?;
-    version.require(&state.db).await?;
+    version.require_serving(&state.db).await?;
     if row.status != "pending" {
         return replay(&row, input);
     }
@@ -620,7 +659,7 @@ pub(crate) async fn decide(
             let mut row=collection.find_one(doc!{"_id":*id,"user_id":*actor}).session(&mut *session).await?.ok_or_else(missing)?;
             let p=proposal(&row)?.clone();
             let version=AssistantVersion::of(&row)?;
-            version.require(db).await?;
+            version.require_serving(db).await?;
             if row.status!="pending" {
                 return replay(&row,input);
             }

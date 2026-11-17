@@ -141,6 +141,7 @@ describe("feature flag catalog", () => {
       SKILL_RUNS: "assistant:skill-runs",
       ORG_AGENTS: "assistant:org-agents",
       SHARED_AGENTS: "assistant:shared-agents",
+      ASSISTANT_NOTIFICATIONS: "assistant:notifications",
       INFERENCE_PLATFORM_MODELS: "inference:platform-models",
       BILLING: "experimental:billing",
       CMA_SANDBOX_BILLING: "experimental:cma-sandbox-billing",

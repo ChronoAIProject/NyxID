@@ -88,6 +88,8 @@ function harness() {
         if (name === "lucide-react-native") return new Proxy({ __esModule: true }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => null });
         if (name === "expo-linear-gradient") return { LinearGradient: box };
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
+        // Native keyboard measurements are inert in this account deletion suite.
+        if (name.endsWith("/KeyboardViewport")) return { KeyboardViewport: box };
         if (name.endsWith("/ThemeContext")) return { useTheme: () => ({ colors: load(resolve(mobileRoot, "theme/mobileTheme.ts")).darkColors, mode: "dark", preference: "dark", setPreference: vi.fn(), bubblePalette: "gray", setBubblePalette: vi.fn() }) };
         if (name.endsWith("/AuthSessionContext")) return { useAuthSession: () => ({ signOut: vi.fn() }) };
         if (name.endsWith("/useNetworkStatus")) return { useNetworkStatus: () => ({ isConnected: true, recheckConnection: vi.fn() }) };

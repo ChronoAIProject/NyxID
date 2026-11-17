@@ -20,6 +20,8 @@ const eventSchema = z.discriminatedUnion("type", [
     parent_id: z.string().nullable(),
     conversation_id: z.string().nullable(),
   }),
+  /** A notification row was written; identifiers only, like every frame. */
+  z.object({ type: z.literal("notification"), id: z.string() }),
   z.object({ type: z.literal("resync") }),
 ]);
 export type AssistantLiveEvent = z.infer<typeof eventSchema>;

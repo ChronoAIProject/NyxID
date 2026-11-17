@@ -21,6 +21,9 @@ function setup({ introSeen = true, granted = false } = {}) {
     interim: "",
     error: undefined,
     permissionDenied: false,
+    recognitionLocale: undefined,
+    chooseLanguage: false,
+    retry: async () => {},
     subscribeLevel: (listener) => {
       levelListeners.add(listener);
       return () => {
@@ -145,6 +148,18 @@ function setup({ introSeen = true, granted = false } = {}) {
     "./DictationWaveform",
     h.load(fileURLToPath(new URL("./DictationWaveform.tsx", import.meta.url))),
   );
+  h.mock("./voice/useDictationLanguage", {
+    useDictationLanguage: () => ({
+      label: "English",
+      summary: "Device language · English",
+      options: [],
+      suggested: [],
+      choose() {},
+    }),
+  });
+  h.mock("./voice/DictationLanguagePicker", {
+    DictationLanguagePicker: "DictationLanguagePicker",
+  });
   const components = h.load(
     fileURLToPath(new URL("./ComposerDictation.tsx", import.meta.url)),
   ) as {
@@ -458,11 +473,12 @@ test("dictation grows within the typing height limit and keeps the meter between
           ),
     )!;
     const children = [row.props.children].flat().filter(Boolean);
-    assert.equal(children.length, 3);
+    assert.equal(children.length, 4);
     assert.equal(children[0].props.accessibilityLabel, "Discard dictation");
-    assert.equal(children[2].props.accessibilityLabel, "Finish dictation");
+    assert.equal(children[1].props.accessibilityLabel, "Choose language");
+    assert.equal(children[3].props.accessibilityLabel, "Finish dictation");
     assert.ok(
-      all(children[1]).some(
+      all(children[2]).some(
         (node) => node.type === "Text" || node.type === "ActivityIndicator",
       ),
     );

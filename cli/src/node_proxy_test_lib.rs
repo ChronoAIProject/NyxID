@@ -99,6 +99,8 @@ fn test_credentials(
         credentials,
         ssh_keys: Vec::new(),
         pending_crypto_keys: std::collections::BTreeMap::new(),
+        credential_generations: Default::default(),
+        credential_generation_fences: Default::default(),
     };
     CredentialStore::from_config_with_backend(&config, &backend)
 }

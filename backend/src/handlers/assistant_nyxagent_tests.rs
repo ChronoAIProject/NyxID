@@ -1,3 +1,5 @@
+#[path = "assistant_shutdown_tests.rs"]
+mod shutdown_tests;
 use super::*;
 #[path = "assistant_first_byte_outcome_tests.rs"]
 mod first_byte_outcome_tests;
@@ -25,6 +27,30 @@ use std::sync::{
 };
 
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
+
+#[test]
+fn voice_history_dto_preserves_interrupted_boundary_and_omits_false() {
+    for interrupted in [false, true] {
+        let message: AssistantMessage = mongodb::bson::from_document(doc! {
+            "_id": "voice-message", "conversation_id": "conversation", "user_id": OWNER,
+            "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "Speech",
+            "status": "completed", "created_at": mongodb::bson::DateTime::now(),
+            "via": "voice", "voice": {
+                "session_id": "call", "segment_id": "segment", "start_ms": 0_i64,
+                "end_ms": 1000_i64, "sealed": true, "complete": false,
+                "interrupted": interrupted, "delivery": "generated",
+            },
+        })
+        .unwrap();
+        let response = serde_json::to_value(MessageResponse::from(message)).unwrap();
+        assert_eq!(response["voice"]["segment_id"], "segment");
+        if interrupted {
+            assert_eq!(response["voice"]["interrupted"], true);
+        } else {
+            assert!(response["voice"].get("interrupted").is_none());
+        }
+    }
+}
 
 #[test]
 fn upstream_request_id_is_bounded_and_validated() {
@@ -63,6 +89,7 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -682,10 +709,23 @@ async fn silent_transport_fails_on_the_idle_bound() {
 
 #[tokio::test]
 async fn unreachable_upstream_fails_at_connect() {
-    short_bounds();
+    // Keep the production first-byte bound: live authority reads precede the
+    // socket attempt. This case asserts connect classification and retry count.
     let (state, _, server) = setup_stream("nyxa_connect", Duration::ZERO, vec![]).await;
     server.abort();
     let _ = server.await;
+    // Port zero cannot host a listener. A released ephemeral port can otherwise
+    // be reused by another process before this request.
+    assert!(tokio::net::TcpStream::connect("127.0.0.1:0").await.is_err());
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"base_url": "http://127.0.0.1:0"}},
+        )
+        .await
+        .unwrap();
     let reply = run_turn_to_reply(&state).await;
     assert_eq!(
         reply.error_code.as_deref(),

@@ -40,7 +40,7 @@ function elements(root: Element): Element[] {
 function renderPermissionForm(root: Element): Element {
   if (
     typeof root.type === "function" &&
-    ["AgentGrantsForm", "CreateAgentForm"].includes(root.type.name)
+    ["AgentGrantsForm", "CreateAgentForm", "RememberForm"].includes(root.type.name)
   ) {
     return root.type(root.props);
   }
@@ -59,6 +59,8 @@ function setup(
   listing = false,
   options: {
     initialCreate?: boolean;
+    createError?: string;
+    memoryError?: string;
     online?: boolean;
     maxLiveSubagents?: number;
     listedAgents?: contracts.AssistantAgent[];
@@ -68,6 +70,7 @@ function setup(
   } = {},
 ) {
   const calls: ApiCall[] = [];
+  const translations: string[] = [];
   const alerts: Array<{
     title: string;
     buttons: Array<{ text: string; onPress?: () => void }>;
@@ -75,12 +78,15 @@ function setup(
   let guard: Record<string, any> = {};
   const edits: unknown[][] = [];
   let latest = plain(agent);
+  let routeAgentId = agent.id;
+  const selectionsKept: string[] = [];
   const client = {
     invalidateQueries: async () => {
       calls.push({ method: "invalidate", args: [] });
     },
   };
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ t: (phrase: string) => { translations.push(phrase); return phrase; } }) },
     "./OrgGuestControls": { OrgGuestChannel: "OrgGuestChannel", OrgGuestGrantsAdoption: "OrgGuestGrantsAdoption" },
     "./AgentCollaborationPanel": {
       AgentCollaborationPanel: "AgentCollaborationPanel",
@@ -128,7 +134,7 @@ function setup(
         refetch: async () => {},
         data:
           queryKey[2] === "detail"
-            ? { agent: latest, memory: options.memory ?? [], threads: [] }
+            ? { agent: { ...latest, id: queryKey[3] }, memory: options.memory ?? [], threads: [] }
             : queryKey[2] === "list"
               ? {
                   agents: options.listedAgents ?? [agent],
@@ -136,19 +142,19 @@ function setup(
                     max_live_subagents: options.maxLiveSubagents ?? 10,
                   },
                 }
-              : queryKey[2] === "connections"
+              : queryKey[2] === "grant-services"
                 ? [
                     {
                       id: "connection-github",
                       slug: "github",
                       label: "GitHub",
-                      is_active: true,
+                      executable: true,
                     },
                     {
                       id: "connection-docs",
                       slug: "documents",
                       label: "Documents",
-                      is_active: true,
+                      executable: true,
                     },
                   ]
                 : [],
@@ -183,11 +189,16 @@ function setup(
         destroy: async (...args: unknown[]) => {
           calls.push({ method: "destroy", args: plain(args) });
         },
+        remember: async (...args: unknown[]) => {
+          calls.push({ method: "remember", args });
+          if (options.memoryError) throw new Error(options.memoryError);
+        },
         forget: async (...args: unknown[]) => {
           calls.push({ method: "forget", args: plain(args) });
         },
         create: async (...args: unknown[]) => {
           calls.push({ method: "create", args: plain(args) });
+          if (options.createError) throw new Error(options.createError);
           return { id: agent.id };
         },
       },
@@ -222,7 +233,7 @@ function setup(
       agentProfileFieldTitle: (field: string, nyxbot?: boolean) =>
         field === "description" ? (nyxbot ? "Notes" : "Purpose") : field,
     },
-  });
+  }, { Error });
   const { AgentsScreen } = harness.load(
     fileURLToPath(new URL("./AgentsScreen.tsx", import.meta.url)),
   ) as {
@@ -231,6 +242,7 @@ function setup(
       agentId?: string;
       initialCreate?: boolean;
       onCreated?: (id: string) => void;
+      onSelectionKept?: (id: string) => void;
       onClose?: () => void;
     }) => Element;
   };
@@ -238,10 +250,15 @@ function setup(
     renderPermissionForm(
       AgentsScreen({
         agentId:
-          creating || listing || options.initialCreate ? undefined : agent.id,
+          creating || listing || options.initialCreate ? undefined : routeAgentId,
         initialCreate: options.initialCreate,
         onCreated: options.onCreated,
         onClose: options.onClose,
+        onSelectionKept: (id) => {
+          selectionsKept.push(id);
+          routeAgentId = id;
+          harness.render();
+        },
         onEditProfile: (...args: unknown[]) => edits.push(args),
       }),
     ),
@@ -261,9 +278,17 @@ function setup(
   }
   return {
     harness,
+    translations,
     calls,
     alerts,
     guard: () => guard,
+    routeAgentId: () => routeAgentId,
+    selectionsKept,
+    selectAgent: (id: string) => {
+      routeAgentId = id;
+      latest = { ...latest, id };
+      harness.render();
+    },
     edits,
     all,
     one,
@@ -646,4 +671,149 @@ test("destroy and forget remain behind explicit confirmations", async () => {
     method: "forget",
     args: [agent.id, "note-1"],
   });
+});
+
+
+test("a refused starting grant keeps the create draft and exits saving without a partial agent", async () => {
+  const created: string[] = [];
+  const reason = "Validation error: Unknown service or no access: revoked-service";
+  const state = setup(false, false, {initialCreate: true, createError: reason, onCreated: id => created.push(id)});
+  await state.field().props.onSave({services:["revoked-service"],account_read:false,guest_access:{}});
+  state.harness.flush();
+  state.one(row => typeof row.type === "function" && row.type.name === "ProfileFields")
+    .props.onChange({name:"researcher",description:"Keep this draft"});
+  state.harness.flush();
+  state.action("Create agent").props.onPress();
+  await state.harness.settle();
+  assert.deepEqual(created, []);
+  assert.deepEqual(plain(state.field().props.value).services, ["revoked-service"]);
+  assert.equal(state.action("Create agent").props.disabled, false);
+  assert.ok(elements(state.harness.value()).some(row => row.props.message === reason));
+});
+
+test("nonblank memory drafts guard Back and dismissal with Keep editing and Discard", () => {
+  const env = setup(false, false, { onClose: () => {} });
+  const input = () =>
+    env.one(
+      (row) =>
+        row.type === "SettingsTextField" &&
+        row.props.accessibilityLabel === "Add a memory",
+    );
+  input().props.onChangeText("   ");
+  env.harness.flush();
+  assert.equal(env.guard().discardOnClose, undefined);
+  input().props.onChangeText("Remember this draft");
+  env.harness.flush();
+  assert.equal(env.guard().active, true);
+  assert.equal(env.guard().discardOnClose.title, "Discard memory draft?");
+  env.guard().onBack();
+  assert.equal(env.alerts.at(-1)?.title, "Discard memory draft?");
+  assert.deepEqual(
+    plain(env.alerts.at(-1)?.buttons.map((button) => button.text)),
+    ["Keep editing", "Discard"],
+  );
+  env.alerts.at(-1)?.buttons[0]?.onPress?.();
+  env.harness.flush();
+  assert.equal(input().props.value, "Remember this draft");
+  env.alerts.at(-1)?.buttons[1]?.onPress?.();
+  env.harness.flush();
+  assert.equal(env.guard().discardOnClose, undefined);
+});
+
+test("Remember success clears the memory draft guard, failure keeps it, and switching agents requires discarding drafts", async () => {
+  for (const memoryError of [undefined, "Could not save memory"]) {
+    const env = setup(false, false, { memoryError });
+    const input = () =>
+      env.one(
+        (row) =>
+          row.type === "SettingsTextField" &&
+          row.props.accessibilityLabel === "Add a memory",
+      );
+    input().props.onChangeText("A memory draft");
+    env.harness.flush();
+    env
+      .one(
+        (row) => row.type === "SettingsRow" && row.props.label === "Remember",
+      )
+      .props.onPress();
+    await env.harness.settle();
+    assert.equal(input().props.value, memoryError ? "A memory draft" : "");
+    assert.equal(!!env.guard().discardOnClose, !!memoryError);
+    input().props.onChangeText("Another draft");
+    env.harness.flush();
+    env.selectAgent("different-agent");
+    assert.equal(input().props.value, "Another draft");
+    assert.equal(env.alerts.at(-1)?.title, "Discard memory draft?");
+    env.alerts.at(-1)?.buttons.find(button => button.text === "Discard")?.onPress?.();
+    env.harness.flush();
+    assert.equal(input().props.value, "");
+    assert.equal(env.guard().discardOnClose, undefined);
+  }
+});
+
+test("mounted agentId changes keep the memory owner until Discard and ignore stale switch alerts", () => {
+  const env = setup();
+  const input = () =>
+    env.one(
+      (row) =>
+        row.type === "SettingsTextField" &&
+        row.props.accessibilityLabel === "Add a memory",
+    );
+  input().props.onChangeText("Keep this agent's draft");
+  env.harness.flush();
+  env.selectAgent("second-agent");
+  const first = env.alerts.at(-1)!;
+  assert.equal(first.title, "Discard memory draft?");
+  first.buttons.find((button) => button.text === "Keep editing")?.onPress?.();
+  env.harness.flush();
+  assert.equal(input().props.value, "Keep this agent's draft");
+  assert.ok(env.guard().discardOnClose);
+  assert.equal(env.routeAgentId(), agent.id, "Keep editing resyncs the route to the memory owner");
+  assert.deepEqual(env.selectionsKept, [agent.id]);
+  const alertCount = env.alerts.length;
+  env.selectAgent("second-agent");
+  assert.equal(env.alerts.length, alertCount + 1, "opening the same link prompts again");
+  env.selectAgent("third-agent");
+  first.buttons.find((button) => button.text === "Discard")?.onPress?.();
+  first.buttons.find((button) => button.text === "Keep editing")?.onPress?.();
+  env.harness.flush();
+  assert.deepEqual(env.selectionsKept, [agent.id], "a stale alert cannot resync a newer link");
+  assert.equal(
+    input().props.value,
+    "Keep this agent's draft",
+    "an old alert cannot switch the newer requested agent",
+  );
+  env.alerts
+    .at(-1)
+    ?.buttons.find((button) => button.text === "Discard")
+    ?.onPress?.();
+  env.harness.flush();
+  assert.equal(input().props.value, "");
+  assert.equal(env.guard().discardOnClose, undefined);
+  assert.equal(env.routeAgentId(), "third-agent", "Discard keeps the requested route");
+  row(env, "Handle").props.onPress();
+  assert.deepEqual(env.edits.at(-1), ["third-agent", "name"], "Discard selects the requested agent");
+  env.harness.unmount();
+});
+
+test("personal agent channel row explains retained Discord draining without a retry control", () => {
+  const state = setup();
+  state.latest({ channels: [{ id: "discord", bot_label: "Shop", platform: "discord", status: "active", gateway_native_activation: "gateway_native_draining" }] });
+  const rows = elements(state.harness.render());
+  const row = rows.find((r) => r.props.label === "Shop");
+  assert.ok(row);
+  assert.match(row.props.detail, /Discord intake is paused/);
+  assert.match(row.props.detail, /cannot bypass/);
+  assert.ok(!rows.some((r) => /Retry native/.test(r.props.label ?? "")));
+});
+
+
+test("personal channel slugs bypass translation", () => {
+  for (const platform of ["x", "lark", "discord"]) {
+    const state = setup();
+    state.latest({ channels: [{ id: platform, bot_label: "Plain slug", platform, status: "active" }] });
+    const rows = elements(state.harness.render());
+    assert.equal(rows.find((r) => r.props.label === "Plain slug")?.props.detail, platform);
+    assert.ok(!state.translations.includes(platform));
+  }
 });

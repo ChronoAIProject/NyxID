@@ -552,18 +552,41 @@ pub async fn update(
 }
 
 pub async fn delete(db: &Database, current: &Trigger) -> AppResult<()> {
-    let result = db
-        .collection::<Trigger>(TRIGGERS)
-        .delete_one(doc! { "_id": &current.id, "user_id": &current.user_id })
-        .await?;
-    if result.deleted_count == 1 {
-        db.collection::<bson::Document>(schedules::WORK)
-            .delete_many(doc! {"trigger_id":&current.id,"kind":"schedule"})
-            .await?;
-        Ok(())
-    } else {
-        Err(AppError::TriggerNotFound)
-    }
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run((db, current), |session, (db, current)| {
+            Box::pin(async move {
+                let operation: AppResult<()> = async {
+                    let result = db
+                        .collection::<Trigger>(TRIGGERS)
+                        .delete_one(doc! {"_id": &current.id, "user_id": &current.user_id})
+                        .session(&mut *session)
+                        .await?;
+                    if result.deleted_count != 1 {
+                        return Err(AppError::TriggerNotFound);
+                    }
+                    db.collection::<bson::Document>(schedules::WORK)
+                        .delete_many(doc! {"trigger_id": &current.id, "kind": "schedule"})
+                        .session(&mut *session)
+                        .await?;
+                    db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+                        .update_many(doc! {"trigger_id": &current.id, "outcome": {"$in": ["pending", "started", "waiting"]}}, doc! {"$inc": {"notification_fence": 1_i64}})
+                        .session(&mut *session).await?;
+                    db.collection::<bson::Document>(
+                        crate::models::assistant_notification::COLLECTION_NAME,
+                    )
+                    .delete_many(doc! {"source.trigger_id": &current.id})
+                    .session(&mut *session)
+                    .await?;
+                    Ok(())
+                }
+                .await;
+                transactions::transaction_result(operation)
+            })
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 pub async fn rotate_secret(
@@ -1053,7 +1076,7 @@ pub fn dispatch_webhook_event(
     body: Zeroizing<Vec<u8>>,
     max_body_bytes: usize,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let event_id = record.event_id.clone();
         let outcome = deliver_webhook_body(
             &encryption_keys,
@@ -2307,7 +2330,21 @@ mod tests {
             Err(AppError::Conflict(_))
         ));
 
+        let removed = crate::test_utils::seed_notification_purge_probe(
+            &db,
+            &owner,
+            doc! {"trigger_id":&rotated.id},
+        )
+        .await;
+        let retained = crate::test_utils::seed_notification_purge_probe(
+            &db,
+            &owner,
+            doc! {"trigger_id":"another-trigger"},
+        )
+        .await;
         delete(&db, &rotated).await.expect("delete trigger");
+        crate::test_utils::assert_notification_probe(&db, &removed, false).await;
+        crate::test_utils::assert_notification_probe(&db, &retained, true).await;
         assert!(matches!(
             rotate_secret(&db, &keys, &rotated).await,
             Err(AppError::TriggerNotFound)

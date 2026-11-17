@@ -661,3 +661,162 @@ async fn automation_receipts_are_erased_by_exact_owner_and_block_final_completio
     receipts.delete_one(doc! {"_id": "leftover"}).await.unwrap();
     assert!(local::source(&db, &job).await.unwrap());
 }
+
+#[tokio::test]
+async fn billing_meter_receipt_and_capture_state_share_financial_erasure_retention() {
+    for org in [false, true] {
+        let (db, owner) = tests::fixture().await;
+        let state = test_app_state(db.clone());
+        db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id":"retained-meter",
+                "billing_owner_id":&owner,
+                "status":"finalized",
+                "released":true,
+                "lago_acked":true,
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_usage_deliveries")
+            .insert_one(doc! {
+                "_id":"retained-delivery",
+                "owner_id":&owner,
+                "wallet_id":"wallet",
+                "transaction_id":"retained-transaction",
+                "state":"acknowledged",
+            })
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_usage_comparisons")
+            .insert_one(doc! {
+                "_id":"retained-capture",
+                "owner_id":&owner,
+                "wallet_id":"wallet",
+                "customer_id":"customer",
+                "subscription_id":"subscription",
+            })
+            .await
+            .unwrap();
+        if org {
+            db.collection::<Document>(USERS)
+                .update_one(doc! {"_id":&owner}, doc! {"$set":{"user_type":"org"}})
+                .await
+                .unwrap();
+            crate::services::org_service::delete_org_user(
+                &db,
+                &owner,
+                &crate::services::org_service::audit::fixture_actor(),
+            )
+            .await
+            .unwrap();
+        } else {
+            accept(&db, &owner, &owner, None).await.unwrap();
+            until_source_removed(&state, &owner).await;
+        }
+        assert!(
+            db.collection::<Document>(USERS)
+                .find_one(doc! {"_id":&owner})
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        for collection in [
+            crate::models::usage_meter::COLLECTION_NAME,
+            "billing_usage_deliveries",
+            "billing_usage_comparisons",
+        ] {
+            assert!(
+                db.collection::<Document>(collection)
+                    .find_one(doc! {"$or":[{"billing_owner_id":&owner},{"owner_id":&owner}]})
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "financial collection {collection} must retain the owner's record"
+            );
+        }
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn notification_feed_is_erased_for_exact_person_and_blocks_completion_if_leftover() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let budgets =
+        db.collection::<Document>(crate::services::assistant_notification_service::PUSH_BUDGETS);
+    let sources =
+        db.collection::<Document>(crate::services::assistant_notification_service::PUSH_SOURCES);
+    budgets
+        .insert_many([doc! {"_id":&owner}, doc! {"_id":"another-person"}])
+        .await
+        .unwrap();
+    sources
+        .insert_many([
+            doc! {"_id":"removed-source","user_id":&owner},
+            doc! {"_id":"retained-source","user_id":"another-person"},
+        ])
+        .await
+        .unwrap();
+    let removed = crate::test_utils::seed_notification_purge_probe(&db, &owner, doc! {}).await;
+    let retained =
+        crate::test_utils::seed_notification_purge_probe(&db, "another-person", doc! {}).await;
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"user_id":&owner})
+        .await
+        .unwrap()
+        .unwrap();
+    until_source_removed(&state, &owner).await;
+    crate::test_utils::assert_notification_probe(&db, &removed, false).await;
+    crate::test_utils::assert_notification_probe(&db, &retained, true).await;
+    assert!(
+        budgets
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        budgets
+            .find_one(doc! {"_id":"another-person"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sources
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        sources
+            .find_one(doc! {"_id":"retained-source"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let leftover = crate::test_utils::seed_notification_purge_probe(&db, &owner, doc! {}).await;
+    assert!(!local::source(&db, &job).await.unwrap());
+    db.collection::<Document>("assistant_notifications")
+        .delete_one(doc! {"_id":leftover})
+        .await
+        .unwrap();
+    assert!(local::source(&db, &job).await.unwrap());
+    for (collection, row) in [
+        (&budgets, doc! {"_id":&owner}),
+        (&sources, doc! {"_id":"leftover-source","user_id":&owner}),
+    ] {
+        collection.insert_one(row.clone()).await.unwrap();
+        assert!(!local::source(&db, &job).await.unwrap());
+        collection
+            .delete_one(doc! {"_id":row.get_str("_id").unwrap()})
+            .await
+            .unwrap();
+        assert!(local::source(&db, &job).await.unwrap());
+    }
+    db.drop().await.unwrap();
+}

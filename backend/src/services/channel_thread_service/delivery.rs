@@ -1,3 +1,4 @@
+use super::gateway::{ReplyError, ReplyResult};
 use super::*;
 use crate::models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage};
 use crate::models::channel_thread::{ThreadAddress, ThreadSenderKind};
@@ -22,15 +23,63 @@ pub async fn send_reply(
     target: &ThreadReplyTarget,
     reply: &crate::services::channel_platform::OutboundReply,
 ) -> AppResult<ThreadDelivery> {
+    send_reply_inner(
+        db,
+        adapter,
+        bot,
+        credentials,
+        target,
+        reply,
+        ReplyAuthority::Bound,
+    )
+    .await
+    .map_err(|failure| failure.error)
+}
+
+pub(crate) async fn send_reply_with_token(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    target: &ThreadReplyTarget,
+    reply: &crate::services::channel_platform::OutboundReply,
+    one_use: Option<&crate::models::reply_token_use::ReplyTokenUse>,
+) -> ReplyResult<ThreadDelivery> {
+    send_reply_inner(
+        db,
+        adapter,
+        bot,
+        credentials,
+        target,
+        reply,
+        ReplyAuthority::Gateway(one_use),
+    )
+    .await
+}
+
+enum ReplyAuthority<'a> {
+    Bound,
+    Gateway(Option<&'a crate::models::reply_token_use::ReplyTokenUse>),
+}
+
+async fn send_reply_inner(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    target: &ThreadReplyTarget,
+    reply: &crate::services::channel_platform::OutboundReply,
+    authority: ReplyAuthority<'_>,
+) -> ReplyResult<ThreadDelivery> {
     let source = db
         .collection::<ChannelMessage>(MESSAGES)
         .find_one(doc! {"_id": &target.message_id})
         .await?
-        .ok_or_else(unavailable)?;
+        .ok_or_else(|| ReplyError::target(unavailable()))?;
     if !target.matches(bot, &source, &target.facts.chat_id)
         || adapter.platform_id() != target.platform
     {
-        return Err(unavailable());
+        return Err(ReplyError::target(unavailable()));
     }
     let components = components(reply, adapter.platform_id())?;
     let http = resolution::client()?;
@@ -39,25 +88,21 @@ pub async fn send_reply(
         delivered_kinds: Vec::new(),
         error: None,
     };
+    if let ReplyAuthority::Gateway(one_use) = &authority {
+        validate_target(db, bot, &source, target).await?;
+        // The unique capability insert is the dispatch barrier. A losing
+        // request must never open or modify the winner's delivery record.
+        if let Some(usage) = one_use {
+            crate::services::channel_relay_service::consume_reply_token_use(db, usage).await?;
+        }
+    }
     let mut delivery = Delivery::begin(db, bot, &source, components.len()).await?;
     for (index, part) in components.into_iter().enumerate() {
+        let mut dispatched = false;
         let sent = Box::pin(async {
-            let eligible = if let Some((owner, origin, conversation)) = &target.admitted {
-                crate::services::channel_thread_follow_service::validate_delivery(
-                    db,
-                    owner,
-                    origin,
-                    conversation,
-                )
-                .await?;
-                resolution::eligible_source_live(db, bot, &source).await?
-            } else {
-                resolution::eligible_source(db, bot, &source).await?
-            };
-            if !eligible {
-                return Err(unavailable());
-            }
+            validate_target(db, bot, &source, target).await?;
             delivery.attempting(db, index).await?;
+            dispatched = true;
             let outcome = crate::services::telegram_formatting::scope(
                 db,
                 delivery.formatting_receipt(index),
@@ -78,13 +123,24 @@ pub async fn send_reply(
                 .delivered_kinds
                 .clone()
                 .unwrap_or_else(|| part.attachments.iter().map(|a| a.kind).collect());
-            Ok((outcome.into_result()?, kinds))
+            Ok::<_, ReplyError>((outcome.into_result()?, kinds))
         })
         .await;
         let (id, kinds) = match sent {
             Ok((Some(id), kinds)) if valid_id(&id) => (id, kinds),
             Ok(_) => {
                 let error = crate::services::channel_reply_delivery::unconfirmed();
+                if matches!(authority, ReplyAuthority::Gateway(_)) {
+                    gateway::record_outcome(
+                        db,
+                        &bot.id,
+                        &bot.user_id,
+                        &source.id,
+                        gateway::ReplyFailure::Send,
+                        &error,
+                    )
+                    .await;
+                }
                 result.error = Some(
                     delivery
                         .failed(db, index, &error)
@@ -94,18 +150,29 @@ pub async fn send_reply(
                 );
                 break;
             }
-            Err(error) => {
+            Err(failure) => {
+                let class = if dispatched {
+                    gateway::ReplyFailure::Send
+                } else {
+                    failure.class
+                };
+                let error = failure.error;
                 let error = delivery
                     .failed(db, index, &error)
                     .await
                     .err()
                     .unwrap_or(error);
-                crate::services::channel_bot_service::record_outbound_outcome(
-                    db,
-                    &bot.id,
-                    Some(&error),
-                )
-                .await;
+                if matches!(authority, ReplyAuthority::Gateway(_)) {
+                    gateway::record_outcome(db, &bot.id, &bot.user_id, &source.id, class, &error)
+                        .await;
+                } else {
+                    crate::services::channel_bot_service::record_outbound_outcome(
+                        db,
+                        &bot.id,
+                        Some(&error),
+                    )
+                    .await;
+                }
                 result.error =
                     Some(crate::services::channel_reply_delivery::failure_after_dispatch(error));
                 break;
@@ -157,6 +224,35 @@ pub async fn send_reply(
         result.error = delivery.complete(db).await.err();
     }
     Ok(result)
+}
+
+async fn validate_target(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    source: &ChannelMessage,
+    target: &ThreadReplyTarget,
+) -> ReplyResult<()> {
+    let eligible = if let Some((owner, origin, conversation)) = &target.admitted {
+        crate::services::channel_thread_follow_service::validate_delivery(
+            db,
+            owner,
+            origin,
+            conversation,
+        )
+        .await
+        .map_err(ReplyError::authority)?;
+        resolution::eligible_source_live(db, bot, source)
+            .await
+            .map_err(ReplyError::authority)?
+    } else {
+        resolution::eligible_source(db, bot, source)
+            .await
+            .map_err(ReplyError::authority)?
+    };
+    if !eligible {
+        return Err(ReplyError::target(unavailable()));
+    }
+    Ok(())
 }
 
 fn components(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundReply>> {
@@ -253,8 +349,44 @@ mod tests {
         assert_eq!(reassembled, text);
     }
 
+    fn assert_malformed_components(reply: &OutboundReply, expected_code: u32) {
+        let failure = ReplyError::from(components(reply, "telegram").err().unwrap());
+        assert_eq!(failure.error.error_code(), expected_code);
+        if expected_code == 10011 {
+            assert_eq!(
+                failure.error.error_key(),
+                "channel_conversation_not_reachable"
+            );
+        }
+        assert_eq!(failure.class, gateway::ReplyFailure::Transient);
+        assert!(failure.class.reason().is_none());
+    }
+
     #[test]
     fn rejects_too_many_parts_before_sending_any_content() {
-        assert!(components(&reply("x".repeat(4096 * 64 + 1)), "telegram").is_err());
+        // The shared text planner has its own, unchanged validation error.
+        assert_malformed_components(&reply("x".repeat(4096 * 64 + 1)), 1008);
+        let attachment = crate::services::channel_platform::MaterializedAttachment {
+            kind: crate::services::channel_platform::MediaKind::File,
+            bytes: bytes::Bytes::from_static(b"file"),
+            filename: None,
+            mime_type: None,
+            caption: None,
+        };
+        let mut oversized = reply(String::new());
+        oversized.attachments = vec![attachment.clone(); 65];
+        assert_malformed_components(&oversized, 10011);
+        oversized.attachments.truncate(64);
+        oversized.text = Some("one more part".into());
+        assert_malformed_components(&oversized, 10011);
+        oversized.attachments = vec![attachment];
+        oversized.attachments[0].caption = Some("one more text part".into());
+        oversized.text = Some("x".repeat(4096 * 64));
+        assert_malformed_components(&oversized, 10011);
+    }
+
+    #[test]
+    fn empty_thread_reply_preserves_main_error_without_target_failure() {
+        assert_malformed_components(&reply(String::new()), 10011);
     }
 }

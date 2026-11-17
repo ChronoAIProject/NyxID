@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plan/remove cache entries whose restore paths are retired.
 
-Input: gh cache list --limit 10000 --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt
+Input: gh cache list --limit 10000 --json id,key,ref,sizeInBytes,createdAt,lastAccessedAt,version
 Default is a dry run. --apply is used only by the trusted main-branch workflow.
 """
 import argparse
@@ -14,11 +14,17 @@ import subprocess
 from pathlib import Path
 
 MAIN = "refs/heads/main"
+BRANCH_GRACE = timedelta(hours=48)
+# Swatinem keys are 8-hex environment and lock hashes. Incremental jobs use
+# v1-rust-incremental; non-incremental lanes stay on v0-rust. The separate
+# actions/cache incremental entries use a longer manifest hash and are matched
+# by INCREMENTAL, not this pattern.
 RUST = re.compile(
-    r"^v0-rust-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-[0-9a-f]{8}-[0-9a-f]{8}$"
+    r"^(?P<prefix>v0-rust|v1-rust-incremental)-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-"
+    r"[0-9a-f]{8}-[0-9a-f]{8}$"
 )
 INCREMENTAL = re.compile(
-    r"^v0-rust-incremental-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-"
+    r"^(?P<prefix>v0-rust-incremental|v1-rust-graph)-(?P<lane>.+)-(?P<os>[^-]+)-(?P<arch>[^-]+)-"
     r"[0-9a-f]+-[0-9a-f]+$"
 )
 DIST = re.compile(
@@ -59,6 +65,14 @@ def timestamp(value):
 def rank(row):
     parsed = timestamp(row.get("createdAt"))
     return (parsed or datetime.min.replace(tzinfo=timezone.utc), str(row.get("id", "")))
+
+
+def cache_version(row):
+    """Return the actions/cache version, or None when the inventory omitted it."""
+    value = row.get("version")
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def family(key):
@@ -124,10 +138,12 @@ def plan(rows, now=None):
         match = RUST.fullmatch(row["key"])
         if not match or match["lane"] not in LANES:
             continue
-        family_key = (match["lane"], match["os"], match["arch"])
+        family_key = (match["prefix"], match["lane"], match["os"], match["arch"], cache_version(row))
         if family_key not in rust_newest or rank(row) > rank(rust_newest[family_key]):
             rust_newest[family_key] = row
 
+    # The version hashes the exact path list. A one-path main entry cannot
+    # restore a two-path reader, so it is not a replacement for that version.
     incremental_newest = {}
     for row in rows:
         if row["ref"] != MAIN:
@@ -135,7 +151,7 @@ def plan(rows, now=None):
         match = INCREMENTAL.fullmatch(row["key"])
         if not match:
             continue
-        family_key = (match["lane"], match["os"], match["arch"])
+        family_key = (match["prefix"], match["lane"], match["os"], match["arch"], cache_version(row))
         if family_key not in incremental_newest or rank(row) > rank(incremental_newest[family_key]):
             incremental_newest[family_key] = row
 
@@ -163,7 +179,8 @@ def plan(rows, now=None):
                 rust = RUST.fullmatch(key)
                 if rust and rust["lane"] in (LANES | set(RETIRED)):
                     family_key = (
-                        RETIRED.get(rust["lane"], rust["lane"]), rust["os"], rust["arch"]
+                        rust["prefix"], RETIRED.get(rust["lane"], rust["lane"]),
+                        rust["os"], rust["arch"], cache_version(row),
                     )
                     replacement = rust_newest.get(family_key)
                     if replacement and row["id"] != replacement["id"]:
@@ -173,11 +190,20 @@ def plan(rows, now=None):
                 else:
                     incremental = INCREMENTAL.fullmatch(key)
                     if incremental:
-                        family_key = (incremental["lane"], incremental["os"], incremental["arch"])
+                        family_key = (
+                            incremental["prefix"], incremental["lane"], incremental["os"], incremental["arch"],
+                            cache_version(row),
+                        )
                         replacement = incremental_newest.get(family_key)
                         if replacement and row["id"] != replacement["id"]:
                             reason = f"superseded incremental cache by main cache {replacement['id']}"
         if reason:
+            # Manual warm runs need time for a second dispatch and a small-edit
+            # comparison, even when main already has a compatible generation.
+            if row["ref"] != MAIN and family(key) in {"rust-lane", "rust-incremental"}:
+                created = timestamp(row.get("createdAt"))
+                if created is None or created > now - BRANCH_GRACE:
+                    continue
             removals.append({**row, "reason": reason})
     return removals
 

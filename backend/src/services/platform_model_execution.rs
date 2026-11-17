@@ -69,7 +69,8 @@ impl Plan {
     ) -> AppResult<Self> {
         registry::require_execution_ready(db).await?;
         if request.has_images() {
-            crate::services::security_readiness_service::require(db, images::READINESS).await?;
+            crate::services::security_readiness_service::require_serving(db, images::READINESS)
+                .await?;
         }
         let metadata = registry::resolve_route_metadata(db, person, public_id, scope).await?;
         let (model, routing) = metadata.into_execution_parts();
@@ -94,8 +95,11 @@ impl Plan {
         )
         .map_err(billing::model_tariffs::unavailable)?;
         if certification::family_contract(&tariff.tariff().contract) {
-            crate::services::security_readiness_service::require(db, certification::READINESS)
-                .await?;
+            crate::services::security_readiness_service::require_serving(
+                db,
+                certification::READINESS,
+            )
+            .await?;
         }
         let mut routes: Vec<_> = routing
             .routes
@@ -279,12 +283,16 @@ pub(crate) async fn dispatch(
     request: &Request,
 ) -> AppResult<Accepted> {
     if certification::family_contract(&plan.tariff.tariff().contract) {
-        crate::services::security_readiness_service::require(ctx.db, certification::READINESS)
-            .await?;
+        crate::services::security_readiness_service::require_serving(
+            ctx.db,
+            certification::READINESS,
+        )
+        .await?;
     }
     let deadline = Instant::now() + DEADLINE;
     if request.has_images() {
-        crate::services::security_readiness_service::require(ctx.db, images::READINESS).await?;
+        crate::services::security_readiness_service::require_serving(ctx.db, images::READINESS)
+            .await?;
     }
     let work = async {
         let mut attempts = 0;
@@ -656,6 +664,10 @@ pub(crate) async fn consume(
         .clone();
     let maximum = plan.tariff.tariff().bounds.max_response_bytes as usize;
     let mut decoder = stream::Decoder::new(native).with_contract(&plan.tariff.tariff().contract);
+    let mut checkpoints = ctx.billing.stream_checkpoints(
+        &metered,
+        sender.is_some() && native != adapters::Native::Gemini,
+    );
     let mut buffer = Zeroizing::new(Vec::new());
     let mut size = 0usize;
     let mut clean = false;
@@ -668,7 +680,31 @@ pub(crate) async fn consume(
                 .filter(|n| *n <= maximum)
                 .ok_or_else(adapters::invalid_response)?;
             if let Some(sender) = sender {
-                for text in decoder.push(&chunk)? {
+                let texts = match decoder.push(&chunk) {
+                    Ok(texts) => texts,
+                    Err(error) => {
+                        checkpoints.invalidate().await;
+                        return Err(error);
+                    }
+                };
+                if checkpoints.is_enabled()
+                    && let Some((protocol, mut evidence, final_report)) = decoder.checkpoint()
+                {
+                    if evidence.cache_write == Some(0) {
+                        for ttl in &plan.tariff.tariff().contract.cache_write_ttls {
+                            evidence.writes.entry(*ttl).or_insert(0);
+                        }
+                    }
+                    let charges = plan
+                        .tariff
+                        .usage(&evidence)
+                        .ok()
+                        .and_then(|u| u.model_charges);
+                    checkpoints
+                        .model_observation(protocol, evidence, final_report, charges)
+                        .await;
+                }
+                for text in texts {
                     if !text.is_empty() {
                         sender
                             .send(Ok(adapters::chunk(
@@ -696,8 +732,10 @@ pub(crate) async fn consume(
         #[allow(unreachable_code)]
         Ok::<(), AppError>(())
     };
+    let shutdown = super::shutdown::process();
     let result = tokio::select! {
         biased;
+        () = shutdown.stopped() => Err(AppError::ClientDisconnected),
         _ = ctx.cancel.cancelled() => Err(AppError::ClientDisconnected),
         r = Box::pin(authority) => r,
         r = tokio::time::timeout_at(deadline, Box::pin(read)) => {
@@ -850,15 +888,21 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
 /// fabricates consumption. Existing component-intent recovery finishes known work.
 pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<u64> {
     let mut n = 0;
-    for _ in 0..100 {
+    let mut failures = billing::recovery_batch::Failures::default();
+    let mut failed_ids = Vec::new();
+    for _ in 0..billing::recovery_batch::limit(100) {
+        if !crate::services::billing::reconcile::continue_reconcile() {
+            break;
+        }
         let token = uuid::Uuid::new_v4().to_string();
+        let mut filter = doc! {"state":{"$in":["dispatched","recovering"]},"lease_until":{"$lt":bson::DateTime::now()}};
+        if !failed_ids.is_empty() {
+            filter.insert("_id", doc! {"$nin":&failed_ids});
+        }
         let row = db
             .collection::<Document>(ATTEMPTS)
             .find_one_and_update(
-                doc! {
-                    "state": {"$in": ["dispatched", "recovering"]},
-                    "lease_until": {"$lt": bson::DateTime::now()},
-                },
+                filter.clone(),
                 doc! {"$set": {
                     "state": "recovering",
                     "recovery_token": &token,
@@ -868,41 +912,65 @@ pub(crate) async fn recover(db: &mongodb::Database) -> AppResult<u64> {
                     "updated_at": bson::DateTime::now(),
                 }},
             )
-            .await?;
+            .await;
+        let row = match row {
+            Ok(row) => row,
+            Err(error) if billing::recovery_batch::document_rejected(&error) => {
+                let raw = db.collection::<Document>(ATTEMPTS).find_one(filter).await?;
+                let Some(raw) = raw else {
+                    return Err(error.into());
+                };
+                failed_ids.push(raw.get("_id").cloned().unwrap_or(bson::Bson::Null));
+                failures.note(error.into());
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         let Some(row) = row else { break };
-        let id = row
-            .get_str("_id")
-            .map_err(|_| adapters::invalid_response())?;
-        // A crash after saving evidence is already recoverable through PR 2.
-        let known = db
-            .collection::<Document>("usage_meter")
-            .find_one(
-                doc! {"billing_request_id":id,"model_tariff.evidence_digest":{"$type":"string"}},
-            )
-            .await?
-            .is_some();
-        if !known {
-            db.collection::<Document>("usage_meter")
-                .update_many(
-                    doc! {"billing_request_id":id,"quantity":bson::Bson::Null,"released":false},
-                    doc! {"$set":{"last_error":"model_usage_pending"}},
+        let result: AppResult<u64> = billing::recovery_batch::work(async {
+            let id = row
+                .get_str("_id")
+                .map_err(|_| adapters::invalid_response())?;
+            // The expired attempt was claimed above; its executor no longer owns it.
+            billing::usage_checkpoint::recover_request(db, id, None).await?;
+            // A crash after saving evidence is already recoverable through PR 2.
+            let known = db
+                .collection::<Document>("usage_meter")
+                .find_one(
+                    doc! {"billing_request_id":id,"model_tariff.evidence_digest":{"$type":"string"}},
+                )
+                .await?
+                .is_some();
+            if !known {
+                db.collection::<Document>("usage_meter")
+                    .update_many(
+                        doc! {"billing_request_id":id,"quantity":bson::Bson::Null,"released":false},
+                        doc! {"$set":{"last_error":"model_usage_pending"}},
+                    )
+                    .await?;
+            }
+            let mut update = doc! {"state":if known {"evidence_saved"} else {"pending_review"},"updated_at":bson::DateTime::now()};
+            if !known {
+                update.insert("reason", "executor_lost");
+            }
+            let result = db
+                .collection::<Document>(ATTEMPTS)
+                .update_one(
+                    doc! {"_id":id,"state":"recovering","recovery_token":&token},
+                    doc! {"$set":update,"$unset":{"recovery_token":""}},
                 )
                 .await?;
+            Ok(result.modified_count)
+        }).await;
+        match result {
+            Ok(count) => n += count,
+            Err(error) => {
+                failed_ids.push(row.get("_id").cloned().unwrap_or(bson::Bson::Null));
+                failures.note(error);
+            }
         }
-        let mut update = doc! {"state":if known {"evidence_saved"} else {"pending_review"},"updated_at":bson::DateTime::now()};
-        if !known {
-            update.insert("reason", "executor_lost");
-        }
-        let result = db
-            .collection::<Document>(ATTEMPTS)
-            .update_one(
-                doc! {"_id":id,"state":"recovering","recovery_token":&token},
-                doc! {"$set":update,"$unset":{"recovery_token":""}},
-            )
-            .await?;
-        n += result.modified_count;
     }
-    Ok(n)
+    failures.finish(n)
 }
 pub(crate) async fn diagnostics(
     db: &mongodb::Database,

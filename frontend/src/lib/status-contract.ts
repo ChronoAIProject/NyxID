@@ -58,14 +58,9 @@ type StatusRegistry = {
   readonly [D in StatusDomain]: Readonly<Record<string, StatusMeta>>;
 };
 
-/** The live connection takes precedence over the persisted node status. */
-export function nodeStatusKey(status: string, isConnected: boolean) {
-  return isConnected ? "Online" : status === "draining" ? "Draining" : "Offline";
-}
-
 export const STATUS_REGISTRY: StatusRegistry = {
   node: {
-    // Derived from `(isConnected, status)` by `nodeStatusKey` above.
+    // Derived from `(isConnected, status)` — see `node-status-badge.tsx`.
     Online: {
       label: "Online",
       variant: "success",

@@ -2183,3 +2183,107 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
     eprintln!("actual paired runtime log: {}", log_path.display());
     fixture.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn issued_session_uses_database_time_and_subsequent_revocation_blocks_effects() {
+    use crate::services::{
+        platform_manager_ingress_service::IngressTurnStore, platform_public_agent_service as agent,
+    };
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::{collections::BTreeMap, sync::Mutex as StdMutex};
+
+    let fixture = Handshake::new("public_session_clock", NORMAL, 200, "review-fixture-model").await;
+    fixture.activate().await;
+    let ingress = fixture.ingress(101).await;
+    // Observe only command names and MongoDB's clock, never credential material.
+    let counts = Arc::new(StdMutex::new(BTreeMap::<String, usize>::new()));
+    let clock = Arc::new(StdMutex::new(None));
+    let observed_counts = counts.clone();
+    let observed_clock = clock.clone();
+    let mut options =
+        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+    options.command_event_handler = Some(EventHandler::callback(move |event| match event {
+        CommandEvent::Started(event) => {
+            *observed_counts
+                .lock()
+                .unwrap()
+                .entry(event.command_name)
+                .or_default() += 1;
+        }
+        CommandEvent::Succeeded(event) if event.command_name == "hello" => {
+            *observed_clock.lock().unwrap() = Some(*event.reply.get_datetime("localTime").unwrap());
+        }
+        _ => {}
+    }));
+    let mut state = fixture.state.clone();
+    state.db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database(fixture.state.db.name());
+    let context = credentials::issue_context(&state, Arc::new(IngressTurnStore), &ingress)
+        .await
+        .unwrap();
+    let creation_counts = std::mem::take(&mut *counts.lock().unwrap());
+    let session_clock = clock.lock().unwrap().unwrap().to_chrono();
+    let row = state
+        .db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one(doc! {"_id": &context.public_session_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.created_at, session_clock,
+        "session creation must use the observed database clock"
+    );
+    assert_eq!(row.expires_at, session_clock + Duration::hours(24));
+    counts.lock().unwrap().clear();
+    let mut transaction = state.db.client().start_session().await.unwrap();
+    transaction
+        .start_transaction()
+        .and_run2(async |session| {
+            tx::transaction_result(
+                agent::revoke_in_session(
+                    &state.db,
+                    session,
+                    &PublicRevocationScope::Session {
+                        public_session_id: row.id.clone(),
+                    },
+                    PublicRevocationReason::SenderUnlinked,
+                )
+                .await,
+            )
+        })
+        .await
+        .unwrap();
+    let revocation_counts = std::mem::take(&mut *counts.lock().unwrap());
+    let revoked = state
+        .db
+        .collection::<PlatformPublicSession>(SESSIONS)
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(revoked.revoked_at.is_some());
+    assert!(revoked.cleanup_record_id.is_some());
+    assert!(revoked.credential_ciphertext.is_empty());
+    // A caller holding the pre-revocation row is refused by the scope marker,
+    // independently of whether it has observed the cleanup page's row update.
+    transaction.start_transaction().await.unwrap();
+    assert!(
+        !agent::fence_local_session_in_session(&state.db, &mut transaction, &row)
+            .await
+            .unwrap()
+    );
+    transaction.abort_transaction().await.unwrap();
+    eprintln!(
+        "session creation commands: {creation_counts:?}; total={}",
+        creation_counts.values().sum::<usize>()
+    );
+    eprintln!(
+        "session revocation commands: {revocation_counts:?}; total={}",
+        revocation_counts.values().sum::<usize>()
+    );
+    fixture.state.db.drop().await.unwrap();
+}

@@ -2,17 +2,43 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
+import { resolveDictationLanguage } from "./voice/resolveDictationLanguage";
+import languageCases from "./voice/dictation-language-cases.json";
+import androidCases from "./voice/dictation-android-cases.json";
 import type { useComposerDictation } from "./useComposerDictation";
 
 type Listener = (event?: any) => void;
-type Permission = { granted: boolean; restricted?: boolean };
+type PermissionStatus = "granted" | "denied" | "undetermined";
+type Permission = {
+  status: PermissionStatus;
+  granted: boolean;
+  canAskAgain: boolean;
+  expires: "never";
+  restricted: boolean;
+};
+
+function permissionResponse(
+  status: PermissionStatus,
+  restricted = false,
+): Permission {
+  return {
+    status,
+    granted: status === "granted",
+    canAskAgain: status !== "denied",
+    expires: "never",
+    restricted,
+  };
+}
 
 /** The native recognizer: one shared session with an event emitter. */
 function recognizer(events: string[]) {
   const listeners = new Map<string, Set<Listener>>();
   let permission = deferred<Permission>();
   const module = {
+    available: true,
     onDevice: true,
+    permissionStatus: permissionResponse("undetermined"),
+    permissionReads: 0,
     setAudioSessionActiveIOS: (
       active: boolean,
       options: { notifyOthersOnDeactivation: boolean },
@@ -22,13 +48,23 @@ function recognizer(events: string[]) {
       events.push("audio-release");
     },
     options: undefined as Record<string, unknown> | undefined,
+    isRecognitionAvailable: () => {
+      events.push("availability");
+      return module.available;
+    },
     requestPermissionsAsync: () => {
       events.push("permission");
       return permission.promise;
     },
+    getMicrophonePermissionsAsync: async () => module.permissionStatus,
+    getSpeechRecognizerPermissionsAsync: async () => module.permissionStatus,
+    getPermissionsAsync: async () => {
+      module.permissionReads++;
+      return module.permissionStatus;
+    },
     getSupportedLocales: async () => ({
       locales: ["en-GB", "en-US"],
-      installedLocales: [],
+      installedLocales: [] as string[],
     }),
     supportsOnDeviceRecognition: () => module.onDevice,
     addListener: (name: string, listener: Listener) => {
@@ -62,7 +98,18 @@ function recognizer(events: string[]) {
 function setup({
   chosen,
   continuous = true,
-}: { chosen?: string; continuous?: boolean } = {}) {
+  platform = "ios",
+  preferred,
+  supported = ["en-GB", "en-US"],
+  installed = [],
+}: {
+  chosen?: string;
+  continuous?: boolean;
+  platform?: "ios" | "android";
+  preferred?: string[];
+  supported?: string[];
+  installed?: string[];
+} = {}) {
   let state = "active",
     focused = true,
     sheetOpen = false,
@@ -72,8 +119,11 @@ function setup({
     inserted: string[] = [];
   const silentDurations: number[] = [];
   let time = 10_000;
-  let resolveForeground: (() => void) | undefined;
   const native = recognizer(events);
+  native.getSupportedLocales = async () => ({
+    locales: supported,
+    installedLocales: installed,
+  });
   const locales: [string | undefined, readonly string[]][] = [];
   const props = {
     scope: "agent:chat:0",
@@ -84,10 +134,17 @@ function setup({
     },
     onSilence: (durationMs: number) => silentDurations.push(durationMs),
   };
+  let translate = (phrase: string, values?: Record<string, string | number>) =>
+    phrase.replace(/{{(\w+)}}/g, (match, key) =>
+      String(values?.[key] ?? match),
+    );
   const h = hookHarness<ReturnType<typeof useComposerDictation>>(
     {
+      "../../i18n/deviceLanguages": {
+        deviceLanguages: () => preferred ?? ["en-GB"],
+      },
       "react-native": {
-        Platform: { OS: "ios" },
+        Platform: { OS: platform },
         Linking: {
           openSettings: async () => {
             events.push("settings");
@@ -109,29 +166,27 @@ function setup({
       "../../lib/accessibility/workspaceAccessibility": {
         useWorkspaceAccessibility: () => ({ sheetOpen }),
       },
+      "../../i18n/LanguageProvider": {
+        useAppLanguage: () => ({ t: translate }),
+      },
       "./voice/dictationLanguage": {
+        languageLabel: (value: string) => value,
         savedDictationLanguage: async () => chosen,
       },
-      "./voice/dictationLocale": {
-        dictationLocale: (
-          phone: string | undefined,
-          list: readonly string[],
+      "./voice/resolveDictationLanguage": {
+        resolveDictationLanguage: (
+          saved: string | undefined,
+          preferred: readonly string[],
+          supported: readonly string[],
+          platform?: string,
         ) => {
-          locales.push([phone, list]);
-          return "en-GB";
-        },
-      },
-      "./voice/voicePermission": {
-        waitForVoiceForeground: async (_app: unknown, signal: AbortSignal) => {
-          if (state === "active") return;
-          await new Promise<void>((resolve, reject) => {
-            resolveForeground = resolve;
-            signal.addEventListener(
-              "abort",
-              () => reject(new Error("cancelled")),
-              { once: true },
-            );
-          });
+          locales.push([preferred[0], supported]);
+          return resolveDictationLanguage(
+            saved,
+            preferred,
+            supported,
+            platform,
+          );
         },
       },
     },
@@ -148,6 +203,12 @@ function setup({
   ) as typeof import("./voice/audioSessionOwnership");
   h.mock("./voice/audioSessionOwnership", ownership);
   h.mock("./audioSessionOwnership", ownership);
+  h.mock(
+    "./voice/voicePermission",
+    h.load(
+      fileURLToPath(new URL("./voice/voicePermission.ts", import.meta.url)),
+    ),
+  );
   const module = h.load(
     fileURLToPath(new URL("./useComposerDictation.ts", import.meta.url)),
   );
@@ -166,6 +227,10 @@ function setup({
     events,
     inserted,
     silentDurations,
+    translate: (next: (phrase: string) => string) => {
+      translate = next;
+      h.render();
+    },
     advance: (ms: number) => {
       time += ms;
     },
@@ -178,7 +243,7 @@ function setup({
     /** Permission granted and the recognizer reported start. */
     begin: async () => {
       const pending = h.value().start();
-      native.grant({ granted: true });
+      native.grant(permissionResponse("granted"));
       await pending;
       await h.settle();
       emit("start", null);
@@ -194,7 +259,6 @@ function setup({
     app: (next: string) => {
       state = next;
       for (const cb of [...appListeners]) cb(next);
-      if (next === "active") resolveForeground?.();
       h.flush();
     },
   };
@@ -221,11 +285,339 @@ test("native dictation starts Apple recognition in the phone's language without 
   x.h.unmount();
 });
 
-test("on-device recognition is only required when the iPhone supports it", async () => {
+test("iOS delegates the on-device capability check to the selected native recognizer", async () => {
   const x = setup();
   x.native.onDevice = false;
   await x.begin();
-  assert.equal(x.native.options!.requiresOnDeviceRecognition, false);
+  assert.equal(x.native.options!.requiresOnDeviceRecognition, true);
+  x.h.unmount();
+});
+
+test("Android without a recognition service explains the unavailable feature before requesting microphone permission", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  x.native.available = false;
+  x.native.grant(permissionResponse("granted"));
+  await x.h.value().start();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability"]);
+  assert.equal(x.h.value().phase, "idle");
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.match(
+    x.h.value().error!,
+    /device.*speech recognition service.*keep typing/i,
+  );
+  t.mock.timers.tick(60_000);
+  x.h.flush();
+  assert.match(x.h.value().error!, /speech recognition service/);
+  assert.deepEqual(x.inserted, []);
+
+  x.h.value().discard();
+  x.h.flush();
+  assert.equal(x.h.value().error, undefined);
+  x.native.available = true;
+  await x.begin();
+  assert.deepEqual(x.events, [
+    "availability",
+    "availability",
+    "permission",
+    "start",
+  ]);
+  assert.equal(x.h.value().recording, true);
+});
+
+test("Android permission activity can dwell before granting and gets a separate foreground handoff", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  x.app("background");
+  t.mock.timers.tick(59_000);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "permission");
+  x.native.grant(permissionResponse("granted"));
+  await x.h.settle();
+  t.mock.timers.tick(4999);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "permission");
+  assert.equal(
+    x.events.includes("start"),
+    false,
+    "no background microphone acquisition",
+  );
+
+  x.app("active");
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  assert.deepEqual(x.events, ["availability", "permission", "start"]);
+  x.emit("start");
+  x.result("Granted draft words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["Granted draft words"]);
+});
+
+test("an unanswered Android permission prompt is bounded and a late grant cannot revive crew capture", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android", continuous: false });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  t.mock.timers.tick(59_999);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "permission");
+  t.mock.timers.tick(1);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "idle");
+  assert.match(x.h.value().error!, /could not start/);
+  x.native.grant(permissionResponse("granted"));
+  x.app("active");
+  await pending;
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+  assert.deepEqual(
+    x.silentDurations,
+    [],
+    "an unanswered permission prompt is not a silent utterance",
+  );
+});
+
+test("a granted Android prompt that never returns foreground fails after five seconds", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  x.native.grant(permissionResponse("granted"));
+  await x.h.settle();
+  t.mock.timers.tick(5000);
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "idle");
+  assert.match(x.h.value().error!, /could not start/);
+  x.app("active");
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+});
+
+test("returning active consumes Android's permission background exception", async () => {
+  const x = setup({ platform: "android" });
+  const pending = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  x.app("active");
+  x.app("background");
+  assert.equal(x.h.value().phase, "idle");
+  x.native.grant(permissionResponse("granted"));
+  x.app("active");
+  await pending;
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
+});
+
+test("already granted Android permission skips the prompt and background still cancels active capture", async () => {
+  const x = setup({ platform: "android" });
+  x.native.permissionStatus = permissionResponse("granted");
+  await x.h.value().start();
+  await x.h.settle();
+  assert.equal(x.native.permissionReads, 1);
+  assert.deepEqual(x.events, ["availability", "start"]);
+  x.emit("start");
+  x.result("Private draft words");
+  x.app("background");
+  assert.equal(x.h.value().phase, "idle");
+  assert.equal(x.events.at(-1), "abort");
+  x.result("Late words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
+});
+
+test("background during the Android permission getter receives no prompt exception", async () => {
+  const x = setup({ platform: "android" });
+  const status = deferred<Permission>();
+  x.native.getPermissionsAsync = () => status.promise;
+  const pending = x.h.value().start();
+  x.app("background");
+  status.resolve(permissionResponse("granted"));
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "idle");
+  assert.deepEqual(x.events, ["availability"]);
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
+});
+
+test("a cancelled Android prompt's late grant cannot replace or clear the next attempt", async () => {
+  const x = setup({ platform: "android" });
+  const firstPermission = deferred<Permission>();
+  const nextPermission = deferred<Permission>();
+  let requests = 0;
+  x.native.requestPermissionsAsync = () => {
+    x.events.push("permission");
+    return (++requests === 1 ? firstPermission : nextPermission).promise;
+  };
+  const first = x.h.value().start();
+  await x.h.settle();
+  x.app("background");
+  x.h.value().stop();
+  x.h.flush();
+  x.app("active");
+  const next = x.h.value().start();
+  await x.h.settle();
+  firstPermission.resolve(permissionResponse("granted"));
+  await first;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "permission");
+  assert.equal(x.events.includes("start"), false);
+  nextPermission.resolve(permissionResponse("granted"));
+  await next;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  assert.equal(x.events.filter((event) => event === "start").length, 1);
+  x.emit("start");
+  x.result("The next draft", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["The next draft"]);
+  x.h.unmount();
+});
+
+test("a recognizer that never starts times out, releases the microphone and supports a clean retry", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  x.native.grant(permissionResponse("granted"));
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  t.mock.timers.tick(7999);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "connecting");
+  t.mock.timers.tick(1);
+  x.h.flush();
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /could not start.*try again.*keep typing/i);
+  assert.equal(x.events.at(-1), "abort");
+  x.emit("start");
+  x.result("late words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, []);
+  assert.equal(x.h.value().phase, "idle");
+  t.mock.timers.tick(60_000);
+  x.h.flush();
+  assert.match(x.h.value().error!, /could not start/);
+
+  x.native.resetPermission();
+  await x.begin();
+  assert.equal(x.h.value().error, undefined);
+  t.mock.timers.tick(60_000);
+  x.h.flush();
+  assert.equal(
+    x.h.value().phase,
+    "listening",
+    "a started recognizer clears its startup deadline",
+  );
+  x.result("retry words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["retry words"]);
+});
+
+test("a stalled locale lookup cannot start recognition after its startup deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const locales =
+    deferred<Awaited<ReturnType<typeof x.native.getSupportedLocales>>>();
+  x.native.getSupportedLocales = () => locales.promise;
+  const pending = x.h.value().start();
+  x.native.grant(permissionResponse("granted"));
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  t.mock.timers.tick(8000);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "idle");
+  assert.match(x.h.value().error!, /could not start/);
+  locales.resolve({ locales: ["en-US"], installedLocales: [] });
+  await pending;
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+});
+
+test("Android permission and recognition errors provide device-appropriate recovery instructions", async (t) => {
+  for (const restricted of [false, true]) {
+    const x = setup({ platform: "android" });
+    t.after(x.h.unmount);
+    x.native.permissionStatus = permissionResponse("denied", restricted);
+    const pending = x.h.value().start();
+    x.native.grant(permissionResponse("denied", restricted));
+    await pending;
+    await x.h.settle();
+    assert.equal(x.h.value().permissionDenied, true);
+    assert.match(
+      x.h.value().error!,
+      restricted
+        ? /restricted on this device/
+        : /Allow microphone access in Settings/,
+    );
+    assert.doesNotMatch(
+      x.h.value().error!,
+      /iPhone|Screen Time|General.*Keyboard/,
+    );
+    x.h.value().openSettings();
+    assert.equal(x.events.at(-1), "settings");
+  }
+  for (const code of ["language-not-supported", "service-not-allowed"]) {
+    const x = setup({ platform: "android" });
+    t.after(x.h.unmount);
+    await x.begin();
+    x.native.permissionStatus = permissionResponse("granted");
+    x.emit("error", { error: code });
+    x.emit("end");
+    await x.h.settle();
+    assert.equal(x.h.value().active, false);
+    assert.match(x.h.value().error!, /language|device.*speech recognition/i);
+    assert.doesNotMatch(
+      x.h.value().error!,
+      /iPhone|Screen Time|General.*Keyboard/,
+    );
+  }
+});
+
+test("dictation errors follow the app language without restarting capture or dropping draft words", async () => {
+  const x = setup({ platform: "android" });
+  await x.begin();
+  x.result("Keep these draft words");
+  x.emit("error", { error: "network" });
+  const message = x.h.value().error!;
+  assert.match(message, /Speech recognition couldn't continue/);
+  const events = [...x.events];
+
+  x.translate((phrase) =>
+    phrase === message ? "语音识别无法继续。请检查网络连接后重试。" : phrase,
+  );
+  assert.equal(x.h.value().error, "语音识别无法继续。请检查网络连接后重试。");
+  assert.equal(x.h.value().phase, "listening");
+  assert.equal(x.h.value().text, "Keep these draft words");
+  assert.deepEqual(
+    x.events,
+    events,
+    "translation does not restart or abort native capture",
+  );
+
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["Keep these draft words"]);
+  x.translate((phrase) => phrase);
+  assert.equal(x.h.value().error, message);
   x.h.unmount();
 });
 
@@ -336,9 +728,11 @@ test("late permission cannot start recognition after cancellation or unmount", a
   ]) {
     const x = setup();
     const pending = x.h.value().start();
+    await x.h.settle();
+    assert.deepEqual(x.events, ["permission"]);
     if (change === "unmount") x.h.unmount();
     else x.change(change);
-    x.native.grant({ granted: true });
+    x.native.grant(permissionResponse("granted"));
     await pending;
     await x.h.settle();
     assert.deepEqual(x.events, ["permission"], change);
@@ -349,8 +743,9 @@ test("late permission cannot start recognition after cancellation or unmount", a
 test("permission denial links to Settings and never starts recognition", async () => {
   for (const restricted of [false, true]) {
     const x = setup();
+    x.native.permissionStatus = permissionResponse("denied", restricted);
     const pending = x.h.value().start();
-    x.native.grant({ granted: false, restricted });
+    x.native.grant(permissionResponse("denied", restricted));
     await pending;
     await x.h.settle();
     assert.match(
@@ -367,11 +762,111 @@ test("permission denial links to Settings and never starts recognition", async (
   }
 });
 
+for (const scenario of [
+  {
+    name: "speech only with microphone undetermined",
+    mic: "undetermined",
+    speech: "denied",
+    message:
+      "Allow speech recognition access in Settings to dictate. You can keep typing.",
+  },
+  {
+    name: "speech only",
+    mic: "granted",
+    speech: "denied",
+    message:
+      "Allow speech recognition access in Settings to dictate. You can keep typing.",
+  },
+  {
+    name: "microphone only",
+    mic: "denied",
+    speech: "granted",
+    message:
+      "Allow microphone access in Settings to dictate. You can keep typing.",
+  },
+  {
+    name: "both permissions",
+    mic: "denied",
+    speech: "denied",
+    message:
+      "Allow microphone and speech recognition access in Settings to dictate. You can keep typing.",
+  },
+  {
+    name: "restricted speech recognition",
+    mic: "granted",
+    speech: "denied",
+    restricted: true,
+    message:
+      "Speech recognition is restricted on this device in Screen Time. You can keep typing.",
+  },
+] as const) {
+  test(`iOS prompt denial identifies ${scenario.name} and offers Settings`, async () => {
+    const x = setup();
+    x.native.permissionStatus = permissionResponse("undetermined");
+    x.native.getMicrophonePermissionsAsync = async () =>
+      permissionResponse(scenario.mic);
+    x.native.getSpeechRecognizerPermissionsAsync = async () =>
+      permissionResponse(scenario.speech, "restricted" in scenario);
+    const pending = x.h.value().start();
+    x.native.grant(permissionResponse("denied"));
+    await pending;
+    await x.h.settle();
+    assert.equal(x.h.value().error, scenario.message);
+    assert.equal(x.h.value().permissionDenied, true);
+    assert.equal(x.h.value().active, false);
+    x.h.value().openSettings();
+    assert.deepEqual(x.events, ["permission", "settings"]);
+    x.h.unmount();
+  });
+}
+
+test("an undetermined iOS permission prompt result offers retry without claiming denial", async () => {
+  const x = setup();
+  x.native.permissionStatus = permissionResponse("undetermined");
+  const pending = x.h.value().start();
+  x.native.grant(permissionResponse("undetermined"));
+  await pending;
+  await x.h.settle();
+  assert.equal(
+    x.h.value().error,
+    "Dictation could not start. Please try again. You can keep typing.",
+  );
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.equal(x.h.value().active, false);
+  assert.deepEqual(x.events, ["permission"]);
+  x.native.grant(permissionResponse("granted"));
+  x.native.permissionStatus = permissionResponse("granted");
+  await x.h.value().retry();
+  x.emit("start");
+  assert.equal(x.h.value().error, undefined);
+  x.h.unmount();
+});
+
+test("discard during precise permission reads cannot restore a denial notice", async () => {
+  const x = setup();
+  const mic = deferred<Permission>();
+  x.native.getMicrophonePermissionsAsync = () => mic.promise;
+  const pending = x.h.value().start();
+  x.native.grant(permissionResponse("denied"));
+  await x.h.settle();
+  x.h.value().discard();
+  mic.resolve(permissionResponse("denied"));
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().error, undefined);
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.equal(x.h.value().active, false);
+  assert.deepEqual(x.events, ["permission"]);
+  x.h.unmount();
+});
+
 test("the permission prompt's inactive state waits for foreground; background during capture aborts", async () => {
   const x = setup();
   const pending = x.h.value().start();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["permission"]);
   x.app("inactive");
-  x.native.grant({ granted: true });
+  x.native.grant(permissionResponse("granted"));
   await x.h.settle();
   assert.deepEqual(x.events, ["permission"]);
   x.app("active");
@@ -388,8 +883,9 @@ test("the permission prompt's inactive state waits for foreground; background du
 test("hold release before the microphone opens cancels without recognizing", async () => {
   const x = setup();
   const pending = x.h.value().start();
+  await x.h.settle();
   x.h.value().stop();
-  x.native.grant({ granted: true });
+  x.native.grant(permissionResponse("granted"));
   await pending;
   await x.h.settle();
   assert.deepEqual(x.events, ["permission"]);
@@ -397,7 +893,7 @@ test("hold release before the microphone opens cancels without recognizing", asy
   x.h.unmount();
   const y = setup();
   const started = y.h.value().start();
-  y.native.grant({ granted: true });
+  y.native.grant(permissionResponse("granted"));
   await started;
   await y.h.settle();
   assert.equal(y.h.value().phase, "connecting");
@@ -415,7 +911,7 @@ test("a new attempt waits for an aborted session's end before listening", async 
   x.h.flush();
   x.native.resetPermission();
   const pending = x.h.value().start();
-  x.native.grant({ granted: true });
+  x.native.grant(permissionResponse("granted"));
   await x.h.settle();
   assert.deepEqual(x.events, ["permission", "start", "abort", "permission"]);
   x.emit("end", null); // the aborted session's end
@@ -436,15 +932,22 @@ test("recognizer errors explain themselves; text heard before a failure still jo
   const cases: [string, RegExp][] = [
     ["no-speech", /No speech was detected/],
     ["network", /connection/],
-    ["language-not-supported", /iPhone's language/],
-    ["service-not-allowed", /Dictation is on in Settings/],
+    ["language-not-supported", /en-GB/],
+    ["service-not-allowed", /temporarily unavailable/],
     ["audio-capture", /microphone couldn't record/],
   ];
   for (const [code, message] of cases) {
     const x = setup();
     await x.begin();
+    x.native.permissionStatus = permissionResponse("granted");
     x.emit("error", { error: code, message: "native detail" });
     x.emit("end", null);
+    await x.h.settle();
+    if (code === "service-not-allowed") {
+      x.emit("error", { error: code });
+      x.emit("end");
+      await x.h.settle();
+    }
     assert.equal(x.h.value().phase, "idle", code);
     assert.match(x.h.value().error!, message, code);
     assert.equal(x.h.value().permissionDenied, false, code);
@@ -454,6 +957,7 @@ test("recognizer errors explain themselves; text heard before a failure still jo
   await denied.begin();
   denied.emit("error", { error: "not-allowed", message: "" });
   denied.emit("end", null);
+  await denied.h.settle();
   assert.equal(denied.h.value().permissionDenied, true);
   assert.match(denied.h.value().error!, /Settings/);
   denied.h.unmount();
@@ -524,7 +1028,7 @@ test("crew speech never dispatches an interrupted or still-interim utterance", a
     });
     if (failed) x.native.emit("error", { error: "interrupted" });
     x.native.emit("end");
-    x.h.flush();
+    await x.h.settle();
     assert.deepEqual(x.inserted, []);
     assert.ok(x.h.value().error);
     x.h.unmount();
@@ -542,10 +1046,13 @@ test("silent crew utterances end without error or delivery and can re-arm; failu
   ]) {
     const x = setup({ continuous: false });
     await x.begin();
+    if (["not-allowed", "service-not-allowed"].includes(event)) {
+      x.native.permissionStatus = permissionResponse("denied");
+    }
     if (event === "nomatch") x.native.emit(event, null);
     else if (event !== "empty") x.native.emit("error", { error: event });
     x.native.emit("end");
-    x.h.flush();
+    await x.h.settle();
     assert.deepEqual(x.inserted, []);
     assert.equal(
       !!x.h.value().error,
@@ -565,7 +1072,7 @@ test("crew silence duration measures the native session and excludes time waitin
   const x = setup({ continuous: false });
   const pending = x.h.value().start();
   x.advance(5000);
-  x.native.grant({ granted: true });
+  x.native.grant(permissionResponse("granted"));
   await pending;
   await x.h.settle();
   x.emit("start");
@@ -852,3 +1359,229 @@ test("rapid repeated recognition/private handoffs retain one obligation until th
   assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
   f.h.unmount();
 });
+
+const recognizerLocales = ["zh-CN", "zh-TW", "ja-JP", "en-US"];
+for (const value of languageCases.filter((value) => value.expected)) {
+  const { preferred, expected } = value;
+  const chosen = value.saved ?? undefined;
+  test(`recognizer start uses preferred list ${preferred.join(",")} and saved ${chosen ?? "automatic"}`, async () => {
+    const x = setup({
+      preferred: [...preferred],
+      supported: recognizerLocales,
+      chosen,
+    });
+    await x.begin();
+    assert.equal(x.native.options?.lang, expected);
+    assert.equal(x.native.options?.requiresOnDeviceRecognition, true);
+    x.h.unmount();
+  });
+}
+for (const installed of [[], ["zh-CN"], ["ja-JP"]]) {
+  test(`Android requires on-device only for the chosen installed locale: ${installed.join(",")}`, async () => {
+    const x = setup({
+      platform: "android",
+      preferred: ["ja-JP"],
+      supported: recognizerLocales,
+      installed,
+    });
+    await x.begin();
+    assert.equal(x.native.options?.lang, "ja-JP");
+    assert.equal(
+      x.native.options?.requiresOnDeviceRecognition,
+      installed.includes("ja-JP"),
+    );
+    x.h.unmount();
+  });
+}
+test("an early iOS on-device asset failure retries the same language once and inserts once", async () => {
+  const x = setup({ preferred: ["zh-Hans-CN"], supported: recognizerLocales });
+  await x.begin();
+  x.native.permissionStatus = permissionResponse("granted");
+  x.emit("error", { error: "service-not-allowed" });
+  x.emit("end");
+  await x.h.settle();
+  assert.equal(x.native.options?.lang, "zh-CN");
+  assert.equal(x.native.options?.requiresOnDeviceRecognition, false);
+  assert.equal(x.events.filter((e) => e === "start").length, 2);
+  assert.equal(x.h.value().error, undefined);
+  x.emit("start");
+  x.result("你好", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["你好"]);
+  x.h.unmount();
+});
+test("both iOS recognition attempts fail with a retry notice and no third automatic start", async () => {
+  const x = setup();
+  await x.begin();
+  x.native.permissionStatus = permissionResponse("granted");
+  for (let i = 0; i < 2; i++) {
+    x.emit("error", { error: "service-not-allowed" });
+    x.emit("end");
+    await x.h.settle();
+  }
+  assert.match(x.h.value().error!, /temporarily unavailable/);
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.equal(x.events.filter((e) => e === "start").length, 2);
+  x.h.unmount();
+});
+for (const transition of ["result", "stop", "discard"] as const) {
+  test(`iOS asset recovery cannot retry after ${transition}`, async () => {
+    const x = setup();
+    await x.begin();
+    x.native.permissionStatus = permissionResponse("granted");
+    if (transition === "result") x.result("heard", true);
+    x.emit("error", { error: "service-not-allowed" });
+    if (transition === "stop") x.h.value().stop();
+    if (transition === "discard") x.h.value().discard();
+    x.emit("end");
+    await x.h.settle();
+    assert.equal(x.events.filter((e) => e === "start").length, 1);
+    assert.equal(x.inserted.length, transition === "result" ? 1 : 0);
+    x.h.unmount();
+  });
+}
+test("revoked microphone permission during an asset failure offers Settings without retry", async () => {
+  const x = setup();
+  await x.begin();
+  x.native.permissionStatus = permissionResponse("denied");
+  x.native.getSpeechRecognizerPermissionsAsync = async () =>
+    permissionResponse("granted");
+  x.emit("error", { error: "service-not-allowed" });
+  x.emit("end");
+  await x.h.settle();
+  assert.equal(x.h.value().permissionDenied, true);
+  assert.match(x.h.value().error!, /microphone access/i);
+  assert.equal(x.events.filter((e) => e === "start").length, 1);
+  x.h.unmount();
+});
+test("unsupported preferred languages never start the recognizer's English default", async () => {
+  const x = setup({ preferred: ["xx-YY"], supported: ["en-US"] });
+  const pending = x.h.value().start();
+  x.native.grant(permissionResponse("granted"));
+  await pending;
+  await x.h.settle();
+  assert.equal(x.native.options, undefined);
+  assert.equal(x.h.value().chooseLanguage, true);
+  assert.equal(
+    x.h.value().error,
+    "Dictation isn't available in your device's language. Choose a language or keep typing.",
+  );
+  x.h.unmount();
+});
+test("revoked speech permission is distinct from microphone access on iOS", async () => {
+  const x = setup();
+  await x.begin();
+  x.native.permissionStatus = permissionResponse("denied");
+  x.native.getMicrophonePermissionsAsync = async () =>
+    permissionResponse("granted");
+  x.emit("error", { error: "service-not-allowed" });
+  x.emit("end");
+  await x.h.settle();
+  assert.equal(x.h.value().permissionDenied, true);
+  assert.match(x.h.value().error!, /Allow speech recognition access/);
+  assert.equal(x.events.filter((event) => event === "start").length, 1);
+  x.h.unmount();
+});
+
+test("iOS recognition error with speech denied and microphone undetermined names speech only", async () => {
+  const x = setup();
+  await x.begin();
+  x.native.permissionStatus = permissionResponse("denied");
+  x.native.getMicrophonePermissionsAsync = async () =>
+    permissionResponse("undetermined");
+  x.emit("error", { error: "service-not-allowed" });
+  x.emit("end");
+  await x.h.settle();
+  assert.equal(
+    x.h.value().error,
+    "Allow speech recognition access in Settings to dictate. You can keep typing.",
+  );
+  assert.equal(x.h.value().permissionDenied, true);
+  assert.equal(x.events.filter((event) => event === "start").length, 1);
+  x.h.value().openSettings();
+  assert.equal(x.events.at(-1), "settings");
+  x.h.unmount();
+});
+
+test("undetermined iOS permissions during an asset failure retry without a Settings notice", async () => {
+  const x = setup();
+  await x.begin();
+  x.native.permissionStatus = permissionResponse("undetermined");
+  x.emit("error", { error: "service-not-allowed" });
+  x.emit("end");
+  await x.h.settle();
+  assert.equal(x.h.value().error, undefined);
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.equal(x.events.filter((event) => event === "start").length, 2);
+  assert.equal(x.native.options?.requiresOnDeviceRecognition, false);
+  x.h.unmount();
+});
+
+for (const [code, message] of [
+  ["busy", /busy/],
+  ["network", /connection/],
+  ["audio-capture", /microphone couldn't record/],
+  ["client", /unexpectedly/],
+  ["speech-timeout", /No speech/],
+] as const) {
+  test(`Android ${code} errors offer retry without inventing denied permission`, async () => {
+    const x = setup({ platform: "android" });
+    await x.begin();
+    x.emit("error", { error: code });
+    x.emit("end");
+    await x.h.settle();
+    assert.match(x.h.value().error!, message);
+    assert.equal(x.h.value().permissionDenied, false);
+    x.native.permissionStatus = permissionResponse("granted");
+    await x.h.value().retry();
+    x.emit("start");
+    assert.equal(x.h.value().error, undefined);
+    x.h.unmount();
+  });
+}
+
+test("Android unavailable language list offers Retry rather than an empty picker on a native language error", async () => {
+  const x = setup({ platform: "android", supported: [] });
+  await x.begin();
+  x.emit("error", { error: "language-not-supported" });
+  assert.equal(x.h.value().chooseLanguage, false);
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.match(x.h.value().error!, /try again/i);
+  x.h.unmount();
+});
+
+for (const scenario of androidCases) {
+  test(`Android shared recognizer hook dictation: ${scenario.name}`, async () => {
+    const x = setup({
+      platform: "android",
+      supported: scenario.locales,
+      chosen: scenario.saved,
+      preferred: scenario.preferred,
+    });
+    if (scenario.reject)
+      x.native.getSupportedLocales = async () => {
+        throw new Error("Locale discovery unavailable");
+      };
+    await x.begin();
+    assert.equal(x.native.options?.lang, scenario.expected);
+    assert.equal(x.h.value().chooseLanguage, !!scenario.hardError);
+    assert.equal(x.events.includes("start"), !scenario.hardError);
+    if (!scenario.hardError) assert.equal(x.h.value().error, undefined);
+    else assert.match(x.h.value().error!, /ja-JP/);
+    x.h.unmount();
+  });
+}
+
+for (const supported of [[], undefined]) {
+  test(`iOS ${supported ? "empty" : "rejected"} locale discovery passes the first preferred language explicitly`, async () => {
+    const x = setup({ preferred: ["zh-Hans-CN", "en-US"], supported: [] });
+    if (!supported)
+      x.native.getSupportedLocales = async () => {
+        throw new Error("Unavailable");
+      };
+    await x.begin();
+    assert.equal(x.native.options?.lang, "zh-Hans-CN");
+    assert.equal(x.h.value().error, undefined);
+    x.h.unmount();
+  });
+}

@@ -19,7 +19,9 @@ env:
   SHARD_COUNT: 8
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  CARGO_INCREMENTAL: 1
+  # The eight-commit replay favors non-incremental archives on 16 GiB runners.
+  # See docs/CI_PERFORMANCE.md; other lanes retain graph reuse.
+  CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # libtest runs each #[tokio::test] body on a 2 MiB thread by default. Debug
@@ -40,8 +42,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
-      - name: Prepare backend memory reserve
-        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
@@ -51,9 +51,12 @@ jobs:
           components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
       - uses: ./.github/actions/ci-rust-cache
         with:
+          backend-reserve: 'true'
           save-if: 'false'
           shared-key: ${{ inputs.coverage && 'coverage-backend-build' || 'backend-build' }}
-          incremental: 'true'
+          incremental: 'false'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
@@ -69,6 +72,16 @@ jobs:
           python3 .github/scripts/ci_resources.py backend-build
           cargo nextest archive -p nyxid -p nyxid-service-adapters
           --archive-file backend-tests.tar.zst
+      - name: Verify cached coverage archive isolation
+        if: inputs.coverage
+        env:
+          NYXID_REQUIRE_RUST_FIXTURES: '1'
+        run: python3 .github/scripts/test_coverage_archive_cache.py
+      - name: Clear coverage counters
+        if: inputs.coverage
+        run: cargo llvm-cov clean --profraw-only
+      # nextest archives list current Cargo executables explicitly. Reporting
+      # from that archive excludes stale objects without deleting build caches.
       - name: Build instrumented test archive
         if: inputs.coverage
         run: >-
@@ -76,7 +89,7 @@ jobs:
           --log-file "$RUNNER_TEMP/coverage-build.log" --
           python3 .github/scripts/ci_resources.py coverage-build
           cargo llvm-cov nextest-archive --package nyxid
-          --archive-file backend-tests.tar.zst
+          --archive-file backend-tests.tar.zst --no-clean
       - name: Record full test inventory
         env:
           LLVM_PROFILE_FILE: ${{ runner.temp }}/list-%p.profraw

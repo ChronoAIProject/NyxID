@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { channelDetail } from "./channelPresentation";
 import { useState } from "react";
 import { Alert, Linking, Switch } from "react-native";
 import { useQuery } from "@tanstack/react-query";
@@ -27,6 +29,8 @@ export function OrgGuestChannel({
   agent: AssistantAgent;
   channel: AssistantAgent["channels"][number];
 }) {
+  const { t } = useAppLanguage();
+  const detail = channelDetail(channel);
   const [open, setOpen] = useState(false);
   const session = useCollaborationSession("nyxbot:org-specialist-channels");
   const query = useQuery({
@@ -45,7 +49,7 @@ export function OrgGuestChannel({
     <>
       <SettingsRow
         label={channel.bot_label}
-        detail={channel.platform}
+        detail={detail.kind === "message" ? t(detail.value) : detail.value}
         value={channel.status}
         onPress={() => setOpen(!open)}
       />
@@ -71,7 +75,7 @@ export function OrgGuestChannel({
                       Boolean(settings.readiness_reason)))
                 }
                 onValueChange={(enabled) => {
-                  if (settings)
+                  if (settings?.can_manage && !session.busy)
                     void session.run(() =>
                       orgGuestApi.toggle(
                         channel.id,
@@ -86,6 +90,7 @@ export function OrgGuestChannel({
           />
           {settings ? (
             <>
+              {!settings.can_manage && <Notice message="An organization admin can change these settings." />}
               {settings.guest_policy_mode === "legacy" ? (
                 <SettingsRow
                   label="Existing guest limits are kept. Review them in Grants."
@@ -111,11 +116,11 @@ export function OrgGuestChannel({
                 label="Guest service access · Grants"
                 onPress={() => openGrants(agent.id)}
               />
-              <SettingsRow
+              {settings.can_manage && settings.spent_today_credits !== undefined && settings.reserved_today_credits !== undefined && <SettingsRow
                 label="Organization spend today"
                 value={`${settings.spent_today_credits} credits (${settings.reserved_today_credits} reserved)`}
                 detail="This bot's guest spend today, including earlier connections. The organization pays."
-              />
+              />}
               {!settings.grants_ready && (
                 <Notice message="Guest settings are upgrading. Existing service limits and the legacy daily cap still apply until every server is ready." />
               )}
@@ -124,7 +129,7 @@ export function OrgGuestChannel({
                   message={
                     settings.readiness_reason === "org_wallet_suspended"
                       ? "The organization wallet is suspended."
-                      : "Provision the organization billing wallet and subscription before enabling guests."
+                      : "Set up organization billing to serve guests."
                   }
                 />
               )}

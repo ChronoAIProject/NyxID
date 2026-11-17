@@ -200,11 +200,36 @@ pub(crate) async fn gateway_call_at_base(
     body: Option<&Value>,
     idempotency_key: Option<&str>,
 ) -> AppResult<GatewayResponse> {
+    let response = exchange_at_base(base, method, path, bearer, body, idempotency_key).await?;
+    let body = match response.body {
+        Err(_) if !(200..300).contains(&response.status) => Value::Null,
+        result => result?,
+    };
+    Ok(GatewayResponse {
+        status: response.status,
+        body,
+    })
+}
+
+struct Exchange {
+    status: u16,
+    body: AppResult<Value>,
+    retry_after: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn exchange_at_base(
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    bearer: &str,
+    body: Option<&Value>,
+    idempotency_key: Option<&str>,
+) -> AppResult<Exchange> {
     let mut operation = crate::turn_trace::Operation::start(
         crate::turn_trace::TurnContext::current(),
         crate::turn_trace::Stage::Gateway,
     );
-    let result: AppResult<GatewayResponse> = crate::turn_trace::scope(operation.context(), async {
+    let result: AppResult<Exchange> = crate::turn_trace::scope(operation.context(), async {
         let requires_json = method != reqwest::Method::DELETE && method != reqwest::Method::HEAD;
         let mut request = GATEWAY_HTTP_CLIENT
             .request(method, format!("{base}{path}"))
@@ -223,24 +248,28 @@ pub(crate) async fn gateway_call_at_base(
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
         }
+        super::channel_turn_preparation::effect().await?;
         let response = request
             .send()
             .await
             .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(retry_after);
         let body = gateway_body(response, requires_json).await;
-        // HTTP refusals remain classified by status even if their diagnostic body
-        // cannot be read. Never parse a partial body or turn a broken 2xx into success.
-        let body = match body {
-            Err(_) if !(200..300).contains(&status) => Value::Null,
-            result => result?,
-        };
-        Ok(GatewayResponse { status, body })
+        Ok(Exchange {
+            status,
+            body,
+            retry_after,
+        })
     })
     .await;
     match &result {
         Ok(response) => operation.finish(
-            if (200..300).contains(&response.status) {
+            if (200..300).contains(&response.status) && response.body.is_ok() {
                 crate::turn_trace::Outcome::Completed
             } else {
                 crate::turn_trace::Outcome::Failed
@@ -255,6 +284,63 @@ pub(crate) async fn gateway_call_at_base(
         ),
     }
     result
+}
+
+fn retry_after(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    if let Ok(seconds) = value.parse::<u64>() {
+        // An unrepresentable delay must not cause an early request.
+        return Some(now + chrono::Duration::seconds(seconds.min(86_400) as i64));
+    }
+    httpdate::parse_http_date(value).ok().map(Into::into)
+}
+
+pub(crate) async fn reply_call(
+    state: &AppState,
+    path: &str,
+    bearer: &str,
+    body: &Value,
+    key: Option<&str>,
+    target_operation: bool,
+) -> AppResult<crate::models::gateway_reply::Reply> {
+    let base = gateway_base(state).await?;
+    let response =
+        exchange_at_base(&base, reqwest::Method::POST, path, bearer, Some(body), key).await?;
+    Ok(classify_reply(response, target_operation))
+}
+
+fn classify_reply(
+    response: Exchange,
+    target_operation: bool,
+) -> crate::models::gateway_reply::Reply {
+    use crate::models::gateway_reply::{Code, Observation, Outcome, Reply};
+    let body = response.body.unwrap_or(Value::Null);
+    let observation = Observation {
+        status: Some(response.status),
+        code: Code::parse(&body["detail"]),
+        retry_after: response.retry_after,
+    };
+    let outcome = if target_operation && observation.retryable() {
+        Outcome::Pending
+    } else if observation.admitted() || response.status >= 500 {
+        Outcome::Unknown
+    } else if !(200..300).contains(&response.status) {
+        Outcome::Rejected
+    } else {
+        match body
+            .pointer("/delivery/outcome")
+            .or_else(|| body.pointer("/message/delivery/outcome"))
+            .and_then(Value::as_str)
+        {
+            Some("confirmed") => Outcome::Confirmed,
+            Some("rejected") => Outcome::Rejected,
+            _ => Outcome::Unknown,
+        }
+    };
+    Reply {
+        outcome,
+        observation,
+    }
 }
 
 async fn gateway_body(mut response: reqwest::Response, requires_json: bool) -> AppResult<Value> {
@@ -836,3 +922,138 @@ mod creator_tests;
 #[cfg(test)]
 #[path = "nyxbot_gateway_http_tests.rs"]
 mod http_tests;
+
+use crate::models::gateway_reply::{Code, Observation};
+impl Code {
+    pub fn parse(value: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
+impl Observation {
+    pub fn status_class(&self) -> Option<&'static str> {
+        self.status.map(|status| match status {
+            200..=299 => "2xx",
+            300..=399 => "3xx",
+            400..=499 => "4xx",
+            500..=599 => "5xx",
+            _ => "other",
+        })
+    }
+    pub fn admitted(&self) -> bool {
+        self.status == Some(409) && self.code == Some(Code::RoutedReplyInProgress)
+    }
+    pub fn retryable(&self) -> bool {
+        self.admitted()
+            || (self.status == Some(503) && self.code == Some(Code::RoutedReplyUnavailable))
+    }
+}
+
+#[cfg(test)]
+mod reply_contract_tests {
+    use super::*;
+    use crate::models::gateway_reply::Outcome;
+    use serde_json::json;
+
+    #[test]
+    fn gateway_reply_closed_codes_and_received_status_survive_broken_bodies() {
+        for (status, body, target, expected) in [
+            (
+                409,
+                json!({"detail":"routed_reply_in_progress"}),
+                true,
+                Outcome::Pending,
+            ),
+            (
+                503,
+                json!({"detail":"routed_reply_unavailable"}),
+                true,
+                Outcome::Pending,
+            ),
+            (
+                503,
+                json!({"detail":"routed_reply_unavailable"}),
+                false,
+                Outcome::Unknown,
+            ),
+            (
+                500,
+                json!({"detail":"routed_reply_unavailable"}),
+                true,
+                Outcome::Unknown,
+            ),
+            (
+                503,
+                json!({"detail":"routed_reply_unavailable "}),
+                true,
+                Outcome::Unknown,
+            ),
+            (
+                409,
+                json!({"detail":"routed_reply_in_progress "}),
+                true,
+                Outcome::Rejected,
+            ),
+            (
+                429,
+                json!({"detail":"reply_operation_limit"}),
+                true,
+                Outcome::Rejected,
+            ),
+            (
+                409,
+                json!({"detail":"reply_idempotency_conflict"}),
+                true,
+                Outcome::Rejected,
+            ),
+            (
+                200,
+                json!({"message":{"delivery":{"outcome":"confirmed"}}}),
+                true,
+                Outcome::Confirmed,
+            ),
+            (
+                200,
+                json!({"delivery":{"outcome":"unknown"}}),
+                true,
+                Outcome::Unknown,
+            ),
+        ] {
+            let reply = classify_reply(
+                Exchange {
+                    status,
+                    body: Ok(body),
+                    retry_after: None,
+                },
+                target,
+            );
+            assert!(reply.outcome == expected);
+            assert_eq!(reply.observation.status, Some(status));
+            assert_eq!(
+                reply.observation.admitted(),
+                status == 409 && expected == Outcome::Pending
+            );
+        }
+        let reply = classify_reply(
+            Exchange {
+                status: 200,
+                body: Err(AppError::Internal("broken".into())),
+                retry_after: None,
+            },
+            true,
+        );
+        assert!(reply.outcome == Outcome::Unknown);
+        assert_eq!(reply.observation.status_class(), Some("2xx"));
+        assert!(reply.observation.code.is_none());
+    }
+
+    #[test]
+    fn gateway_reply_retry_after_delta_date_and_invalid() {
+        let now = chrono::Utc::now();
+        assert!(retry_after("120").unwrap() >= now + chrono::Duration::seconds(120));
+        assert!(retry_after("invalid").is_none());
+        assert!(retry_after("-1").is_none());
+        let date = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(600));
+        assert!(retry_after(&date).unwrap() > now + chrono::Duration::seconds(598));
+        assert!(retry_after("18446744073709551615").unwrap() >= now + chrono::Duration::hours(24));
+    }
+}

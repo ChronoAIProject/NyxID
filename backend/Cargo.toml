@@ -35,6 +35,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 pulldown-cmark = "0.13"
+linkify = "0.10"
 uuid = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"

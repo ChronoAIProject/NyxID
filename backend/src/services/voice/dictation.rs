@@ -304,6 +304,7 @@ async fn serve_with_provider(
         let mut text_bytes = 0usize;
         loop {
             tokio::select! { biased;
+                () = state.shutdown.interrupted(), if !drain.stopping() => { drain.stop(); }
                 _ = tick.tick() => {
                     if started.elapsed().as_secs() >= MAX_SECONDS as u64 {drain.stop();}
                     stage = "provider";

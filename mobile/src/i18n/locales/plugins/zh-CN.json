@@ -1,0 +1,19 @@
+{
+  "Added skills unavailable offline": "离线时无法加载已添加的技能",
+  "Reconnect before changing this agent's skills.": "请先重新联网，再修改此智能体的技能。",
+  "Reconnect to load agents and their skills.": "请重新联网，以加载智能体及其技能。",
+  "Reconnect to load available connectors.": "请重新联网，以加载可用的连接器。",
+  "Reconnect to load published skill versions.": "请重新联网，以加载已发布的技能版本。",
+  "Reconnect to load skill history.": "请重新联网，以加载技能历史记录。",
+  "Reconnect to load skill information.": "请重新联网，以加载技能信息。",
+  "Reconnect to load these connections.": "请重新联网，以加载这些连接。",
+  "Reconnect to load this agent's skills.": "请重新联网，以加载此智能体的技能。",
+  "Reconnect to load this package preview.": "请重新联网，以加载此技能包的预览。",
+  "Reconnect to load this skill's agent.": "请重新联网，以加载此技能所属的智能体。",
+  "Reconnect to load your added connectors.": "请重新联网，以加载已添加的连接器。",
+  "Reconnect to load your plugins.": "请重新联网，以加载你的插件。",
+  "Reconnect to search the skill catalog.": "请重新联网，以搜索技能目录。",
+  "Showing cached plugins. Reconnect to refresh.": "正在显示缓存的插件。重新联网后可刷新。",
+  "Showing cached skill information. Reconnect to refresh or make changes.": "正在显示缓存的技能信息。重新联网后可刷新或修改。",
+  "Skill catalog unavailable offline": "离线时无法加载技能目录"
+}

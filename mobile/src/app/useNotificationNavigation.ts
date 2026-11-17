@@ -20,6 +20,12 @@ import {
   subscribeAuthAccount,
 } from "../lib/auth/authAccount";
 import { nativeNotificationUrl } from "../lib/notifications/notificationDestination";
+import { notificationPushSignalFromResponse } from "../lib/notifications/notificationPushSignal";
+import {
+  isPushDeliveryStateHydrated,
+  isPushDeliverySuppressed,
+  pushDeliveryStateHydrated,
+} from "../lib/notifications/pushDeliveryState";
 
 type AccountBinding = { accountId: string | null; invalidated: boolean };
 
@@ -33,8 +39,11 @@ function bindAccount(binding: AccountBinding | null, accountId: string | null) {
 export function useNotificationNavigation(
   navigation: NavigationContainerRefWithCurrent<RootStackParamList>,
   guards: RefObject<Set<symbol>>,
+  onNotificationNavigated?: (notificationId: string) => void | Promise<void>,
 ) {
-  const pending = useRef<(AccountBinding & { url: string }) | null>(null);
+  const pending = useRef<
+    (AccountBinding & { url: string; notificationId: string | null }) | null
+  >(null);
   const coldBinding = useRef<AccountBinding | null>(null);
   const handled = useRef<string | undefined>(undefined);
   const intentRevision = useRef(0);
@@ -70,7 +79,9 @@ export function useNotificationNavigation(
         return undefined;
       }
     };
+    const next = pending.current;
     let action = destinationAction();
+    const supportedDestination = Boolean(action);
     if (!action) {
       const fallback = getStateFromPath("activity", navigationLinkingConfig);
       action =
@@ -79,15 +90,24 @@ export function useNotificationNavigation(
     if (action) {
       pending.current = null;
       navigation.dispatch(action);
+      // Fallback Activity is useful for unknown pushes, but does not mean
+      // the addressed notification was opened. Never mark that row read.
+      if (
+        supportedDestination &&
+        next.notificationId &&
+        getAuthAccountId() === next.accountId
+      )
+        void onNotificationNavigated?.(next.notificationId);
     }
-  }, [navigation, guards]);
+  }, [navigation, guards, onNotificationNavigated]);
   const open = useCallback(
-    (url: string) => {
+    (url: string, notificationId: string | null = null) => {
       const normalized = nativeNotificationUrl(url, notificationLinkConfig);
       if (!normalized) return;
       intentRevision.current++;
       pending.current = {
         url: normalized,
+        notificationId,
         accountId: getAuthAccountId(),
         invalidated: false,
       };
@@ -120,21 +140,32 @@ export function useNotificationNavigation(
       invalidated: false,
     };
     coldBinding.current = binding;
-    const handle = (response: Notifications.NotificationResponse | null) => {
+    const handle = async (
+      response: Notifications.NotificationResponse | null,
+    ): Promise<void> => {
       if (!mounted || !response) return;
+      if (!isPushDeliveryStateHydrated()) await pushDeliveryStateHydrated();
+      if (!mounted) return;
+      if (isPushDeliverySuppressed()) {
+        void Notifications.clearLastNotificationResponseAsync().catch(() => {});
+        return;
+      }
       const id = `${response.notification.request.identifier}:${response.actionIdentifier}`;
       if (handled.current === id) return;
-      const url =
-        extractUrlFromNotificationResponse(response) ??
-        `${notificationLinkConfig.scheme}://activity`;
+      const destination = extractUrlFromNotificationResponse(response);
       handled.current = id;
-      open(url);
+      open(
+        destination ?? `${notificationLinkConfig.scheme}://activity`,
+        destination
+          ? notificationPushSignalFromResponse(response)?.notificationId
+          : null,
+      );
       void Notifications.clearLastNotificationResponseAsync().catch(() => {});
     };
     const subscription = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         receivedTap = true;
-        handle(response);
+        void handle(response);
       },
     );
     void Notifications.getLastNotificationResponseAsync()
@@ -148,7 +179,7 @@ export function useNotificationNavigation(
             );
           return;
         }
-        handle(response);
+        void handle(response);
       })
       .catch(() => {});
     return () => {

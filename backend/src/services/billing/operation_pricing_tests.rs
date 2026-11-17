@@ -260,6 +260,7 @@ fn normalization_keeps_unchanged_sync_state_and_queues_removed_codes() {
 
 #[derive(Default)]
 struct RecordingLago {
+    charges: std::sync::Mutex<std::collections::BTreeMap<(String, String), String>>,
     synced: Mutex<Vec<ServicePriceSync>>,
     removed: Mutex<Vec<String>>,
     fail_removals: AtomicBool,
@@ -283,14 +284,27 @@ impl LagoApi for RecordingLago {
                 "fixture failure".into(),
             ));
         }
+        self.charges.lock().unwrap().insert(
+            (_plan.into(), input.metric_code.clone()),
+            input.credits_per_unit.clone(),
+        );
         Ok(())
     }
     async fn remove_standard_charge(&self, _plan: &str, code: &str) -> AppResult<()> {
         if self.fail_removals.load(Ordering::SeqCst) {
             return Err(AppError::BillingProviderUnavailable("test".into()));
         }
+        self.charges
+            .lock()
+            .unwrap()
+            .remove(&(_plan.into(), code.into()));
         self.removed.lock().unwrap().push(code.into());
         Ok(())
+    }
+    async fn plan_charges(&self, plan: &str) -> AppResult<Vec<serde_json::Value>> {
+        Ok(self.charges.lock().unwrap().iter().filter(|((p, _), _)| p == plan).map(|((_, code), amount)| serde_json::json!({
+            "billable_metric_code": code, "charge_model":"standard", "properties":{"amount":amount}
+        })).collect())
     }
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         Ok(owner.external_customer_id.clone())
@@ -312,6 +326,7 @@ impl LagoApi for RecordingLago {
             .collect())
     }
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -389,6 +404,14 @@ async fn operation_charges_sync_reprice_retry_cleanup_and_retire_with_their_lane
     let db = crate::test_utils::connect_test_database("operation_charge_lifecycle")
         .await
         .expect("MongoDB required");
+    async fn retry_catalog(db: &mongodb::Database, lago: &RecordingLago) -> AppResult<u64> {
+        // The service retry is the subject here; the independent plan audit is
+        // in its existing per-code backoff, with truthful provider readback.
+        db.collection::<Document>(crate::models::billing_plan_sync::CHARGE_COLLECTION)
+            .update_many(doc! {"plan_code":"standard"}, doc! {"$set":{"repair_next_at":mongodb::bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::hours(1))}})
+            .await.unwrap();
+        pricing::retry_pending_service_prices(db, lago, "standard").await
+    }
     let lago = RecordingLago::default();
     let mut catalog = dummy_service();
     catalog.id = Uuid::new_v4().to_string();
@@ -447,12 +470,7 @@ async fn operation_charges_sync_reprice_retry_cleanup_and_retire_with_their_lane
         )
         .await
         .unwrap();
-    assert_eq!(
-        pricing::retry_pending_service_prices(&db, &lago, "standard")
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(retry_catalog(&db, &lago).await.unwrap(), 1);
     catalog = reload(&db, &catalog).await;
     assert_eq!(
         catalog
@@ -470,9 +488,13 @@ async fn operation_charges_sync_reprice_retry_cleanup_and_retire_with_their_lane
     // Reprice one operation and remove the other while removal is failing.
     lago.fail_removals.store(true, Ordering::SeqCst);
     save(&db, &mut catalog, byok(vec![requested("search", "5")])).await;
-    pricing::retry_pending_service_prices(&db, &lago, "standard")
-        .await
-        .unwrap();
+    assert!(matches!(
+        retry_catalog(&db, &lago).await,
+        Err(AppError::BillingRecoveryFailed {
+            failed_units: 1,
+            ..
+        })
+    ));
     catalog = reload(&db, &catalog).await;
     let billing = catalog.billing.as_ref().unwrap();
     assert_eq!(billing.component_cleanup_metric_codes, [code("lookup")]);
@@ -485,10 +507,10 @@ async fn operation_charges_sync_reprice_retry_cleanup_and_retire_with_their_lane
     assert_eq!(pending_cleanup[&code("lookup")], (Some(2 * PICO), false));
 
     // The durable marker retries until the charge is removed, then retires the rate.
+    // Advance the fixture to the next pass after the uncertain plan lease expires.
+    crate::services::billing::plan_writers_tests::expire_plan_lease(&db, "standard").await;
     lago.fail_removals.store(false, Ordering::SeqCst);
-    pricing::retry_pending_service_prices(&db, &lago, "standard")
-        .await
-        .unwrap();
+    retry_catalog(&db, &lago).await.unwrap();
     catalog = reload(&db, &catalog).await;
     assert!(
         catalog
@@ -508,9 +530,7 @@ async fn operation_charges_sync_reprice_retry_cleanup_and_retire_with_their_lane
 
     // Removing the whole lane removes and retires its operation charges too.
     save(&db, &mut catalog, None).await;
-    pricing::retry_pending_service_prices(&db, &lago, "standard")
-        .await
-        .unwrap();
+    retry_catalog(&db, &lago).await.unwrap();
     catalog = reload(&db, &catalog).await;
     let billing = catalog.billing.as_ref().unwrap();
     assert!(billing.component_cleanup_metric_codes.is_empty());
@@ -674,7 +694,8 @@ async fn spawn_plan_mock(mock: PlanMock) -> String {
                     str::to_owned,
                 );
                 json!({"lago_id": id, "billable_metric_code": code,
-                    "charge_model": "standard", "properties": charge["properties"]})
+                    "charge_model": "standard", "properties": charge["properties"],
+                    "invoiceable": charge["invoiceable"], "pay_in_advance": charge["pay_in_advance"], "prorated": charge["prorated"]})
             })
             .collect();
         *mock.charges.lock().unwrap() = stored.clone();

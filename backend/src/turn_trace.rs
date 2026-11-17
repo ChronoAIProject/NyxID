@@ -307,6 +307,24 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    spawn_traced(future, false)
+}
+
+/// Preserve attribution while completing an already dispatched operation or
+/// its settlement after execution has stopped.
+pub(crate) fn spawn_cleanup<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    spawn_traced(future, true)
+}
+
+fn spawn_traced<F>(future: F, cleanup: bool) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     let ingress = INGRESS.try_with(Clone::clone).ok();
     let callback = turn_callback();
     let context = TurnContext::current().or_else(|| {
@@ -314,12 +332,17 @@ where
             .then(|| ingress.as_ref().and_then(Ingress::admitted))
             .flatten()
     });
-    tokio::spawn(TURN_CALLBACK.scope(callback, async move {
+    let future = TURN_CALLBACK.scope(callback, async move {
         match ingress {
             Some(ingress) => INGRESS.scope(ingress, scope(context, future)).await,
             None => scope(context, future).await,
         }
-    }))
+    });
+    if cleanup {
+        crate::services::shutdown::process().spawn_cleanup(future)
+    } else {
+        crate::services::shutdown::process().spawn(future)
+    }
 }
 
 pub(crate) async fn scope<T>(context: Option<TurnContext>, future: impl Future<Output = T>) -> T {

@@ -76,7 +76,7 @@ pub(crate) fn dispatch_verified<'a>(
                 .await?;
             return Ok(());
         };
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let _permit = permit;
             let api = crate::services::telegram_new_api::TelegramApi {
                 http: &state.http_client,

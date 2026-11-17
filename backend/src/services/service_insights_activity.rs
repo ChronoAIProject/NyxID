@@ -525,6 +525,8 @@ fn recent_request(
 /// A response header is not stream completion, so successful HTTP responses keep
 /// the explicit `response_received` state and WS upgrades use `connection_opened`.
 pub struct RequestAudit {
+    model: Option<super::assistant_model_observer::ModelRequest>,
+    attachment_diagnostic: Option<super::lark_attachment_tool::diagnostics::Handle>,
     business: Option<super::assistant_real_work::Signal>,
     db: Database,
     actor: audit_service::AuditActor,
@@ -602,6 +604,8 @@ impl RequestAudit {
         credential_class: crate::models::usage_meter::CredentialClass,
     ) -> Self {
         Self {
+            model: None,
+            attachment_diagnostic: None,
             business: None,
             db: db.clone(),
             actor: attribution.actor,
@@ -613,6 +617,38 @@ impl RequestAudit {
                 "auth_kind": attribution.auth_kind,
                 "outcome": "unknown",
             }),
+        }
+    }
+
+    /// Explicit opt-in: ordinary service events retain their exact shape.
+    pub(crate) fn attachment_write(&mut self) {
+        self.attachment_diagnostic = super::lark_attachment_tool::diagnostics::current();
+    }
+
+    pub(crate) fn observe_model(
+        &mut self,
+        model: Option<&super::assistant_model_observer::ModelRequest>,
+    ) {
+        self.model = model.cloned();
+    }
+    pub(crate) fn model_approval_required(&mut self) {
+        if self.model.is_some() {
+            self.event["outcome"] = "approval_required".into();
+            self.event["failure_code"] = "approval_required".into();
+        }
+    }
+    pub(crate) fn model_approval_error(&mut self, error: &crate::errors::AppError) {
+        if self.model.is_some()
+            && let Some(code) = super::assistant_model_observer::approval_failure_code(error)
+        {
+            self.event["outcome"] = code.into();
+            self.event["failure_code"] = code.into();
+        }
+    }
+    pub(crate) fn model_send_failed(&mut self, code: &'static str) {
+        if self.model.is_some() {
+            self.event["outcome"] = "failed".into();
+            self.event["failure_code"] = code.into();
         }
     }
 
@@ -660,6 +696,10 @@ impl RequestAudit {
     }
 
     pub async fn response(&mut self, status: u16) {
+        self.event
+            .as_object_mut()
+            .expect("audit metadata")
+            .remove("failure_code");
         self.event["response_status"] = status.into();
         self.event["outcome"] = match status {
             101 => "connection_opened",
@@ -691,8 +731,42 @@ impl RequestAudit {
 
 impl Drop for RequestAudit {
     fn drop(&mut self) {
+        if let Some(model) = &self.model {
+            self.event["model_egress_admitted"] = model.egress_admitted().into();
+            if model.approval_exempt() {
+                self.event["approval_exempt"] = "assistant_model_transport".into();
+            }
+            if !model.egress_admitted()
+                && let Some(code) = model.policy_failure()
+            {
+                self.event["outcome"] = if code == "model_policy_denied" {
+                    "denied"
+                } else {
+                    "approval_unsupported"
+                }
+                .into();
+                self.event["failure_code"] = code.into();
+                self.event["response_status"] = 403.into();
+            }
+
+            if self.event.get("response_status").is_none()
+                && let Some(status) = model.response_status()
+            {
+                self.event["response_status"] = status.into();
+            }
+        }
         if self.event["user_service_id"].is_null() {
             return;
+        }
+        if let Some(diagnostic) = &self.attachment_diagnostic {
+            let mut diagnostic = diagnostic.lock().expect("attachment diagnostic");
+            if diagnostic.reason.is_none() && diagnostic.fields()["outcome"] != "succeeded" {
+                diagnostic.reason =
+                    Some(super::lark_attachment_tool::diagnostics::Reason::Internal);
+            }
+            for (key, value) in diagnostic.fields().as_object().expect("diagnostic object") {
+                self.event[key] = value.clone();
+            }
         }
         audit_service::log_async(
             self.db.clone(),

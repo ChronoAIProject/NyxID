@@ -46,7 +46,7 @@ test("actual foreground receive listener survives malformed-relative URLs and su
     displayed.push(n),
   );
   const cleanup = await module.initializeNotificationRuntime();
-  for (const type of ["channel_bot_failed", "unknown"]) {
+  for (const type of ["channel_bot_failed", "channel_bot_restored", "unknown"]) {
     receive({
       request: {
         content: { title: "Review update", data: { type, url: "//[" } },
@@ -55,7 +55,11 @@ test("actual foreground receive listener survives malformed-relative URLs and su
   }
   assert.deepEqual(
     displayed.map((n) => n.url),
-    ["nyxid://plugins?tab=connectors", "nyxid://activity"],
+    [
+      "nyxid://plugins?tab=connectors",
+      "nyxid://plugins?tab=connectors",
+      "nyxid://activity",
+    ],
   );
   unsubscribe();
   cleanup();

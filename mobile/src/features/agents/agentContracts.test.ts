@@ -7,11 +7,12 @@ import {
   buildAgentPatch,
   changedGrants,
   grantOptions,
+  grantServiceSchema,
   grantSignature,
   profileHasConflict,
   type AssistantAgent,
+  type GrantService,
 } from "./agentContracts";
-import type { ServiceConnection } from "../services/serviceContracts";
 
 const agent: AssistantAgent = agentSchema.parse({
   id: "agent-1",
@@ -26,18 +27,12 @@ const agent: AssistantAgent = agentSchema.parse({
   account_read: false,
   guest_access: { "api-github": "read" },
 });
-const key: ServiceConnection = {
+const key: GrantService = {
   id: "service-1",
   label: "GitHub",
   slug: "api-github",
-  status: "active",
-  is_active: true,
-  auto_connected: false,
-  credential_type: "oauth2",
-  catalog_service_slug: "api-github",
-  catalog_service_name: "GitHub",
-  error_message: null,
-  credential_source: { type: "personal" },
+  executable: true,
+  catalog_slug: "api-github",
 };
 
 test("specialist creation validates handle and required purpose", () => {
@@ -110,56 +105,79 @@ test("profile conflict check blocks overwriting changed fields but permits unrel
   );
 });
 
-test("org grant options are exact IDs in the same authorized owner scope", () => {
-  const orgKey = {
+test("grant options use the server scoped inventory with exact org IDs", () => {
+  const rows = [
+    { id: "one", slug: "calendar", label: "Calendar", executable: false },
+    { id: "two", slug: "calendar", label: "Other Calendar", executable: true },
+  ];
+  assert.deepEqual(grantOptions(rows, { ...agent, owner_kind: "org" }), [
+    { value: "one", label: "Calendar", iconSlug: "calendar", iconUrl: undefined },
+    { value: "two", label: "Other Calendar", iconSlug: "calendar", iconUrl: undefined },
+  ]);
+  assert.deepEqual(grantOptions(rows), [{ value: "calendar", label: "Calendar", iconSlug: "calendar", iconUrl: undefined }]);
+  assert.equal(grantOptions([{ id: "public", slug: "chrono-llm-public", label: "Chrono LLM (public)", executable: true }])[0]?.value, "chrono-llm-public");
+});
+
+test("specialist tool grants exclude NyxBot Voice by catalog identity and legacy slug", () => {
+  const voice = {
     ...key,
-    id: "org-service-id",
-    credential_source: {
-      type: "org" as const,
-      org_id: "org-1",
-      org_name: "Team",
-      role: "admin" as const,
-      allowed: true,
-    },
+    id: "voice-connection",
+    label: "NyxBot Voice",
+    slug: "my-bot-voice",
+    catalog_slug: "nyxbot-voice",
   };
-  const orgAgent = { ...agent, owner_kind: "org" as const, owner_id: "org-1" };
   assert.deepEqual(
-    grantOptions(
-      [
-        key,
-        orgKey,
-        {
-          ...orgKey,
-          id: "other-org",
-          credential_source: { ...orgKey.credential_source, org_id: "org-2" },
-        },
-        {
-          ...orgKey,
-          id: "denied",
-          credential_source: { ...orgKey.credential_source, allowed: false },
-        },
-      ],
-      orgAgent,
-    ),
-    [
+    grantOptions([
+      voice,
       {
-        value: "org-service-id",
-        label: "GitHub",
-        iconSlug: "api-github",
-        iconUrl: undefined,
+        ...voice,
+        id: "legacy-voice",
+        slug: "nyxbot-voice",
+        catalog_slug: undefined,
       },
-    ],
+      key,
+    ]).map((option) => option.value),
+    ["api-github"],
   );
   assert.deepEqual(
-    grantOptions([key, { ...key, id: "disabled", is_active: false }]),
-    [
-      {
-        value: "api-github",
-        label: "GitHub",
-        iconSlug: "api-github",
-        iconUrl: undefined,
-      },
-    ],
+    grantOptions(
+      [voice, key],
+      { ...agent, owner_kind: "org", owner_id: "org-1" },
+    ).map((option) => option.value),
+    [key.id],
+  );
+});
+
+test("other server-approved connections remain grantable even when not executable", () => {
+  const connections = [
+    key,
+    {
+      ...key,
+      id: "public",
+      slug: "public-tools",
+    },
+    {
+      ...key,
+      id: "offline",
+      slug: "offline-tools",
+      executable: false,
+    },
+    {
+      ...key,
+      id: "similarly-named",
+      slug: "nyxbot-voice-helper",
+      catalog_slug: undefined,
+    },
+    {
+      ...key,
+      id: "different-catalog",
+      slug: "nyxbot-voice",
+      catalog_slug: "other-service",
+    },
+  ];
+  assert.deepEqual(
+    grantOptions(connections).map((option) => option.value),
+    connections.map((connection) => connection.slug),
   );
 });
 
@@ -219,4 +237,29 @@ test("agent create/profile writes strip legacy model selection fields", () => {
   };
   assert.equal("model" in agentCreateSchema.parse(values), false);
   assert.deepEqual(buildAgentPatch(agent, values), {});
+});
+
+
+test("grant options preserve the catalog glyph and icon for a differently named connection", () => {
+  assert.deepEqual(grantOptions([grantServiceSchema.parse({
+    id: "github-second", slug: "api-github-2", label: "Second GitHub", executable: true,
+    catalog_slug: "api-github", icon_url: "https://example.test/catalog-github.svg",
+  })]), [{
+    value: "api-github-2", label: "Second GitHub", iconSlug: "api-github",
+    iconUrl: "https://example.test/catalog-github.svg",
+  }]);
+});
+
+test("grant options preserve custom icons and accept older inventory rows without icon metadata", () => {
+  assert.deepEqual(grantOptions([grantServiceSchema.parse({
+    id: "custom", slug: "renamed-account", label: "Custom", executable: true,
+    catalog_slug: "api-github", icon_url: "https://example.test/my-icon.svg",
+  }), grantServiceSchema.parse({
+    id: "older", slug: "custom-api", label: "Older", executable: true,
+  })]), [{
+    value: "renamed-account", label: "Custom", iconSlug: "api-github",
+    iconUrl: "https://example.test/my-icon.svg",
+  }, {
+    value: "custom-api", label: "Older", iconSlug: "custom-api", iconUrl: undefined,
+  }]);
 });

@@ -374,3 +374,48 @@ collections are not in the generic operator rewrap inventory; retain legacy read
 until legacy pending requests have completed/been purged or a CMA migration adapter
 has been deployed and verified. An inventory pass alone does not establish that
 these CMA rows have been converted.
+
+### Sandbox trust confirmation and stranded requests
+
+CMA's exact `409 trust_confirmation_required` problem for `POST /api/v1/sandboxes`
+is proof that no sandbox was admitted. NyxID releases that creation's account slot
+and clears its encrypted request in the same transaction, with the existing
+receipt and generation fences. The response and `commands_digest` reach the
+caller unchanged. A problem with a resource/operation identifier, wrong type,
+status or code is not that proof. Workspace trust refusals never free the existing
+parent sandbox, and lifecycle Agent worker failures remain uncertain.
+
+CMA records this refusal in its idempotency cache. Repeating the original bytes
+and key returns the same refusal; **adding confirmation requires a new
+Idempotency-Key**. Review the indicated commands, then submit `trust_confirmed:true`
+and the exact `commands_digest` using a fresh key. A changed-body retry under the
+old key returns `cma_creation_authority_changed` with this instruction. NyxID does
+not silently replace upstream keys. This contract was checked against CMA commit
+[`68f26f17fd18a701958a27ea5b2b933227fa2fbf`](https://github.com/ChronoAIProject/cma/tree/68f26f17fd18a701958a27ea5b2b933227fa2fbf),
+`api/crates/layer1-public/src/rest/{idempotency,instances,sandboxes}.rs` and
+`api/crates/layer2-core/src/sandbox/service_creation.rs`.
+
+An affected account needs no deletion or reconnection. A new slot-allocating CMA
+creation first re-observes its one occupied unknown sandbox request, using the
+retained original bytes and key through the existing guarded replay. An explicit
+recovery does the same. Automatic proxy-admission recovery does not require the
+optional NyxBot CMA sandbox-management feature. Explicit management recovery still
+requires that feature at entry and immediately before replay, plus the existing
+first-party-human handler check. A proven refusal settles recovery as complete and permits
+the new creation; a real receipt preserves the original sandbox and its slot.
+Ambiguous replies, changed authority, unavailable dependencies or identifier-bearing
+problems never release capacity. No pending, never-dispatched request or unknown
+lifecycle Agent request is automatically resent.
+
+All original owner, catalog deployment, request, parent generation and erasure
+fences apply. Generic sandbox replay is limited to 23 hours from first dispatch,
+inside CMA's 24-hour idempotency retention. Explicit recovery outside that window
+returns `cma_creation_replay_expired` without sending. During automatic recovery,
+lookup or replay failures after finding the occupied slot instead return
+`cma_sandbox_account_slot_occupied`, explaining that the earlier creation is not
+confirmed absent and can be rechecked later. The new request is not dispatched.
+The initial slot lookup's database errors and the incoming request's own validation
+and authorization errors retain their usual responses. Such older uncertain requests require
+authoritative CMA investigation, not a new identity or a local force-unlock.
+A rolling old replica may still leave a refusal unknown; an upgraded replica can
+recover it within that window. No schema or writer-cutover change is required.

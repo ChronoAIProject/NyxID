@@ -1,5 +1,11 @@
-import type { NavigationState, PartialState } from "@react-navigation/routers";
+import type {
+  NavigationAction,
+  NavigationState,
+  PartialState,
+} from "@react-navigation/routers";
+import { getActionFromState, getStateFromPath } from "@react-navigation/core";
 import { withWorkspaceFallback } from "./navigationHierarchy";
+import { navigationLinkingConfig } from "./navigationLinking";
 import type { AssistantParams } from "./navigationTypes";
 import {
   assistantHomeParams,
@@ -7,6 +13,26 @@ import {
 } from "./assistantChatParams";
 
 type LinkState = PartialState<NavigationState> | undefined;
+
+/**
+ * What opening a first-party path inside the app should dispatch: the same
+ * state a tapped push or universal link produces, as a navigate action when
+ * the linking config yields one, else a root reset. Undefined when the path
+ * names no native page.
+ */
+export function canonicalLinkNavigation(
+  path: string,
+):
+  | { type: "action"; action: NavigationAction }
+  | { type: "reset"; state: PartialState<NavigationState> }
+  | undefined {
+  const state = workspaceStateFromPath(path, (next) =>
+    getStateFromPath(next, navigationLinkingConfig),
+  );
+  if (!state) return undefined;
+  const action = getActionFromState(state, navigationLinkingConfig);
+  return action ? { type: "action", action } : { type: "reset", state };
+}
 
 /** Web account panels share /assistant with chat, so query state selects the drawer. */
 export function workspaceStateFromPath(
@@ -75,25 +101,27 @@ export function workspaceStateFromPath(
       ),
     };
   }
-  if (!search.has("panel")) {
-    const group =
-      search.get("g") ??
-      (search.get("c")?.startsWith("nyxg-") ? search.get("c") : null);
-    if (group)
-      return withWorkspaceFallback(
-        parse(`groups/${encodeURIComponent(group)}`),
-      );
-    const conversation = search.get("c");
-    const agent = search.get("agent");
-    const card = search.get("card");
-    const query = new URLSearchParams();
-    if (conversation) query.set("conversationId", conversation);
-    if (agent) query.set("agentId", agent);
-    if (card) query.set("acknowledgementId", card);
-    if (!conversation && agent) query.set("openLatest", "true");
-    return withWorkspaceFallback(parse(`chat?${query}`));
+  const panels = search.getAll("panel");
+  // Web chat links (`?c=`, `?g=`, `?agent=`), also the push deeplink shape,
+  // and the notifications panel open their thread in the content slab.
+  if (
+    panels.length === 0 ||
+    (panels.length === 1 && panels[0] === "notifications")
+  ) {
+    const pages = assistantPagesFromSearch(search);
+    if (!pages) return withWorkspaceFallback(parse(path));
+    if (panels.length === 1) pages.push({ name: "Notifications" });
+    return withWorkspaceFallback({
+      index: 0,
+      routes: [
+        {
+          name: "Workspace",
+          state: { index: pages.length - 1, routes: pages },
+        },
+      ],
+    });
   }
-  if (search.getAll("panel").length !== 1 || search.get("panel") !== "billing")
+  if (panels.length !== 1 || panels[0] !== "billing")
     return withWorkspaceFallback(parse(path));
 
   const period = search.get("panelPeriod");
@@ -135,4 +163,51 @@ export function workspaceStateFromPath(
       };
   }
   return { ...state, index: routes.length - 1, routes };
+}
+
+const CONVERSATION_ID = /^nyxa-[a-f0-9]{32}$/;
+const GROUP_ID = /^nyxg-[a-fA-F0-9]{32}$/;
+const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** The content pages a canonical `/assistant` query selects, or undefined
+ * when its identifiers are malformed and the ordinary parser should decide.
+ * Server links (`AssistantPage`) name a crew with `?c=` as well as `?g=`,
+ * focus a decision with `?card=` and open an agent's details with
+ * `?agent=&details=`. */
+function assistantPagesFromSearch(
+  search: URLSearchParams,
+): { name: string; params?: object }[] | undefined {
+  const c = search.get("c");
+  const agentId = search.get("agent");
+  const g = search.get("g");
+  const card = search.get("card");
+  const draft = search.get("draft") === "true";
+  const conversationId = c && CONVERSATION_ID.test(c) ? c : undefined;
+  const groupId = g && GROUP_ID.test(g) ? g : c && GROUP_ID.test(c) ? c : undefined;
+  if (c && !conversationId && c !== groupId) return undefined;
+  if (g && !groupId) return undefined;
+  if (card && !CARD_ID.test(card)) return undefined;
+  if (groupId && !conversationId && !draft)
+    return [
+      { name: "Assistant", params: assistantHomeParams() },
+      { name: "GroupChat", params: { groupId } },
+    ];
+  if (agentId && search.has("details") && !conversationId && !draft)
+    return [
+      { name: "Assistant", params: assistantHomeParams() },
+      { name: "Agents" },
+      { name: "AgentDetail", params: { agentId } },
+    ];
+  if (conversationId || agentId || draft) {
+    const params: AssistantParams = {
+      home: false,
+      ...(conversationId ? { conversationId } : {}),
+      ...(conversationId && card ? { acknowledgementId: card } : {}),
+      ...(agentId ? { agentId } : {}),
+      draft: !conversationId && draft,
+      openLatest: !conversationId && !draft && !!agentId,
+    };
+    return [{ name: "Assistant", params }];
+  }
+  return [{ name: "Assistant", params: assistantHomeParams() }];
 }

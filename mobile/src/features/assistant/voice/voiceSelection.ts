@@ -33,6 +33,31 @@ export function chooseVoiceOption(
   );
 }
 
+/** Shared next-call policy for the chat controls and account voice settings. */
+export function resolveVoicePreferences(
+  option: VoiceOption,
+  saved?: VoicePreferences | null,
+  changes: Partial<Pick<VoicePreferences, "voice" | "input_mode">> = {},
+): VoicePreferences {
+  return {
+    service_id: option.service_id,
+    connection_id: option.connection_id,
+    key_source: option.key_source,
+    model: option.model,
+    // Keep a removed saved voice visible until the person replaces it.
+    voice:
+      changes.voice !== undefined
+        ? changes.voice
+        : (saved?.voice ?? option.voice.voices[0]?.id ?? null),
+    input_mode:
+      option.voice.protocol === "xai_realtime"
+        ? "push_to_talk"
+        : (changes.input_mode ?? saved?.input_mode ?? "automatic"),
+    language: saved?.language ?? null,
+    notify_on_completion: saved?.notify_on_completion ?? false,
+  };
+}
+
 export function voiceTariff(option: VoiceOption) {
   if (option.key_source === "own" && !option.pricing) {
     const prices = option.reported_token_pricing;

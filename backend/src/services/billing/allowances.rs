@@ -79,8 +79,11 @@ async fn prepare_allowance(
     let service = resolve_service(db, &input.service_ref).await?;
     let metric = service.metric(input.metric)?;
     if metric.requires_model_evidence() {
-        crate::services::security_readiness_service::require(db, super::model_tariffs::READINESS)
-            .await?;
+        crate::services::security_readiness_service::require_serving(
+            db,
+            super::model_tariffs::READINESS,
+        )
+        .await?;
     }
     let now = Utc::now();
     let allowance = UsageAllowance {
@@ -191,7 +194,7 @@ async fn prepare_update(
             service.metric(input.metric)?
         };
         if metric.requires_model_evidence() && metric != current.metric {
-            crate::services::security_readiness_service::require(
+            crate::services::security_readiness_service::require_serving(
                 db,
                 super::model_tariffs::READINESS,
             )
@@ -247,7 +250,7 @@ async fn validate_bundle(
         validate_quantity(unit.quantity)?;
         service.metric(Some(unit.metric))?;
         if unit.metric.requires_model_evidence() {
-            crate::services::security_readiness_service::require(
+            crate::services::security_readiness_service::require_serving(
                 db,
                 super::model_tariffs::READINESS,
             )
@@ -681,6 +684,128 @@ mod tests {
     use crate::test_utils::connect_test_database;
 
     use super::*;
+
+    #[tokio::test]
+    async fn model_evidence_allowance_create_update_and_bundle_serve_overlap_but_refuse_missing_support_or_activation()
+     {
+        use crate::models::{security_capability_activation as activation, security_replica};
+        use crate::services::security_readiness_service as readiness;
+        let db =
+            crate::test_utils::connect_transaction_test_database("model_allowance_overlap").await;
+        let (mut service, _, _) = super::super::model_tariffs::tests::fixture();
+        let metrics = [
+            BillingMetric::ReasoningTokens,
+            BillingMetric::ImageInputTokens,
+        ];
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .platform_key_pricing
+            .as_mut()
+            .unwrap()
+            .model_prices[0]
+            .allowance_metrics
+            .extend(metrics);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let creator = Uuid::new_v4().to_string();
+        let input = |metric| CreateAllowanceInput {
+            service_ref: service.id.clone(),
+            metric: Some(metric),
+            quantity: 100,
+            recurrence: AllowanceRecurrence::Daily,
+            target_kind: BillingTargetKind::AllUsers,
+            target_user_ids: vec![],
+            target_org_ids: vec![],
+            target_group_ids: vec![],
+            created_by: creator.clone(),
+        };
+        let bundle = AllowanceBundleInput {
+            service_ref: service.id.clone(),
+            target_kind: BillingTargetKind::AllUsers,
+            target_user_ids: vec![],
+            target_org_ids: vec![],
+            target_group_ids: vec![],
+            units: vec![AllowanceUnitInput {
+                metric: metrics[0],
+                quantity: 100,
+                recurrence: AllowanceRecurrence::Daily,
+            }],
+            created_by: creator.clone(),
+        };
+        readiness::ready_test_replica(&db).await;
+        readiness::stop_test_replica(&db).await;
+        let sibling = readiness::overlapping_test_replica(&db).await;
+        let row = create_allowance(&db, input(metrics[0])).await.unwrap();
+        let updated = update_allowance(
+            &db,
+            &row.id,
+            UpdateAllowanceInput {
+                metric: Some(metrics[1]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.metric, metrics[1]);
+        assert_eq!(
+            create_allowance_bundle(&db, bundle.clone())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        for case in ["unsupported", "never_recorded"] {
+            if case == "unsupported" {
+                readiness::remove_test_replica_capability(
+                    &db,
+                    &sibling,
+                    super::super::model_tariffs::READINESS,
+                )
+                .await;
+            } else {
+                db.collection::<security_replica::SecurityReplica>(
+                    security_replica::COLLECTION_NAME,
+                )
+                .replace_one(doc! {"_id":&sibling.id}, &sibling)
+                .await
+                .unwrap();
+                db.collection::<bson::Document>(activation::COLLECTION_NAME).delete_one(doc! {"record_kind":activation::RECORD_KIND,"capability":super::super::model_tariffs::READINESS}).await.unwrap();
+            }
+            assert!(
+                matches!(
+                    create_allowance(&db, input(metrics[0])).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    update_allowance(
+                        &db,
+                        &row.id,
+                        UpdateAllowanceInput {
+                            metric: Some(metrics[0]),
+                            ..Default::default()
+                        }
+                    )
+                    .await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    create_allowance_bundle(&db, bundle.clone()).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{case}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn machine_runtime_allowance_is_a_logical_sku_without_catalog_credentials() {

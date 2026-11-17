@@ -373,6 +373,7 @@ impl LagoApi for ModelLago {
         customer: &str,
         subscription: &str,
     ) -> crate::errors::AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -399,9 +400,9 @@ async fn model_tariff_lago_retry_emits_wallet_only_quantities_once_and_reconcile
         let mut config=crate::test_utils::test_app_config();config.billing_enabled=true;let worker=reconcile::BillingReconciler::new(db.clone(),Some(lago.clone()),std::sync::Arc::new(config));
         let ledger_before=db.collection::<Document>("billing_ledger").count_documents(doc!{}).await.unwrap();
         db.collection::<Document>("usage_meter").update_many(doc!{},doc!{"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(60))}}).await.unwrap();
-        let first=worker.run_once().await.unwrap();assert_eq!(first.retried,1);
+        let first=worker.run_once_failing_for_test(&["usage_push", "wallet_balances"]).await;assert_eq!(first.retried,1);
         db.collection::<Document>("usage_meter").update_many(doc!{},doc!{"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(60))}}).await.unwrap();
-        let second=worker.run_once().await.unwrap();assert_eq!(second.pushed,1);assert_eq!(second.drift_alerts,0);assert_eq!(worker.run_once().await.unwrap().pushed,0);
+        let second=worker.run_once_failing_for_test(&["wallet_balances"]).await;assert_eq!(second.pushed,1);assert_eq!(second.drift_alerts,0);assert_eq!(worker.run_once_failing_for_test(&["wallet_balances"]).await.pushed,0);
         let rows:Vec<UsageMeterRow>=db.collection("usage_meter").find(doc!{}).await.unwrap().try_collect().await.unwrap();
         {let events=lago.events.lock().unwrap();assert_eq!(events.len(),5);for row in &rows {assert!(row.lago_acked);let event=&events[&row.transaction_id];assert_eq!(event,LagoEvent::from_usage_row(row,Some("subscription".into())).as_ref().unwrap());assert_eq!(event.properties.model.as_deref(),Some(t.public_model.as_str()));}}
         assert_eq!(db.collection::<Document>("billing_ledger").count_documents(doc!{}).await.unwrap(),ledger_before);assert_accounts(&db).await;db.drop().await.unwrap();
@@ -612,7 +613,7 @@ async fn model_tariff_free_component_preserves_allowance_and_emits_no_lago_event
         let mut config = crate::test_utils::test_app_config(); config.billing_enabled=true;
         let worker = reconcile::BillingReconciler::new(db.clone(), Some(lago.clone()), std::sync::Arc::new(config));
         db.collection::<Document>("usage_meter").update_many(doc! {}, doc! {"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(60))}}).await.unwrap();
-        assert_eq!(worker.run_once().await.unwrap().drift_alerts, 0);
+        assert_eq!(worker.run_once_failing_for_test(&["wallet_balances"]).await.drift_alerts, 0);
         // The free write class and the fully allowance-funded paid write class
         // both have zero wallet-funded quantity and must emit no Lago event.
         let allowance_code = &t.components.iter().find(|c| c.key == "write30").unwrap().lago_metric_code;

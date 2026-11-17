@@ -133,6 +133,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        wake: None,
         automation_work: None,
         execution_task: None,
         channel_contexts: Vec::new(),
@@ -1006,6 +1007,31 @@ pub async fn home_thread_for(
 // Grants
 // ---------------------------------------------------------------------------
 
+/// One authorization inventory for grant editors and all grant writers. Tool
+/// publication affects discovery, not whether an HTTP connection can be granted.
+pub async fn grant_catalog(
+    db: &Database,
+    nodes: &NodeWsManager,
+    actor: &str,
+    scope: mcp_service::ServiceScope<'_>,
+    targets: &[String],
+) -> AppResult<Vec<mcp_service::McpToolService>> {
+    let catalog = mcp_service::load_authorization_catalog(db, nodes, actor, scope, targets).await?;
+    Ok(catalog
+        .services
+        .into_iter()
+        .chain(catalog.unpublished_services)
+        .filter(|service| {
+            !matches!(service.source, mcp_service::McpToolSource::Internal)
+                && !is_engine(&service.service_slug)
+        })
+        .collect())
+}
+
+fn is_engine(target: &str) -> bool {
+    target.eq_ignore_ascii_case(engine::SERVICE_SLUG) || target.eq_ignore_ascii_case("nyxagent")
+}
+
 /// Services resolved from slugs or IDs exactly as MCP enforces them: user
 /// services by `UserService` ID, platform services by catalog ID.
 #[derive(Clone, Debug, Default)]
@@ -1068,9 +1094,7 @@ pub async fn resolve_each_target(
         Some(access) => mcp_service::ServiceScope::Organization { access },
         None => mcp_service::ServiceScope::Preferring(&trimmed_targets),
     };
-    let catalog =
-        mcp_service::load_authorization_catalog(db, node_manager, actor, scope, &trimmed_targets)
-            .await?;
+    let catalog = grant_catalog(db, node_manager, actor, scope, &trimmed_targets).await?;
     for target in &trimmed_targets {
         let target = target.as_str();
         let refuse = |reason: String| Refused {
@@ -1079,9 +1103,7 @@ pub async fn resolve_each_target(
         };
         // Every agent runs on NyxAgent and thinks with NyxID's model
         // services; the engine itself is not a service an agent calls.
-        if target.eq_ignore_ascii_case(crate::services::assistant_nyxagent::SERVICE_SLUG)
-            || target.eq_ignore_ascii_case("nyxagent")
-        {
+        if is_engine(target) {
             refused.push(refuse(
                 "NyxAgent is the assistant engine every agent already runs on; it is not \
                 granted as a service"
@@ -1107,7 +1129,6 @@ pub async fn resolve_each_target(
             continue;
         }
         let Some(service) = catalog
-            .services
             .iter()
             .find(|service| service.service_slug == target || service.service_id == target)
         else {
@@ -2339,6 +2360,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                 db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
                     .await?;
+                db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+                    .delete_many(doc! {"source.agent_id": &agent.id})
+                    .session(&mut *session)
+                    .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
                     db, &mut agent, session,
                 ))
@@ -2407,6 +2432,13 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                         )
                         .session(&mut *session)
                         .await?;
+                    super::assistant_notification_service::resolve_cards_in_session(
+                        db,
+                        session,
+                        super::assistant_notification_service::CardScope::Conversation(&row.id),
+                        "superseded",
+                    )
+                    .await?;
                 }
                 Ok((agent, children))
             }
@@ -2463,6 +2495,9 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     }
     // Clean derived authoring claims before the parent so a failed cleanup
     // remains retryable through the existing destroyed-agent purge endpoint.
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.agent_id": &agent.id})
+        .await?;
     db.collection::<bson::Document>(
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     )
@@ -2963,23 +2998,27 @@ async fn slug_names(
     Ok(names)
 }
 
-async fn last_reply(
+pub(crate) async fn last_reply(
     db: &Database,
     owner: &str,
     id: &str,
     chars: usize,
 ) -> AppResult<Option<ReplySummary>> {
-    Ok(db
+    let Some(message) = db
         .collection::<AssistantMessage>(MESSAGES)
-        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant"})
-        .sort(doc! {"seq": -1})
-        .await?
-        .map(|message| ReplySummary {
-            seq: message.seq,
-            status: message.status,
-            text: excerpt(&message.text, chars),
-            created_at: message.created_at,
-        }))
+        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant", "turn_metadata.voice_link_publication":{"$exists":false}})
+        .sort(doc! {"seq": -1}).await? else { return Ok(None); };
+    let mut text = super::voice::links::message_text(&message, &message.text).into_owned();
+    if text != super::voice::links::redact_tokens(&text) {
+        let hidden = super::voice::links::hidden_voice_thread(db, owner, id).await;
+        text = super::voice::links::thread_text(hidden, text);
+    }
+    Ok(Some(ReplySummary {
+        seq: message.seq,
+        status: message.status,
+        text: excerpt(&text, chars),
+        created_at: message.created_at,
+    }))
 }
 
 /// Agents with a live turn in any of their threads.
@@ -3392,6 +3431,10 @@ pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<Assista
     let mut filter = doc! {
         "collaboration": null,
         "pending_events.created_at": {"$exists": true},
+        "$expr":{"$anyElementTrue":[{"$map":{"input":{"$ifNull":["$pending_events",[]]},"as":"event","in":{"$or":[
+            {"$ne":[{"$ifNull":["$$event.wake.kind",""]},"watch"]},
+            {"$lte":["$$event.wake.ready_at","$$NOW"]}
+        ]}}}]},
         "$or": [
             {"role": "subagent"},
             {"event_streak": {"$not": {"$gte": MAX_EVENT_STREAK}}},

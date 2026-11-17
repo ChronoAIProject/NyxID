@@ -1,6 +1,8 @@
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,6 +16,8 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 import { SkeletonRows } from "../../components/Skeleton";
 import { resolveLegalDocumentUrl } from "./legalDocumentUrl";
 import { createLegalMarkdownStyles } from "./legalMarkdownStyles";
+import { resolveLegalLink, type LegalDocumentKey } from "./legalLink";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -33,9 +37,10 @@ import { spacing, typeScale } from "../../theme/designTokens";
  */
 type Props = {
   title: string;
-  docKey: "privacy" | "terms";
+  docKey: LegalDocumentKey;
   telemetryBackTarget: string;
   onBack: () => void;
+  onOpenDocument: (docKey: LegalDocumentKey) => void;
 };
 
 const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n*/;
@@ -57,9 +62,12 @@ export function LegalDocumentScreen({
   docKey,
   telemetryBackTarget,
   onBack,
+  onOpenDocument,
 }: Props) {
   const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const { colors } = useTheme();
+  const { t } = useAppLanguage();
+  const mounted = useRef(false);
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const markdownStyles = useMemo(
@@ -71,6 +79,38 @@ export function LegalDocumentScreen({
   const [content, setContent] = useState<string>("");
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const openLink = async (href: string) => {
+    const link = resolveLegalLink(href, url);
+    try {
+      if (link.kind === "document") {
+        if (link.docKey !== docKey) onOpenDocument(link.docKey);
+      } else if (link.kind === "external") {
+        await Linking.openURL(link.url);
+      } else {
+        throw new Error("Unsupported legal document link");
+      }
+    } catch {
+      if (!mounted.current) return;
+      Alert.alert(
+        t("Unable to open link"),
+        t("Try again, or open the link outside NyxID."),
+        [
+          { text: t("Cancel"), style: "cancel" },
+          ...(link.kind === "unsupported"
+            ? []
+            : [{ text: t("Retry"), onPress: () => void openLink(href) }]),
+        ],
+      );
+    }
+  };
 
   useEffect(() => {
     const url = resolveLegalDocumentUrl(docKey);
@@ -161,7 +201,16 @@ export function LegalDocumentScreen({
               ) : null}
             </View>
           ) : content ? (
-            <Markdown style={markdownStyles}>{content}</Markdown>
+            <Markdown
+              style={markdownStyles}
+              onLinkPress={(href) => {
+                void openLink(href);
+                // We own internal navigation and external-open error handling.
+                return false;
+              }}
+            >
+              {content}
+            </Markdown>
           ) : (
             <SkeletonRows
               rows={6}

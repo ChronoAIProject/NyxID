@@ -123,9 +123,8 @@ pub async fn sync(
         .await?;
     let result = state.billing.sync_machine_runtime_rate(&id).await;
     audit(&state, &auth, "machine_runtime_rate_sync_requested", &id).await;
-    result?;
     Ok(Json(SyncView {
-        synced: true,
+        synced: result?,
         rate_version: id,
     }))
 }

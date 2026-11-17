@@ -46,6 +46,7 @@ impl LagoApi for Entitled {
         customer: &str,
         subscription: &str,
     ) -> crate::errors::AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -83,6 +84,10 @@ async fn database(name: &str) -> mongodb::Database {
                 )
                 .build(),
         )
+        .await
+        .unwrap();
+    db.collection::<Document>("usage_meter")
+        .create_indexes(crate::db::billing_hold_indexes())
         .await
         .unwrap();
     db.collection::<Document>("billing_ledger")
@@ -538,8 +543,13 @@ async fn billing_readiness_does_not_wait_for_rollup_normalization() {
     assert!(exact_migration::run(&db).await.is_err());
     exact_migration::require_ready(&db).await.unwrap();
     let diagnostics = startup_diagnostics(&db).await.unwrap();
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code, "billing_rollup_normalization");
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| d.code == "billing_rollup_normalization")
+            .count(),
+        1
+    );
     db.collection::<Document>(crate::models::usage_rollup_hourly::COLLECTION_NAME)
         .update_one(
             doc! { "_id": "bad-analytics" },
@@ -549,7 +559,13 @@ async fn billing_readiness_does_not_wait_for_rollup_normalization() {
         .unwrap();
     exact_migration::run(&db).await.unwrap();
     assert!(exact_migration::rollup_ready(&db).await.unwrap());
-    assert!(startup_diagnostics(&db).await.unwrap().is_empty());
+    assert!(
+        startup_diagnostics(&db)
+            .await
+            .unwrap()
+            .iter()
+            .all(|d| d.code != "billing_rollup_normalization")
+    );
     db.drop().await.unwrap();
 }
 
@@ -702,7 +718,7 @@ async fn v2_postings_balance_commit_every_field_and_reconciliation_detects_corru
         .await
         .unwrap();
     exact_migration::run(&db).await.unwrap();
-    webhook::refresh_wallet_balance(&db, "owner", "7.12345".parse().unwrap())
+    webhook::refresh_test_balance(&db, "owner", "7.12345".parse().unwrap())
         .await
         .unwrap();
     assert_accounts(&db).await;
@@ -1137,7 +1153,7 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         .await
         .unwrap();
     assert_accounts(&db).await;
-    webhook::refresh_wallet_balance(&db, &owner, "10.12345".parse().unwrap())
+    webhook::refresh_test_balance(&db, &owner, "10.12345".parse().unwrap())
         .await
         .unwrap();
     assert_accounts(&db).await;
@@ -1153,6 +1169,11 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
             amount: "0.12345".parse().unwrap(),
             settled_at: now - chrono::Duration::days(366),
         }],
+        dispatch_attempts: 0,
+        processing_lease_until: None,
+        processing_lease_token: None,
+        dispatch_started_at: None,
+        unresolved_reported_at: None,
         lago_void_transaction_id: Some("void".into()),
         wallet_balance_applied: false,
         history_applied: false,
@@ -1166,10 +1187,19 @@ async fn mixed_account_lifecycle_balances_after_issue_hold_release_expire_revoke
         )
         .await
         .unwrap();
-    webhook::apply_balance(&db, "wallet", Credits::from_whole(10), Some(&operation))
-        .await
-        .unwrap()
-        .unwrap();
+    webhook::apply_balance(
+        &db,
+        &db.collection::<crate::models::billing_wallet::BillingWallet>("billing_wallet")
+            .find_one(doc! {"_id":"wallet"})
+            .await
+            .unwrap()
+            .unwrap(),
+        Credits::from_whole(10),
+        Some(&operation),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     db.collection::<Document>("billing_wallet")
         .update_one(doc! {}, doc! { "$unset": { "active_topup_expiry": "" } })
         .await
@@ -1961,13 +1991,22 @@ async fn migration_ready_latches_only_a_durable_completion_and_diagnostics_are_r
         .await
         .unwrap();
     let diagnostics = startup_diagnostics(&db).await.unwrap();
-    assert_eq!(diagnostics.len(), 2);
+    let cutover = diagnostics
+        .iter()
+        .filter(|d| d.code == "billing_exact_cutover")
+        .collect::<Vec<_>>();
+    let rates = diagnostics
+        .iter()
+        .filter(|d| d.code == "billing_invalid_rates")
+        .collect::<Vec<_>>();
+    assert_eq!(cutover.len(), 1);
+    assert_eq!(rates.len(), 1);
     assert_eq!(
-        diagnostics[0].detail,
+        cutover[0].detail,
         "7 failed documents; first keys: credit_grants:bad-0, credit_grants:bad-1, \
          credit_grants:bad-2, credit_grants:bad-3, credit_grants:bad-4"
     );
-    assert_eq!(diagnostics[1].detail, "Rejected metrics: tokens, images");
+    assert_eq!(rates[0].detail, "Rejected metrics: tokens, images");
     assert!(!exact_migration::ready(&db).await.unwrap());
     migrations
         .update_one(

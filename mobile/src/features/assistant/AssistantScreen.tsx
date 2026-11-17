@@ -1,4 +1,9 @@
 import {
+  groupVoiceMessages,
+  voiceMessageIndex,
+  type GroupedVoiceMessage,
+} from "./voice/voiceMessageGroups";
+import {
   ChatComposerDock,
   ChatIconButton as IconButton,
   ChatMessageTurn,
@@ -23,6 +28,12 @@ import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { assistantDraftKey, assistantDraftStore } from "./assistantDraftStore";
 import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceChatList } from "../../components/workspace/WorkspaceChatList";
+import { NotificationBell } from "../notifications/NotificationBell";
+import {
+  useNotificationIndicator,
+  useNotificationRuntime,
+  useVisibleThreadRead,
+} from "../notifications/useNotifications";
 import {
   ChatHeaderFrame,
   ChatIdentity,
@@ -49,7 +60,6 @@ import {
   FlatList,
   findNodeHandle,
   Keyboard,
-  LayoutAnimation,
   Modal,
   Platform,
   ScrollView,
@@ -84,6 +94,8 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { withVoiceRequestDeadline } from "./voice/voiceRequestDeadline";
 import { chatBubbleColors } from "../../theme/chatAppearance";
 import { fonts } from "../../theme/designTokens";
 import { useAssistant } from "./useAssistant";
@@ -133,7 +145,6 @@ import {
   mergeVoiceTranscript,
   retainVoiceSnapshot,
   voiceTranscriptLabel,
-  withoutLiveUserSpeech,
   type VoiceTranscriptMessage,
 } from "./voice/voiceTranscript";
 import type { VoiceSnapshot } from "./voice/voiceContracts";
@@ -155,6 +166,65 @@ type AssistantScreenProps = {
   };
 };
 
+function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let subscription: ReturnType<typeof Keyboard.addListener> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      subscription?.remove();
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", aborted);
+      if (error) reject(error);
+      else resolve();
+    };
+    const aborted = () => finish(new Error("Voice start was cancelled."));
+    try {
+      // Keep the text input mounted until Android confirms the IME is hidden,
+      // before the voice WebView can take focus away from that input.
+      subscription = Keyboard.addListener("keyboardDidHide", () => finish());
+      timeout = setTimeout(
+        () => finish(new Error("Voice could not open. Try again.")),
+        1500,
+      );
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) aborted();
+      else if (!Keyboard.isVisible()) finish();
+      else Keyboard.dismiss();
+    } catch {
+      finish(new Error("Voice could not open. Try again."));
+    }
+  });
+}
+
+async function createVoiceDraft(
+  agentId: string | undefined,
+  signal: AbortSignal,
+) {
+  const request = new AbortController();
+  const cancel = () => request.abort(signal.reason);
+  if (signal.aborted) cancel();
+  else signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await withVoiceRequestDeadline(request, () =>
+      assistantUploadsApi.createDraft(agentId, request.signal),
+    );
+  } catch (cause) {
+    if (
+      cause &&
+      typeof cause === "object" &&
+      "name" in cause &&
+      cause.name === "VoiceRequestTimeoutError"
+    )
+      throw new Error("Voice could not open. Try again.");
+    throw cause;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
 export function AssistantScreen({
   route,
   contextual = false,
@@ -163,6 +233,7 @@ export function AssistantScreen({
   const focused = useIsFocused();
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
+  const { t } = useAppLanguage();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
   const transcriptEdges = useScrollEdges();
@@ -175,6 +246,7 @@ export function AssistantScreen({
       adoptedId.current = id;
       navigation.setParams({
         conversationId: id,
+        messageId: undefined,
         acknowledgementId: undefined,
         home: false,
         draft: false,
@@ -204,13 +276,6 @@ export function AssistantScreen({
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
-  const [voiceMinimized, setVoiceMinimized] = useState(false);
-  function changeVoiceSize(minimized: boolean) {
-    if (minimized === voiceMinimized) return;
-    if (!reducedMotion)
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setVoiceMinimized(minimized);
-  }
   const [voicePreferencesOpen, setVoicePreferencesOpen] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState<{
     thread: string;
@@ -320,20 +385,33 @@ export function AssistantScreen({
     voiceTranscript.epoch === voiceEpoch
       ? voiceTranscript.snapshot
       : undefined;
-  // While the voice composer is open it alone shows the user's unsent words;
-  // once it closes, the chat keeps them as a partial transcript.
-  const voiceComposerOpen =
-    !!voiceThread && voiceThread === assistant.conversationId;
+  // Caption IDs own voice messages. Microphone energy also includes noise and
+  // playback, so it must not create a separate transcription placeholder.
   const messages = useMemo(
-    () =>
-      mergeVoiceTranscript(
-        historyMessages ?? [],
-        voiceComposerOpen
-          ? withoutLiveUserSpeech(voiceSnapshot)
-          : voiceSnapshot,
-      ),
-    [historyMessages, voiceSnapshot, voiceComposerOpen],
+    () => groupVoiceMessages(
+      mergeVoiceTranscript(historyMessages ?? [], voiceSnapshot),
+    ),
+    [historyMessages, voiceSnapshot],
   );
+  const revealedMessage = useRef<string | undefined>(undefined);
+  const messageTarget = route?.params?.messageId;
+  const targetIndex = messageTarget ? voiceMessageIndex(messages, messageTarget) : -1;
+  const revealMessage = () => {
+    if (!focused || targetIndex < 0 || !messageTarget || !transcript.current) return;
+    const key = `${assistant.conversationId}:${messageTarget}`;
+    if (revealedMessage.current === key) return;
+    transcriptScroll.pause();
+    transcript.current.scrollToIndex({
+      index: targetIndex,
+      animated: false,
+      viewPosition: 0.5,
+    });
+    revealedMessage.current = key;
+  };
+  useEffect(() => {
+    if (!messageTarget) revealedMessage.current = undefined;
+    revealMessage();
+  });
   const voiceHistory = useRef(historyMessages);
   voiceHistory.current = historyMessages;
   const receiveVoiceSnapshot = useCallback(
@@ -497,6 +575,7 @@ export function AssistantScreen({
     epoch: getAuthEpoch(),
     revision: draftRevision.current,
     voiceAllowed: canCompose && voiceAvailable,
+    focused,
   });
   voiceContext.current = {
     agentId: assistant.agentId,
@@ -504,13 +583,21 @@ export function AssistantScreen({
     epoch: getAuthEpoch(),
     revision: draftRevision.current,
     voiceAllowed: canCompose && voiceAvailable,
+    focused,
   };
   useEffect(() => {
     setOpeningVoice(false);
     return () => {
       voiceOpening.current?.abort();
     };
-  }, [route?.params?.agentId, route?.params?.conversationId]);
+  }, [
+    route?.params?.agentId,
+    route?.params?.conversationId,
+    assistant.agentId,
+    assistant.conversationId,
+    voiceEpoch,
+    focused,
+  ]);
   useEffect(() => {
     if (voiceThread && voiceThread !== assistant.conversationId)
       setVoiceThread(undefined);
@@ -527,27 +614,30 @@ export function AssistantScreen({
   }, [assistant.conversationId, voiceEpoch]);
 
   async function openVoice() {
-    if (!canCompose || !voiceAvailable || voiceOpening.current) return;
+    if (!focused || !canCompose || !voiceAvailable || voiceOpening.current)
+      return;
     if (voiceThread === assistant.conversationId && voiceThread) return;
-    Keyboard.dismiss();
     const scope = { ...voiceContext.current, revision: draftRevision.current };
     const controller = new AbortController();
     voiceOpening.current = controller;
     setOpeningVoice(true);
+    setLocalError(undefined);
     const current = () =>
       !controller.signal.aborted &&
       voiceContext.current.agentId === scope.agentId &&
       voiceContext.current.conversationId === scope.conversationId &&
       voiceContext.current.voiceAllowed &&
+      voiceContext.current.focused &&
       getAuthEpoch() === scope.epoch &&
       draftRevision.current === scope.revision;
     try {
+      if (Keyboard.isVisible())
+        await dismissKeyboardForVoice(controller.signal);
+      else Keyboard.dismiss();
+      if (!current()) return;
       const id =
         scope.conversationId ??
-        (await assistantUploadsApi.createDraft(
-          scope.agentId,
-          controller.signal,
-        ));
+        (await createVoiceDraft(scope.agentId, controller.signal));
       if (!current()) return;
       if (!scope.conversationId) {
         adoptedId.current = id;
@@ -561,14 +651,15 @@ export function AssistantScreen({
           openLatest: false,
         });
       }
-      setVoiceMinimized(false);
       setVoiceThread(id);
     } catch (cause) {
       if (current())
         setLocalError(
-          cause instanceof Error
-            ? cause.message
-            : "Voice could not open. Try again.",
+          t(
+            cause instanceof Error
+              ? cause.message
+              : "Voice could not open. Try again.",
+          ),
         );
     } finally {
       if (voiceOpening.current === controller) {
@@ -717,6 +808,19 @@ export function AssistantScreen({
     );
   }
 
+  const notificationRuntime = useNotificationRuntime();
+  const bell = useNotificationIndicator(notificationRuntime.active);
+  useVisibleThreadRead(
+    assistant.conversationId
+      ? { type: "conversation", id: assistant.conversationId }
+      : undefined,
+    bell.enabled,
+    notificationRuntime.active,
+  );
+  function openNotifications() {
+    afterPickerDismissal(() => navigation.push("Notifications"));
+  }
+
   function openChatOptions() {
     if (!voiceThread || voiceThread !== assistant.conversationId)
       return openDetails();
@@ -740,12 +844,28 @@ export function AssistantScreen({
       { text: "Cancel", style: "cancel" },
     ]);
   }
-  const headerHandlers = useRef({ newChat, openDetails: openChatOptions });
-  headerHandlers.current = { newChat, openDetails: openChatOptions };
+  const headerHandlers = useRef({
+    newChat,
+    openDetails: openChatOptions,
+    openNotifications,
+  });
+  headerHandlers.current = {
+    newChat,
+    openDetails: openChatOptions,
+    openNotifications,
+  };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const actions = () => (
       <WorkspaceHeaderVisibility>
         <View style={styles.headerActions}>
+          {bell.enabled ? (
+            <NotificationBell
+              unread={bell.unread}
+              needsDecision={bell.needsDecision}
+              disabled={headerDisabled}
+              onPress={() => headerHandlers.current.openNotifications()}
+            />
+          ) : null}
           <IconButton
             label="New chat"
             disabled={newChatDisabled}
@@ -802,6 +922,9 @@ export function AssistantScreen({
     colors.textSecondary,
     headerDisabled,
     newChatDisabled,
+    bell.enabled,
+    bell.unread,
+    bell.needsDecision,
   ]);
 
   useWorkspaceBack({
@@ -809,7 +932,9 @@ export function AssistantScreen({
     // contextual chats pushed from another screen have a native Back parent.
     active: false,
     defaultRole: contextual ? "back" : "menu",
-    disabled: headerDisabled,
+    disabled:
+      (assistant.sending || uploads.session.sending) &&
+      !assistant.conversationId,
     options: headerOptions,
     onBack: () => navigation.goBack(),
   });
@@ -846,7 +971,7 @@ export function AssistantScreen({
     item,
     index,
   }: {
-    item: VoiceTranscriptMessage;
+    item: GroupedVoiceMessage;
     index: number;
   }) {
     const isUser = item.role === "user";
@@ -894,7 +1019,10 @@ export function AssistantScreen({
         {index > 0 &&
         !item.voiceTransient &&
         !messages[index - 1]?.voiceTransient &&
-        item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
+        item.seq >
+          (messages[index - 1]?.voiceGroup?.at(-1)?.seq ??
+            messages[index - 1]?.seq ??
+            item.seq) + 1 ? (
           <Notice message="Messages between these pages haven't loaded yet. Load missing messages to restore them." />
         ) : null}
         {resetHere ? (
@@ -1080,10 +1208,20 @@ export function AssistantScreen({
     );
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
+    const continuingVoice =
+      item.voice &&
+      !item.voice.complete &&
+      !item.voice.interrupted &&
+      voiceSnapshot?.session.id === item.voice.session_id &&
+      voiceSnapshot.session.state !== "closed" &&
+      voiceSnapshot.session.state !== "failed" &&
+      !voiceSnapshot.session.end_requested;
     const footer =
-      !item.voiceTransient && !voiceLabel ? (
+      !item.voiceTransient &&
+      item.voice?.sealed !== false &&
+      !continuingVoice ? (
         <AssistantMessageFooter
-          key={`${assistant.conversationId}:${item.id}`}
+          key={`${assistant.conversationId}:${item.anchorId ?? item.id}`}
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
           timestamp={item.created_at}
           user={isUser}
@@ -1094,7 +1232,7 @@ export function AssistantScreen({
               ? {
                   kind: "conversation",
                   id: assistant.conversationId,
-                  messageId: item.id,
+                  messageId: item.anchorId ?? item.id,
                   reported: isReported(item.feedback),
                 }
               : undefined
@@ -1201,9 +1339,6 @@ export function AssistantScreen({
       <TranscriptViewport
         key="transcript-column"
         ready={homeVisible || transcriptScroll.ready}
-        onTouchStart={() => {
-          if (voiceThread) changeVoiceSize(true);
-        }}
         viewportRef={transcriptViewport}
       >
         {homeVisible ? (
@@ -1287,10 +1422,19 @@ export function AssistantScreen({
             onLayout={(event) => {
               transcriptScroll.listProps.onLayout(event);
               transcriptEdges.layout(event.nativeEvent.layout.height);
+              revealMessage();
             }}
             onContentSizeChange={(width, height) => {
               transcriptScroll.listProps.onContentSizeChange(width, height);
               transcriptEdges.content(height);
+              revealMessage();
+            }}
+            onScrollToIndexFailed={({ index, averageItemLength }) => {
+              revealedMessage.current = undefined;
+              transcript.current?.scrollToOffset({
+                offset: index * averageItemLength,
+                animated: false,
+              });
             }}
             onScroll={(event) => {
               transcriptOffset.current = event.nativeEvent.contentOffset.y;
@@ -1558,8 +1702,6 @@ export function AssistantScreen({
             key={`voice:${voiceThread}`}
             thread={voiceThread}
             agentName={agentName}
-            minimized={voiceMinimized}
-            onExpand={() => changeVoiceSize(false)}
             onClose={() => {
               if (
                 getAuthEpoch() !== voiceEpoch ||

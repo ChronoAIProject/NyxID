@@ -1,3 +1,4 @@
+import androidCases from "../assistant/voice/dictation-android-cases.json";
 import { createAssistantDraftStore } from "../assistant/assistantDraftStore";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -27,11 +28,13 @@ const nodes = (n: any): E[] =>
 function setup({
   draftStore = createAssistantDraftStore(() => 1),
   missingResearch = false,
+  android = undefined as (typeof androidCases)[number] | undefined,
 } = {}) {
   let options: any;
   let settingsOpened = 0;
   let dictationOptions: any;
-  const dictation = { active: false, phase: "idle" };
+  let dictation: any = { active: false, phase: "idle" };
+  const nativeStarts: any[] = [];
   const members = [
     { id: "bot", name: "nyxbot", display_name: "NyxBot", kind: "nyxbot" },
     {
@@ -83,6 +86,11 @@ function setup({
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "react-native": {
+      Platform: { OS: android ? "android" : "ios" },
+      AppState: {
+        currentState: "active",
+        addEventListener: () => ({ remove() {} }),
+      },
       useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
       ...Object.fromEntries(
         [
@@ -143,6 +151,11 @@ function setup({
     "../../lib/api/agentsApi": {},
     "../../lib/api/groupsApi": {},
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
+    "../notifications/useNotifications": {
+      useNotificationRuntime: () => ({ active: true, online: true }),
+      useNotificationsEnabled: () => false,
+      useVisibleThreadRead: () => {},
+    },
     "../../app/WorkspaceHeader": {
       WorkspaceHeaderVisibility: "Visibility",
       useWorkspaceBack: (p: any) => {
@@ -235,6 +248,49 @@ function setup({
       fileURLToPath(new URL("../assistant/ChatSurface.tsx", import.meta.url)),
     ),
   );
+  if (android) {
+    h.mock("expo-speech-recognition", {
+      ExpoSpeechRecognitionModule: {
+        isRecognitionAvailable: () => true,
+        getPermissionsAsync: async () => ({
+          granted: true,
+          status: "granted",
+          canAskAgain: true,
+        }),
+        getSupportedLocales: async () => {
+          if (android.reject) throw new Error("Unavailable");
+          return { locales: android.locales };
+        },
+        addListener: () => ({ remove() {} }),
+        start: (options: unknown) => nativeStarts.push(options),
+        abort() {},
+      },
+    });
+    h.mock("@react-navigation/native", { useIsFocused: () => true });
+    h.mock("../../i18n/deviceLanguages", {
+      deviceLanguages: () => android.preferred ?? ["en-US"],
+    });
+    h.mock("./voice/dictationLanguage", {
+      savedDictationLanguage: async () => android.saved,
+      languageLabel: (value: string) => value,
+    });
+    h.mock("../../lib/accessibility/workspaceAccessibility", {
+      useWorkspaceAccessibility: () => ({ sheetOpen: false }),
+    });
+    const hooks = h.load(
+      fileURLToPath(
+        new URL("../assistant/useComposerDictation.ts", import.meta.url),
+      ),
+    ) as typeof import("../assistant/useComposerDictation");
+    h.mock("../assistant/useComposerDictation", {
+      ...hooks,
+      useComposerDictation: (options: any) => {
+        dictationOptions = options;
+        dictation = hooks.useComposerDictation(options);
+        return dictation;
+      },
+    });
+  }
   const Screen = h.load(
     fileURLToPath(new URL("./GroupChatScreen.tsx", import.meta.url)),
   ).GroupChatScreen as any;
@@ -267,6 +323,8 @@ function setup({
     submit,
     dictation,
     dictationOptions: () => dictationOptions,
+    realDictation: () => dictation,
+    nativeStarts,
   };
 }
 
@@ -853,3 +911,16 @@ test("crew options use the private header overflow affordance and avoid a duplic
   assert.equal(f.identity().props.members.length, 2);
   f.h.unmount();
 });
+
+for (const scenario of androidCases) {
+  test(`Android GroupChatScreen composer: ${scenario.name}`, async () => {
+    const x = setup({ android: scenario });
+    assert.equal(x.dictationOptions().enabled, true);
+    await x.realDictation().start();
+    await x.h.settle();
+    assert.equal(x.nativeStarts.length, scenario.hardError ? 0 : 1);
+    assert.equal(x.nativeStarts[0]?.lang, scenario.expected);
+    assert.equal(x.realDictation().chooseLanguage, !!scenario.hardError);
+    x.h.unmount();
+  });
+}

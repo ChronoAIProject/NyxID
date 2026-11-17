@@ -126,7 +126,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         );
         return Ok(None);
     }
-    crate::services::security_readiness_service::require(db, READINESS).await?;
+    crate::services::security_readiness_service::require_serving(db, READINESS).await?;
     let Some(source) = source(db, context, chat).await? else {
         tracing::info!(
             reason = "source_not_recoverable",

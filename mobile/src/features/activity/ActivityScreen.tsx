@@ -67,7 +67,10 @@ export function ActivityScreen() {
   const navigation = useNavigation<Nav>();
   const route =
     useRoute<
-      RouteProp<WorkspaceContentParamList, "Activity" | "ActiveGrants">
+      RouteProp<
+        WorkspaceContentParamList,
+        "Activity" | "ActivityReview" | "ActiveGrants"
+      >
     >();
   const queryClient = useQueryClient();
   const { isConnected, recheckConnection } = useNetworkStatus();
@@ -92,7 +95,10 @@ export function ActivityScreen() {
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
   useWorkspaceBack({
     active: false,
-    defaultRole: route.name === "ActiveGrants" ? "back" : "menu",
+    defaultRole:
+      route.name === "ActiveGrants" || route.name === "ActivityReview"
+        ? "back"
+        : "menu",
     disabled: mutatingIds.size > 0,
     onBack: navigation.goBack,
   });

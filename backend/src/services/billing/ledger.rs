@@ -166,7 +166,9 @@ pub async fn record_usage_settled(
     if append_and_confirm_dedupe(db, entry).await {
         Ok(())
     } else {
-        Err(AppError::Internal("usage ledger append is pending".into()))
+        Err(super::recovery_batch::waiting(AppError::Internal(
+            "usage ledger append is pending".into(),
+        )))
     }
 }
 
@@ -449,11 +451,9 @@ pub async fn append_chained_entry(
                 .or_insert_with(|| {
                     let (tx, rx) = tokio::sync::mpsc::channel(512);
                     let batcher = std::sync::Arc::new(AppendBatcher { tx });
-                    tokio::spawn(run_append_batches(
-                        db.clone(),
-                        Zeroizing::new(key.to_vec()),
-                        rx,
-                    ));
+                    crate::services::shutdown::process().spawn_completion_worker(
+                        run_append_batches(db.clone(), Zeroizing::new(key.to_vec()), rx),
+                    );
                     batcher
                 })
                 .clone()
@@ -462,6 +462,7 @@ pub async fn append_chained_entry(
         match batcher
             .tx
             .send(AppendRequest {
+                _work: crate::services::shutdown::process().completion_work(),
                 entry: entry.clone(),
                 reply,
             })
@@ -493,6 +494,7 @@ pub async fn append_chained_entry(
 }
 
 struct AppendRequest {
+    _work: crate::services::shutdown::Work,
     entry: BillingLedgerEntry,
     reply: tokio::sync::oneshot::Sender<Result<BillingLedgerEntry, String>>,
 }
@@ -1716,6 +1718,7 @@ mod tests {
         ] {
             let (reply, result) = tokio::sync::oneshot::channel();
             requests.push(AppendRequest {
+                _work: crate::services::shutdown::process().completion_work(),
                 entry: v2_entry(reference, account),
                 reply,
             });

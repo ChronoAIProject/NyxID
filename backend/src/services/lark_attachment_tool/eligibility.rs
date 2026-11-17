@@ -31,8 +31,8 @@ pub(crate) enum Reason {
 }
 
 impl Reason {
-    pub(crate) fn error(self) -> AppError {
-        let (reason, action) = match self {
+    fn details(self) -> (&'static str, &'static str) {
+        match self {
             Self::Guest => (
                 "guest_turn",
                 "Only the owner may upload attachments; use an owner chat",
@@ -125,8 +125,16 @@ impl Reason {
                 "async_unsupported",
                 "Attachment writes require live synchronous chat execution",
             ),
-        };
-        AppError::Forbidden(format!("attachment_write_{reason}: {action}"))
+        }
+    }
+    pub(crate) fn code(self) -> &'static str {
+        self.details().0
+    }
+    pub(crate) fn error(self) -> AppError {
+        let (reason, action) = self.details();
+        diagnostics::Reason::Eligibility(self).error(AppError::Forbidden(format!(
+            "attachment_write_{reason}: {action}"
+        )))
     }
 }
 

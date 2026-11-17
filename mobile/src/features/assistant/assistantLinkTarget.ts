@@ -1,3 +1,4 @@
+import { bareAutolinkTarget } from "./autolinkPunctuation";
 const ACCOUNT_KEYS = new Set([
   "panel",
   "panelTab",
@@ -27,7 +28,9 @@ export type AssistantLinkTarget =
 export function assistantLinkTarget(
   href: string,
   frontendUrls: string | readonly string[],
+  bareAutolink = false,
 ): AssistantLinkTarget | null {
+  if (bareAutolink) href = bareAutolinkTarget(href);
   try {
     const origins = (
       typeof frontendUrls === "string" ? [frontendUrls] : frontendUrls

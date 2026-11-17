@@ -7,8 +7,8 @@ use crate::crypto::aes::EncryptionDecryptStats;
 use crate::errors::AppResult;
 use crate::services::feature_flag_service;
 
-/// GET /api/v1/admin/security-readiness. Process observations and an explicit
-/// serving roster are prerequisites, not an automatic rollout controller.
+/// GET /api/v1/admin/security-readiness. Observed support and durable activation,
+/// including the optional legacy roster/drain diagnostics.
 pub async fn security_readiness(
     State(state): State<AppState>,
     auth: crate::mw::auth::AuthUser,
@@ -24,7 +24,12 @@ pub async fn security_readiness(
     )
     .await?;
     let mut reports = std::collections::BTreeMap::new();
-    for capability in crate::services::security_readiness_service::CAPABILITIES {
+    for capability in crate::services::security_readiness_service::CAPABILITIES
+        .iter()
+        .chain(std::iter::once(
+            &crate::services::security_readiness_service::AUTOMATION_COMPLETION,
+        ))
+    {
         reports.insert(
             (*capability).to_owned(),
             crate::services::security_readiness_service::report(&state.db, capability).await?,
@@ -45,6 +50,15 @@ pub struct HealthResponse {
 pub struct EncryptionHealthResponse {
     pub previous_key_configured: bool,
     pub decrypt_stats: EncryptionDecryptStats,
+}
+
+/// Readiness is process-local; liveness and security capability readiness are independent.
+pub async fn ready(State(state): State<AppState>) -> axum::http::StatusCode {
+    if state.shutdown.is_draining() {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    }
 }
 
 /// GET /health

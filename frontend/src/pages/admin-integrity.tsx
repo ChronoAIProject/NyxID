@@ -15,6 +15,7 @@ import {
 } from "@/hooks/use-admin-chain-verification";
 import type {
   ChainVerifyStatus,
+  SecurityEffectDiagnostics,
   StartupDiagnostic,
 } from "@/schemas/admin-chain-verification";
 import { useAuthStore } from "@/stores/auth-store";
@@ -137,28 +138,84 @@ function StartupDiagnostics({
   useUiTranslation();
   if (diagnostics.length === 0) return null;
 
+  const informationalCodes = ["billing_usage_warming", "billing_usage_coverage"];
+  const informational = diagnostics.filter((item) => informationalCodes.includes(item.code));
+  const failures = diagnostics.filter((item) => !informationalCodes.includes(item.code));
   return (
-    <Card className="border-destructive/50">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0">
-        <div className="flex items-center gap-2">
-          <ShieldAlert className="h-5 w-5 text-destructive" />
-          <CardTitle className="text-15">{translateUi("Startup diagnostics")}</CardTitle>
+    <>
+      {informational.map((diagnostic) => (
+        <div key={diagnostic.code} role="status" className="space-y-1 text-14 text-muted-foreground">
+          <p>{diagnostic.summary}{diagnostic.code === "billing_usage_warming" ? <> · {translateUi("Since {{value1}}", {
+            value1: formatTimestamp(diagnostic.detected_at),
+          })}</> : null}</p>
+          <p>{diagnostic.detail}</p>
         </div>
-        <Badge variant="destructive">{translateUi("Action required")}</Badge>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {diagnostics.map((diagnostic) => (
-          <div key={diagnostic.code} className="space-y-2 text-14">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <p className="font-medium text-destructive">
-                {diagnostic.summary}
-              </p>
-              <span className="text-13 text-muted-foreground">
-                {formatTimestamp(diagnostic.detected_at)}
-              </span>
+      ))}
+      {failures.length > 0 ? (
+        <Card className="border-destructive/50">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="h-5 w-5 text-destructive" />
+              <CardTitle className="text-15">{translateUi("Startup diagnostics")}</CardTitle>
             </div>
-            <p className="text-muted-foreground">{diagnostic.detail}</p>
-            <p>{diagnostic.remediation}</p>
+            <Badge variant="destructive">{translateUi("Action required")}</Badge>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {failures.map((diagnostic) => (
+              <div key={diagnostic.code} className="space-y-2 text-14">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <p className="font-medium text-destructive">
+                    {diagnostic.summary}
+                  </p>
+                  <span className="text-13 text-muted-foreground">
+                    {formatTimestamp(diagnostic.detected_at)}
+                  </span>
+                </div>
+                <p className="text-muted-foreground">{diagnostic.detail}</p>
+                <p>{diagnostic.remediation}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+    </>
+  );
+}
+
+function SecurityEffectQueue({
+  diagnostics,
+}: {
+  readonly diagnostics: SecurityEffectDiagnostics | undefined;
+}) {
+  useUiTranslation();
+  if (!diagnostics) return null;
+  const needsAttention =
+    (diagnostics.oldest_pending_age_seconds ?? 0) >= 3600 ||
+    diagnostics.counts.some(
+      (item) => item.state === "uncertain" || item.state === "failed",
+    );
+  return (
+    <Card className={needsAttention ? "border-destructive/50" : undefined}>
+      <CardHeader>
+        <CardTitle className="text-15">{translateUi("Security effect relay")}</CardTitle>
+        {needsAttention ? (
+          <Badge variant="destructive">{translateUi("Action required")}</Badge>
+        ) : null}
+      </CardHeader>
+      <CardContent className="space-y-2 text-14">
+        <p className="text-muted-foreground">
+          {diagnostics.oldest_pending_at
+            ? translateUi("Oldest outstanding effect: {{value1}}", {
+                value1: `${formatTimestamp(diagnostics.oldest_pending_at)} (${diagnostics.oldest_pending_age_seconds ?? 0}s)`,
+              })
+            : translateUi("No outstanding effects")}
+        </p>
+        {diagnostics.counts.map((item) => (
+          <div key={`${item.kind}:${item.state}`} className="flex justify-between gap-4">
+            <span>{item.kind} / {item.state}</span>
+            <span className="font-mono">
+              {item.count}{item.at_least ? "+" : ""}
+            </span>
           </div>
         ))}
       </CardContent>
@@ -217,6 +274,7 @@ export function AdminIntegrityPage() {
       {data ? (
         <StartupDiagnostics diagnostics={data.startup_diagnostics} />
       ) : null}
+      {data ? <SecurityEffectQueue diagnostics={data.security_effects} /> : null}
 
       {error ? (
         <Card>

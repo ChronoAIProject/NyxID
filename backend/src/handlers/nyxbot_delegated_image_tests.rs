@@ -88,6 +88,7 @@ async fn source(
 }
 async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> TurnAttachment {
     let attachment = AssistantAttachment {
+        chunks: 0,
         artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
@@ -191,6 +192,9 @@ async fn send_refs(
     images::send_turn_images(
         &f.state,
         ImageSendContext {
+            source: crate::models::image_preparation::Source::Event {
+                event_id: f.event.id.clone(),
+            },
             owner: OWNER,
             conversation_id: &row.id,
             turn_id: &row.active_turn.as_ref().unwrap().turn_id,

@@ -170,6 +170,19 @@ impl ClusterLeaseRuntime {
         LeaseStore::acquire(db, name, &self.holder, self.ttl).await
     }
 
+    /// Request-time leases (notably OAuth refresh) still use `acquire`.
+    pub async fn acquire_background(
+        &self,
+        db: &mongodb::Database,
+        name: &str,
+        shutdown: &super::shutdown::Runtime,
+    ) -> AppResult<Option<LeaseToken>> {
+        let Some(_claim) = shutdown.background() else {
+            return Ok(None);
+        };
+        self.acquire(db, name).await
+    }
+
     pub fn contender_wait(&self) -> Duration {
         self.renew_interval / 10
     }
@@ -247,6 +260,19 @@ impl LeaseStore {
         holder: &CoordinationHolder,
         ttl: Duration,
     ) -> AppResult<Option<LeaseToken>> {
+        Ok(Self::acquire_with_checkpoint(db, name, holder, ttl)
+            .await?
+            .map(|(token, _)| token))
+    }
+
+    /// Return the checkpoint from the acquisition's existing post-image. A
+    /// supervisor can resume durable status without another database read.
+    pub(crate) async fn acquire_with_checkpoint(
+        db: &mongodb::Database,
+        name: &str,
+        holder: &CoordinationHolder,
+        ttl: Duration,
+    ) -> AppResult<Option<(LeaseToken, Option<Bson>)>> {
         let ttl_ms = duration_millis(ttl, "lease TTL")?;
         let lease_id = uuid::Uuid::new_v4().to_string();
         let holder_bson = bson::to_bson(holder).map_err(|error| {
@@ -293,11 +319,14 @@ impl LeaseStore {
             .await;
 
         match result {
-            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some(LeaseToken {
-                name: name.to_string(),
-                holder: holder.clone(),
-                lease_id,
-            })),
+            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some((
+                LeaseToken {
+                    name: name.to_string(),
+                    holder: holder.clone(),
+                    lease_id,
+                },
+                record.checkpoint,
+            ))),
             Ok(Some(_)) => Ok(None),
             Ok(None) => Err(AppError::Internal(
                 "Lease acquisition returned no record".to_string(),
@@ -337,6 +366,7 @@ impl LeaseStore {
             .delete_one(without_checkpoint)
             .await?;
         if deleted.deleted_count == 1 {
+            super::shutdown::process().record_release("cluster", 1);
             return Ok(true);
         }
 
@@ -352,6 +382,7 @@ impl LeaseStore {
                 }},
             )
             .await?;
+        super::shutdown::process().record_release("cluster", released.modified_count);
         Ok(released.modified_count == 1)
     }
 
@@ -439,6 +470,33 @@ pub struct RateAdmission {
 pub struct RateWindowStore;
 
 impl RateWindowStore {
+    /// A read-only shortcut; callers must still claim capacity with admit.
+    pub async fn is_exhausted(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        limit: u64,
+        window: Duration,
+    ) -> AppResult<bool> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| AppError::Internal("Rate limit out of range".into()))?;
+        if limit == 0 {
+            return Ok(true);
+        }
+        Ok(db
+            .collection::<Document>(RATE_WINDOW_COLLECTION_NAME)
+            .find_one(
+                doc! {"_id": hash_parts(&[namespace, key]), "$expr": {"$and": [
+                    {"$eq": ["$window_start", rate_window_start(window_ms)]},
+                    {"$gte": ["$count", limit]},
+                ]}},
+            )
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some())
+    }
+
     /// Couple admission to a caller's reservation transaction. A failed
     /// reservation consumes no rate budget and Mongo retries remain atomic.
     pub(crate) async fn admit_in_session(
@@ -728,6 +786,7 @@ impl SlotStore {
                 &token.lease_id,
             ))
             .await?;
+        super::shutdown::process().record_release("capacity_slots", result.deleted_count);
         Ok(result.deleted_count == 1)
     }
 
@@ -987,6 +1046,21 @@ tokio::task_local! {
     pub(crate) static TEST_RATE_WINDOW_NOW: std::cell::Cell<DateTime>;
 }
 
+fn rate_window_start(window_ms: i64) -> Document {
+    let now = Bson::String("$$NOW".into());
+    #[cfg(test)]
+    let now = TEST_RATE_WINDOW_NOW
+        .try_with(|clock| Bson::DateTime(clock.get()))
+        .unwrap_or(now);
+    doc! {
+        "$dateTrunc": {
+            "date": now,
+            "unit": "millisecond",
+            "binSize": window_ms,
+        }
+    }
+}
+
 fn rate_window_pipeline(
     namespace: &str,
     key_hash: &str,
@@ -994,18 +1068,7 @@ fn rate_window_pipeline(
     limit: i64,
     window_ms: i64,
 ) -> Vec<Document> {
-    let now = Bson::String("$$NOW".into());
-    #[cfg(test)]
-    let now = TEST_RATE_WINDOW_NOW
-        .try_with(|clock| Bson::DateTime(clock.get()))
-        .unwrap_or(now);
-    let current_window = doc! {
-        "$dateTrunc": {
-            "date": now,
-            "unit": "millisecond",
-            "binSize": window_ms,
-        }
-    };
+    let current_window = rate_window_start(window_ms);
     vec![
         doc! {
             "$set": {

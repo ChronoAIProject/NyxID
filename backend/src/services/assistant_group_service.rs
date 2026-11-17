@@ -663,6 +663,10 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
     // writes the same parent, so an in-flight parser cannot leave orphan files.
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.group_id": id})
+        .session(&mut session)
+        .await?;
     db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
         .delete_many(doc! {"group_id": id})
         .session(&mut session)
@@ -888,6 +892,14 @@ async fn append_following_bound(
                     .insert_one(&message)
                     .session(&mut *session)
                     .await?;
+                // Member replies and notices, never the owner's or NyxBot's
+                // own posts into the group.
+                if source_thread.is_some() || role == "notice" {
+                    super::assistant_notification_service::record_group_reply_in_session(
+                        &db, session, &owner, &group, &message,
+                    )
+                    .await?;
+                }
                 if let Some(conversation_id) = follower.as_deref() {
                     follow_in_session(
                         &db,
@@ -1479,10 +1491,14 @@ pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
         .collection::<AssistantGroup>(GROUPS)
         .find(doc! {"collaboration": null, "$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
+        .hint(mongodb::options::Hint::Name(super::assistant_wake_service::GROUP_PENDING_INDEX.into()))
         .limit(50)
         .await?
         .try_collect()
         .await?;
+    if rows.is_empty() {
+        return Ok(rows);
+    }
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     db.collection::<AssistantGroup>(GROUPS)
         .update_many(

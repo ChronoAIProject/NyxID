@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { nyxBotGroupKeys } from "@/hooks/use-nyxbot-groups";
+import { notificationQueryKeys } from "@/hooks/use-assistant-notifications";
 import { listenNyxAgentLive, type NyxAgentLiveEvent } from "@/lib/assistant/nyxagent-live";
 import { useAuthStore } from "@/stores/auth-store";
 
@@ -56,6 +57,9 @@ export function nyxAgentLiveRefresh(
         now: [],
         lists: [nyxBotQueryKeys.channels(userId), nyxBotQueryKeys.agents(userId)],
       };
+    case "notification":
+      // The bell and an open feed follow at once; identifiers only.
+      return { now: [notificationQueryKeys.root(userId)], lists: [] };
     case "ready":
     case "resync":
       // (Re)connected or events were missed: re-read everything.

@@ -57,6 +57,7 @@ pub struct Update {
     pub max_group_handoffs_per_hour: Option<i32>,
     pub specialist_access_requests:
         Option<crate::models::assistant_settings::SpecialistAccessRequests>,
+    pub notifications: Option<crate::models::assistant_settings::NotificationPreferences>,
 }
 
 pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<AssistantSettings> {
@@ -223,6 +224,14 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         );
         defaults.remove("specialist_access_requests");
     }
+    if let Some(value) = update.notifications {
+        set.insert(
+            "notifications",
+            bson::to_bson(&value)
+                .map_err(|_| AppError::Internal("Settings serialization failed".into()))?,
+        );
+        defaults.remove("notifications");
+    }
     let updated = db
         .collection::<AssistantSettings>(COLLECTION_NAME)
         .find_one_and_update(
@@ -233,6 +242,11 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Internal("Assistant settings unavailable".into()))?;
+    super::assistant_notification_service::cache_push_preferences(
+        db,
+        user_id,
+        updated.notifications.push,
+    );
     if updated.access_mode == AccessMode::Autopilot && current.access_mode != updated.access_mode {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(
             db,

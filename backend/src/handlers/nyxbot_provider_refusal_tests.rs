@@ -547,3 +547,97 @@ async fn provider_refused_cold_telegram_new_guest_then_established_owner_one_tur
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn telegram_new_guest_text_with_media_flag_uses_gateway_path() {
+    use crate::services::assistant_team_service::{CreateRequest, create_specialist};
+    let (state, calls, server) = setup("telegram_new_guest_text_media_flag").await;
+    let (agent, _) = create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        CreateRequest {
+            machines: None,
+            logins: None,
+            name: "support".into(),
+            description: "Customer support".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (row, key) = channel(&state, "gateway").await;
+    link(&state, OWNER, &row.id, &agent).await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.channel_bot_id},
+            doc! {"$set": {"platform": "telegram-new"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"private_chats": "everyone", "owner_sender_ids": ["7"]}},
+        )
+        .await
+        .unwrap();
+    media_tests::enable_media(&state).await;
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_telegram_new_media".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER)),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_conversation(
+            State(state.clone()),
+            Path(("bnd_telegram_new_media".into(), PARTITION.into())),
+            bearer(&key),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": "telegram-new-guest-text", "channel_bot_id": &row.channel_bot_id,
+            "conversation_id": row.route_id.as_deref().unwrap(),
+            "platform_conversation_id": "chat-1", "user_id": OWNER,
+            "direction": "inbound", "platform": "telegram-new",
+            "sender_platform_id": "42", "agent_api_key_id": &row.route_api_key_id,
+            "content_type": "text", "attachments": bson::Bson::Array(Vec::new()),
+            "created_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    let response = respond(
+        &state,
+        &key,
+        &event("hello from Telegram", "42", "telegram-new-guest-text"),
+        "telegram-new-guest-text",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("Here is your answer"));
+    assert_eq!(calls.lock().await.len(), 1);
+    server.abort();
+}

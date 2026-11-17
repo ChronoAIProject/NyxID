@@ -11,6 +11,34 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewRequest {
+    pub bot_id: String,
+    pub agent_id: String,
+    pub channel_id: Option<String>,
+}
+
+pub async fn preview(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(input): Json<PreviewRequest>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    Ok(Json(json!(
+        Box::pin(org::preview::load(
+            &state.db,
+            &state.encryption_keys,
+            &actor,
+            &input.bot_id,
+            &input.agent_id,
+            input.channel_id.as_deref()
+        ))
+        .await?
+    )))
+}
+
 pub async fn get(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -32,7 +60,6 @@ pub async fn update(
     let row = org::management::load(&state.db, &actor, &id, true).await?;
     org::management::update(&state.db, &actor, &row, input).await?;
     let row = org::management::load(&state.db, &actor, &id, true).await?;
-    audit(&state, &actor, "org_channel_guest_policy_changed", &id).await;
     Ok(Json(org::management::view(&state.db, &actor, &row).await?))
 }
 
@@ -49,7 +76,6 @@ pub(crate) async fn update_tool(
     let row = org::management::load(&state.db, actor, id, true).await?;
     org::management::patch(&state.db, actor, &row, input).await?;
     let row = org::management::load(&state.db, actor, id, true).await?;
-    audit(state, actor, "org_channel_guest_policy_changed", id).await;
     org::management::view(&state.db, actor, &row).await
 }
 pub async fn issue(

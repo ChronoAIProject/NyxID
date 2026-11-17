@@ -10,6 +10,7 @@ import * as emailLogin from "./emailLogin";
 import * as publicAuthConfig from "./publicAuthConfig";
 import * as socialCallback from "./socialCallback";
 import { loadTestModule } from "../../lib/api/apiUrlTestHarness";
+import { spacing } from "../../theme/designTokens";
 
 type Element = { type: unknown; props: Record<string, any> };
 type LoginInput = ReturnType<typeof emailLogin.passwordLoginInput>;
@@ -52,12 +53,14 @@ function setup({
   emailEnabled = true,
   getFrontendUrl = () => "https://nyxid.example",
   beforeMount = () => {},
+  platform = "ios",
 }: {
   state?: "ready" | "loading" | "error";
   providers?: PublicAuthConfig["socialProviders"];
   emailEnabled?: boolean;
   getFrontendUrl?: () => string;
   beforeMount?: () => void;
+  platform?: "ios" | "android";
 } = {}) {
   const config: PublicAuthConfig = {
     emailAuthEnabled: emailEnabled,
@@ -72,8 +75,11 @@ function setup({
   const urlListeners: Array<(event: { url: string }) => void> = [];
   let login = async (_input: LoginInput) => signedIn;
   let refetch = async () => ({ data: config, error: null as Error | null });
+  let configState = state;
+  let currentConfig = config;
   let configRefetches = 0;
   const appStateListeners: Array<(state: string) => void> = [];
+  let keyboardVisible = false;
   const colors = new Proxy(
     { dangerTone: { bg: "#fee", border: "#f00" } },
     { get: (target, key) => Reflect.get(target, key) ?? "#111" },
@@ -97,13 +103,17 @@ function setup({
     "@react-navigation/native": { useIsFocused: () => true },
     "@tanstack/react-query": {
       useQuery: () => ({
-        data: state === "loading" ? undefined : config,
-        isPending: state === "loading",
-        isError: state === "error",
-        isFetching: state === "loading",
-        refetch: () => {
+        data: configState === "loading" ? undefined : currentConfig,
+        isPending: configState === "loading",
+        isError: configState === "error",
+        isFetching: configState === "loading",
+        refetch: async () => {
           configRefetches++;
-          return refetch();
+          const result = await refetch();
+          configState = result.error ? "error" : "ready";
+          currentConfig = result.data;
+          harness.render();
+          return result;
         },
       }),
     },
@@ -119,7 +129,8 @@ function setup({
           "KeyboardAvoidingView",
         ].map((name) => [name, name]),
       ),
-      Platform: { OS: "ios" },
+      Platform: { OS: platform },
+      Keyboard: { metrics: () => keyboardVisible ? { screenY: 500 } : undefined },
       StyleSheet: { create: (styles: unknown) => styles },
       AppState: {
         currentState: "active",
@@ -132,11 +143,20 @@ function setup({
         },
       },
       Linking: {
-        openURL: async (url: string) => { waitlistUrls.push(url); },
+        openURL: async (url: string) => {
+          waitlistUrls.push(url);
+        },
         getInitialURL: async () => null,
-        addEventListener: (_event: string, listener: (event: { url: string }) => void) => {
+        addEventListener: (
+          _event: string,
+          listener: (event: { url: string }) => void,
+        ) => {
           urlListeners.push(listener);
-          return { remove: () => { urlListeners.splice(urlListeners.indexOf(listener), 1); } };
+          return {
+            remove: () => {
+              urlListeners.splice(urlListeners.indexOf(listener), 1);
+            },
+          };
         },
       },
     },
@@ -157,7 +177,10 @@ function setup({
           calls.push(plain(input));
           return login(input);
         },
-        verifyMfa: (body: {code: string; mfa_token: string}) => { calls.push({ mfaCode: body.code } as LoginInput); return Promise.resolve(signedIn); },
+        verifyMfa: (body: { code: string; mfa_token: string }) => {
+          calls.push({ mfaCode: body.code } as LoginInput);
+          return Promise.resolve(signedIn);
+        },
         getSocialAuthorizeUrl: (provider: string) =>
           `https://example.test/${provider}`,
       },
@@ -199,7 +222,11 @@ function setup({
     fileURLToPath(new URL("./AuthHomeScreen.tsx", import.meta.url)),
   ) as { AuthHomeScreen: (props: unknown) => Element };
   beforeMount();
-  harness.mount(() => AuthHomeScreen({ navigation: { navigate: (route: string) => navigations.push(route) } }));
+  harness.mount(() =>
+    AuthHomeScreen({
+      navigation: { navigate: (route: string) => navigations.push(route) },
+    }),
+  );
 
   function input(label: string) {
     const element = elements(harness.value()).find(
@@ -212,8 +239,7 @@ function setup({
   }
   function submit() {
     const element = elements(harness.value()).find(
-      (element) =>
-        element.type === "AuthSubmitButton",
+      (element) => element.type === "AuthSubmitButton",
     );
     assert.ok(element, "Expected email sign-in action");
     return element;
@@ -238,6 +264,8 @@ function setup({
     registrationUrls,
     waitlistUrls,
     navigations,
+    showKeyboard: () => { keyboardVisible = true; },
+    hideKeyboard: () => { keyboardVisible = false; },
     configRefetches: () => configRefetches,
     setLogin: (handler: typeof login) => {
       login = handler;
@@ -260,46 +288,287 @@ function setup({
   };
 }
 
-for (const emailEnabled of [false, true]) {
-test(`email login adopts the session when registration is ${emailEnabled ? "enabled" : "disabled"}`, async (t) => {
-  const screen = setup({ emailEnabled });
+for (const platform of ["ios", "android"] as const) {
+  test(`email form keeps its actions scrollable with native keyboard handling (${platform})`, async (t) => {
+    const screen = setup({
+      platform,
+      providers: ["google", "github", "apple"],
+    });
+    t.after(screen.harness.unmount);
+    const scroller = elements(screen.harness.value()).find(
+      (element) => element.type === "ScrollView",
+    );
+    assert.ok(scroller);
+    assert.equal(
+      scroller.props.automaticallyAdjustKeyboardInsets,
+      platform === "ios",
+    );
+    assert.equal(
+      scroller.props.keyboardDismissMode,
+      platform === "ios" ? "interactive" : "on-drag",
+    );
+    assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
+    assert.ok(
+      elements(scroller).includes(screen.submit()),
+      "submit remains inside the keyboard-adjusted scroll content",
+    );
+    assert.equal(
+      elements(screen.harness.value()).some(
+        (element) => element.type === "KeyboardAvoidingView",
+      ),
+      false,
+      "keyboard space is reserved only once",
+    );
+
+    const scrolls: unknown[] = [];
+    scroller.props.ref.current = {
+      getNativeScrollRef: () => ({
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(0, 120, 390, 700),
+      }),
+      scrollTo: (position: unknown) => scrolls.push(plain(position)),
+    };
+    const inputGeometry = (label: string, top: number) => {
+      screen.input(label).props.ref.current = {
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(40, top, 300, 28),
+      };
+    };
+    inputGeometry("Email", 200);
+    inputGeometry("Password", 480);
+    screen.input("Email").props.onFocus();
+    assert.equal(
+      scrolls.length,
+      0,
+      "initial keyboard animation is owned by the native scroll view",
+    );
+    screen.showKeyboard();
+    scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 350 } } });
+    screen.input("Password").props.onFocus();
+    screen.input("Email").props.onFocus();
+    assert.deepEqual(
+      scrolls,
+      platform === "ios"
+        ? [{ y: 350 + 480 + 28 + spacing.xl - 500, animated: true }]
+        : [],
+      "measure real window coordinates so native header and safe-area offsets are respected; leave an already-visible field in place",
+    );
+    inputGeometry("Email", 110);
+    screen.input("Email").props.onFocus();
+    if (platform === "ios")
+      assert.deepEqual(
+        scrolls.at(-1),
+        { y: 350 + 110 - 120 - spacing.xl, animated: true },
+        "a field above the visible viewport also becomes reachable",
+      );
+
+    screen.setLogin(async () => {
+      throw new Error("Invalid email or password");
+    });
+    screen.change("Email", "reviewer@example.test");
+    screen.change("Password", "wrong-password");
+    screen.submit().props.onPress();
+    await screen.harness.settle();
+    const nextScroller = elements(screen.harness.value()).find(
+      (element) => element.type === "ScrollView",
+    );
+    assert.ok(nextScroller);
+    assert.match(textContent(nextScroller), /Invalid email or password/);
+    assert.ok(elements(nextScroller).includes(screen.submit()));
+  });
+}
+
+test("focus reveal waits for a mounted native scroll viewport", (t) => {
+  const screen = setup();
   t.after(screen.harness.unmount);
-  assert.equal(screen.input("Password").props.secureTextEntry, true);
-  assert.equal(screen.social().length, 0);
-  assert.equal(screen.submit().props.disabled, true);
-  screen.change("Email", " reviewer@example.test ");
-  screen.change("Password", " review password ");
-  assert.equal(screen.submit().props.disabled, false);
-  const started = Date.now();
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let mounted = false;
+  let inputMeasurements = 0;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () =>
+      mounted
+        ? {
+            measureInWindow: (callback: (...args: number[]) => void) =>
+              callback(0, 120, 390, 700),
+          }
+        : null,
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) => {
+      inputMeasurements++;
+      callback(40, 480, 300, 28);
+    },
+  };
+  screen.showKeyboard();
+  assert.doesNotThrow(() => screen.input("Password").props.onFocus());
+  assert.equal(inputMeasurements, 0);
+  assert.deepEqual(scrolls, []);
+
+  mounted = true;
+  screen.input("Password").props.onFocus();
+  assert.equal(inputMeasurements, 1);
+  assert.deepEqual(scrolls, [
+    { y: 480 + 28 + spacing.xl - 500, animated: true },
+  ]);
+});
+
+test("MFA focus is revealed while the software keyboard is already open", async (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  screen.setLogin(async () => {
+    throw new MfaChallengeError("test-mfa-token");
+  });
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
   screen.submit().props.onPress();
   await screen.harness.settle();
-  assert.deepEqual(screen.calls, [
-    {
-      email: "reviewer@example.test",
-      password: " review password ",
-    },
+  const scrolls: unknown[] = [];
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Authenticator code").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 490, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Authenticator code").props.onFocus();
+  assert.deepEqual(scrolls, [
+    { y: 490 + 28 + spacing.xl - 500, animated: true },
   ]);
-  assert.equal(screen.sessions.length, 1);
-  assert.deepEqual(
-    {
-      accessToken: screen.sessions[0]!.accessToken,
-      refreshToken: screen.sessions[0]!.refreshToken,
-    },
-    {
-      accessToken: signedIn.accessToken,
-      refreshToken: signedIn.refreshToken,
-    },
+});
+
+test("late field measurements do not scroll after focus changes or the keyboard closes", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
   );
-  assert.ok(screen.sessions[0]!.accessTokenExpiresAt >= started + 3_600_000);
-  assert.ok(
-    screen.sessions[0]!.accessTokenExpiresAt <= Date.now() + 3_600_000,
-  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  let emailMeasurement: ((...args: number[]) => void) | undefined;
+  screen.input("Email").props.ref.current = {
+    measureInWindow: (callback: typeof emailMeasurement) => {
+      emailMeasurement = callback;
+    },
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 480, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Email").props.onFocus();
+  screen.input("Password").props.onFocus();
+  assert.equal(scrolls.length, 1);
+  assert.ok(emailMeasurement);
+  emailMeasurement(40, 600, 300, 28);
   assert.equal(
-    screen.configRefetches(),
-    0,
-    "Email does not start another config request",
+    scrolls.length,
+    1,
+    "ignore the old field after a newer field has focused",
+  );
+  screen.input("Email").props.onFocus();
+  screen.hideKeyboard();
+  emailMeasurement(40, 600, 300, 28);
+  assert.equal(
+    scrolls.length,
+    1,
+    "keyboard dismissal invalidates a pending reveal",
   );
 });
+
+test("a native scroll between field and viewport measurements invalidates the old geometry", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let viewportMeasurement: ((...args: number[]) => void) | undefined;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: typeof viewportMeasurement) => {
+        viewportMeasurement = callback;
+      },
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Email").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 800, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Email").props.onFocus();
+  assert.ok(viewportMeasurement);
+  scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 600 } } });
+  viewportMeasurement(0, 120, 390, 700);
+  assert.deepEqual(
+    scrolls,
+    [],
+    "native keyboard adjustment already moved the field; stale screen coordinates must not add a second scroll",
+  );
+});
+
+for (const emailEnabled of [false, true]) {
+  test(`email login adopts the session when registration is ${emailEnabled ? "enabled" : "disabled"}`, async (t) => {
+    const screen = setup({ emailEnabled });
+    t.after(screen.harness.unmount);
+    assert.equal(screen.input("Password").props.secureTextEntry, true);
+    assert.equal(screen.social().length, 0);
+    assert.equal(screen.submit().props.disabled, true);
+    screen.change("Email", " reviewer@example.test ");
+    screen.change("Password", " review password ");
+    assert.equal(screen.submit().props.disabled, false);
+    const started = Date.now();
+    screen.submit().props.onPress();
+    await screen.harness.settle();
+    assert.deepEqual(screen.calls, [
+      {
+        email: "reviewer@example.test",
+        password: " review password ",
+      },
+    ]);
+    assert.equal(screen.sessions.length, 1);
+    assert.deepEqual(
+      {
+        accessToken: screen.sessions[0]!.accessToken,
+        refreshToken: screen.sessions[0]!.refreshToken,
+      },
+      {
+        accessToken: signedIn.accessToken,
+        refreshToken: signedIn.refreshToken,
+      },
+    );
+    assert.ok(screen.sessions[0]!.accessTokenExpiresAt >= started + 3_600_000);
+    assert.ok(
+      screen.sessions[0]!.accessTokenExpiresAt <= Date.now() + 3_600_000,
+    );
+    assert.equal(
+      screen.configRefetches(),
+      0,
+      "Email does not start another config request",
+    );
+  });
 }
 
 for (const emailEnabled of [false, true]) {
@@ -307,22 +576,57 @@ for (const emailEnabled of [false, true]) {
     const order = ["google", "github", "apple"] as const;
     const providers = order.filter((_, i) => (subset & (1 << i)) !== 0);
     test(`sign-in renders provider subset ${subset} with email ${emailEnabled ? "on" : "off"}`, (t) => {
-      const screen = setup({ emailEnabled, providers: [...providers].reverse() });
+      const screen = setup({
+        emailEnabled,
+        providers: [...providers].reverse(),
+      });
       t.after(screen.harness.unmount);
-      assert.deepEqual(screen.social().map((element) => element.props.provider), providers);
+      assert.deepEqual(
+        screen.social().map((element) => element.props.provider),
+        providers,
+      );
       assert.deepEqual(
         screen.social().map((element) => element.props.label),
-        providers.map((provider) => `Continue with ${{ google: "Google", github: "GitHub", apple: "Apple" }[provider]}`),
+        providers.map(
+          (provider) =>
+            `Continue with ${{ google: "Google", github: "GitHub", apple: "Apple" }[provider]}`,
+        ),
       );
       const tree = elements(screen.harness.value());
       for (const label of ["Email", "Password"]) {
-        assert.equal(tree.some((element) => element.props.accessibilityLabel === label), true);
+        assert.equal(
+          tree.some((element) => element.props.accessibilityLabel === label),
+          true,
+        );
       }
-      assert.equal(tree.some((element) => element.type === "AuthSubmitButton" && element.props.label === "Sign In"), true);
-      assert.equal(tree.some((element) => element.type === "Text" && textContent(element) === "or continue with email"), providers.length > 0);
-      assert.equal(tree.some((element) => element.props.accessibilityLabel === "Create account"), emailEnabled);
+      assert.equal(
+        tree.some(
+          (element) =>
+            element.type === "AuthSubmitButton" &&
+            element.props.label === "Sign In",
+        ),
+        true,
+      );
+      assert.equal(
+        tree.some(
+          (element) =>
+            element.type === "Text" &&
+            textContent(element) === "or continue with email",
+        ),
+        providers.length > 0,
+      );
+      assert.equal(
+        tree.some(
+          (element) => element.props.accessibilityLabel === "Create account",
+        ),
+        emailEnabled,
+      );
       if (providers.length > 0) {
-        assert.ok(tree.indexOf(screen.social().at(-1)!) < tree.indexOf(screen.input("Email")), "provider rows precede email, matching the web");
+        assert.ok(
+          tree.indexOf(screen.social().at(-1)!) <
+            tree.indexOf(screen.input("Email")),
+          "provider rows precede email, matching the web",
+        );
       }
     });
   }
@@ -330,21 +634,40 @@ for (const emailEnabled of [false, true]) {
 
 for (const state of ["loading", "error"] as const) {
   test(`unavailable ${state} config keeps email login and provider retry without offering undiscovered providers`, async (t) => {
-    const screen = setup({ state, providers: ["google", "github", "apple"], emailEnabled: true });
+    const screen = setup({
+      state,
+      providers: ["google", "github", "apple"],
+      emailEnabled: true,
+    });
     t.after(screen.harness.unmount);
     assert.deepEqual(screen.social(), []);
     screen.input("Email");
     screen.input("Password");
-    assert.equal(elements(screen.harness.value()).some((element) => element.props.accessibilityLabel === "Create account"), false);
+    assert.equal(
+      elements(screen.harness.value()).some(
+        (element) => element.props.accessibilityLabel === "Create account",
+      ),
+      false,
+    );
     if (state === "error") {
-      const retry = elements(screen.harness.value()).find((element) => element.type === "Pressable" && textContent(element) === "Retry sign-in options");
+      const retry = elements(screen.harness.value()).find(
+        (element) =>
+          element.type === "Pressable" &&
+          textContent(element) === "Retry sign-in options",
+      );
       assert.ok(retry);
       retry.props.onPress();
       await screen.harness.settle();
       assert.equal(screen.configRefetches(), 1);
-      assert.doesNotMatch(textContent(screen.harness.value()), /still sign in with email/);
+      assert.doesNotMatch(
+        textContent(screen.harness.value()),
+        /still sign in with email/,
+      );
     } else {
-      assert.match(textContent(screen.harness.value()), /Loading sign-in options/);
+      assert.match(
+        textContent(screen.harness.value()),
+        /Loading sign-in options/,
+      );
     }
   });
 }
@@ -358,8 +681,16 @@ test("disabling registration keeps email credentials and social providers while 
   assert.equal(screen.input("Email").props.value, "reviewer@example.test");
   assert.equal(screen.input("Password").props.value, "password");
   assert.equal(screen.submit().props.disabled, false);
-  assert.deepEqual(screen.social().map((element) => element.props.provider), ["google", "github", "apple"]);
-  assert.equal(elements(screen.harness.value()).some((element) => element.props.accessibilityLabel === "Create account"), false);
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["google", "github", "apple"],
+  );
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Create account",
+    ),
+    false,
+  );
 });
 
 test("Create account opens the configured registration page only when registration is enabled", async (t) => {
@@ -367,29 +698,58 @@ test("Create account opens the configured registration page only when registrati
   t.after(screen.harness.unmount);
   assert.deepEqual(screen.registrationUrls, []);
   screen.setEmailEnabled(true);
-  const registration = elements(screen.harness.value()).find((element) => element.props.accessibilityLabel === "Create account");
+  const registration = elements(screen.harness.value()).find(
+    (element) => element.props.accessibilityLabel === "Create account",
+  );
   assert.ok(registration);
   assert.equal(registration.props.accessibilityRole, "link");
   assert.equal(registration.props.style.minHeight, 44);
   registration.props.onPress();
   await screen.harness.settle();
   assert.deepEqual(screen.registrationUrls, ["https://nyxid.example/register"]);
-  assert.equal(screen.sessions.length, 0, "closing registration cannot authenticate an account");
-  assert.match(textContent(screen.harness.value()), /Registration is not verified by closing the browser/);
+  assert.equal(
+    screen.sessions.length,
+    0,
+    "closing registration cannot authenticate an account",
+  );
+  assert.match(
+    textContent(screen.harness.value()),
+    /Registration is not verified by closing the browser/,
+  );
   assert.deepEqual(screen.calls, []);
   screen.setEmailEnabled(false);
   registration.props.onPress();
   await screen.harness.settle();
-  assert.equal(screen.registrationUrls.length, 1, "a stale registration action cannot bypass the config gate");
+  assert.equal(
+    screen.registrationUrls.length,
+    1,
+    "a stale registration action cannot bypass the config gate",
+  );
 });
 
 test("registration-disabled social sign-in still verifies MFA, supports recovery and keeps legal links", async (t) => {
   const screen = setup({ emailEnabled: false, providers: ["google"] });
   t.after(screen.harness.unmount);
-  screen.openUrl("nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge");
-  assert.match(textContent(screen.harness.value()), /Verify your Google sign-in/);
-  assert.equal(elements(screen.harness.value()).some((element) => element.props.accessibilityLabel === "Email" || element.props.accessibilityLabel === "Password"), false);
-  const recovery = elements(screen.harness.value()).find((element) => element.type === "Pressable" && textContent(element) === "Use a recovery code");
+  screen.openUrl(
+    "nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge",
+  );
+  assert.match(
+    textContent(screen.harness.value()),
+    /Verify your Google sign-in/,
+  );
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) =>
+        element.props.accessibilityLabel === "Email" ||
+        element.props.accessibilityLabel === "Password",
+    ),
+    false,
+  );
+  const recovery = elements(screen.harness.value()).find(
+    (element) =>
+      element.type === "Pressable" &&
+      textContent(element) === "Use a recovery code",
+  );
   assert.ok(recovery);
   recovery.props.onPress();
   screen.harness.flush();
@@ -400,9 +760,16 @@ test("registration-disabled social sign-in still verifies MFA, supports recovery
   assert.deepEqual(screen.calls, [{ mfaCode: "abcdef12" }]);
   assert.equal(screen.sessions.length, 1);
   assert.equal(screen.input("Password").props.value, "");
-  assert.equal(elements(screen.harness.value()).some((element) => element.props.accessibilityLabel === "Recovery code"), false);
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Recovery code",
+    ),
+    false,
+  );
   for (const label of ["Terms", "Privacy"]) {
-    const link = elements(screen.harness.value()).find((element) => element.type === "Text" && textContent(element) === label);
+    const link = elements(screen.harness.value()).find(
+      (element) => element.type === "Text" && textContent(element) === label,
+    );
     assert.ok(link);
     link.props.onPress();
   }
@@ -412,8 +779,13 @@ test("registration-disabled social sign-in still verifies MFA, supports recovery
 test("registration-disabled configuration preserves provider error mapping and email login", (t) => {
   const screen = setup({ emailEnabled: false, providers: ["github"] });
   t.after(screen.harness.unmount);
-  screen.openUrl("nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict");
-  assert.match(textContent(screen.harness.value()), /This email is linked to another login method\./);
+  screen.openUrl(
+    "nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict",
+  );
+  assert.match(
+    textContent(screen.harness.value()),
+    /This email is linked to another login method\./,
+  );
   assert.equal(screen.sessions.length, 0);
   screen.input("Email");
   screen.input("Password");
@@ -422,7 +794,9 @@ test("registration-disabled configuration preserves provider error mapping and e
 test("registration-disabled email authentication handles the actual MFA challenge before adopting a session", async (t) => {
   const screen = setup({ emailEnabled: false });
   t.after(screen.harness.unmount);
-  screen.setLogin(async () => { throw new MfaChallengeError("synthetic-challenge"); });
+  screen.setLogin(async () => {
+    throw new MfaChallengeError("synthetic-challenge");
+  });
   screen.change("Email", "reviewer@example.test");
   screen.change("Password", "password");
   screen.submit().props.onPress();
@@ -478,10 +852,18 @@ test("failed credentials show feedback and permit retry without a false MFA prom
 });
 
 test("registration-disabled email login preserves the server's inactive-account error", async (t) => {
-  const screen = setup({ emailEnabled: false, providers: ["google", "github", "apple"] });
+  const screen = setup({
+    emailEnabled: false,
+    providers: ["google", "github", "apple"],
+  });
   t.after(screen.harness.unmount);
   screen.setLogin(async () => {
-    throw new ApiError({ errorKey: "forbidden", errorCode: 1002, statusCode: 403, message: "Account is deactivated" });
+    throw new ApiError({
+      errorKey: "forbidden",
+      errorCode: 1002,
+      statusCode: 403,
+      message: "Account is deactivated",
+    });
   });
   screen.change("Email", "inactive@example.test");
   screen.change("Password", "password");
@@ -490,8 +872,16 @@ test("registration-disabled email login preserves the server's inactive-account 
   assert.match(textContent(screen.harness.value()), /Account is deactivated/);
   assert.equal(screen.sessions.length, 0);
   assert.equal(screen.submit().props.disabled, false);
-  assert.equal(elements(screen.harness.value()).some((element) => element.props.accessibilityLabel === "Authenticator code"), false);
-  assert.deepEqual(screen.social().map((element) => element.props.provider), ["google", "github", "apple"]);
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Authenticator code",
+    ),
+    false,
+  );
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["google", "github", "apple"],
+  );
 });
 
 test("a pending email attempt blocks duplicate presses and concurrent social login", async (t) => {
@@ -540,6 +930,74 @@ test("social login remains configured and revalidates availability before openin
   assert.equal(screen.input("Password").props.editable, true);
 });
 
+test("a timed-out provider check recovers through config retry without a stale login error", async (t) => {
+  const screen = setup({ providers: ["google"] });
+  t.after(screen.harness.unmount);
+  const config = {
+    emailAuthEnabled: false,
+    socialProviders: ["google"] as const,
+  };
+  screen.setRefetch(async () => ({
+    data: { ...config, socialProviders: [...config.socialProviders] },
+    error: new Error(
+      "Loading sign-in options timed out. Check your connection and try again.",
+    ),
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(
+    screen.socialUrls,
+    [],
+    "failed provider discovery must not open OAuth",
+  );
+  assert.deepEqual(screen.social(), []);
+  const retry = elements(screen.harness.value()).find(
+    (element) =>
+      element.type === "Pressable" &&
+      textContent(element) === "Retry sign-in options",
+  );
+  assert.ok(retry);
+  assert.match(
+    textContent(screen.harness.value()),
+    /Could not load sign-in options/,
+  );
+  assert.doesNotMatch(
+    textContent(screen.harness.value()),
+    /Loading sign-in options timed out/,
+  );
+
+  screen.setRefetch(async () => ({
+    data: { ...config, socialProviders: [...config.socialProviders] },
+    error: null,
+  }));
+  retry.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["google"],
+  );
+  assert.doesNotMatch(
+    textContent(screen.harness.value()),
+    /timed out|Could not load sign-in options/,
+  );
+  assert.equal(screen.configRefetches(), 2);
+  assert.equal(screen.social()[0]!.props.disabled, false);
+  assert.deepEqual(screen.sessions, []);
+
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.equal(
+    screen.configRefetches(),
+    3,
+    "retrying Google still revalidates the provider",
+  );
+  assert.equal(screen.socialUrls.length, 1);
+  assert.match(
+    textContent(screen.harness.value()),
+    /Sign-in was closed \(cancel\)/,
+  );
+});
+
 test("a pending social attempt blocks concurrent email login", async (t) => {
   const screen = setup({ providers: ["apple"] });
   t.after(screen.harness.unmount);
@@ -575,27 +1033,39 @@ test("backgrounding clears password and authenticator data", (t) => {
 });
 
 test("registration and waitlist callbacks resolve the domain after import and at each press", async (t) => {
-  const domains = loadTestModule<typeof import("../../lib/domains")>("../domains.ts", {
-    process: { env: {
-      EXPO_PUBLIC_API_BASE_URL: "https://old-api.example/api/v1",
-      EXPO_PUBLIC_FRONTEND_URL: "https://old.example",
-      EXPO_PUBLIC_LEGAL_BASE_URL: "https://old.example",
-      EXPO_PUBLIC_NEW_API_BASE_URL: "https://api.nyxid.ai/api/v1",
-      EXPO_PUBLIC_NEW_FRONTEND_URL: "https://nyxid.ai",
-      EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "https://nyxid.ai",
-    } },
-  });
+  const domains = loadTestModule<typeof import("../../lib/domains")>(
+    "../domains.ts",
+    {
+      process: {
+        env: {
+          EXPO_PUBLIC_API_BASE_URL: "https://old-api.example/api/v1",
+          EXPO_PUBLIC_FRONTEND_URL: "https://old.example",
+          EXPO_PUBLIC_LEGAL_BASE_URL: "https://old.example",
+          EXPO_PUBLIC_NEW_API_BASE_URL: "https://api.nyxid.ai/api/v1",
+          EXPO_PUBLIC_NEW_FRONTEND_URL: "https://nyxid.ai",
+          EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "https://nyxid.ai",
+        },
+      },
+    },
+  );
   const screen = setup({
     getFrontendUrl: domains.getFrontendUrl,
     beforeMount: () => domains.selectNewDomains(true),
   });
   t.after(screen.harness.unmount);
-  const registration = elements(screen.harness.value()).find((element) => element.props.accessibilityLabel === "Create account")!;
+  const registration = elements(screen.harness.value()).find(
+    (element) => element.props.accessibilityLabel === "Create account",
+  )!;
   registration.props.onPress();
   await screen.harness.settle();
   assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register"]);
-  screen.openUrl("nyxid://auth/social/callback?status=error&error=social_auth_registration_closed");
-  const waitlist = elements(screen.harness.value()).find((element) => element.type === "Text" && textContent(element) === "Join the waitlist");
+  screen.openUrl(
+    "nyxid://auth/social/callback?status=error&error=social_auth_registration_closed",
+  );
+  const waitlist = elements(screen.harness.value()).find(
+    (element) =>
+      element.type === "Text" && textContent(element) === "Join the waitlist",
+  );
   assert.ok(waitlist);
   waitlist.props.onPress();
   assert.deepEqual(screen.waitlistUrls, ["https://nyxid.ai"]);
@@ -604,10 +1074,15 @@ test("registration and waitlist callbacks resolve the domain after import and at
   registration.props.onPress();
   waitlist.props.onPress();
   await screen.harness.settle();
-  assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register", "https://old.example/register"]);
-  assert.deepEqual(screen.waitlistUrls, ["https://nyxid.ai", "https://old.example"]);
+  assert.deepEqual(screen.registrationUrls, [
+    "https://nyxid.ai/register",
+    "https://old.example/register",
+  ]);
+  assert.deepEqual(screen.waitlistUrls, [
+    "https://nyxid.ai",
+    "https://old.example",
+  ]);
 });
-
 
 test("sign-in delegates idle, ready, pending and MFA submits to the shared primary button", async (t) => {
   const screen = setup();
@@ -618,7 +1093,12 @@ test("sign-in delegates idle, ready, pending and MFA submits to the shared prima
   screen.change("Password", "password");
   assert.equal(screen.submit().props.disabled, false);
   let rejectLogin!: (reason: unknown) => void;
-  screen.setLogin(() => new Promise((_resolve, reject) => { rejectLogin = reject; }));
+  screen.setLogin(
+    () =>
+      new Promise((_resolve, reject) => {
+        rejectLogin = reject;
+      }),
+  );
   screen.submit().props.onPress();
   screen.harness.flush();
   assert.equal(screen.submit().props.loading, true);

@@ -1,6 +1,7 @@
 //! Relay media acceptance and crash disposition. Admission never downloads.
 use super::{
     channel_media_authority::{self as authority, MediaRequest},
+    channel_platform::canonical_platform,
     feature_flag_service as flags,
 };
 use crate::{
@@ -86,8 +87,8 @@ pub async fn presence(
     request: &MediaRequest,
     missing_media: bool,
 ) -> AppResult<usize> {
-    if !(authority::supported_relay(&request.channel.platform)
-        || (request.channel.platform == "telegram"
+    if !(authority::supported_relay(canonical_platform(&request.channel.platform))
+        || (canonical_platform(&request.channel.platform) == "telegram"
             && !request
                 .channel
                 .owner_sender_ids
@@ -111,6 +112,12 @@ pub async fn presence(
                 + source.embedded_attachments_omitted)
         }
         Err(AppError::NotFound(_)) => {
+            // A text-only activity does not assert that a media source exists.
+            // Do not turn an unrelated or legacy source lookup miss into a
+            // media authorization failure for the whole turn.
+            if !missing_media {
+                return Ok(0);
+            }
             if db
                 .collection::<ChannelMessage>(MESSAGES)
                 .find_one(doc! {"_id":&request.source_message_id})
@@ -131,8 +138,8 @@ pub async fn presence(
 /// Source presence is computed for every sender. Owner/member claims and opted-in
 /// personal guest claims bind live authority. No gateway handles enter this API.
 pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Option<EventMedia>> {
-    if !(authority::supported_relay(&request.channel.platform)
-        || (request.channel.platform == "telegram"
+    if !(authority::supported_relay(canonical_platform(&request.channel.platform))
+        || (canonical_platform(&request.channel.platform) == "telegram"
             && !request
                 .channel
                 .owner_sender_ids
@@ -189,7 +196,10 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         Sha256::digest(
             format!(
                 "v1\0{}\0{}\0{}\0{}",
-                authorized.bot.id, request.channel.platform, request.chat_id, native
+                authorized.bot.id,
+                canonical_platform(&request.channel.platform),
+                request.chat_id,
+                native
             )
             .as_bytes()
         )
@@ -226,7 +236,7 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         declared,
         items,
         channel_bot_id: authorized.bot.id,
-        platform: request.channel.platform.clone(),
+        platform: canonical_platform(&request.channel.platform).to_owned(),
         platform_chat_id: request.chat_id.clone(),
         interrupted: false,
         noted: false,
@@ -294,9 +304,9 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// A different relay UUID lost the native-media insert race. Store one bounded
-/// alias only on the exact scoped source row; same-ID provider replays continue
-/// through the old replay/resume contract.
+/// Register a duplicate against the native-media winner, including a new HTTP
+/// key for the same relay source. Only a different source needs a duplicate
+/// marker; matching event IDs continue through the existing replay/resume path.
 pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<bool> {
     let Some(media) = &event.media else {
         return Ok(false);
@@ -308,18 +318,37 @@ pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<b
     let Some(winner) = winner else {
         return Ok(false);
     };
-    if winner.relay_message_id == event.relay_message_id {
+    if winner.relay_message_id == event.relay_message_id && winner.id == event.id {
         return Ok(false);
     }
     let Some(source) = &event.relay_message_id else {
         return Ok(false);
     };
-    db.collection::<ChannelMessage>(MESSAGES)
-        .update_one(
-            doc! {"_id":source,"direction":"inbound"},
-            doc! {"$set":{"duplicate_of_media_key":&media.key}},
-        )
-        .await?;
+    if let Some(key) = event
+        .dispatch_identity
+        .as_ref()
+        .and_then(|d| d.keys.first())
+    {
+        match super::nyxbot_dispatch_identity::alias_result(db, &winner.id, &winner.channel_id, key)
+            .await?
+        {
+            super::nyxbot_dispatch_identity::AliasOutcome::Added => {}
+            super::nyxbot_dispatch_identity::AliasOutcome::Limit => {
+                return Err(AppError::Conflict("dispatch_alias_limit".into()));
+            }
+            super::nyxbot_dispatch_identity::AliasOutcome::Missing => {
+                return Err(AppError::Conflict("dispatch_identity_conflict".into()));
+            }
+        }
+    }
+    if winner.relay_message_id != event.relay_message_id {
+        db.collection::<ChannelMessage>(MESSAGES)
+            .update_one(
+                doc! {"_id":source,"direction":"inbound"},
+                doc! {"$set":{"duplicate_of_media_key":&media.key}},
+            )
+            .await?;
+    }
     Ok(true)
 }
 
@@ -386,7 +415,7 @@ pub async fn note_in_session(
         let filter = doc! {"user_id":owner,
         "media.key":{"$type":"string"},"media.guest":{"$ne":true},"media.platform_chat_id":chat_id,"media.noted":{"$ne":true},
         "$and":[{"$or":[{"channel_id":&origin.nyxbot_channel_id},
-            {"media.channel_bot_id":&channel.channel_bot_id,"media.platform":&channel.platform}]},
+            {"media.channel_bot_id":&channel.channel_bot_id}]},
         {"$or":[{"media.interrupted":true},
             {"status":{"$in":["running","resuming","retryable"]},"conversation_id":bson::Bson::Null,
                 "turn_id":bson::Bson::Null,"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(5))}}]}]};
@@ -398,7 +427,15 @@ pub async fn note_in_session(
             .await?;
         let mut ids = Vec::new();
         while let Some(row) = cursor.next(&mut *session).await.transpose()? {
-            ids.push(row.get("_id").cloned());
+            let media_platform = row
+                .get_document("media")
+                .ok()
+                .and_then(|media| media.get_str("platform").ok());
+            if media_platform.is_none_or(|platform| {
+                canonical_platform(platform) == canonical_platform(&channel.platform)
+            }) {
+                ids.push(row.get("_id").cloned());
+            }
         }
         if !ids.is_empty() {
             let mut exact = filter;

@@ -17,6 +17,8 @@ import {
   type AssistantMessage,
 } from "./assistantTypes";
 import { voiceSnapshotSchema } from "./voice/voiceContracts";
+import voiceGroupFixtures from "../../../../shared/voice-message-groups.json";
+import { VOICE_RECOVERY_TIMEOUT_MS } from "./voice/voiceRequestDeadline";
 
 // Exercise the screen's real handlers and render conditions. Native UI, network,
 // and existing assistant/upload hooks are boundaries, not reimplementations of
@@ -80,16 +82,30 @@ function setup(
   enableVoiceForTest = true,
   platform = "ios",
   reducedMotion = false,
+  translations: Record<string, string> = {},
 ) {
   let onAdopt: ((id: string) => void) | undefined;
   let headerOptions: Record<string, any> = {};
   const headerModule = {};
+  let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
   const alerts: { text: string; onPress?: () => void }[][] = [];
-  const drafts: { agentId: string; signal: AbortSignal }[] = [];
+  const drafts: {
+    agentId: string;
+    signal: AbortSignal;
+    response: ReturnType<typeof deferred<string>>;
+  }[] = [];
   const featureQueries: { enabled: boolean }[] = [];
   let epoch = 7;
+  let focused = true;
+  let keyboardVisible = false;
+  let hideOnDismiss = false;
+  const keyboardListeners = new Set<() => void>();
+  const hideKeyboard = () => {
+    keyboardVisible = false;
+    for (const listener of [...keyboardListeners]) listener();
+  };
   let transcriptFollowing = true;
   let features: string[] | undefined = ["assistant:voice"];
   const agent = {
@@ -205,6 +221,11 @@ function setup(
     },
   };
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({
+        t: (phrase: string) => translations[phrase] ?? phrase,
+      }),
+    },
     "../../lib/accessibility/useReducedMotion": {
       useReducedMotion: () => reducedMotion,
     },
@@ -271,11 +292,22 @@ function setup(
         ) => alerts.push(actions),
       },
       LayoutAnimation: { configureNext() {}, Presets: { easeInEaseOut: {} } },
-      Keyboard: { dismiss: () => events.push(["dismissKeyboard"]) },
+      Keyboard: {
+        isVisible: () => keyboardVisible,
+        addListener: (event: string, listener: () => void) => {
+          assert.equal(event, "keyboardDidHide");
+          keyboardListeners.add(listener);
+          return { remove: () => keyboardListeners.delete(listener) };
+        },
+        dismiss: () => {
+          events.push(["dismissKeyboard"]);
+          if (hideOnDismiss) hideKeyboard();
+        },
+      },
       StyleSheet: { create: (value: unknown) => value },
     },
     "@react-navigation/native": {
-      useIsFocused: () => true,
+      useIsFocused: () => focused,
       useNavigation: () => ({
         setParams: (params: Record<string, unknown>) => {
           events.push(["params", { ...params }]);
@@ -330,7 +362,11 @@ function setup(
       ].map((name) => [name, name]),
     ),
     "../../app/WorkspaceHeader": {
-      useWorkspaceBack: (input: { options: Record<string, any> }) => {
+      useWorkspaceBack: (input: {
+        options: Record<string, unknown>;
+        disabled: boolean;
+      }) => {
+        navigationDisabled = input.disabled;
         headerOptions = input.options;
       },
       WorkspaceHeaderVisibility: "WorkspaceHeaderVisibility",
@@ -468,12 +504,27 @@ function setup(
     "../../lib/api/assistantUploadsApi": {
       assistantUploadsApi: {
         createDraft: (agentId: string, signal: AbortSignal) => {
-          drafts.push({ agentId, signal });
-          return draft.promise;
+          const response = drafts.length === 0 ? draft : deferred<string>();
+          drafts.push({ agentId, signal, response });
+          return response.promise;
         },
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "../notifications/NotificationBell": {
+      NotificationBell: "NotificationBell",
+    },
+    "../notifications/useNotifications": {
+      useNotificationIndicator: () => ({
+        enabled: false,
+        live: false,
+        unread: 0,
+        needsDecision: 0,
+        badge: "",
+      }),
+      useNotificationRuntime: () => ({ active: true, online: true }),
+      useVisibleThreadRead: () => {},
+    },
   });
   Object.assign(
     headerModule,
@@ -508,6 +559,8 @@ function setup(
     all().find((element) => element.type === "AssistantVoiceConversation");
   return {
     harness,
+    navigationDisabled: () => navigationDisabled,
+    headerActions: () => elements(expand(headerOptions.headerRight())),
     assistant,
     uploads,
     connection,
@@ -554,6 +607,20 @@ function setup(
     setEpoch: (value: number) => {
       epoch = value;
     },
+    setFocused: (value: boolean) => {
+      focused = value;
+      harness.render();
+    },
+    keyboard: {
+      show: () => {
+        keyboardVisible = true;
+      },
+      hide: hideKeyboard,
+      hideOnDismiss: () => {
+        hideOnDismiss = true;
+      },
+      listeners: () => keyboardListeners.size,
+    },
     pauseTranscript: () => {
       transcriptFollowing = false;
       harness.render();
@@ -591,23 +658,218 @@ function liveVoice(text: string, sealed = false) {
   });
 }
 
-test("unsent voice words stay in the voice composer and sealed history joins the chat once", async () => {
+test("a shielded voice link publication renders as completed without pending UI", () => {
+  const x = setup(A, false);
+  const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
+  const message = messageSchema.parse({
+    id: "published-link",
+    seq: 3,
+    turn_id: "hidden-turn",
+    role: "assistant",
+    text: `<${link}>`,
+    status: "completed",
+    execution_pending: true,
+    via: "voice",
+    error_code: null,
+    created_at: "2026-11-14T01:00:00Z",
+    activities: [],
+    attachments: [],
+  });
+  // The API field is ignored by the schema; even a retained field must not
+  // turn an assistant publication into pending execution UI.
+  Object.assign(message, { execution_pending: true });
+  x.assistant.history!.messages = [message];
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  assert.equal(list.props.data.length, 1);
+  const rendered = elements(
+    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+  );
+  const footer = rendered.find((node) => node.type === "AssistantMessageFooter");
+  assert.equal(footer?.props.text, `<${link}>`);
+  assert.equal(footer?.props.report.messageId, message.id);
+  assert.equal(
+    rendered.some((node) =>
+      ["ActivityIndicator", "AssistantTurnStatus"].includes(String(node.type)),
+    ),
+    false,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(rendered),
+    /Queued|Waiting for|Thinking|Speaking/,
+  );
+  x.harness.unmount();
+});
+
+test("persisted voice segments render one Copy/date footer and Report targets the latest feedback anchor", () => {
+  for (const savedFeedback of [false, true]) {
+    const x = setup(A);
+    const fixture = voiceGroupFixtures[0]!;
+    x.assistant.history!.messages = fixture.rows.map((row, index) =>
+      messageSchema.parse({
+        ...row,
+        seq: index + 6,
+        role: "assistant",
+        status: "completed",
+        error_code: null,
+        created_at: `2026-11-09T01:00:0${index}Z`,
+        via: "voice",
+        ...(savedFeedback && index === 1 ? { feedback: { vote: "down" } } : {}),
+      }),
+    );
+    x.harness.render();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    const footers = rendered.filter(
+      (node) => node.type === "AssistantMessageFooter",
+    );
+    assert.equal(footers.length, 1);
+    assert.equal(footers[0]!.props.text, fixture.copy![0]);
+    assert.equal(footers[0]!.props.timestamp, "2026-11-09T01:00:00Z");
+    assert.equal(footers[0]!.props.report.messageId, savedFeedback ? "7" : "8");
+    assert.equal(footers[0]!.props.report.id, x.assistant.conversationId);
+    assert.equal(x.assistant.history!.messages.length, 3);
+    x.harness.unmount();
+  }
+});
+
+test("appending voice parts keeps the mobile row key stable and Report follows its anchor", () => {
+  const x = setup(A);
+  const rows = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: `2026-11-09T01:00:0${index}Z`,
+      via: "voice",
+    }),
+  );
+  x.assistant.history!.messages = rows.slice(0, 1);
+  x.harness.render();
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const key = list().props.keyExtractor(list().props.data[0]);
+  x.assistant.history!.messages = rows;
+  x.harness.render();
+  assert.equal(list().props.keyExtractor(list().props.data[0]), key);
+  const rendered = elements(
+    expand(list().props.renderItem({ item: list().props.data[0], index: 0 })),
+  );
+  assert.equal(
+    rendered.find((node) => node.type === "AssistantMessageFooter")!.props
+      .report.messageId,
+    "8",
+  );
+  x.harness.unmount();
+});
+test("a navigation target for a middle voice segment reveals its stable group row", () => {
+  const x = setup(A);
+  x.assistant.history!.messages = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: "2026-11-09T01:00:00Z",
+      via: "voice",
+    }),
+  );
+  x.props.route.params.messageId = "7";
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  const scrolls: { index: number }[] = [];
+  list.props.ref.current = {
+    scrollToIndex: (target: { index: number }) => scrolls.push(target),
+  };
+  x.harness.render();
+  assert.equal(list.props.data[0].id, "6");
+  assert.deepEqual(scrolls.map((target) => target.index), [0]);
+  x.harness.render();
+  assert.equal(scrolls.length, 1);
+  x.harness.unmount();
+});
+test("voice footers hide live continuations and keep sealed disconnect partial groups", async () => {
+  for (const [sealed, state, interrupted, visible] of [
+    [false, "active", false, false],
+    [true, "active", false, false],
+    [true, "closed", false, true],
+    [true, "failed", false, true],
+    [true, "active", true, true],
+  ] as const) {
+    const x = setup(A);
+    x.assistant.history!.messages = voiceGroupFixtures[0]!.rows
+      .slice(0, 2)
+      .map((row, index) =>
+        messageSchema.parse({
+          ...row,
+          seq: index + 6,
+          role: "assistant",
+          status: "completed",
+          error_code: null,
+          created_at: `2026-11-09T01:00:0${index}Z`,
+          via: "voice",
+          voice: {
+            ...row.voice,
+            sealed: index === 0 || sealed,
+            complete: index === 0,
+            interrupted: index !== 0 && interrupted,
+          },
+        }),
+      );
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    const snapshot = liveVoice("");
+    snapshot.session.id = x.assistant.history!.messages[0]!.voice!.session_id;
+    snapshot.session.state = state;
+    snapshot.captions = [];
+    x.voice()!.props.onSnapshot(snapshot);
+    x.harness.flush();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    assert.equal(
+      rendered.filter((node) => node.type === "AssistantMessageFooter").length,
+      visible ? 1 : 0,
+    );
+    if (visible) {
+      const footer = rendered.find((node) => node.type === "AssistantMessageFooter")!;
+      assert.equal(footer.props.text, list.props.data[0].text);
+      assert.equal(footer.props.timestamp, "2026-11-09T01:00:00Z");
+      assert.equal(footer.props.report.messageId, "7");
+    }
+    x.harness.unmount();
+  }
+});
+
+test("live speech grows in the main chat and sealed history replaces it once", async () => {
   const x = setup(A);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   const list = () => x.all().find((node) => node.type === "FlatList")!;
   const originalKey = list().key;
-  // The open voice composer is the only place that shows unsent words.
   x.voice()!.props.onSnapshot(liveVoice("上午"));
   x.harness.flush();
-  assert.equal(list().props.data.length, 0);
-  x.voice()!.props.onSnapshot(liveVoice("上午写方案"));
-  x.harness.flush();
-  assert.equal(list().props.data.length, 0);
+  assert.equal(list().props.data.length, 1);
+  assert.equal(list().props.data[0].text, "上午");
   const render = () =>
     elements(
       expand(list().props.renderItem({ item: list().props.data[0], index: 0 })),
     );
+  assert.equal(
+    render().some((node) => node.type === "AssistantMessageFooter"),
+    false,
+  );
+  x.voice()!.props.onSnapshot(liveVoice("上午写方案"));
+  x.harness.flush();
+  assert.equal(list().props.data.length, 1);
+  assert.equal(list().props.data[0].text, "上午写方案");
   const persisted = messageSchema.parse({
     id: "live-user",
     seq: 1,
@@ -637,35 +899,101 @@ test("unsent voice words stay in the voice composer and sealed history joins the
   x.harness.unmount();
 });
 
-test("unsent words return to the chat as a partial transcript once voice closes", async () => {
+test("only a real caption creates a transcription row, which updates in place and never leaves an extra footer", async () => {
   const x = setup(A);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
-  const transcribing = () =>
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const footerTranscribing = () =>
+    elements(expand(list().props.ListFooterComponent)).some((node) =>
+      node.props.children.includes("Transcribing…"),
+    );
+  const renderedRow = (index = 0) =>
     elements(
       expand(
-        x.all().find((node) => node.type === "FlatList")!.props
-          .ListFooterComponent,
+        list().props.renderItem({ item: list().props.data[index], index }),
       ),
-    ).some(
-      (node) =>
-        node.props.accessibilityLabel === "Your speech is being transcribed",
     );
+  x.voice()!.props.onSnapshot({ ...liveVoice(""), captions: [] });
+  x.harness.flush();
+  assert.equal(list().props.data.length, 0);
+  assert.equal(footerTranscribing(), false);
+
+  x.voice()!.props.onSnapshot(liveVoice(""));
+  x.harness.flush();
+  assert.equal(list().props.data.length, 1);
+  const captionId = list().props.data[0].id;
+  assert.equal(
+    renderedRow().filter((node) =>
+      node.props.children.includes("Transcribing…"),
+    ).length,
+    1,
+  );
+  assert.equal(footerTranscribing(), false);
+
+  x.voice()!.props.onSnapshot(liveVoice("正在"));
+  x.harness.flush();
+  assert.equal(list().props.data[0].id, captionId);
+  assert.equal(list().props.data[0].text, "正在");
   x.voice()!.props.onSnapshot(liveVoice("正在说话"));
   x.harness.flush();
-  assert.equal(transcribing(), false);
+  assert.equal(list().props.data.length, 1);
+  assert.equal(list().props.data[0].text, "正在说话");
+  assert.equal(footerTranscribing(), false);
+
+  const completed = liveVoice("正在说话。", true);
+  completed.captions.push({
+    id: "live-assistant",
+    speaker: "assistant",
+    text: "听到了。",
+    sealed: true,
+    complete: true,
+  });
+  for (let repeat = 0; repeat < 3; repeat++) {
+    x.voice()!.props.onSnapshot(completed);
+    x.harness.flush();
+    assert.equal(list().props.data.length, 2);
+    assert.equal(list().props.data[0].id, captionId);
+    assert.equal(footerTranscribing(), false);
+    assert.equal(
+      renderedRow().some((node) =>
+        node.props.children.includes("Transcribing…"),
+      ),
+      false,
+    );
+  }
+
+  const next = {
+    ...completed,
+    captions: [
+      ...completed.captions,
+      { ...liveVoice("").captions[0], id: "next-user" },
+    ],
+  };
+  x.voice()!.props.onSnapshot(next);
+  x.harness.flush();
+  assert.equal(list().props.data.length, 3);
   assert.equal(
-    x.all().find((node) => node.type === "FlatList")!.props.data.length,
-    0,
+    renderedRow(2).filter((node) =>
+      node.props.children.includes("Transcribing…"),
+    ).length,
+    1,
   );
+  x.voice()!.props.onSnapshot({
+    ...next,
+    captions: next.captions.map((caption) =>
+      caption.id === "next-user" ? { ...caption, text: "下一句" } : caption,
+    ),
+  });
+  x.harness.flush();
+  assert.equal(list().props.data.length, 3);
+  assert.equal(list().props.data[2].id, "next-user");
+  assert.equal(list().props.data[2].text, "下一句");
   x.voice()!.props.onClose();
   x.harness.flush();
-  assert.equal(transcribing(), false);
-  const list = x.all().find((node) => node.type === "FlatList")!;
-  assert.equal(list.props.data[0].text, "正在说话");
-  const retained = elements(
-    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
-  );
+  assert.equal(footerTranscribing(), false);
+  assert.equal(list().props.data[2].text, "下一句");
+  const retained = renderedRow(2);
   assert.ok(
     retained.some((node) => node.props.children.includes("Partial transcript")),
   );
@@ -690,6 +1018,19 @@ test("old voice callbacks cannot populate a different chat or account", async ()
     assert.equal(
       x.all().find((node) => node.type === "FlatList")!.props.data.length,
       0,
+    );
+    const footer = elements(
+      expand(
+        x.all().find((node) => node.type === "FlatList")!.props
+          .ListFooterComponent,
+      ),
+    );
+    assert.equal(
+      footer.some(
+        (node) =>
+          node.props.accessibilityLabel === "Your speech is being transcribed",
+      ),
+      false,
     );
     x.harness.unmount();
   }
@@ -726,6 +1067,7 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
   x.harness.flush();
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
+  x.voice()!.props.onSnapshot(liveVoice("current call"));
   stale.onSnapshot(liveVoice("old call"));
   stale.onClose();
   oldMenu[0]!.onPress!();
@@ -735,10 +1077,28 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
   assert.equal(x.voice()!.props.preferencesOpen, false);
   assert.equal(
     x.all().find((node) => node.type === "FlatList")!.props.data.length,
-    0,
+    1,
+  );
+  assert.equal(
+    x.all().find((node) => node.type === "FlatList")!.props.data[0].text,
+    "current call",
+    "a closed surface cannot replace the reopened call's live transcript",
   );
   assert.equal(
     x.events.some((event) => event[0] === "push"),
+    false,
+  );
+  const footer = elements(
+    expand(
+      x.all().find((node) => node.type === "FlatList")!.props
+        .ListFooterComponent,
+    ),
+  );
+  assert.equal(
+    footer.some(
+      (node) =>
+        node.props.accessibilityLabel === "Your speech is being transcribed",
+    ),
     false,
   );
   x.harness.unmount();
@@ -885,6 +1245,105 @@ test("empty chat creates exactly one real draft and adopts it before opening voi
   x.harness.unmount();
 });
 
+test("a hung voice draft releases its spinner with a localized error and a retry ignores its late result", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const timeoutMessage = "无法打开语音，请重试。";
+  const x = setup(undefined, true, "android", false, {
+    "Voice could not open. Try again.": timeoutMessage,
+  });
+  x.button("Open voice call")!.props.onPress();
+  x.harness.flush();
+  context.mock.timers.tick(VOICE_RECOVERY_TIMEOUT_MS - 1);
+  await x.harness.settle();
+  assert.equal(x.button("Open voice call")?.props.disabled, true);
+  assert.equal(x.drafts[0]!.signal.aborted, false);
+  context.mock.timers.tick(1);
+  await x.harness.settle();
+  assert.equal(x.drafts[0]!.signal.aborted, true);
+  assert.equal(x.voice(), undefined);
+  assert.ok(x.input());
+  assert.equal(x.button("Open voice call")?.props.disabled, false);
+  assert.ok(x.all().some((node) => node.props.message === timeoutMessage));
+  assert.equal(
+    x.events.some(([name]) => name === "open" || name === "params"),
+    false,
+  );
+
+  x.button("Open voice call")!.props.onPress();
+  x.harness.flush();
+  assert.equal(x.drafts.length, 2);
+  assert.equal(x.button("Open voice call")?.props.disabled, true);
+  assert.equal(
+    x.all().some((node) => node.props.message === timeoutMessage),
+    false,
+  );
+  x.draft.resolve(A);
+  await x.harness.settle();
+  assert.equal(x.voice(), undefined, "timed-out success cannot adopt a chat");
+  assert.equal(
+    x.events.some(([name]) => name === "open" || name === "params"),
+    false,
+  );
+  x.drafts[1]!.response.resolve(B);
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, B);
+  assert.deepEqual(
+    x.events.filter(([name]) => name === "open"),
+    [["open", B, undefined]],
+  );
+  context.mock.timers.tick(VOICE_RECOVERY_TIMEOUT_MS);
+  await x.harness.settle();
+  assert.equal(x.drafts[1]!.signal.aborted, false);
+  assert.equal(x.voice()?.props.thread, B);
+  x.harness.unmount();
+});
+
+test("chat, account, blur and unmount cancel a hung draft without waiting for transport and release the entry", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const reason of ["chat", "account", "blur", "unmount"] as const) {
+    const x = setup();
+    x.button("Open voice call")!.props.onPress();
+    x.harness.flush();
+    if (reason === "chat") {
+      x.props.route.params.conversationId = B;
+      x.assistant.openConversation(B);
+      x.harness.render();
+    } else if (reason === "account") {
+      x.setEpoch(8);
+      x.harness.render();
+    } else if (reason === "blur") x.setFocused(false);
+    else x.harness.unmount();
+    await x.harness.settle();
+    assert.equal(x.drafts[0]!.signal.aborted, true, reason);
+    assert.equal(x.voice(), undefined, reason);
+
+    if (reason !== "unmount") {
+      if (reason === "blur") x.setFocused(true);
+      assert.equal(x.button("Open voice call")?.props.disabled, false, reason);
+      x.button("Open voice call")!.props.onPress();
+      if (reason !== "chat") {
+        assert.equal(x.drafts.length, 2, reason);
+        x.drafts[1]!.response.resolve(B);
+      }
+      await x.harness.settle();
+      assert.equal(x.voice()?.props.thread, B, reason);
+    }
+    x.draft.resolve(A);
+    await x.harness.settle();
+    assert.equal(
+      x.events.some(([name, id]) => name === "open" && id === A),
+      false,
+      reason,
+    );
+    context.mock.timers.tick(VOICE_RECOVERY_TIMEOUT_MS);
+    await x.harness.settle();
+    if (reason !== "unmount") {
+      assert.equal(x.voice()?.props.thread, B, reason);
+      x.harness.unmount();
+    }
+  }
+});
+
 test("saved chat opens voice directly without creating a new draft or replacing its identity", async () => {
   const x = setup(A);
   x.button("Open voice call")!.props.onPress();
@@ -900,6 +1359,179 @@ test("saved chat opens voice directly without creating a new draft or replacing 
     false,
   );
   x.harness.unmount();
+});
+
+test("voice waits for the visible keyboard to hide while keeping the text input mounted", async () => {
+  const x = setup(A, true, "android");
+  x.keyboard.show();
+  const input = x.input();
+  const open = x.button("Open voice call")!;
+  open.props.onPress();
+  open.props.onPress();
+  x.harness.flush();
+  assert.equal(x.keyboard.listeners(), 1);
+  assert.equal(x.input().props.value, input.props.value);
+  assert.equal(x.voice(), undefined);
+  assert.equal(x.button("Open voice call")?.props.disabled, true);
+  assert.deepEqual(
+    x.events.filter(([name]) => name === "dismissKeyboard"),
+    [["dismissKeyboard"]],
+  );
+  x.keyboard.hide();
+  await x.harness.settle();
+  assert.equal(x.keyboard.listeners(), 0);
+  assert.equal(x.voice()?.props.thread, A);
+  assert.equal(x.input(), undefined);
+  x.harness.unmount();
+});
+
+test("keyboard hide is subscribed before dismiss even when native dismissal completes synchronously", async () => {
+  const x = setup(A, true, "android");
+  x.keyboard.show();
+  x.keyboard.hideOnDismiss();
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, A);
+  assert.equal(x.keyboard.listeners(), 0);
+  x.harness.unmount();
+});
+
+test("new chat creates one draft only after keyboard hide acknowledgement", async () => {
+  const x = setup(undefined, true, "android");
+  x.keyboard.show();
+  const open = x.button("Open voice call")!;
+  open.props.onPress();
+  open.props.onPress();
+  x.harness.flush();
+  assert.equal(x.drafts.length, 0);
+  assert.ok(x.input());
+  x.keyboard.hide();
+  await x.harness.settle();
+  assert.equal(x.drafts.length, 1);
+  assert.equal(x.voice(), undefined);
+  x.draft.resolve(A);
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, A);
+  x.harness.unmount();
+});
+
+test("keyboard handoff times out with a usable composer and a retry ignores the late hide", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const timeoutMessage = "无法打开语音，请重试。";
+  const x = setup(A, true, "android", false, {
+    "Voice could not open. Try again.": timeoutMessage,
+  });
+  x.keyboard.show();
+  x.button("Open voice call")!.props.onPress();
+  context.mock.timers.tick(1499);
+  await x.harness.settle();
+  assert.equal(x.voice(), undefined);
+  assert.equal(x.button("Open voice call")?.props.disabled, true);
+  context.mock.timers.tick(1);
+  await x.harness.settle();
+  assert.equal(x.voice(), undefined);
+  assert.ok(x.input());
+  assert.equal(x.button("Open voice call")?.props.disabled, false);
+  assert.equal(x.keyboard.listeners(), 0);
+  assert.ok(x.all().some((node) => node.props.message === timeoutMessage));
+  x.keyboard.hide();
+  await x.harness.settle();
+  assert.equal(x.voice(), undefined, "late acknowledgement cannot open voice");
+  x.keyboard.show();
+  x.button("Open voice call")!.props.onPress();
+  x.harness.flush();
+  assert.equal(
+    x.all().some((node) => node.props.message === timeoutMessage),
+    false,
+  );
+  x.keyboard.hide();
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, A);
+  assert.equal(x.keyboard.listeners(), 0);
+  x.harness.unmount();
+});
+
+test("chat, account, blur and unmount cancel the keyboard handoff without creating a draft", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const reason of ["chat", "account", "blur", "unmount"] as const) {
+    const x = setup(undefined, true, "android");
+    x.keyboard.show();
+    x.button("Open voice call")!.props.onPress();
+    x.harness.flush();
+    assert.equal(x.keyboard.listeners(), 1, reason);
+    if (reason === "chat") {
+      x.props.route.params.conversationId = B;
+      x.assistant.conversationId = B;
+      x.harness.render();
+    } else if (reason === "account") {
+      x.setEpoch(8);
+      x.harness.render();
+    } else if (reason === "blur") x.setFocused(false);
+    else x.harness.unmount();
+    assert.equal(x.keyboard.listeners(), 0, reason);
+    x.keyboard.hide();
+    context.mock.timers.tick(2000);
+    if (reason === "unmount")
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    else await x.harness.settle();
+    assert.equal(x.drafts.length, 0, reason);
+    assert.equal(x.voice(), undefined, reason);
+    assert.equal(
+      x.events.some(([name]) => name === "open" || name === "params"),
+      false,
+      reason,
+    );
+    if (reason !== "unmount") {
+      assert.equal(
+        x
+          .all()
+          .some(
+            (node) => node.props.message === "Voice could not open. Try again.",
+          ),
+        false,
+        reason,
+      );
+      if (reason === "blur") x.setFocused(true);
+      assert.equal(x.button("Open voice call")?.props.disabled, false, reason);
+      x.harness.unmount();
+    }
+  }
+});
+
+test("typing or losing voice availability during keyboard handoff cannot start a draft", async () => {
+  for (const reason of ["typing", "upload", "feature", "offline"] as const) {
+    const x = setup(undefined, true, "android");
+    x.keyboard.show();
+    x.button("Open voice call")!.props.onPress();
+    x.harness.flush();
+    if (reason === "typing") x.input().props.onChangeText("Keep this text");
+    else if (reason === "upload") x.uploads.picking = true;
+    else if (reason === "feature") x.setFeatures([]);
+    else x.assistant.online = false;
+    x.harness.render();
+    x.keyboard.hide();
+    await x.harness.settle();
+    assert.equal(x.drafts.length, 0, reason);
+    assert.equal(x.voice(), undefined, reason);
+    assert.equal(x.keyboard.listeners(), 0, reason);
+    if (reason === "typing")
+      assert.equal(x.input().props.value, "Keep this text");
+    x.harness.unmount();
+  }
+});
+
+test("voice entry without a visible keyboard keeps the existing zero-delay path on iOS and Android", () => {
+  for (const platform of ["ios", "android"]) {
+    for (const id of [undefined, A]) {
+      const x = setup(id, true, platform);
+      x.button("Open voice call")!.props.onPress();
+      x.harness.flush();
+      assert.equal(x.keyboard.listeners(), 0, platform);
+      if (id) assert.equal(x.voice()?.props.thread, id, platform);
+      else assert.equal(x.drafts.length, 1, platform);
+      x.harness.unmount();
+    }
+  }
 });
 
 test("voice slides up in the composer's place and closing it keeps the transcript", async () => {
@@ -1206,7 +1838,7 @@ test("voice task review returns to its exact saved chat without closing voice", 
   x.harness.unmount();
 });
 
-test("transcript interaction minimizes voice in place, tapping expands it and closing restores the entry", async () => {
+test("reading the transcript keeps the compact voice composer and closing restores the entry", async () => {
   const x = setup(A);
   x.input().props.onChangeText(" ");
   x.harness.flush();
@@ -1216,17 +1848,21 @@ test("transcript interaction minimizes voice in place, tapping expands it and cl
   x.voice()!.props.onUpdate();
   assert.equal(x.events.filter(([name]) => name === "recover").length, 1);
   const voiceKey = x.voice()!.key;
-  const viewport = x
-    .all()
-    .find((n) => typeof n.props.onTouchStart === "function")!;
-  viewport.props.onTouchStart();
+  const viewport = x.all().find((node) => "onTouchStart" in node.props)!;
+  assert.equal(viewport.props.onTouchStart, undefined);
+  x.all()
+    .find((node) => node.type === "FlatList")!
+    .props.onScrollBeginDrag();
   x.harness.flush();
-  assert.equal(x.voice()!.props.minimized, true);
   assert.equal(x.voice()!.key, voiceKey);
-  x.voice()!.props.onExpand();
-  x.harness.flush();
-  assert.equal(x.voice()!.props.minimized, false);
-  for (const prop of ["draft", "onChangeText", "onSendText", "canSendText"])
+  for (const prop of [
+    "minimized",
+    "onExpand",
+    "draft",
+    "onChangeText",
+    "onSendText",
+    "canSendText",
+  ])
     assert.equal(prop in x.voice()!.props, false);
   x.voice()!.props.onClose();
   x.harness.flush();
@@ -2207,4 +2843,33 @@ test("2345 history failure keeps the composer usable, offers refresh, and respec
   x.harness.render();
   assert.equal(x.input().props.editable, false);
   x.harness.unmount();
+});
+
+
+test("Home loading never registers a critical navigation guard; only its initial send or upload does", () => {
+  const env = setup();
+  env.assistant.loading = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), false);
+  assert.equal(
+    env
+      .headerActions()
+      .find((node) => node.props.accessibilityLabel === "New chat")?.props
+      .disabled,
+    true,
+  );
+  env.assistant.sending = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), true);
+  env.assistant.sending = false;
+  env.uploads.session.sending = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), true);
+  env.adopt(A);
+  assert.equal(
+    env.navigationDisabled(),
+    false,
+    "an established chat can leave during a send",
+  );
+  env.harness.unmount();
 });

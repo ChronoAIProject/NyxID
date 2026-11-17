@@ -55,7 +55,7 @@ impl DeveloperWebhookDispatcher {
         let dispatcher = self.clone();
         let event_type = event_type.to_string();
         let event_id = Uuid::new_v4().to_string();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             if let Err(failure) = dispatcher
                 .deliver_for_app(&db, &app_id, &event_id, &event_type, data)
                 .await

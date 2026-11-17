@@ -68,12 +68,14 @@ import { MachinesScreen } from "../features/machines/MachinesScreen";
 import { WorkspacePageHeader } from "../components/workspace/WorkspacePageHeader";
 import { WorkspaceDrawerHeader } from "../components/workspace/WorkspaceDrawerHeader";
 import { ActivityScreen } from "../features/activity/ActivityScreen";
+import { NotificationsScreen } from "../features/notifications/NotificationsScreen";
 import { PluginSkillPage } from "../features/plugins/PluginSkills";
 import { AuthoredSkillPage } from "../features/plugins/NativeAuthoredSkillReview";
 import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnectionHistory";
 import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
 import { AssistantScreen } from "../features/assistant/AssistantScreen";
 import { AssistantLinkHost } from "../features/assistant/AssistantLinkHost";
+import { SshTerminalScreen } from "../features/ssh/SshTerminalScreen";
 import { ServicesScreen } from "../features/services/ServicesScreen";
 import { AgentsScreen } from "../features/agents/AgentsScreen";
 import { AgentsGroupsScreen } from "../features/agents/AgentsGroupsScreen";
@@ -92,6 +94,7 @@ import {
 } from "../features/plugins/PluginsScreen";
 import { TermsOfServiceScreen } from "../features/legal/TermsOfServiceScreen";
 import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
+import { OpenSourceNoticesScreen } from "../features/account/OpenSourceNoticesScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
 import { useReducedMotion } from "../lib/accessibility/useReducedMotion";
 import {
@@ -213,7 +216,7 @@ function GroupEditorRoute({
       onBack={() => navigation.goBack()}
       onSaved={(groupId) => {
         if (route.params?.groupId) navigation.goBack();
-        else navigation.push("GroupChat", { groupId });
+        else navigation.replace("GroupChat", { groupId });
       }}
       onRemoved={() =>
         navigation.popTo("Agents", { tab: "groups" }, { merge: true })
@@ -230,6 +233,7 @@ function AgentDetailRoute({
   return (
     <AgentsScreen
       agentId={route.params.agentId}
+      onSelectionKept={(agentId) => navigation.setParams({ agentId })}
       onClose={() => navigation.goBack()}
       onOpenChat={openChat}
       onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
@@ -424,6 +428,11 @@ function WorkspaceNavigator() {
           options={{ title: t("Activity") }}
         />
         <ContentStack.Screen
+          name="Notifications"
+          component={NotificationsScreen}
+          options={{ title: "Notifications" }}
+        />
+        <ContentStack.Screen
           name="WorkspaceSearch"
           component={WorkspaceSearchScreen}
           options={{ title: t("Search") }}
@@ -458,6 +467,7 @@ function WorkspaceNavigator() {
           title: route.params?.groupId ? t("Crew settings") : t("New crew"),
         })}
       />
+      <ContentStack.Screen name="SshTerminal" component={SshTerminalScreen} options={{ title: t("SSH terminal") }} />
       <ContentStack.Screen
         name="ServiceSetup"
         component={ServiceSetupRoute}
@@ -491,6 +501,11 @@ function WorkspaceNavigator() {
         name="ActiveGrants"
         component={ActivityScreen}
         options={{ title: t("Active grants") }}
+      />
+      <ContentStack.Screen
+        name="ActivityReview"
+        component={ActivityScreen}
+        options={{ title: t("Activity") }}
       />
       <ContentStack.Screen
         name="MachinePolicy"
@@ -778,6 +793,11 @@ function SettingsSheetRoute({
             name="PrivacyPolicy"
             component={PrivacyPolicyScreen}
             options={{ title: t("Privacy Policy") }}
+          />
+          <SheetStack.Screen
+            name="OpenSourceNotices"
+            component={OpenSourceNoticesScreen}
+            options={{ title: t("Open-source notices") }}
           />
           <SheetStack.Screen
             name="DeviceLogin"

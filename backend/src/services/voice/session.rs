@@ -385,6 +385,9 @@ pub async fn claim_orphans(db: &Database, worker: &str) -> AppResult<Vec<VoiceSe
         .sort(doc!{"lease_until":1}).limit(2).await?.try_collect().await?;
     let mut claimed = Vec::new();
     for row in candidates {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if let Some(row)=rows.find_one_and_update(doc!{"_id":row.id,"generation":row.generation,"live_slot":row.live_slot,
             "lease_until":{"$lte":bson::DateTime::from_chrono(now)}},doc!{"$inc":{"generation":1},"$set":{
             "lease_owner":worker,"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(LEASE_SECONDS))}})
@@ -414,6 +417,25 @@ pub async fn control(
         false,
     )
     .await
+}
+
+/// Internal End for the exact start whose response was not consumed. Like a
+/// caller End, intent survives lease transfer and must not overwrite another End.
+pub(super) async fn end_undelivered_start(
+    db: &Database,
+    row: &VoiceSession,
+) -> AppResult<Option<VoiceSession>> {
+    Ok(db
+        .collection::<VoiceSession>(COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id":&row.id,"user_id":&row.user_id,
+            "conversation_id":&row.conversation_id,"client_request_id":&row.client_request_id,
+            "live_slot":true,"end_requested":false},
+            doc! {"$set":{"end_requested":true,"state":"closing","end_reason":"client_lost"},
+            "$inc":{"control_revision":1}},
+        )
+        .return_document(ReturnDocument::After)
+        .await?)
 }
 
 #[allow(clippy::too_many_arguments)]

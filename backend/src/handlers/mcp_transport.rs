@@ -1,3 +1,5 @@
+#[path = "mcp_lark_diagnostics.rs"]
+mod lark_diagnostics;
 #[path = "mcp_tool_results.rs"]
 mod retained_results;
 use std::convert::Infallible;
@@ -810,6 +812,14 @@ impl McpAuthContext {
         context.rate_limit_per_second = auth.rate_limit_per_second;
         context.rate_limit_burst = auth.rate_limit_burst;
         context
+    }
+
+    fn attachment_chat(
+        &self,
+    ) -> Option<&crate::services::assistant_acknowledgement_service::ChatAuthority> {
+        self.chat
+            .as_ref()
+            .filter(|_| self.is_api_key && self.auth_method == AuthMethod::ApiKey)
     }
 
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
@@ -2076,13 +2086,17 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         }
     };
 
-    Sse::new(stream)
+    let mut response = Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(30))
                 .text("keepalive"),
         )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(crate::services::shutdown::RecoverableSubscription);
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -2395,13 +2409,35 @@ async fn handle_tools_list(
         }
     }
 
+    let attachment_schemas = match crate::services::raw_attachment_tool::discovery_schemas(
+        &state.db,
+        auth.attachment_chat(),
+        &services,
+    )
+    .await
+    {
+        Ok(mut schemas) => {
+            schemas.retain(|name, _| {
+                mcp_service::resolve_tool_call(name, &services)
+                    .is_some_and(|(service, _)| chat_access(auth, service) == "granted")
+            });
+            schemas
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Failed to load file upload schemas"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
             let mut tool = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
+                "inputSchema": webhook_tool_schema(auth, attachment_schemas.get(&t.name).unwrap_or(&t.input_schema)),
             });
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
                 tool["title"] = annotations["title"].clone();
@@ -2614,6 +2650,109 @@ async fn artifacts_enabled(
         .await
         .unwrap_or(false)
 }
+/// Preserve the finite MCP transport (including inline notifications) while
+/// presenting only result envelopes. Id-less calls intentionally have no replay identity.
+async fn present_voice_tool_response(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    request: &JsonRpcRequest,
+    response: Response,
+) -> Response {
+    let publication = chat
+        .turn_id
+        .as_ref()
+        .zip(chat.voice_parent_conversation_id.as_ref())
+        .map(
+            |(turn, parent)| crate::services::voice::links::Publication {
+                user_id: chat.user_id.clone(),
+                parent_id: parent.clone(),
+                conversation_id: chat.conversation_id.clone(),
+                turn_id: turn.clone(),
+            },
+        );
+    let tool_call = request
+        .id
+        .as_ref()
+        .filter(|id| !id.is_null())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (mut parts, body) = response.into_parts();
+    let sse = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    let rewrite = async |payload: &str| -> Result<String, ()> {
+        let mut envelope: serde_json::Value = serde_json::from_str(payload).map_err(|_| ())?;
+        for field in ["result", "error"] {
+            if let Some(result) = envelope.get_mut(field) {
+                *result = crate::services::voice::links::present_optional(
+                    state,
+                    publication.as_ref(),
+                    &tool_call,
+                    result.take(),
+                )
+                .await;
+            }
+        }
+        Ok(envelope.to_string())
+    };
+    let transformed: Result<String, ()> = async {
+        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+            .await
+            .map_err(|_| ())?;
+        let wire = std::str::from_utf8(&bytes).map_err(|_| ())?;
+        if !sse {
+            return rewrite(wire).await;
+        }
+        let mut output = String::new();
+        for event in wire.replace("\r\n", "\n").split("\n\n") {
+            if event.is_empty() {
+                continue;
+            }
+            let data = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let data = if data.is_empty() {
+                None
+            } else {
+                Some(rewrite(&data).await?)
+            };
+            for line in event.lines().filter(|line| !line.starts_with("data:")) {
+                output.push_str(line);
+                output.push('\n');
+            }
+            if let Some(data) = data {
+                output.push_str("data: ");
+                output.push_str(&data);
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+        Ok(output)
+    }
+    .await;
+    let body = transformed.unwrap_or_else(|()| {
+        // Presentation failure is not execution failure. Preserve the original
+        // HTTP/typed outcome and receipt digest so effects cannot be replayed.
+        let notice = "Tool output withheld; links could not be checked. Do not repeat the action or claim that a link was sent.";
+        let envelope = if let Some(code) = parts.extensions.get::<RpcFailureCode>() {
+            serde_json::json!({"jsonrpc": JSONRPC_VERSION, "id": request.id,
+                "error": {"code": code.0, "message": notice}})
+        } else {
+            serde_json::json!({"jsonrpc": JSONRPC_VERSION, "id": request.id,
+                "result": {"content": [{"type": "text", "text": notice}],
+                    "isError": parts.extensions.get::<ToolOutcome>() == Some(&ToolOutcome::Error),
+                    "link_publication": "unchecked", "links_in_chat": 0}})
+        };
+        if sse { format!("data: {envelope}\n\n") } else { envelope.to_string() }
+    });
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(body))
+}
+
 async fn handle_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2641,18 +2780,36 @@ async fn handle_tools_call(
         GENERATED_ARTIFACTS_ENABLED
             .scope(
                 cell,
-                handle_tools_call_inner(
+                lark_diagnostics::call(
                     state,
                     auth,
-                    session_id,
                     request,
-                    client_accepts_sse,
-                    billing_egress_permit,
+                    // Keep the large dispatch state out of the diagnostic and
+                    // task-local wrappers, including for ordinary non-Lark tools.
+                    box_tool_future(|| {
+                        handle_tools_call_inner(
+                            state,
+                            auth,
+                            session_id,
+                            request,
+                            client_accepts_sse,
+                            billing_egress_permit,
+                        )
+                    }),
                 ),
             )
             .await
     })
     .await;
+    let response = if let Some(chat) = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.voice_parent_conversation_id.is_some())
+    {
+        present_voice_tool_response(state, chat, request, response).await
+    } else {
+        response
+    };
     operation.finish(
         if tool_succeeded(&response) {
             crate::turn_trace::Outcome::Completed
@@ -2711,6 +2868,13 @@ async fn handle_tools_call_inner(
             )
             .await
     {
+        crate::services::lark_attachment_tool::diagnostics::failure(
+            crate::services::lark_attachment_tool::diagnostics::Reason::Eligibility(
+                crate::services::lark_attachment_tool::eligibility::Reason::NotLive,
+            ),
+            None,
+            None,
+        );
         return app_error_to_rpc(request.id.clone(), &error);
     }
     // A retried turn may not repeat a call its failed turn completed. Checked
@@ -2845,6 +3009,7 @@ async fn handle_tools_call_inner(
             tracing::warn!(conversation_id = %chat.conversation_id, "Could not record tool progress digest");
         }
     }
+    lark_diagnostics::decorate_current(&mut response);
     if let Some((chat, id)) = activity {
         let failure = tool_failure(&response);
         let _ = crate::services::assistant_nyxagent::activity_finished_for_turn(
@@ -3396,7 +3561,15 @@ fn dispatch_service_tool<'a>(
         {
             Ok(catalog) => catalog,
             Err(e) => {
-                tracing::error!("Failed to load tools for execution: {e}");
+                if crate::services::lark_attachment_tool::diagnostics::active() {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                    tracing::error!(
+                        error_code = e.error_code(),
+                        "Attachment tool catalog unavailable"
+                    );
+                } else {
+                    tracing::error!("Failed to load tools for execution: {e}");
+                }
                 return tool_result(request.id.clone(), "Failed to load tools", true);
             }
         };
@@ -3446,6 +3619,10 @@ fn dispatch_service_tool<'a>(
             }
         };
 
+        if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+            crate::services::lark_attachment_tool::diagnostics::bind(&service.service_id);
+        }
+
         if let Some((row, _)) = &resource
             && !crate::services::assistant_resource_service::matches_endpoint(
                 row, service, endpoint,
@@ -3489,7 +3666,13 @@ fn dispatch_service_tool<'a>(
         let mut prepared = match mcp_service::prepare_chat_proxy_tool_call(
             &state.db,
             &state.encryption_keys,
-            auth.chat.as_ref(),
+            if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
+                && !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+            {
+                auth.attachment_chat()
+            } else {
+                auth.chat.as_ref()
+            },
             service,
             endpoint,
             &execution_arguments,
@@ -3502,6 +3685,9 @@ fn dispatch_service_tool<'a>(
                     .and_then(|_| arguments["acknowledgement_id"].as_str()),
             ),
             Err(e) => {
+                if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                }
                 return tool_result(
                     request.id.clone(),
                     &format!("Invalid tool arguments: {e}"),
@@ -3683,7 +3869,15 @@ fn dispatch_service_tool<'a>(
                 return concurrency_limited_response(request.id.clone());
             }
             Err(e) => {
-                tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                    crate::services::lark_attachment_tool::diagnostics::error(&e);
+                    tracing::warn!(
+                        error_code = e.error_code(),
+                        "Attachment tool execution failed"
+                    );
+                } else {
+                    tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                }
                 return tool_failure_with_diagnostic(
                     request.id.clone(),
                     &format!("Tool execution failed: {e}"),
@@ -3696,21 +3890,25 @@ fn dispatch_service_tool<'a>(
             response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
         }
         // Audit log -- attribute the API key when the caller is an agent.
-        audit_service::log_async(
-            state.db.clone(),
-            Some(auth.user_id.clone()),
-            "mcp_tool_call".to_string(),
-            Some(serde_json::json!({
-                "tool": tool_name,
-                "service_id": service.service_id,
-                "response_status": response.status,
-                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-            })),
-            auth.ip_address.clone(),
-            auth.user_agent.clone(),
-            auth.api_key_id.clone(),
-            auth.api_key_name.clone(),
-        );
+        if !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+            || !crate::services::lark_attachment_tool::diagnostics::active()
+        {
+            audit_service::log_async(
+                state.db.clone(),
+                Some(auth.user_id.clone()),
+                "mcp_tool_call".to_string(),
+                Some(serde_json::json!({
+                    "tool": tool_name,
+                    "service_id": service.service_id,
+                    "response_status": response.status,
+                    "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+                })),
+                auth.ip_address.clone(),
+                auth.user_agent.clone(),
+                auth.api_key_id.clone(),
+                auth.api_key_name.clone(),
+            );
+        }
 
         let concurrency = response.concurrency.take();
         let is_policy_refusal = response.is_policy_refusal();
@@ -3863,6 +4061,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
     mcp_service::McpExecContext {
         strict_response_utf8: false,
         execution_permission: auth.execution_permission.as_ref(),
+        attachment_owner_key: auth.attachment_chat().is_some(),
         assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
@@ -4490,13 +4689,17 @@ async fn webhook_service_gate(
     let summary = format!(
         "{} {} on {}",
         prepared.method(),
-        crate::services::assistant_nyxagent::identifier(&endpoint.name),
+        prepared
+            .attachment_summary(endpoint, args)
+            .unwrap_or_else(|| crate::services::assistant_nyxagent::identifier(&endpoint.name)),
         crate::services::assistant_nyxagent::identifier(&service.service_slug),
     );
     let materialized_args = prepared.attachment_confirmation_arguments(endpoint, args);
     let args = materialized_args.as_ref().unwrap_or(args);
     let result = async {
-        let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
+        let gate =
+            acks::confirmation_needed(&state.db, chat, facts, prepared.attachment_policy_floor())
+                .await?;
         if let Some(need) = gate.ask()
             && let Some(refusal) =
                 acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await?
@@ -5158,7 +5361,15 @@ async fn handle_meta_call_tool(
     {
         Ok(catalog) => catalog,
         Err(e) => {
-            tracing::error!("Failed to load tools for call_tool: {e}");
+            if crate::services::lark_attachment_tool::diagnostics::active() {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+                tracing::error!(
+                    error_code = e.error_code(),
+                    "Attachment tool catalog unavailable"
+                );
+            } else {
+                tracing::error!("Failed to load tools for call_tool: {e}");
+            }
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
@@ -5209,6 +5420,10 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+        crate::services::lark_attachment_tool::diagnostics::bind(&service.service_id);
+    }
+
     if result_query.is_some()
         && (endpoint.method != "GET"
             || endpoint.path != "/v1/blocks/{block_id}/children"
@@ -5231,7 +5446,13 @@ async fn handle_meta_call_tool(
     let prepared = match mcp_service::prepare_chat_proxy_tool_call(
         &state.db,
         &state.encryption_keys,
-        auth.chat.as_ref(),
+        if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
+            && !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        {
+            auth.attachment_chat()
+        } else {
+            auth.chat.as_ref()
+        },
         service,
         endpoint,
         &execution_arguments,
@@ -5244,6 +5465,9 @@ async fn handle_meta_call_tool(
                 .and_then(|_| inner_args["acknowledgement_id"].as_str()),
         ),
         Err(e) => {
+            if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+            }
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
@@ -5438,7 +5662,15 @@ async fn handle_meta_call_tool(
             return concurrency_limited_response(request_id);
         }
         Err(e) => {
-            tracing::warn!("Tool execution failed for {tool_name}: {e}");
+            if crate::services::lark_attachment_tool::is_attachment_operation(endpoint) {
+                crate::services::lark_attachment_tool::diagnostics::error(&e);
+                tracing::warn!(
+                    error_code = e.error_code(),
+                    "Attachment tool execution failed"
+                );
+            } else {
+                tracing::warn!("Tool execution failed for {tool_name}: {e}");
+            }
             return tool_failure_with_diagnostic(
                 request_id,
                 &format!("Tool execution failed: {e}"),
@@ -5451,22 +5683,26 @@ async fn handle_meta_call_tool(
         response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
     }
     // Audit log -- attribute the API key when the caller is an agent.
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth.user_id.clone()),
-        "mcp_tool_call".to_string(),
-        Some(serde_json::json!({
-            "tool": tool_name,
-            "service_id": service.service_id,
-            "response_status": response.status,
-            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
-            "via": "nyx__call_tool",
-        })),
-        auth.ip_address.clone(),
-        auth.user_agent.clone(),
-        auth.api_key_id.clone(),
-        auth.api_key_name.clone(),
-    );
+    if !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        || !crate::services::lark_attachment_tool::diagnostics::active()
+    {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(auth.user_id.clone()),
+            "mcp_tool_call".to_string(),
+            Some(serde_json::json!({
+                "tool": tool_name,
+                "service_id": service.service_id,
+                "response_status": response.status,
+                "agent_role": auth.chat.as_ref().map(|chat| chat.role),
+                "via": "nyx__call_tool",
+            })),
+            auth.ip_address.clone(),
+            auth.user_agent.clone(),
+            auth.api_key_id.clone(),
+            auth.api_key_name.clone(),
+        );
+    }
 
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
@@ -5689,13 +5925,35 @@ async fn handle_meta_search(
             Default::default()
         }
     };
+    let attachment_schemas = match crate::services::raw_attachment_tool::discovery_schemas(
+        &state.db,
+        auth.attachment_chat(),
+        &services,
+    )
+    .await
+    {
+        Ok(mut schemas) => {
+            schemas.retain(|name, _| {
+                mcp_service::resolve_tool_call(name, &services)
+                    .is_some_and(|(service, _)| chat_access(auth, service) == "granted")
+            });
+            schemas
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Failed to load file upload schemas"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     let results: Vec<_> = ranked_candidates
         .into_iter()
         .map(|tool| {
             let mut value = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
+                "inputSchema": webhook_tool_schema(auth, attachment_schemas.get(&tool.name).unwrap_or(&tool.input_schema)),
             });
             if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
                 value["service_id"] = serde_json::json!(service.service_id);
@@ -6973,7 +7231,7 @@ async fn execute_ssh_command_internal(
 
     // Generate ephemeral SSH credentials (key + cert as strings, no files)
     let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
-        state, ssh_svc, service_id, user_id, principal,
+        state, ssh_svc, service_id, user_id, principal, false,
     )
     .await?;
 
@@ -9827,9 +10085,15 @@ mod curation_auth_regressions {
             .await
             .unwrap()
             .unwrap();
-        curation_grant_service::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
-            .await
-            .unwrap();
+        curation_grant_service::issue(
+            &f.state.db,
+            &f.sa.id,
+            &f.owner,
+            grant_input(&f.service.id),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         let fresh = token(&f, None).await;
         headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
@@ -9858,7 +10122,7 @@ mod curation_auth_regressions {
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         let fresh = token(&f, None).await;
         headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
-        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true)
+        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true, None)
             .await
             .unwrap();
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
@@ -11449,6 +11713,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
@@ -12395,6 +12660,36 @@ mod decision_result_contract_tests {
                 .await
                 .unwrap(),
             axum::body::to_bytes(gated.into_body(), 4096).await.unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod future_size_tests {
+    use super::*;
+
+    fn tools_call_future_size<F: std::future::Future>(
+        _: impl FnOnce(
+            &'static AppState,
+            &'static McpAuthContext,
+            Option<&'static str>,
+            &'static JsonRpcRequest,
+            bool,
+            crate::services::billing::route_inventory::BillingEgressPermit,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn diagnostic_boundary_keeps_tools_call_future_small() {
+        // Measure the actual shared entry point without constructing a fixture
+        // or polling it. Unrelated native tools must not embed Lark's child state.
+        let size = tools_call_future_size(handle_tools_call);
+        eprintln!("shared tools/call future: {size} bytes");
+        assert!(
+            size < 64 * 1024,
+            "shared tools/call future grew to {size} bytes"
         );
     }
 }
