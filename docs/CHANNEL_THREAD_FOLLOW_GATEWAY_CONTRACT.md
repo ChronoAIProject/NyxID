@@ -105,8 +105,15 @@ Shared inbound resolution keeps its existing fallback on unavailable history.
 A delayed reference past 29 minutes has the separate
 `thread_reply_reference_expired` reason. The next confirmed bot outbound clears
 the thread error.
-A streamed answer still is not a platform receipt; followed-thread durable
-response recovery and gateway terminal receipts are separate work.
+A streamed answer still is not a platform receipt. Followed relay admissions
+now expose a metadata-only response lifecycle: the negotiated original prefix
+has `X-CMA-Response-ID`, SSE id/sequence 0 and queued status, retaining
+`thread_reply` in `response.created.response`. Reads stay nonterminal until the
+turn settles, then complete with empty output so the gateway releases its
+parent without sending another answer. NyxID's existing late sender retains the
+thread target. No-turn notices under that prefix retain encrypted output for the gateway parent
+to deliver, with the same `thread_reply` on the replayed created frame; NyxID
+never sends those notices locally. See [response lifecycle](CHANNEL_EVENT_GATEWAY.md#locally-delivered-response-lifecycle-2588).
 
 Deploy NyxID to **all** replicas first, then upgrade **all** gateway replicas
 before authoring opted-in definitions (old strict gateway readers cannot
