@@ -43,10 +43,7 @@ export function formatComposerConnectionReason(
     case "disabled":
       return translateUi("Node {{name}} is disabled", { name });
     default:
-      return translateUi("Node {{name}} is unavailable ({{status}})", {
-        name,
-        status,
-      });
+      return translateUi("Node {{name}} is unavailable", { name });
   }
 }
 

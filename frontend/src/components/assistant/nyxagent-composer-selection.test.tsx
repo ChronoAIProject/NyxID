@@ -21,6 +21,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import type { KeyInfo } from "@/types/keys";
@@ -396,7 +397,7 @@ it("changes the chip and send ID only after an explicit replacement", async () =
   await choose();
   state.data = [{ ...connection, credential_missing: true }, { ...connection, id: "replacement", label: "Replacement" }];
   view.rerender();
-  await userEvent.setup().click(screen.getByRole("button", { name: "Choose another connection for this message" }));
+  await userEvent.setup().click(screen.getByRole("button", { name: "Change connection for this message" }));
   await userEvent.setup().click(screen.getByRole("button", { name: /Replacement/ }));
   expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Replacement");
   submit("Use replacement");
@@ -415,12 +416,60 @@ it("updates both open option and selected chip at expiry, preserving OAuth refre
       { ...connection, id: "oauth", label: "OAuth", credential_type: "oauth2", expires_at: new Date(start + 1000).toISOString() },
     ];
     view.rerender();
-    fireEvent.click(screen.getByRole("button", { name: "Choose another connection for this message" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change connection for this message" }));
     expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "false");
     act(() => vi.advanceTimersByTime(1000));
     expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAccessibleDescription("Credential expired");
     expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByRole("button", { name: /OAuth/ })).toHaveAttribute("aria-disabled", "false");
     expect(screen.getByRole("group", { name: "Connection for this message", hidden: true })).toHaveTextContent("Credential expired");
+  } finally { vi.useRealTimers(); }
+});
+
+it("updates the same refusal toast after click and Enter attempts", async () => {
+  const error = vi.spyOn(toast, "error").mockReturnValue("refused");
+  try {
+    const view = mount();
+    await choose();
+    state.data = [{ ...connection, credential_missing: true }];
+    view.rerender();
+    submit("Keep this draft");
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", code: "Enter" });
+    expect(error).toHaveBeenCalledTimes(2);
+    const ids = error.mock.calls.map((call) => call[1]?.id);
+    expect(ids[0]).toBeTruthy();
+    expect(ids[1]).toBe(ids[0]);
+    expect(screen.getByRole("textbox")).toHaveValue("Keep this draft");
+    expect(view.onSend).not.toHaveBeenCalled();
+  } finally { error.mockRestore(); }
+});
+
+it.each(["api_key", "oauth2"])("checks wall-clock expiry after throttled timers for %s", async (credentialType) => {
+  useAssistantDraftStore.getState().saveDraft("owner", "selection:test", "Keep this persisted draft");
+  const view = mount();
+  await choose();
+  const start = Date.now();
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(start);
+    state.data = [{ ...connection, credential_type: credentialType, expires_at: new Date(start + 1000).toISOString() }];
+    view.rerender();
+    const chip = screen.getByRole("group", { name: "Connection for this message" });
+    expect(chip).not.toHaveTextContent("Credential expired");
+    // Jump wall time without firing the expiry timer, as in a background tab.
+    vi.setSystemTime(start + 2000);
+    expect(chip).not.toHaveTextContent("Credential expired");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    });
+    if (credentialType === "api_key") {
+      expect(view.onSend).not.toHaveBeenCalled();
+      expect(screen.getByRole("textbox")).toHaveValue("Keep this persisted draft");
+      expect(useAssistantDraftStore.getState().getDraft("selection:test")).toBe("Keep this persisted draft");
+      expect(chip).toHaveTextContent("Credential expired");
+    } else {
+      expect(view.onSend).toHaveBeenCalledWith("/service org-connection\nKeep this persisted draft", undefined, undefined);
+      expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+    }
   } finally { vi.useRealTimers(); }
 });

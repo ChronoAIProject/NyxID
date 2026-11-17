@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useId, useState } from "react";
-import { Check, Link2, RefreshCw, X } from "lucide-react";
+import { useId, useState, type RefObject } from "react";
+import { Check, Link2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -191,8 +191,10 @@ export function ComposerConnectionChip({
   disabled,
   onRemove,
   onChange,
+  changeButtonRef,
 }: {
   readonly connection?: KeyInfo;
+  readonly changeButtonRef?: RefObject<HTMLButtonElement | null>;
   readonly unavailableReason: string | null;
   readonly disabled: boolean;
   readonly onRemove: () => void;
@@ -242,13 +244,14 @@ export function ComposerConnectionChip({
       <Button
         type="button"
         variant="ghost"
-        size="icon"
-        className="size-7 shrink-0"
-        aria-label={translateUi("Choose another connection for this message")}
+        size="sm"
+        className="shrink-0"
+        ref={changeButtonRef}
+        aria-label={translateUi("Change connection for this message")}
         disabled={disabled}
         onClick={onChange}
       >
-        <RefreshCw aria-hidden className="size-3.5" />
+        {translateUi("Change")}
       </Button>
       <Button
         type="button"

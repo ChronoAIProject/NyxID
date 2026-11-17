@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { appI18n } from "@/i18n/instance";
 import zh from "@/i18n/locales/app/zh-CN";
+import zhTW from "@/i18n/locales/app/zh-TW";
 import {
   ComposerConnectionPicker,
   ComposerConnectionChip,
@@ -121,4 +122,31 @@ it("keeps organization names literal in the picker, chip and search", async () =
   expect(
     screen.getByRole("group", { name: "此消息使用的连接", hidden: true }),
   ).toHaveTextContent("Personal");
+});
+
+it("shows a visible Change action whose accessible name contains the label", async () => {
+  const onChange = vi.fn();
+  render(<ComposerConnectionChip connection={key} unavailableReason="Credential missing" disabled={false} onChange={onChange} onRemove={vi.fn()} />);
+  const change = screen.getByRole("button", { name: "Change connection for this message" });
+  expect(change).toHaveTextContent("Change");
+  await userEvent.setup().click(change);
+  expect(onChange).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ["en", ["Node home is offline", "Node home is draining", "Node home is disabled", "Node home is unavailable", "Node home is unavailable"]],
+  ["zh-CN", ["节点 home 已离线", "节点 home 正在排空", "节点 home 已停用", "节点 home 不可用", "节点 home 不可用"]],
+  ["zh-TW", ["節點 home 已離線", "節點 home 正在排空", "節點 home 已停用", "節點 home 無法使用", "節點 home 無法使用"]],
+] as const)("localizes known node states and hides raw fallback status in %s", async (language, descriptions) => {
+  appI18n.addResourceBundle("zh-CN", "app", zh, true, true);
+  appI18n.addResourceBundle("zh-TW", "app", zhTW, true, true);
+  await act(() => appI18n.changeLanguage(language));
+  const connections = ["offline", "draining", "disabled", "online", "unknown"].map((status, index) => ({
+    ...key, id: `node-${index}`, label: `Node ${index}`, credential_missing: false,
+    execution_unavailable_reason: `node home ${status}`,
+  }));
+  render(<ComposerConnectionPicker {...props} connections={connections} />);
+  connections.forEach((connection, index) => {
+    expect(screen.getByRole("button", { name: new RegExp(connection.label) })).toHaveAccessibleDescription(descriptions[index]);
+  });
 });

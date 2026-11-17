@@ -9,6 +9,7 @@ import { UploadComposer } from "./upload-composer";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-client";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { autoFocusAllowed } from "@/lib/assistant/composer-focus";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { useNyxAgentModels } from "@/hooks/use-nyxbot-agents";
 import { modelCannotViewImages } from "@/lib/assistant/nyxbot-labels";
@@ -40,6 +41,10 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   const [connectionId, setConnectionId] = useState<string>();
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
   const [connectionFocusRequest, setConnectionFocusRequest] = useState(0);
+  const attachmentTrigger = useRef<HTMLButtonElement>(null);
+  const connectionChange = useRef<HTMLButtonElement>(null);
+  const pickerOpener = useRef<"attachment" | "change">("attachment");
+  const pickerSelected = useRef(false);
   const [now, setNow] = useState(Date.now);
   const connections = useKeys();
   useEffect(() => {
@@ -81,24 +86,32 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     if (connectionLocked) setConnectionPickerOpen(false);
   }, [connectionLocked]);
 
-  function openConnectionPicker() {
+  function openConnectionPicker(opener: "attachment" | "change") {
     if (connectionLocked) return;
+    pickerOpener.current = opener;
+    pickerSelected.current = false;
     setNow(Date.now());
     setConnectionPickerOpen(true);
     if (!connections.isFetching) void connections.refetch();
   }
 
-  function focusComposer() {
-    setConnectionFocusRequest((request) => request + 1);
+  function focusComposer(fallback: "attachment" | "change") {
+    if (autoFocusAllowed()) setConnectionFocusRequest((request) => request + 1);
+    else (fallback === "change" ? connectionChange : attachmentTrigger).current?.focus({ preventScroll: true });
   }
 
   function checkConnection() {
     const live = liveSelection.current;
-    const reason = live.connection && composerConnectionUnavailableReason(live.connection, live.now);
+    const wallNow = Date.now();
+    const reason = live.connection && composerConnectionUnavailableReason(live.connection, Math.max(live.now, wallNow));
+    // Background tabs can throttle the expiry timer. Match the rendered reason
+    // to the wall-clock guard before the owner tries again.
+    if (reason && !composerConnectionUnavailableReason(live.connection!, live.now)) setNow(wallNow);
     if (live.connectionId !== connectionId || (connectionId &&
       (live.error || !live.connection || reason))) {
       const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
       toast.error(translateErrorMessage(message), {
+        id: "composer-connection-unavailable",
         description: live.error ? translateUi("Could not load connections.")
           : reason ? formatComposerConnectionReason(reason) : translateUi("No longer listed"),
       });
@@ -107,6 +120,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   }
 
   return <UploadComposer {...props}
+    attachmentTriggerRef={attachmentTrigger}
     focusRequest={(props.focusRequest ?? 0) + connectionFocusRequest}
     beforeSend={() => {
       if (!props.active) {
@@ -126,7 +140,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
       disabled={props.disabled}
       onVoiceSettings={onVoiceSettings}
     />}
-    attachmentMenuItems={<DropdownMenuItem disabled={connectionLocked} onSelect={openConnectionPicker}>
+    attachmentMenuItems={<DropdownMenuItem disabled={connectionLocked} onSelect={() => openConnectionPicker("attachment")}>
       <Link2 aria-hidden className="size-4" />{translateUi("Use a connection")}</DropdownMenuItem>}
     onVoice={props.onVoice && !connectionId ? async (id, preparation) => {
       if (!conversation && draftModel) await nyxBotApi.changeModel(id, draftModel);
@@ -138,17 +152,20 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     sendLabel={canSteer ? translateUi("Send guidance") : translateUi("Send message")}
     controls={<>{props.controls}
       <ComposerConnectionPicker open={connectionPickerOpen && !connectionLocked} onOpenChange={setConnectionPickerOpen}
-        now={now} onCloseAutoFocus={focusComposer}
+        now={now} onCloseAutoFocus={() => focusComposer(pickerSelected.current ? "change" : pickerOpener.current)}
         connections={connections.data ?? []} value={connectionId ?? ""}
         onChange={(id) => {
           const selected = connections.data?.find((key) => key.id === id);
-          if (selected && !connections.isError && !composerConnectionUnavailableReason(selected, now)) setConnectionId(id);
+          if (selected && !connections.isError && !composerConnectionUnavailableReason(selected, now)) {
+            pickerSelected.current = true;
+            setConnectionId(id);
+          }
         }}
         loading={connections.isPending} error={connections.isError} onRetry={() => void connections.refetch()}
         disabled={connectionLocked} />
       {connectionId && <ComposerConnectionChip connection={connection} unavailableReason={connectionUnavailableReason}
-        onChange={openConnectionPicker}
-        disabled={connectionLocked} onRemove={() => { setConnectionId(undefined); focusComposer(); }} />}
+        changeButtonRef={connectionChange} onChange={() => openConnectionPicker("change")}
+        disabled={connectionLocked} onRemove={() => { setConnectionId(undefined); focusComposer("attachment"); }} />}
       {notice && <div className="mb-2 ml-[30px] text-14 text-muted-foreground" role="status">
       <p>{translateUi(steeringNotice(notice.code, notice.outcome))}</p>
       {notice.code === "no_active_turn" && notice.text && <Button type="button" size="sm" variant="outline"
