@@ -20,6 +20,7 @@ enum ProposalCase {
     ExistingDecided,
     Limit,
     TaskFence,
+    BindAbort,
 }
 
 impl ProposalCase {
@@ -32,7 +33,7 @@ impl ProposalCase {
                     return;
                 }
                 match self {
-                    Self::New | Self::NextTurn => {}
+                    Self::New | Self::NextTurn | Self::BindAbort => {}
                     Self::Existing | Self::ExistingDecided => {
                         let mut request = request;
                         if self == Self::ExistingDecided {
@@ -99,17 +100,27 @@ impl ProposalCase {
     }
 }
 
+#[derive(Clone, Default)]
+struct AbortObservation {
+    callbacks: Arc<AtomicUsize>,
+    pending: Arc<std::sync::atomic::AtomicBool>,
+    finalizations: Arc<AtomicUsize>,
+}
+
 async fn callback_proxy(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((slug, path)): Path<(String, String)>,
     Extension(hook): Extension<ModelApprovalHook>,
+    Extension((case, abort)): Extension<(ProposalCase, AbortObservation)>,
+    Extension(settled): Extension<Option<tokio::sync::watch::Sender<()>>>,
     request: Request<Body>,
 ) -> AppResult<axum::response::Response> {
     // Keep the proposal write slower than several 250 ms turn-stop polls.
-    proposals::MODEL_APPROVAL_PREPARE
-        .scope(
-            hook,
+    let call = proposals::MODEL_APPROVAL_PREPARE.scope(
+        hook,
+        proposals::MODEL_APPROVAL_SETTLED.scope(
+            settled.map(|settled| settled.subscribe()),
             proposals::MODEL_APPROVAL_DELAY.scope(Duration::from_millis(750), async {
                 Box::pin(crate::handlers::proxy::proxy_request_by_slug_inner(
                     &state,
@@ -121,8 +132,23 @@ async fn callback_proxy(
                 ))
                 .await
             }),
-        )
-        .await
+        ),
+    );
+    if case == ProposalCase::BindAbort {
+        use crate::services::assistant_activity_decision as activity;
+        abort.callbacks.fetch_add(1, Ordering::Relaxed);
+        activity::DECISION_PENDING
+            .scope(
+                abort.pending.clone(),
+                activity::PROXY_FINALIZATIONS.scope(
+                    abort.finalizations.clone(),
+                    proposals::MODEL_APPROVAL_ABORT_AFTER_BIND.scope(true, call),
+                ),
+            )
+            .await
+    } else {
+        call.await
+    }
 }
 async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -148,6 +174,23 @@ async fn model_approval_pipeline_case(
     policy: &'static str,
     permissions: bool,
     case: ProposalCase,
+) {
+    Box::pin(model_approval_pipeline_order(
+        origin,
+        policy,
+        permissions,
+        case,
+        false,
+    ))
+    .await;
+}
+
+async fn model_approval_pipeline_order(
+    origin: &'static str,
+    policy: &'static str,
+    permissions: bool,
+    case: ProposalCase,
+    hold_after_commit: bool,
 ) {
     let (state, _, original) = setup("model_approval_pipeline").await;
     original.abort();
@@ -264,12 +307,18 @@ async fn model_approval_pipeline_case(
             "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
         }).await.unwrap();
     }
+    let (settlement_signal, _) = tokio::sync::watch::channel(());
+    let abort = AbortObservation::default();
     let callbacks = Router::new()
         .route("/api/v1/proxy/s/{slug}/{*path}", any(callback_proxy))
         .layer(Extension(
             crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY,
         ))
         .layer(Extension(case.hook()))
+        .layer(Extension((case, abort.clone())))
+        .layer(Extension(
+            hold_after_commit.then(|| settlement_signal.clone()),
+        ))
         .with_state(state.clone());
     let callback_calls = Arc::new(AtomicUsize::new(0));
     let observed_calls = callback_calls.clone();
@@ -462,6 +511,7 @@ async fn model_approval_pipeline_case(
         .unwrap();
         (*conversation, None)
     };
+    settlement_signal.send_replace(());
     if let Some(approving) = approving {
         approving.await.unwrap();
     }
@@ -474,6 +524,22 @@ async fn model_approval_pipeline_case(
         .rev()
         .find(|m| m.role == "assistant")
         .unwrap();
+    if case == ProposalCase::BindAbort {
+        assert_eq!(abort.callbacks.load(Ordering::Relaxed), 1);
+        assert!(
+            !abort.pending.load(Ordering::Relaxed),
+            "aborted proposal marked decision-required"
+        );
+        assert_eq!(
+            abort.finalizations.load(Ordering::Relaxed),
+            0,
+            "aborted proposal finalized an unstored activity"
+        );
+        assert!(
+            reply.activities.is_empty(),
+            "aborted activity survived settlement"
+        );
+    }
     let success = interactive || !matches!(policy, "deny" | "write" | "org");
     let approvals = state
         .db
@@ -507,7 +573,7 @@ async fn model_approval_pipeline_case(
             approvals,
             match case {
                 ProposalCase::Limit => 32,
-                ProposalCase::TaskFence => 0,
+                ProposalCase::TaskFence | ProposalCase::BindAbort => 0,
                 _ => u64::from(permissions && origin == "user" && policy == "write"),
             }
         );
@@ -522,7 +588,10 @@ async fn model_approval_pipeline_case(
                 permissions
                     && origin == "user"
                     && policy == "write"
-                    && !matches!(case, ProposalCase::Limit | ProposalCase::TaskFence)
+                    && !matches!(
+                        case,
+                        ProposalCase::Limit | ProposalCase::TaskFence | ProposalCase::BindAbort
+                    )
             )
         );
         let code = if policy == "deny" {
@@ -558,6 +627,37 @@ async fn model_approval_pipeline_case(
                     .any(|r| r.text.contains(code) && r.text.contains("/approvals/settings"))
             );
         }
+    }
+    if permissions
+        && origin == "user"
+        && policy == "write"
+        && !matches!(
+            case,
+            ProposalCase::Limit | ProposalCase::TaskFence | ProposalCase::BindAbort
+        )
+    {
+        assert_eq!(
+            reply.activity_count,
+            Some(1),
+            "{case:?}: missing recovery evidence"
+        );
+        assert_eq!(reply.activities.len(), 1);
+        let decision = reply.activities[0]
+            .decision
+            .as_ref()
+            .expect("approval evidence");
+        assert_eq!(decision.kind, "approval");
+        assert_eq!(decision.state, "waiting");
+        assert!(!decision.executing);
+        assert!(
+            state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find_one(doc! {"_id": &decision.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
     if policy != "deny" {
         assert_eq!(
@@ -644,7 +744,18 @@ async fn model_approval_pipeline_case(
                 );
                 eprintln!("pending model proposal retry: {message}");
             }
-            _ => panic!("pending proposal must retain the existing recovery-evidence fence"),
+            Err(error) => panic!(
+                "pending proposal must retain the existing recovery-evidence fence; got Err({error:?}): {error}"
+            ),
+            Ok(Started::Turn { .. }) => panic!(
+                "pending proposal must retain the existing recovery-evidence fence; got Ok(Started::Turn)"
+            ),
+            Ok(Started::Busy) => panic!(
+                "pending proposal must retain the existing recovery-evidence fence; got Ok(Started::Busy)"
+            ),
+            Ok(Started::PoolFull) => panic!(
+                "pending proposal must retain the existing recovery-evidence fence; got Ok(Started::PoolFull)"
+            ),
         }
         assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
         assert!(
@@ -697,6 +808,7 @@ async fn model_approval_pipeline_case(
         })
         .await
         .unwrap();
+        settlement_signal.send_replace(());
         assert!(start.elapsed() < Duration::from_secs(15));
         let messages = engine::messages(&state.db, OWNER, &second.id, 20, None)
             .await
@@ -848,6 +960,31 @@ async fn model_approval_pending_retry_and_new_turn_keep_gap_identity() {
         "write",
         true,
         ProposalCase::NextTurn,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn model_approval_settlement_before_callback_retains_retry_evidence() {
+    for case in [
+        ProposalCase::NextTurn,
+        ProposalCase::Existing,
+        ProposalCase::ExistingDecided,
+    ] {
+        Box::pin(model_approval_pipeline_order(
+            "user", "write", true, case, true,
+        ))
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn model_approval_abort_after_binding_never_publishes_decision_flags() {
+    Box::pin(model_approval_pipeline_case(
+        "user",
+        "write",
+        true,
+        ProposalCase::BindAbort,
     ))
     .await;
 }
