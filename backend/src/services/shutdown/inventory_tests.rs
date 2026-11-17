@@ -416,6 +416,13 @@ fn all_sources(directory: &Path, out: &mut BTreeSet<PathBuf>) {
 // raw spawn beside an approved one still fails. Reasons describe ownership.
 const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
+        "handlers/users.rs",
+        "export_body_with_deadline",
+        "body_stream",
+        1,
+        "Bounded export body releases its reservation and semaphore permit at EOF, Drop or a total 120-second deadline; non-deliveries refund via tracked shutdown cleanup.",
+    ),
+    (
         "handlers/assistant_cma_agents.rs",
         "relay_events",
         "body_stream",
@@ -715,6 +722,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "services::machine_access_service::spawn",
         1,
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
+    ),
+    (
+        "main.rs",
+        "server_run",
+        "services::personal_erasure_orphan_sweep::jobs::spawn_worker",
+        1,
+        "Leased orphan-sweep worker shares the erasure worker lifetime; shutdown stops claims and drains the bounded claimed pass before lease expiry permits recovery.",
     ),
     (
         "main.rs",

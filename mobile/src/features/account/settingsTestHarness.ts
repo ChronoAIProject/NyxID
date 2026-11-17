@@ -1,6 +1,7 @@
 import { translate, type TranslationValues } from "../../i18n/translate";
 import type { Language } from "../../i18n/language";
 import assert from "node:assert/strict";
+import { ApiError } from "../../lib/api/ApiError";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import { lightColors } from "../../theme/mobileTheme";
@@ -93,6 +94,7 @@ export function setupSettingsScreen(
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
   let pending = false;
   const mutations: unknown[] = [];
+  const mutationOptions: Record<string, any>[] = [];
   const deviceChoices: boolean[] = [];
   const pushes: unknown[][] = [];
   const preferences: unknown[] = [];
@@ -215,10 +217,13 @@ export function setupSettingsScreen(
                     : []
                   : { enabled: true },
       }),
-      useMutation: () => ({
-        mutate: (value: unknown) => mutations.push(value),
-        isPending: pending,
-      }),
+      useMutation: (options: Record<string, any>) => {
+        mutationOptions.push(options);
+        return {
+          mutate: (value: unknown) => mutations.push(value),
+          isPending: pending,
+        };
+      },
     },
     "../display/ChatPreview": { ChatPreview: "ChatPreview" },
     "./AccountDeletionSheet": { AccountDeletionSheet: "AccountDeletionSheet" },
@@ -254,7 +259,28 @@ export function setupSettingsScreen(
     },
     "../../lib/analyticsConsentState": {},
     "../../lib/analyticsRelay": {},
-    "../../lib/api/http": {},
+    "../../lib/api/http": {
+      requestJson: async () => ({ enabled: true }),
+      requestBoundAuthenticatedResponse: async () => ({ response: { body: null }, assertOwner: async () => {} }),
+    },
+    "../../lib/api/ApiError": { ApiError },
+    "expo-file-system": {
+      Directory: class Directory { list() { return []; } },
+      File: class File {
+        uri = "cache/export.json";
+        open() { return { writeBytes() {}, close() {} }; }
+        exists = false;
+        create() {}
+        write() {}
+        delete() {}
+      },
+      Paths: { cache: "cache" },
+    },
+    "./accountExport": { cleanStaleAccountExports: () => {}, shareAccountExport: async () => {} },
+    "expo-sharing": {
+      isAvailableAsync: async () => true,
+      shareAsync: async () => {},
+    },
     "../../lib/telemetry": { capture() {} },
     "../../hooks/useNetworkStatus": {
       useNetworkStatus: () => ({ isConnected: true }),
@@ -330,6 +356,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
+    mutationOptions,
     pushPreferenceMutations,
     deviceChoices,
     sheets,

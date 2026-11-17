@@ -380,14 +380,17 @@ async function invalidateSession() {
 
 /** Expo's native fetch exposes a ReadableStream on iOS/Android; RN's global
  * fetch can buffer the entire response. Both paths share secure admission. */
-export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
-  const { response } = await executeAuthenticatedRequest({
+export async function requestBoundAuthenticatedResponse(path: string, options: RequestOptions = {}) {
+  return executeAuthenticatedRequest({
     url: buildApiUrl(path), options, clientHeaders: clientHeaders(),
     transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init).catch((cause: unknown) => { throw networkApiError(cause); }), init.signal ?? undefined), loadSession: loadStoredAuthSession,
     refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
     toError: buildApiError, getAuthEpoch,
   });
-  return response;
+}
+
+export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
+  return (await requestBoundAuthenticatedResponse(path, options)).response;
 }
 
 export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {

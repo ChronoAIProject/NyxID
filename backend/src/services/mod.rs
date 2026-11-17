@@ -1,3 +1,4 @@
+pub mod account_export_service;
 pub mod action_description;
 pub mod admin_assistant_analytics;
 pub mod admin_audit_service;
@@ -205,6 +206,9 @@ pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
 pub mod par_service;
+pub(crate) mod personal_attribution_service;
+pub mod personal_data_registry;
+pub mod personal_erasure_orphan_sweep;
 pub mod personal_erasure_registry;
 pub mod personal_erasure_service;
 pub(crate) mod platform_binding_service;
