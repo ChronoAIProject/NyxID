@@ -961,6 +961,7 @@ async fn apply_increments(
 async fn finish(
     db: &Database,
     batch: &UsageRollupBatch,
+    now: DateTime<Utc>,
     mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<()> {
     let sources = db.collection::<Document>(if batch.hourly_sources {
@@ -968,12 +969,30 @@ async fn finish(
     } else {
         METERS
     });
-    let (marker, update) = if batch.hourly_sources {
-        ("daily_pending", doc! { "$set": { "daily_pending": false } })
+    let (marker, update): (&str, mongodb::options::UpdateModifications) = if batch.hourly_sources {
+        (
+            "daily_pending",
+            doc! { "$set": { "daily_pending": false } }.into(),
+        )
     } else {
+        let expires_at = bson::DateTime::from_chrono(
+            now + chrono::Duration::days(super::reconcile::ACKED_RETENTION_DAYS),
+        );
         (
             "rollup_pending",
-            doc! { "$set": { "rollup_pending": false, "rolled_up_at": bson::DateTime::from_chrono(batch.claimed_at) } },
+            vec![doc! { "$set": {
+                "rollup_pending": false,
+                "rolled_up_at": bson::DateTime::from_chrono(batch.claimed_at),
+                "expires_at": { "$cond": [
+                    { "$and": [
+                        { "$eq": [{ "$ifNull": ["$wallet_id", null] }, null] },
+                        { "$eq": [{ "$ifNull": ["$expires_at", null] }, null] },
+                    ] },
+                    expires_at,
+                    "$expires_at",
+                ] },
+            } }]
+            .into(),
         )
     };
     let action = sources.update_many(
@@ -1037,7 +1056,7 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
             .and_run2(async move |session| {
                 let operation: AppResult<()> = async {
                     apply(&db, &transaction_batch, Some(&mut *session)).await?;
-                    finish(&db, &transaction_batch, Some(&mut *session)).await
+                    finish(&db, &transaction_batch, Utc::now(), Some(&mut *session)).await
                 }
                 .await;
                 crate::services::api_key_mutation_service::transaction_result(operation)
@@ -1046,7 +1065,7 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
             .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     } else {
         apply(db, &batch, None).await?;
-        finish(db, &batch, None).await?;
+        finish(db, &batch, Utc::now(), None).await?;
     }
     Ok(batch.row_ids.len())
 }
@@ -1105,6 +1124,8 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
         }),
     )
 }
+
+pub(super) mod retention;
 
 #[cfg(test)]
 pub(crate) mod tests;

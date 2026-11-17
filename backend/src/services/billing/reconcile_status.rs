@@ -40,6 +40,7 @@ const STEPS: &[&str] = &[
     "wallet_balances",
     "rate_cache",
     "status_publication",
+    "metering_retention",
 ];
 
 const VERSION: i64 = 1;
