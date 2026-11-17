@@ -1,5 +1,5 @@
 import { exclusiveCharacters, wrongScriptCharacters } from './i18nScriptGuard';
-import { translationConcatenations, missingRenderLanguageSubscription } from "./i18nQualityGuard";
+import { translationConcatenations, missingRenderLanguageSubscription, moduleScopeTranslations } from "./i18nQualityGuard";
 import { NON_TRANSLATABLE_TOKENS } from "./i18nLiteralGuard";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -212,6 +212,29 @@ test("rendered bridge translations subscribe to the app language", () => {
   assert.equal(missingRenderLanguageSubscription('const Page = memo(() => { const title = translateApp("Hello"); return <Text>{title}</Text> })').length, 1);
   assert.deepEqual(missingRenderLanguageSubscription('function Page() { useAppLanguage(); return <Text>{translateApp("Hello")}</Text> }'), []);
   assert.deepEqual(missingRenderLanguageSubscription('function Page() { return <Button onPress={() => Alert.alert(translateApp("Hello"))} /> }'), []);
+});
+
+test("N13 production translations never freeze copy at module scope", () => {
+  const failures = sources(new URL("../", import.meta.url)).flatMap((file) =>
+    moduleScopeTranslations(readFileSync(file, "utf8"), file.pathname)
+      .map((line) => `${file.pathname}:${line}`));
+  assert.deepEqual(failures, []);
+});
+
+test("N13 module-scope AST guard distinguishes cached copy from deferred formatters", () => {
+  assert.deepEqual(moduleScopeTranslations(`
+    import { translateApp as label } from "./appTranslation";
+    const days = [label("Sundays"), translateApp("Mondays")];
+    const map = { day: translate("zh-CN", "Tuesdays") };
+    class Labels { static day = translateApp("Wednesdays"); }
+  `), [3, 3, 4, 5]);
+  assert.deepEqual(moduleScopeTranslations(`
+    // translateApp("not executed")
+    const source = 'translateApp("not executed")';
+    const getter = { get label() { return translateApp("Sundays"); } };
+    const format = () => translateApp("Mondays");
+    function render() { return translate("zh-CN", "Tuesdays"); }
+  `), []);
 });
 
 test("Chinese catalogs use the correct script including OpenCC mappings with multiple targets", () => {
