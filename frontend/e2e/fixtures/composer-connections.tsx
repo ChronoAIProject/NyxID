@@ -10,10 +10,20 @@ import {
   queryKey,
   updateConnection,
 } from "./composer-connections-state";
+import { useAuthStore } from "../../src/stores/auth-store";
+import type { User } from "../../src/types/api";
+import "../../src/i18n";
 import "../../src/app.css";
+
+useAuthStore.setState({
+  user: { id: "fixture" } as User,
+  isAuthenticated: true,
+  isLoading: false,
+});
 
 export function ComposerConnectionsFixture() {
   useApplyTheme("assistant");
+  const [locked, setLocked] = useState(false);
   const [sent, setSent] = useState<string[]>([]);
   return (
     <main className="mx-auto max-w-2xl space-y-4 p-6">
@@ -29,14 +39,21 @@ export function ComposerConnectionsFixture() {
         >
           Invalidate work connection
         </Button>
-        <Button type="button" onClick={() => client.setQueryData(queryKey, keys)}>
+        <Button
+          type="button"
+          onClick={() => client.setQueryData(queryKey, keys)}
+        >
           Restore connections
         </Button>
       </div>
+      <Button type="button" onClick={() => setLocked((previous) => !previous)}>
+        Toggle composer lock
+      </Button>
       <NyxAgentComposer
         ownerUserId="fixture"
         draftKey="availability"
         scope={{ kind: "conversations", id: "fixture" }}
+        disabled={locked}
         active={false}
         sending={false}
         onStop={async () => {}}
@@ -49,7 +66,10 @@ export function ComposerConnectionsFixture() {
         <p className="text-13 text-muted-foreground">
           Test messages only. Nothing is sent to a real provider.
         </p>
-        <output aria-label="Submitted messages" className="block whitespace-pre-wrap break-words">
+        <output
+          aria-label="Submitted messages"
+          className="block whitespace-pre-wrap break-words"
+        >
           {sent.length ? sent.join("\n\n") : "No messages sent yet."}
         </output>
       </section>

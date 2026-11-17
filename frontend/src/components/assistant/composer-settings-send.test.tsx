@@ -1,3 +1,7 @@
+vi.mock("@/hooks/use-keys", async (original) => {
+  const hooks = await original<typeof import("@/hooks/use-keys")>();
+  return { ...hooks, useKeys: () => ({ ...hooks.useKeys(), refetch: vi.fn() }) };
+});
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import {
   act,
@@ -226,4 +230,32 @@ it.each([
   else expect(screen.queryByText(/This model can’t view images/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   await waitFor(() => expect(onSend).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ attachmentIds: ["photo"] }), undefined));
+});
+
+it("keeps the draft store and upload attached through refused pointer and Enter sends", async () => {
+  const key = { id: "selected", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  client.setQueryData(["keys", "list", undefined], [key]);
+  await draftWithUpload();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  act(() => client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]));
+  await waitFor(() => expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Credential missing"));
+  await waitFor(() => expect(Object.values(useAssistantDraftStore.getState().drafts).some((draft) => draft.text === "Read my notes")).toBe(true));
+  const before = useAssistantDraftStore.getState().drafts;
+  const clear = vi.spyOn(useAssistantDraftStore.getState(), "clearDraft");
+  const detachments: boolean[] = [];
+  const observer = new MutationObserver(() => detachments.push(Boolean(screen.queryByText("Ready"))));
+  observer.observe(document.body, { childList: true, subtree: true });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", code: "Enter" });
+  await act(async () => {});
+  observer.disconnect();
+  expect(clear).not.toHaveBeenCalled();
+  expect(useAssistantDraftStore.getState().drafts).toBe(before);
+  expect(screen.getByRole("textbox")).toHaveValue("Read my notes");
+  expect(screen.getByText("Ready")).toBeVisible();
+  expect(detachments).not.toContain(false);
+  expect(onSend).not.toHaveBeenCalled();
 });

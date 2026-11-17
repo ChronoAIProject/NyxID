@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { KeyInfo } from "@/types/keys";
 import { connectionAvailable } from "./connection-context";
-import { composerConnectionUnavailableReason } from "./composer-connection";
+import {
+  composerConnectionUnavailableReason,
+  formatComposerConnectionReason,
+} from "./composer-connection";
 
 const connection = {
   id: "connection",
@@ -56,7 +59,11 @@ describe("composer execution availability", () => {
   ])("blocks explicit unavailable facts: %j", (overrides, reason) => {
     expect(
       composerConnectionUnavailableReason({ ...connection, ...overrides }, now),
-    ).toBe(reason);
+    ).toEqual(
+      reason.startsWith("node ")
+        ? { kind: "node", name: "home", status: "offline" }
+        : { kind: "classifier", reason },
+    );
   });
 
   it.each<Partial<KeyInfo>>([
@@ -102,3 +109,60 @@ describe("composer execution availability", () => {
     expect(connectionAvailable(offline)).toBe(true);
   });
 });
+
+it.each<Partial<KeyInfo>>([
+  { is_active: false },
+  { credential_missing: true },
+  { credential_binding: "platform", platform_key_available: false },
+  {
+    credential_source: {
+      type: "org",
+      org_id: "org",
+      org_name: "Team",
+      allowed: false,
+      role: "viewer",
+    },
+  },
+])("keeps hard classifier facts ahead of backend node reasons: %j", (patch) => {
+  const expected = composerConnectionUnavailableReason(
+    { ...connection, ...patch },
+    now,
+  );
+  expect(
+    composerConnectionUnavailableReason(
+      {
+        ...connection,
+        ...patch,
+        execution_unavailable_reason: "node home offline",
+      },
+      now,
+    ),
+  ).toEqual(expected);
+});
+
+it("preserves node fallback classification even with expired server credentials", () => {
+  expect(
+    composerConnectionUnavailableReason(
+      {
+        ...connection,
+        node_id: "node",
+        node_status: "offline",
+        status: "expired",
+        expires_at: "2020-01-01",
+      },
+      now,
+    ),
+  ).toBeNull();
+});
+
+it.each(["Provider says <b>wait</b> {{x}}", "   "])(
+  "keeps an unknown nonempty backend reason verbatim: %j",
+  (text) => {
+    const reason = composerConnectionUnavailableReason(
+      { ...connection, execution_unavailable_reason: text },
+      now,
+    )!;
+    expect(reason).toEqual({ kind: "backend", text });
+    expect(formatComposerConnectionReason(reason)).toBe(text);
+  },
+);

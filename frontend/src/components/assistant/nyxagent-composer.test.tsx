@@ -1,3 +1,7 @@
+vi.mock("@/hooks/use-keys", async (original) => {
+  const hooks = await original<typeof import("@/hooks/use-keys")>();
+  return { ...hooks, useKeys: () => ({ ...hooks.useKeys(), refetch: vi.fn() }) };
+});
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -133,4 +137,19 @@ it("includes the combined settings menu inside the composer", () => {
   expect(view.container.querySelector("[data-composer-footer]")).toContainElement(
     screen.getByRole("button", { name: /Thinking and permissions/ }),
   );
+});
+
+it("still steers an active turn when its retained connection chip is unavailable", async () => {
+  const view = mount({ ...props(), active: false, sending: false });
+  const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  act(() => view.client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]));
+  view.rerenderProps({ ...view.props, active: true, sending: true });
+  await send("Keep steering");
+  await waitFor(() => expect(nyxAgentTransport.steer).toHaveBeenCalledWith(conversation.id, "Keep steering", "turn-1", expect.any(String)));
+  expect(view.props.onSend).not.toHaveBeenCalled();
 });

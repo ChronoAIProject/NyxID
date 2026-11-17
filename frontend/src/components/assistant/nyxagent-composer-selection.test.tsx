@@ -5,15 +5,19 @@ vi.mock("./composer-settings", () => ({
 const state = vi.hoisted(() => ({
   data: [] as import("@/types/keys").KeyInfo[],
   error: false,
+  fetching: false,
+  refetch: vi.fn(),
 }));
 vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({
     data: state.error ? undefined : state.data,
     isError: state.error,
     isPending: false,
+    isFetching: state.fetching,
+    refetch: state.refetch,
   }),
 }));
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +42,8 @@ const connection = {
 beforeEach(() => {
   state.data = [connection];
   state.error = false;
+  state.fetching = false;
+  state.refetch.mockClear();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount(onSend = vi.fn().mockResolvedValue(undefined)) {
@@ -60,13 +66,14 @@ function mount(onSend = vi.fn().mockResolvedValue(undefined)) {
   );
   return {
     onSend,
-    rerender: (draftKey = props.draftKey, ownerUserId = props.ownerUserId) =>
+    rerender: (draftKey = props.draftKey, ownerUserId = props.ownerUserId, disabled = false) =>
       view.rerender(
         <QueryClientProvider client={query}>
           <NyxAgentComposer
             {...props}
             draftKey={draftKey}
             ownerUserId={ownerUserId}
+            disabled={disabled}
           />
         </QueryClientProvider>,
       ),
@@ -170,6 +177,7 @@ describe("visible one-message connection context", () => {
         ).toHaveTextContent("Unavailable"),
       );
       expect(view.onSend).not.toHaveBeenCalled();
+      if (reason === "revoked") expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("No longer listed");
     },
   );
   it("resets connection context when navigating to another draft", async () => {
@@ -212,13 +220,13 @@ describe("visible one-message connection context", () => {
     );
     expect(
       screen.getByRole("button", { name: /Disabled account/ }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.getByRole("button", { name: /Disabled account/ }),
     ).toHaveAccessibleDescription("Disabled");
     expect(
       screen.getByRole("button", { name: /Denied account/ }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.getByRole("button", { name: /Denied account/ }),
     ).toHaveAccessibleDescription("No access");
@@ -229,7 +237,7 @@ describe("visible one-message connection context", () => {
     expect(screen.getByText("No matching connections.")).toBeVisible();
   });
 
-  it("updates an open picker and skips unavailable options for pointer and keyboard selection", async () => {
+  it("updates an open picker and reaches unavailable options for pointer and keyboard selection", async () => {
     state.data = [
       connection,
       {
@@ -245,7 +253,7 @@ describe("visible one-message connection context", () => {
     work.focus();
     state.data = [{ ...connection, credential_missing: true }, state.data[1]!];
     view.rerender();
-    expect(work).toBeDisabled();
+    expect(work).toHaveAttribute("aria-disabled", "true");
     expect(work).toHaveAccessibleDescription("Credential missing");
     await user.click(work);
     await user.keyboard("{Enter} ");
@@ -254,6 +262,10 @@ describe("visible one-message connection context", () => {
       screen.queryByRole("group", { name: "Connection for this message" }),
     ).not.toBeInTheDocument();
     screen.getByRole("textbox", { name: "Search connections" }).focus();
+    await user.tab();
+    expect(work).toHaveFocus();
+    await user.keyboard("{Enter} ");
+    expect(screen.getByRole("dialog")).toBeVisible();
     await user.tab();
     expect(
       screen.getByRole("button", { name: /Personal documents/ }),
@@ -348,4 +360,67 @@ describe("visible one-message connection context", () => {
       screen.queryByRole("group", { name: "Connection for this message" }),
     ).not.toBeInTheDocument();
   });
+});
+
+it("refreshes exactly once per opening, joins an in-flight fetch and keeps cached rows visible", async () => {
+  const view = mount();
+  await openPicker();
+  expect(state.refetch).toHaveBeenCalledOnce();
+  expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "false");
+  state.fetching = true;
+  state.data = [{ ...connection, credential_missing: true }];
+  view.rerender();
+  expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "true");
+  expect(screen.queryByText("Loading connections…")).not.toBeInTheDocument();
+  await userEvent.setup().keyboard("{Escape}");
+  await openPicker();
+  expect(state.refetch).toHaveBeenCalledOnce();
+  state.error = true;
+  view.rerender();
+  expect(screen.getByRole("alert")).toHaveTextContent("Could not load connections.");
+  await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
+  expect(state.refetch).toHaveBeenCalledTimes(2);
+});
+
+it("closes an open picker permanently when a lock begins", async () => {
+  const view = mount();
+  await openPicker();
+  view.rerender("selection:test", "owner", true);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  view.rerender();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("changes the chip and send ID only after an explicit replacement", async () => {
+  const view = mount();
+  await choose();
+  state.data = [{ ...connection, credential_missing: true }, { ...connection, id: "replacement", label: "Replacement" }];
+  view.rerender();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Choose another connection for this message" }));
+  await userEvent.setup().click(screen.getByRole("button", { name: /Replacement/ }));
+  expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Replacement");
+  submit("Use replacement");
+  await waitFor(() => expect(view.onSend).toHaveBeenCalledWith("/service replacement\nUse replacement", undefined, undefined));
+});
+
+it("updates both open option and selected chip at expiry, preserving OAuth refreshability", async () => {
+  const view = mount();
+  await choose();
+  const start = Date.now();
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(start);
+    state.data = [
+      { ...connection, credential_type: "api_key", expires_at: new Date(start + 1000).toISOString() },
+      { ...connection, id: "oauth", label: "OAuth", credential_type: "oauth2", expires_at: new Date(start + 1000).toISOString() },
+    ];
+    view.rerender();
+    fireEvent.click(screen.getByRole("button", { name: "Choose another connection for this message" }));
+    expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "false");
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAccessibleDescription("Credential expired");
+    expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: /OAuth/ })).toHaveAttribute("aria-disabled", "false");
+    expect(screen.getByRole("group", { name: "Connection for this message", hidden: true })).toHaveTextContent("Credential expired");
+  } finally { vi.useRealTimers(); }
 });

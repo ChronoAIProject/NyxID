@@ -353,6 +353,7 @@
   "The owner stopped this turn; wait for a new turn": "The owner stopped this turn; wait for a new turn",
   "The receipt is not ready yet; try again shortly": "The receipt is not ready yet; try again shortly",
   "The request could not be completed. Check your input and try again.": "The request could not be completed. Check your input and try again.",
+  "The selected connection is unavailable. Choose another connection or remove it before sending.": "The selected connection is unavailable. Choose another connection or remove it before sending.",
   "The selected model is not available. Choose another model in the model selector.": "The selected model is not available. Choose another model in the model selector.",
   "The voice request queue is full": "The voice request queue is full",
   "This assistant key is only valid while its conversation has a live turn; start or resume the conversation": "This assistant key is only valid while its conversation has a live turn; start or resume the conversation",

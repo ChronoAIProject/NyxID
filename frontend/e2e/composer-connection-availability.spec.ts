@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
 import type { KeyInfo } from "../src/types/keys";
 
 async function openPicker(page: Page) {
@@ -17,39 +19,60 @@ async function update(page: Page, patch: Partial<KeyInfo>) {
 
 test.beforeEach(async ({ page }) => {
   await page.context().grantPermissions(["local-network-access"]);
-  await page.route("**/api/**", (route) => route.abort());
+  await page.route("**/api/**", async (route) => {
+    if (new URL(route.request().url()).pathname === "/api/v1/keys") {
+      const keys = await page.evaluate(
+        async () =>
+          (await import("/e2e/fixtures/composer-connections-state.ts"))
+            .serverConnections,
+      );
+      await route.fulfill({ json: { keys } });
+    } else await route.abort();
+  });
   await page.goto("/e2e/fixtures/composer-connections.html");
+  await expect(page.locator("[data-composer-textbox]")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const state =
+          await import("/e2e/fixtures/composer-connections-state.ts");
+        return state.client.getQueryState(state.queryKey)?.fetchStatus;
+      }),
+    )
+    .toBe("idle");
 });
 
 test("compact composer controls share one vertical center line", async ({
   page,
 }) => {
-  const centers = await page.locator(
-    '[data-composer-textbox], [data-composer-attachment], [data-composer-footer]',
-  ).evaluateAll((elements) =>
-    elements.map((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.top + rect.height / 2;
-    }),
-  );
+  const centers = await page
+    .locator(
+      "[data-composer-textbox], [data-composer-attachment], [data-composer-footer]",
+    )
+    .evaluateAll((elements) =>
+      elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.top + rect.height / 2;
+      }),
+    );
   expect(Math.max(...centers) - Math.min(...centers)).toBeLessThan(0.5);
 });
 
-test("disabled choices expose reasons and keyboard skips them; unverified, refresh and fallback stay selectable", async ({
+test("disabled choices expose reasons and keyboard reaches them without selecting; unverified, refresh and fallback stay selectable", async ({
   page,
 }, testInfo) => {
   const dialog = await openPicker(page);
   const missing = dialog.getByRole("button", { name: /Missing credential/ });
-  await expect(missing).toBeDisabled();
+  await expect(missing).toHaveAttribute("aria-disabled", "true");
   await expect(missing).toHaveAccessibleDescription("Credential missing");
   await missing.click({ force: true });
   await expect(dialog).toBeVisible();
   await expect(
     dialog.getByRole("button", { name: /Node without fallback/ }),
-  ).toBeDisabled();
+  ).toHaveAttribute("aria-disabled", "true");
   await expect(
     dialog.getByRole("button", { name: /Unavailable platform/ }),
-  ).toBeDisabled();
+  ).toHaveAttribute("aria-disabled", "true");
   for (const label of [
     "Unverified account",
     "Refreshable OAuth",
@@ -65,6 +88,14 @@ test("disabled choices expose reasons and keyboard skips them; unverified, refre
     animations: "disabled",
   });
   await dialog.getByRole("textbox", { name: "Search connections" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(missing).toBeFocused();
+  await expect(missing).toHaveAccessibleName(
+    "Missing credential Personal · unavailable",
+  );
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Space");
+  await expect(dialog).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(
     dialog.getByRole("button", { name: /Work documents/ }),
@@ -83,7 +114,7 @@ test("a focused option becoming unavailable cannot be selected by Enter or Space
   const work = dialog.getByRole("button", { name: /Work documents/ });
   await work.focus();
   await update(page, { credential_missing: true });
-  await expect(work).toBeDisabled();
+  await expect(work).toHaveAttribute("aria-disabled", "true");
   await expect(work).toHaveAccessibleDescription("Credential missing");
   await page.keyboard.press("Enter");
   await page.keyboard.press("Space");
@@ -92,6 +123,12 @@ test("a focused option becoming unavailable cannot be selected by Enter or Space
     page.getByRole("group", { name: "Connection for this message" }),
   ).toHaveCount(0);
   await dialog.getByRole("textbox", { name: "Search connections" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(
+    dialog.getByRole("button", { name: /Missing credential/ }),
+  ).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(work).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(
     dialog.getByRole("button", { name: /Personal documents/ }),
@@ -115,13 +152,17 @@ test("live selection updates its label, refuses mouse and keyboard sends on inva
   await expect(input).toHaveText("Keep this draft");
   await input.press("Enter");
   await expect(input).toHaveText("Keep this draft");
-  await expect(page.getByLabel("Submitted messages")).toHaveText("No messages sent yet.");
+  await expect(page.getByLabel("Submitted messages")).toHaveText(
+    "No messages sent yet.",
+  );
   await page.screenshot({
     path: testInfo.outputPath("selected-connection-unavailable.png"),
     fullPage: true,
     animations: "disabled",
   });
-  await openPicker(page);
+  await page
+    .getByRole("button", { name: "Choose another connection for this message" })
+    .click();
   await dialog.getByRole("button", { name: /Personal documents/ }).click();
   await input.press("Enter");
   await expect(page.getByLabel("Submitted messages")).toHaveText(
@@ -129,3 +170,150 @@ test("live selection updates its label, refuses mouse and keyboard sends on inva
   );
   await expect(chip).toHaveCount(0);
 });
+
+test("selection and removal return focus to the editor; locks never reopen the picker", async ({
+  page,
+}) => {
+  const dialog = await openPicker(page);
+  await dialog.getByRole("button", { name: /Work documents/ }).click();
+  const editor = page.locator("[data-composer-textbox]");
+  await expect(editor).toBeFocused();
+  await page
+    .getByRole("button", { name: "Remove connection for this message" })
+    .click();
+  await expect(editor).toBeFocused();
+  await openPicker(page);
+  // The fixture lock is outside the modal, so invoke its real React handler.
+  await page
+    .getByRole("button", { name: "Toggle composer lock", includeHidden: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(dialog).not.toBeVisible();
+  await page.getByRole("button", { name: "Toggle composer lock" }).click();
+  await expect(dialog).not.toBeVisible();
+});
+
+test("opening refreshes cached connections once, updates live choices and offers Retry on failure", async ({
+  page,
+}) => {
+  let requests = 0;
+  let fail = false;
+  await page.route("**/api/v1/keys", async (route) => {
+    requests += 1;
+    if (fail)
+      await route.fulfill({
+        status: 503,
+        json: { error: "unavailable", message: "Unavailable" },
+      });
+    else {
+      await page.evaluate(async () => {
+        const state =
+          await import("/e2e/fixtures/composer-connections-state.ts");
+        state.serverConnections[1] = {
+          ...state.serverConnections[1]!,
+          credential_missing: true,
+        };
+      });
+      const keys = await page.evaluate(
+        async () =>
+          (await import("/e2e/fixtures/composer-connections-state.ts"))
+            .serverConnections,
+      );
+      await route.fulfill({ json: { keys } });
+    }
+  });
+  const dialog = await openPicker(page);
+  const work = dialog.getByRole("button", { name: /Work documents/ });
+  await expect(work).toHaveAccessibleDescription("Credential missing");
+  expect(requests).toBe(1);
+  await page.keyboard.press("Escape");
+  fail = true;
+  await openPicker(page);
+  await expect(dialog.getByRole("alert")).toContainText(
+    "Could not load connections.",
+  );
+  await dialog.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => requests).toBe(3);
+});
+
+test("expiry updates an open picker and chip without a cache refresh", async ({
+  page,
+}) => {
+  const dialog = await openPicker(page);
+  await dialog.getByRole("button", { name: /Work documents/ }).click();
+  await page.clock.install();
+  await update(page, { expires_at: new Date(Date.now() + 2000).toISOString() });
+  await page
+    .getByRole("button", { name: "Choose another connection for this message" })
+    .click();
+  await page.clock.fastForward(2100);
+  await expect(
+    dialog.getByRole("button", { name: /Work documents/ }),
+  ).toHaveAccessibleDescription("Credential expired");
+  await expect(
+    dialog.getByRole("button", { name: /Refreshable OAuth/ }),
+  ).toHaveAttribute("aria-disabled", "false");
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("group", { name: "Connection for this message" }),
+  ).toContainText("Credential expired");
+});
+
+for (const variant of ["light", "dark", "mobile"] as const) {
+  test(`availability evidence: ${variant}`, async ({ page }, testInfo) => {
+    if (variant === "mobile")
+      await page.setViewportSize({ width: 390, height: 844 });
+    const mode = variant === "light" ? "light" : "dark";
+    await page.evaluate(async (value) => {
+      (await import("/src/stores/theme-store.ts")).useThemeStore
+        .getState()
+        .setMode(value);
+    }, mode);
+    const dialog = await openPicker(page);
+    await dialog.getByRole("button", { name: /Work documents/ }).click();
+    await update(page, { credential_missing: true });
+    const chip = page.getByRole("group", {
+      name: "Connection for this message",
+    });
+    await expect(chip).toContainText("Credential missing");
+    await expect(
+      chip.getByRole("button", {
+        name: "Choose another connection for this message",
+      }),
+    ).toBeVisible();
+    await expect(
+      chip.getByRole("button", { name: "Remove connection for this message" }),
+    ).toBeVisible();
+    const evidence = process.env.NYXID_CONNECTION_EVIDENCE_DIR;
+    if (evidence) await mkdir(evidence, { recursive: true });
+    const shot = (name: string) =>
+      evidence
+        ? path.join(evidence, `${variant}-${name}.png`)
+        : testInfo.outputPath(`${variant}-${name}.png`);
+    await page.screenshot({
+      path: shot("unavailable-chip"),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await chip
+      .getByRole("button", {
+        name: "Choose another connection for this message",
+      })
+      .click();
+    const search = dialog.getByRole("textbox", { name: "Search connections" });
+    await search.focus();
+    await page.keyboard.press("Tab");
+    const missing = dialog.getByRole("button", { name: /Missing credential/ });
+    await expect(missing).toBeFocused();
+    await expect(missing).toHaveAccessibleDescription("Credential missing");
+    await page.screenshot({
+      path: shot("focused-picker"),
+      fullPage: true,
+      animations: "disabled",
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  });
+}

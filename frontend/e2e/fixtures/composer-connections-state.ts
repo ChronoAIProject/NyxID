@@ -1,12 +1,11 @@
 import { QueryClient } from "@tanstack/react-query";
 import type { KeyInfo } from "../../src/types/keys";
 
-// Deliberately unauthenticated: only this isolated query cache supplies keys.
-// The real composer, picker and Tiptap editor render without backend effects.
+// Synthetic account and keys; browser routes supply every API response.
 export const client = new QueryClient({
   defaultOptions: { queries: { retry: false } },
 });
-export const queryKey = ["keys", "list", undefined];
+export const queryKey = ["keys", "list", "fixture"];
 const base = {
   is_active: true,
   status: "active",
@@ -68,9 +67,13 @@ export const keys: KeyInfo[] = [
     platform_key_available: false,
   },
 ];
+export let serverConnections = keys;
 client.setQueryData(queryKey, keys);
 
 export function updateConnection(id: string, patch: Partial<KeyInfo>) {
+  serverConnections = serverConnections.map((key) =>
+    key.id === id ? { ...key, ...patch } : key,
+  );
   client.setQueryData<readonly KeyInfo[]>(queryKey, (current) =>
     current?.map((key) => (key.id === id ? { ...key, ...patch } : key)),
   );
