@@ -55,6 +55,7 @@ async fn serve(server: &MockServer, id: &str, bytes: &[u8], gets: u64) {
 
 #[tokio::test]
 async fn owner_flag_blocks_all_downloads_until_that_person_is_enabled() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, owner, server, bot) = fixture().await;
     let files = [file("private", None)];
     let other = uuid::Uuid::new_v4().to_string();
@@ -159,6 +160,7 @@ async fn flag_lookup_failure_is_unknown_and_blocks_downloads_and_upload_admissio
 
 #[tokio::test]
 async fn each_failed_file_degrades_without_discarding_successful_siblings_or_retry() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, owner, server, bot) = fixture().await;
     flag(&state, &owner, true).await;
     serve(&server, "first", b"First file", 1).await;
@@ -193,6 +195,7 @@ async fn each_failed_file_degrades_without_discarding_successful_siblings_or_ret
 
 #[tokio::test]
 async fn oversize_rate_limit_and_attachment_cap_produce_bounded_failure_notes() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use mongodb::bson::doc;
     let (state, owner, server, bot) = fixture().await;
     flag(&state, &owner, true).await;
@@ -254,6 +257,7 @@ async fn oversize_rate_limit_and_attachment_cap_produce_bounded_failure_notes() 
 
 #[tokio::test]
 async fn telegram_shares_browser_byte_budget_and_releases_on_cancellation() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, owner, server, bot) = fixture().await;
     flag(&state, &owner, true).await;
     let all = budget::reserve(budget::CAPACITY / 2).await.unwrap();

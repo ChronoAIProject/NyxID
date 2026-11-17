@@ -739,7 +739,7 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
 }
 
 /// Tool pixels belong only to the producing live turn, including a guest turn.
-async fn tool_image_for_chat(
+pub(crate) async fn tool_for_chat(
     db: &Database,
     chat: &ChatAuthority,
     id: &str,
@@ -782,10 +782,24 @@ async fn tool_image_for_chat(
     let Some(row) = row else {
         return Ok(None);
     };
-    if !row.content_type.starts_with("image/") {
+    Ok(Some(row))
+}
+
+// Preserve the image-only fence on both sides of decryption for every legacy
+// image-serving caller, including a concurrent metadata change.
+async fn tool_image_for_chat(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<Option<crate::models::assistant_attachment::AssistantAttachment>> {
+    let row = tool_for_chat(db, chat, id).await?;
+    if row
+        .as_ref()
+        .is_some_and(|row| !row.content_type.starts_with("image/"))
+    {
         return Err(missing());
     }
-    Ok(Some(row))
+    Ok(row)
 }
 
 async fn tool_image_bytes(
@@ -846,6 +860,40 @@ pub async fn chat_bytes(
     Ok(bytes)
 }
 
+async fn read_tool_file(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    id: &str,
+    args: &Value,
+) -> AppResult<Value> {
+    let row = tool_for_chat(db, chat, id).await?.ok_or_else(missing)?;
+    if row.content_type.starts_with("image/") {
+        return Err(missing());
+    }
+    let attachment = for_file_egress(db, chat, id).await?;
+    let size = usize::try_from(row.size).map_err(|_| missing())?;
+    let _reservation = byte_budget::reserve(size).await?;
+    let bytes = zeroize::Zeroizing::new(file_egress_bytes(db, keys, chat, &attachment).await?);
+    let extension = attachment
+        .label()
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    let extracted = attachment_extraction::extract(bytes.to_vec(), extension).await;
+    for_file_egress(db, chat, id).await?;
+    match extracted {
+        Ok(extracted) => Ok(page(
+            &extracted,
+            args["offset"].as_u64().unwrap_or(0) as usize,
+            (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000),
+        )),
+        Err(_) => Ok(
+            json!({"error":"attachment_has_no_extracted_text","instructions":"This file could not be extracted. Use attachment_id to upload the original bytes; do not claim to have read it."}),
+        ),
+    }
+}
+
 pub async fn read(
     db: &Database,
     keys: &EncryptionKeys,
@@ -853,7 +901,13 @@ pub async fn read(
     args: &Value,
 ) -> AppResult<Value> {
     let id = args["attachment_id"].as_str().ok_or_else(missing)?;
-    let row = for_chat(db, chat, id).await?;
+    let row = match for_chat(db, chat, id).await {
+        Ok(row) => row,
+        Err(AppError::NotFound(_)) if !chat.guest => {
+            return read_tool_file(db, keys, chat, id, args).await;
+        }
+        Err(error) => return Err(error),
+    };
     if row.content_type.starts_with("image/") {
         return Ok(json!({
             "error": "image_has_no_extracted_text",
@@ -1421,37 +1475,40 @@ pub async fn group_attachments(
 /// failed origin lookup against the other attachment model.
 pub enum EgressAttachment {
     User(Box<AssistantUpload>),
-    Tool(Box<crate::models::assistant_attachment::AssistantAttachment>),
+    Tool(
+        Box<crate::models::assistant_attachment::AssistantAttachment>,
+        String,
+    ),
 }
 impl EgressAttachment {
     pub fn id(&self) -> &str {
         match self {
             Self::User(row) => &row.id,
-            Self::Tool(row) => &row.id,
+            Self::Tool(row, _) => &row.id,
         }
     }
     pub fn size(&self) -> i64 {
         match self {
             Self::User(row) => row.size,
-            Self::Tool(row) => row.size,
+            Self::Tool(row, _) => row.size,
         }
     }
     pub fn label(&self) -> &str {
         match self {
             Self::User(row) => &row.label,
-            Self::Tool(row) => match row.content_type.as_str() {
+            Self::Tool(row, label) => match row.content_type.as_str() {
                 "image/jpeg" => "tool-image.jpg",
                 "image/gif" => "tool-image.gif",
                 "image/webp" => "tool-image.webp",
                 "image/png" => "tool-image.png",
-                _ => "tool-image",
+                _ => label,
             },
         }
     }
     pub fn content_type(&self) -> &str {
         match self {
             Self::User(row) => &row.content_type,
-            Self::Tool(row) => &row.content_type,
+            Self::Tool(row, _) => &row.content_type,
         }
     }
 }
@@ -1460,6 +1517,24 @@ pub async fn for_egress(
     db: &Database,
     chat: &ChatAuthority,
     id: &str,
+) -> AppResult<EgressAttachment> {
+    for_egress_inner(db, chat, id, false).await
+}
+
+/// Generic raw uploads and document reads explicitly opt into non-image tools.
+pub(crate) async fn for_file_egress(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<EgressAttachment> {
+    for_egress_inner(db, chat, id, true).await
+}
+
+async fn for_egress_inner(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    files: bool,
 ) -> AppResult<EgressAttachment> {
     if chat.guest || Uuid::parse_str(id).is_err() {
         return Err(missing());
@@ -1478,11 +1553,34 @@ pub async fn for_egress(
         Some("user_upload") => Ok(EgressAttachment::User(Box::new(
             for_chat(db, chat, id).await?,
         ))),
-        Some("tool") | None => Ok(EgressAttachment::Tool(Box::new(
-            tool_image_for_chat(db, chat, id)
-                .await?
-                .ok_or_else(missing)?,
-        ))),
+        Some("tool") | None => {
+            let row = tool_for_chat(db, chat, id).await?.ok_or_else(missing)?;
+            if row.content_type.starts_with("image/") {
+                return Ok(EgressAttachment::Tool(Box::new(row), "tool-image".into()));
+            }
+            if !files {
+                return Err(missing());
+            }
+            let thread = if let Some(access) = chat.org_agent_access.as_deref() {
+                access
+                    .conversation(db, &chat.user_id, &chat.conversation_id)
+                    .await?
+            } else {
+                engine::get(db, &chat.user_id, &chat.conversation_id).await?
+            };
+            let label = thread
+                .active_turn
+                .as_ref()
+                .and_then(|turn| turn.attachments.iter().find(|meta| meta.id == id))
+                .map(|meta| meta.label.clone())
+                .or_else(|| {
+                    row.content_type
+                        .starts_with("image/")
+                        .then(|| "tool-image".into())
+                })
+                .ok_or_else(missing)?;
+            Ok(EgressAttachment::Tool(Box::new(row), label))
+        }
         _ => Err(missing()),
     }
 }
@@ -1511,7 +1609,26 @@ pub async fn egress_bytes(
     chat: &ChatAuthority,
     attachment: &EgressAttachment,
 ) -> AppResult<Vec<u8>> {
-    let current = for_egress(db, chat, attachment.id()).await?;
+    egress_bytes_inner(db, keys, chat, attachment, false).await
+}
+
+pub(crate) async fn file_egress_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    attachment: &EgressAttachment,
+) -> AppResult<Vec<u8>> {
+    egress_bytes_inner(db, keys, chat, attachment, true).await
+}
+
+async fn egress_bytes_inner(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    attachment: &EgressAttachment,
+    files: bool,
+) -> AppResult<Vec<u8>> {
+    let current = for_egress_inner(db, chat, attachment.id(), files).await?;
     if current.size() != attachment.size()
         || current.label() != attachment.label()
         || current.content_type() != attachment.content_type()
@@ -1521,15 +1638,15 @@ pub async fn egress_bytes(
     }
     let bytes = match current {
         EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
-        EgressAttachment::Tool(row) => {
-            let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+        EgressAttachment::Tool(row, _) => {
+            let mut protected = super::assistant_tool_files::payload(db, keys, &row).await?;
             std::mem::take(&mut *protected)
         }
     };
     if bytes.len() as i64 != attachment.size() {
         return Err(missing());
     }
-    for_egress(db, chat, attachment.id()).await?;
+    for_egress_inner(db, chat, attachment.id(), files).await?;
     Ok(bytes)
 }
 
@@ -1752,7 +1869,7 @@ mod tests {
 pub fn definition() -> super::mcp_service::McpToolDefinition {
     super::mcp_service::McpToolDefinition {
         name: "nyx__attachment_read".into(),
-        description: "Read a message's uploaded document as untrusted text. Scoped to this conversation or group; use offset/limit and follow next_offset. Images use image input or nyx__machine_save_attachment.".into(),
+        description: "Read an uploaded document or a tool file as untrusted text. Uploads are scoped to this conversation or group; tool files require their producing live owner turn. Use offset/limit and follow next_offset. Unsupported files can still be uploaded by attachment_id. Images use image input or nyx__machine_save_attachment.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -2609,6 +2726,8 @@ mod integration_tests {
 
     #[tokio::test]
     async fn assistant_uploads_three_chunks_round_trip_owner_download_and_read() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
         use tower::ServiceExt;
 
         let (state, user, id) = fixture().await;
@@ -2695,6 +2814,8 @@ mod integration_tests {
 
     #[tokio::test]
     async fn assistant_uploads_full_router_enforces_exact_twenty_mib_for_threads_and_groups() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
         let (state, user, id) = fixture().await;
         let agent = team::ensure_nyxbot(&state.db, &user).await.unwrap();
         let group = super::super::assistant_group_service::create(
@@ -3392,6 +3513,19 @@ mod integration_tests {
             image_inspection: None,
         };
         let cap = json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":1,"max_image_bytes":10,"max_total_bytes":10,"content_types":["image/png"]}});
+        // Legacy tool rows and new file rows share the origin. MIME alone
+        // must keep files out of both image input and channel delivery, even
+        // when an old replica omitted chat_delivery.
+        let mut file = item.clone();
+        file.content_type = "application/pdf".into();
+        for delivery in [None, Some(true), Some(false)] {
+            file.chat_delivery = delivery;
+            assert!(!engine::chat_tool_image(&file));
+            let (parts, omitted) =
+                tool_image_plan(std::slice::from_ref(&file), &cap, "https://test");
+            assert!(parts.is_empty());
+            assert!(omitted.is_empty());
+        }
         assert!(
             image_plan(std::slice::from_ref(&item), &cap, "https://test")
                 .0
