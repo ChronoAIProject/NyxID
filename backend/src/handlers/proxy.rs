@@ -46,6 +46,9 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+#[path = "proxy_ingress.rs"]
+pub(crate) mod ingress;
+
 #[path = "proxy_shared_connect.rs"]
 mod shared_connect;
 
@@ -779,6 +782,24 @@ pub async fn proxy_request(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((service_id, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    ingress::execute(
+        &state.refusal_throttle,
+        &auth_user,
+        &service_id,
+        request,
+        |request| proxy_request_unthrottled(&state, &auth_user, tele, &service_id, &path, request),
+    )
+    .await
+}
+
+async fn proxy_request_unthrottled(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: TelemetryContext,
+    service_id: &str,
+    path: &str,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
     let trace = crate::turn_trace::TurnContext::for_request(
@@ -795,7 +816,7 @@ pub async fn proxy_request(
             // real slug (never a UUID from the route path) even when the error
             // happens after service resolution. See docs/TELEMETRY.md §5.1.
             let diagnostic =
-                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                super::invocation_diagnostics::HttpInvocation::start(state, &mut request);
             let started_at = std::time::Instant::now();
             let method = request.method().clone();
             request
@@ -813,10 +834,10 @@ pub async fn proxy_request(
             // Keep nested proxy dispatch off the handler frame (also called by
             // assistant operation-scope checks through the full router).
             let mut result = Box::pin(proxy_request_inner(
-                &state,
-                &auth_user,
-                &service_id,
-                &path,
+                state,
+                auth_user,
+                service_id,
+                path,
                 request,
                 &mut resolved_slug,
             ))
@@ -847,7 +868,7 @@ pub async fn proxy_request(
                 .await;
             }
             super::invocation_diagnostics::HttpInvocation::finish(
-                diagnostic, &state, &auth_user, result,
+                diagnostic, state, auth_user, result,
             )
             .await
         })
@@ -1151,6 +1172,26 @@ pub async fn proxy_request_by_slug(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((slug, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    ingress::execute(
+        &state.refusal_throttle,
+        &auth_user,
+        &slug,
+        request,
+        |request| {
+            proxy_request_by_slug_unthrottled(&state, &auth_user, tele, &slug, &path, request)
+        },
+    )
+    .await
+}
+
+async fn proxy_request_by_slug_unthrottled(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: TelemetryContext,
+    slug: &str,
+    path: &str,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
     let trace = crate::turn_trace::TurnContext::for_request(
@@ -1168,7 +1209,7 @@ pub async fn proxy_request_by_slug(
             // requires a resolved slug or empty, and the path param is unvalidated
             // user input until resolution succeeds.
             let diagnostic =
-                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                super::invocation_diagnostics::HttpInvocation::start(state, &mut request);
             let started_at = request
                 .extensions()
                 .get::<ProxyExchangeStartedAt>()
@@ -1187,10 +1228,10 @@ pub async fn proxy_request_by_slug(
             }
             let mut resolved_slug = String::new();
             let mut result = Box::pin(proxy_request_by_slug_inner(
-                &state,
-                &auth_user,
-                &slug,
-                &path,
+                state,
+                auth_user,
+                slug,
+                path,
                 request,
                 &mut resolved_slug,
             ))
@@ -1221,7 +1262,7 @@ pub async fn proxy_request_by_slug(
                 .await;
             }
             super::invocation_diagnostics::HttpInvocation::finish(
-                diagnostic, &state, &auth_user, result,
+                diagnostic, state, auth_user, result,
             )
             .await
         })
@@ -12101,6 +12142,7 @@ mod proxy_resolution_integration_tests {
     include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
+    include!("proxy_refusal_parity_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,
@@ -12469,16 +12511,8 @@ mod proxy_resolution_integration_tests {
             serde_json::from_str(&auth_response).expect("parse node auth response");
         assert_eq!(auth_response["type"], "auth_ok");
 
-        for _ in 0..100 {
-            if state.node_ws_manager.is_connected(&node.id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(
-            state.node_ws_manager.is_connected(&node.id),
-            "authenticated node WebSocket must be registered"
-        );
+        // auth_ok is sent only after the connection has been registered.
+        assert!(state.node_ws_manager.is_connected(&node.id));
 
         let credentials = nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url)
             .expect("build node executor credentials");

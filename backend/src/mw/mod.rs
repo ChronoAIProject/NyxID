@@ -9,3 +9,5 @@ pub mod telemetry;
 pub mod cookie_domain;
 
 pub mod shutdown;
+
+pub(crate) mod refusal_throttle;
