@@ -555,6 +555,51 @@ Sol-M round 1, approved by Opus:
 Finding sent back: restore main's three-line `threads` formatting in
 `AgentRow`, so the net diff has no cosmetic noise.
 
+Sol-M round 2 is approved: the formatting matches main byte for byte, eslint
+passes and the 85 sidebar tests pass.
+
+### Integration commits and final validation
+
+- **Merge commit 6189309b4** (parents fcb07a14b, c48c1de05). Opus staged the
+  resolved files by explicit path plus the documented `git add -A` scoped to
+  `frontend/src/i18n/locales`. Before committing:
+  - no paths were unmerged, unstaged or untracked;
+  - the staged content had no conflict markers;
+  - the legacy single-file catalogs were no longer tracked.
+- **Net diff against c48c1de05.** 55 files, all explained:
+  - every non-catalog file is in this branch's original change set;
+  - the only branch files that dropped out are the deliberately reverted
+    `nodeStatusKey` helper and the legacy catalogs;
+  - the per-area catalog changes are +247 lines (81 keys × 3 languages, plus
+    4 English overrides) and −45 (15 removed keys × 3).
+- **Main advanced** to 186e35678 before the push, with #2598 (legal pages and
+  catalog keys in `shared`) and #2589 (deploy). Both overlapped this branch
+  (`CLAUDE.md` and the `shared` area). They merged without conflicts as merge
+  commit 687405234, whose staged set equals main's own 24 changed files.
+  `verify_adoption.py` against 186e35678 passes in all three languages
+  (12,179 main keys + 81 − 15 = 12,245). The `shared` area differs from main
+  only by this branch's three bypass-reason keys.
+- **Opus's final local validation** on the tree after both merges:
+  - tsc passes;
+  - `sync:i18n` is idempotent;
+  - lint has 0 errors (34 pre-existing warnings);
+  - `check:i18n` passes (1,339 files, 14,222 static calls);
+  - the i18n tooling tests pass 12,124/12,124 (`test/`, after the first merge);
+  - the full Vitest suite passes 20,511/20,511 (748 files) at default
+    concurrency, with no timeouts on this run;
+  - `npm run build` and `cargo fmt --check` pass;
+  - Playwright passes 103/103 (sidebar threads, pins, rail, workspace sidebar,
+    suggestions restore, multilingual, Telegram setup);
+  - the run left no untracked files and no `.tmp`.
+- **Telegram flake.** The first post-merge Playwright run had one failure, in
+  `channel-telegram-new.spec.ts` "Cancel setup unlocks fields and the next
+  start uses the edited destination". That test is unchanged by this branch.
+  It reads the captured POST list right after a popup event, without polling,
+  so it races Playwright's route handler.
+  - 15 repetitions failed once both on the merged branch and on a clean main
+    worktree at c48c1de05 (14/15 each).
+  - It is pre-existing and not in CI, and is recorded here, not changed.
+
 ## Milestones
 
 - Audit of #2001/#2067 sent to root; #2001 audit comment posted; #2067 closed
