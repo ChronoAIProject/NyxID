@@ -24,28 +24,48 @@ pub async fn get(db: &Database, owner: &str, agent: &str) -> AppResult<Option<Us
         .map_err(Into::into)
 }
 
+pub struct Publication {
+    pub agent: AssistantAgent,
+    pub service: Option<UserService>,
+    pub can_publish: bool,
+}
+
+/// Project the same live publication authority for the UI and the write path.
+/// A visible Bot does not grant access to its voice connection metadata.
+pub async fn publication(db: &Database, actor: &str, agent_id: &str) -> AppResult<Publication> {
+    super::access::personal_owner(db, actor).await?;
+    let agent = team::agent(db, actor, agent_id).await?;
+    let access = crate::services::org_agent_service::access(db, actor, &agent.user_id).await?;
+    let mut service = None;
+    let can_publish = if agent.destroyed_at.is_none() && access.can_write() {
+        service = get(db, &agent.user_id, agent_id).await?;
+        service.as_ref().map_or_else(
+            || access.allows_any_resource(&[]),
+            |service| access.allows_resource(&service.id),
+        )
+    } else {
+        false
+    };
+    Ok(Publication {
+        agent,
+        service: service.filter(|_| can_publish),
+        can_publish,
+    })
+}
+
 pub async fn managed_agent(
     db: &Database,
     actor: &str,
     agent_id: &str,
 ) -> AppResult<AssistantAgent> {
-    super::access::personal_owner(db, actor).await?;
-    let agent = team::agent(db, actor, agent_id).await?;
-    let access = crate::services::org_agent_service::access(db, actor, &agent.user_id).await?;
-    let connection = get(db, &agent.user_id, agent_id).await?;
-    if agent.destroyed_at.is_some()
-        || !access.can_write()
-        || !connection.as_ref().map_or_else(
-            || access.allows_any_resource(&[]),
-            |service| access.allows_resource(&service.id),
-        )
-    {
+    let publication = publication(db, actor, agent_id).await?;
+    if !publication.can_publish {
         return Err(AppError::Forbidden(
             "Bot voice publication requires owner or organization service administration access"
                 .into(),
         ));
     }
-    Ok(agent)
+    Ok(publication.agent)
 }
 
 pub async fn publish(

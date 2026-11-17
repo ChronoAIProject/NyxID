@@ -108,6 +108,92 @@ async fn get(f: &Fixture, raw: &str, path: &str) -> (u16, Value) {
     )
 }
 
+async fn publication(f: &Fixture, actor: &str, agent: &str) -> Value {
+    crate::handlers::assistant_voice::voice_service(
+        State(f.state.clone()),
+        crate::test_utils::test_auth_user(actor),
+        Path(agent.to_owned()),
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+#[tokio::test]
+async fn org_device_voice_publication_capability_tracks_live_resource_authority() {
+    Box::pin(async {
+        let (f, agent, service, _) = fixture("org_device_voice_capability").await;
+        let allowed = publication(&f, &f.admin, &agent.id).await;
+        assert_eq!(allowed["can_publish"], true);
+        assert_eq!(allowed["service"]["id"], service.id);
+        for actor in [&f.member, &f.viewer] {
+            let refused = publication(&f, actor, &agent.id).await;
+            assert_eq!(refused, json!({"can_publish":false,"service":null}));
+            assert!(matches!(
+                crate::handlers::assistant_voice::publish_voice_service(
+                    State(f.state.clone()),
+                    crate::test_utils::test_auth_user(actor),
+                    Path(agent.id.clone()),
+                )
+                .await,
+                Err(crate::errors::AppError::Forbidden(_))
+            ));
+        }
+        assert!(matches!(
+            crate::handlers::assistant_voice::voice_service(
+                State(f.state.clone()),
+                crate::test_utils::test_auth_user(&f.outsider),
+                Path(agent.id.clone()),
+            )
+            .await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+        // The admin label alone is insufficient: the effective resource scope
+        // must include the connection, and revocation must affect the next read.
+        let memberships = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME);
+        let admin = doc! {"org_user_id":&f.org,"member_user_id":&f.admin};
+        memberships
+            .update_one(admin.clone(), doc! {"$set":{"allowed_service_ids":[]}})
+            .await
+            .unwrap();
+        assert_eq!(
+            publication(&f, &f.admin, &agent.id).await,
+            json!({"can_publish":false,"service":null})
+        );
+        assert!(
+            binding::publish(&f.state.db, &f.admin, &agent.id, &f.state.config.base_url)
+                .await
+                .is_err()
+        );
+        memberships
+            .update_one(admin, doc! {"$set":{"allowed_service_ids":[&service.id]}})
+            .await
+            .unwrap();
+        assert_eq!(
+            publication(&f, &f.admin, &agent.id).await["can_publish"],
+            true
+        );
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&agent.id},
+                doc! {"$set":{"destroyed_at":bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            publication(&f, &f.admin, &agent.id).await,
+            json!({"can_publish":false,"service":null})
+        );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn org_device_voice_publishes_discovers_and_admits_actor_private_calls() {
     Box::pin(async {

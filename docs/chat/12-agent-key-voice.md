@@ -170,6 +170,12 @@ owner or an authorized organization administrator opens
 **Agent details → Access → Device voice** and publishes the desired Bot's
 connection. Then grant that exact connection to the device Agent Key with
 selected-service access and `proxy` scope (`read` too for `/keys` discovery).
+The connection query returns `can_publish`, computed from current owner/service
+authority and effective scope. The UI uses that capability instead of organization
+role names. A visible Bot without publication authority returns
+`can_publish: false, service: null`; connection metadata remains private. Publishing
+always rechecks authority, including inside the write transaction. A UI connected
+to an older backend that omits the capability hides the publication control.
 Publication itself grants no access. An allow-all Key keeps ordinary all-service
 semantics, so selected-service scope is the way to restrict a device to one Bot.
 The Bot's grant to the board's own panel service is the opposite direction and

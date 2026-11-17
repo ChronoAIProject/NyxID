@@ -9321,6 +9321,10 @@ Organization administrators may publish their organization's Bot connection;
 personal Keys granted that connection must retain live organization service
 access. Calls use the acting person's private thread, not the organization's
 or another member's conversation.
+The connection query returns `can_publish` from current service management
+authority and effective resource scope. Clients use this capability instead of
+organization role names; callers without publication authority receive
+`can_publish: false, service: null`. Publishing revalidates that authority.
 See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
 independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
 work running; explicit Stop cancels it.

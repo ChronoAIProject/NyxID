@@ -49,6 +49,7 @@ function show(value = agent) {
       <AgentVoiceService agent={value} />
     </QueryClientProvider>,
   );
+  return client;
 }
 beforeEach(() => {
   owner("owner-a");
@@ -59,9 +60,9 @@ afterEach(cleanup);
 
 it("creates no connection or Key grant on load; publication is explicit and names one Bot", async () => {
   mocks.request
-    .mockResolvedValueOnce({ service: null })
-    .mockResolvedValueOnce({ service })
-    .mockResolvedValue({ service });
+    .mockResolvedValueOnce({ can_publish: true, service: null })
+    .mockResolvedValueOnce({ can_publish: true, service })
+    .mockResolvedValue({ can_publish: true, service });
   show();
   const button = await screen.findByRole("button", {
     name: "Create voice connection",
@@ -87,13 +88,10 @@ it("creates no connection or Key grant on load; publication is explicit and name
   ]);
 });
 
-it("does not expose publication for shared, read-only, non-admin organization or destroyed Bots", () => {
+it("does not query publication for shared, read-only or destroyed Bots", () => {
   for (const fields of [
     { share_role: "manager" },
-    { owner_kind: "org" },
-    { owner_kind: "org", org_role: "member" },
-    { owner_kind: "org", org_role: "viewer" },
-    { owner_kind: "org", org_role: "admin", can_maintain: false },
+    { can_maintain: false },
     { status: "destroyed" },
   ]) {
     show({ ...agent, ...fields } as AssistantAgent);
@@ -105,9 +103,11 @@ it("does not expose publication for shared, read-only, non-admin organization or
   expect(mocks.request).not.toHaveBeenCalled();
 });
 
-it("allows organization admins to explicitly publish the Bot's voice connection", async () => {
-  mocks.request.mockResolvedValueOnce({ service: null }).mockResolvedValue({ service });
-  show({ ...agent, owner_kind: "org", org_role: "admin", can_maintain: true });
+it("uses server publication authority without requiring an organization role label", async () => {
+  mocks.request
+    .mockResolvedValueOnce({ can_publish: true, service: null })
+    .mockResolvedValue({ can_publish: true, service });
+  show({ ...agent, owner_kind: "org", org_role: null, can_maintain: true });
   const button = await screen.findByRole("button", { name: "Create voice connection" });
   await waitFor(() => expect(button).toBeEnabled());
   expect(mocks.request).toHaveBeenCalledTimes(1);
@@ -119,6 +119,34 @@ it("allows organization admins to explicitly publish the Bot's voice connection"
   );
 });
 
+it.each(["admin", "member", "viewer"] as const)(
+  "honors the server's refusal for an organization %s without exposing connection metadata",
+  async (org_role) => {
+    mocks.request.mockResolvedValue({ can_publish: false, service: null });
+    const client = show({ ...agent, owner_kind: "org", org_role, can_maintain: true });
+    await waitFor(() => expect(client.isFetching()).toBe(0));
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("region", { name: "Device voice" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create voice connection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Manage Agent Key access" })).not.toBeInTheDocument();
+  },
+);
+
+it("does not infer publication authority when an older backend omits the capability", async () => {
+  mocks.request.mockResolvedValue({ service });
+  const client = show({ ...agent, owner_kind: "org", org_role: "admin", can_maintain: true });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("region", { name: "Device voice" })).not.toBeInTheDocument();
+});
+
+it("reports lookup failures with publication disabled", async () => {
+  mocks.request.mockRejectedValue(new Error("Connection lookup failed"));
+  show();
+  await screen.findByText("Connection lookup failed");
+  expect(screen.getByRole("button", { name: "Create voice connection" })).toBeDisabled();
+});
+
 it("keeps publication disabled while the feature is off", () => {
   mocks.enabled = false;
   show();
@@ -126,7 +154,7 @@ it("keeps publication disabled while the feature is off", () => {
 });
 
 it("discloses the primary NyxBot's full account and service authority", async () => {
-  mocks.request.mockResolvedValue({ service });
+  mocks.request.mockResolvedValue({ can_publish: true, service });
   show({ ...agent, kind: "nyxbot" });
   await screen.findByRole("link", { name: "Manage Agent Key access" });
   expect(
