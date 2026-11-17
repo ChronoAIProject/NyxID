@@ -10,7 +10,10 @@ import { useQuery } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
+  AccessibilityInfo,
   AppState,
+  Keyboard,
+  ScrollView,
   Linking,
   Platform,
   Pressable,
@@ -198,6 +201,54 @@ export function AuthHomeScreen({ navigation }: Props) {
   const isMountedRef = useRef(true);
   const emailLoginLock = useRef(false);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const errorBannerRef = useRef<View>(null);
+  const scrollOffset = useRef(0);
+  const focusRevision = useRef(0);
+
+  const revealFocusedInput = useCallback((input: Pick<View, "measureInWindow"> | null) => {
+    // Native insets handle the initial keyboard animation. A focus change
+    // with the keyboard already open does not always emit a new frame.
+    const revision = ++focusRevision.current;
+    const keyboard = Keyboard.metrics();
+    const scroller = scrollViewRef.current;
+    if (Platform.OS !== "ios" || !keyboard || !input || !scroller) return;
+    const viewport = scroller.getNativeScrollRef();
+    if (!viewport) return;
+    const measuredOffset = scrollOffset.current;
+    input.measureInWindow((_x, y, _width, height) => {
+      viewport.measureInWindow((_left, top, _viewWidth, viewHeight) => {
+        const currentKeyboard = Keyboard.metrics();
+        if (
+          revision !== focusRevision.current ||
+          scrollViewRef.current !== scroller ||
+          scrollOffset.current !== measuredOffset ||
+          currentKeyboard?.screenY !== keyboard.screenY
+        ) {
+          return;
+        }
+        const bottom = Math.min(top + viewHeight, keyboard.screenY);
+        const delta =
+          y < top + spacing.xl
+            ? y - top - spacing.xl
+            : Math.max(0, y + height + spacing.xl - bottom);
+        if (delta) {
+          scroller.scrollTo({
+            y: Math.max(0, measuredOffset + delta),
+            animated: true,
+          });
+        }
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (loginError && Platform.OS === "ios") {
+      AccessibilityInfo.announceForAccessibility(loginError === "WAITLIST"
+        ? translateApp("Registration is invite-only.") : loginError);
+    }
+  }, [loginError]);
+
   const showToast = (message: string, kind: ToastKind) => {
     setToast({ message, kind });
   };
@@ -453,6 +504,8 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <BrandNebula />
       <KeyboardScrollView
+        scrollRef={scrollViewRef}
+        onScroll={(event) => { scrollOffset.current = event.nativeEvent.contentOffset.y; }}
         style={flowStyles.content}
         contentContainerStyle={[
           flowStyles.scrollContent,
@@ -617,6 +670,24 @@ export function AuthHomeScreen({ navigation }: Props) {
                 </Pressable>
               </View>
               )}
+        {loginError && (
+          <View ref={errorBannerRef} style={styles.errorBanner}
+            accessibilityRole="alert" accessibilityLiveRegion="assertive"
+            onLayout={() => revealFocusedInput(errorBannerRef.current)}>
+            {loginError === "WAITLIST" ? (
+              <>
+                <Text style={styles.errorText}>
+                  {getFrontendUrl() ? <Translation
+                    message="Registration is invite-only. {{waitlist}} to get access."
+                    values={{ waitlist: <Text style={styles.errorLink} onPress={() => void Linking.openURL(getFrontendUrl())}>{translateApp("Join the waitlist")}</Text> }}
+                  /> : translateApp("Registration is invite-only.")}
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.errorText}>{loginError}</Text>
+            )}
+          </View>
+        )}
               <AuthSubmitButton
                 onPress={() => void handleEmailLogin()}
                 disabled={signInBlocked}
@@ -673,22 +744,6 @@ export function AuthHomeScreen({ navigation }: Props) {
         {registrationNotice ? (
           <Text accessibilityRole="alert" style={{ color: colors.textSecondary }}>{registrationNotice}</Text>
         ) : null}
-        {loginError && (
-          <View style={styles.errorBanner}>
-            {loginError === "WAITLIST" ? (
-              <>
-                <Text style={styles.errorText}>
-                  {getFrontendUrl() ? <Translation
-                    message="Registration is invite-only. {{waitlist}} to get access."
-                    values={{ waitlist: <Text style={styles.errorLink} onPress={() => void Linking.openURL(getFrontendUrl())}>{translateApp("Join the waitlist")}</Text> }}
-                  /> : translateApp("Registration is invite-only.")}
-                </Text>
-              </>
-            ) : (
-              <Text style={styles.errorText}>{loginError}</Text>
-            )}
-          </View>
-        )}
       </KeyboardScrollView>
       <ToastOverlay toast={toast} bottom={64} />
     </ScreenContainer>
