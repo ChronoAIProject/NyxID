@@ -24,16 +24,16 @@ for (const width of [1280, 390])
       await disclosureIcons(page.locator(".billing-page"), true);
       await page.screenshot({ path: info.outputPath("billing-root.png"), animations: "disabled" });
       await page.locator('[data-drawer-page-trigger="billing/benefits"]').click();
-      await page.locator('[data-drawer-page-trigger="billing/benefits/allowances"]').click();
       await expect(
-        page.getByRole("heading", { name: "Free allowances", exact: true }).first(),
+        page.getByRole("heading", { name: "Benefits & allowances", exact: true }).first(),
       ).toBeFocused();
       await page.reload();
-      await page.getByRole("button", { name: "Benefits & allowances", exact: true }).click();
+      await page.getByRole("button", { name: "Billing", exact: true }).click();
       await expect(
-        page.locator('[data-drawer-page-trigger="billing/benefits/allowances"]'),
+        page.locator('[data-drawer-page-trigger="billing/benefits"]'),
       ).toBeFocused();
       expect(await page.evaluate(() => history.length)).toBe(initialLength);
+      await page.locator('[data-drawer-page-trigger="billing/benefits"]').click();
       await page.getByRole("tab", { name: "Usage", exact: true }).click();
       expect(await page.evaluate(() => history.length)).toBe(initialLength + 1);
       await page.goBack();
@@ -65,14 +65,13 @@ for (const width of [1280, 390])
       await sectionAddress(page, "/assistant", {
         panel: "billing",
         panelTab: "usage",
-        panelSection: "usage/charts/funding",
+        panelSection: "usage/charts",
         panelPeriod: "7d",
       });
       const panel = page
         .getByRole("dialog")
         .filter({ has: page.getByRole("tablist", { name: "Billing and usage" }) });
       await expect(panel).toBeVisible();
-      await panel.getByRole("button", { name: "Usage charts", exact: true }).click();
       await panel.getByRole("button", { name: "Usage", exact: true }).click();
       await expect(page).toHaveURL(/panelPeriod=7d/);
       const panelLength = await page.evaluate(() => history.length);

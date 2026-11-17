@@ -421,13 +421,10 @@ it("confirms destructive actions by default and saves only a changed access mode
   expect(full).toHaveAttribute("aria-checked", "true");
 });
 
-it("edits both permission pages through one reviewed save without losing the parent draft", async () => {
+it("edits both permission groups through one reviewed save", async () => {
   const user = renderPage("permissions");
   await user.click(
     await screen.findByRole("radio", { name: /^Ask every time / }),
-  );
-  await user.click(
-    screen.getByRole("button", { name: /^Specialist access requests/ }),
   );
   expect(
     screen.getByText(
@@ -444,14 +441,13 @@ it("edits both permission pages through one reviewed save without losing the par
   await confirmChanges();
   await waitFor(() =>
     expect(writes.map((write) => write.body)).toEqual([
-      { access_mode: "ask_every_time" },
-      { specialist_access_requests: "routed_to_nyxbot" },
+      { access_mode: "ask_every_time", specialist_access_requests: "routed_to_nyxbot" },
     ]),
   );
 });
 
 it("validates specialist limits against the server limits before saving", async () => {
-  const user = renderPage("tasks/specialists");
+  const user = renderPage("tasks");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const live = await within(page).findByRole("spinbutton", {
     name: "Live specialists",
@@ -473,7 +469,7 @@ it("validates specialist limits against the server limits before saving", async 
 });
 
 it("saves group hand-off limits within the server's bounds", async () => {
-  const user = renderPage("tasks/groups");
+  const user = renderPage("tasks");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const perMessage = await within(page).findByRole("spinbutton", {
     name: "Group hand-offs per message",
@@ -691,7 +687,7 @@ it("shows load errors with retry and retains independent channel and personal-li
 
 it("keeps dirty values and reports a failed General save inline", async () => {
   saveError = true;
-  const user = renderPage("tasks/specialists");
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
@@ -707,12 +703,12 @@ it("keeps dirty values and reports a failed General save inline", async () => {
 
 it("saves dirty General and Automation forms in order through one bar with independent payloads", async () => {
   settings.timezone = "UTC";
-  const user = renderPage("tasks/specialists");
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
   fireEvent.change(live, { target: { value: "12" } });
-  await go("automations/budgets");
+  await go("automations");
   await screen.findByRole("spinbutton", { name: "Runs per hour" });
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
   fireEvent.change(hourly, { target: { value: "4" } });
@@ -720,7 +716,7 @@ it("saves dirty General and Automation forms in order through one bar with indep
     screen.getAllByRole("region", { name: "Unsaved changes" }),
   ).toHaveLength(1);
   expect(
-    screen.getByText("Unsaved: Specialists, automation preferences"),
+    screen.getByText("Unsaved: Tasks & specialists, automation preferences"),
   ).toBeInTheDocument();
   expect(
     [...document.forms].every((form) => !form.parentElement?.closest("form")),
@@ -742,24 +738,24 @@ it("saves dirty General and Automation forms in order through one bar with indep
 
 it("keeps failed General changes dirty while Automation preferences succeed", async () => {
   settings.timezone = "UTC";
-  const user = renderPage("tasks/specialists");
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
   fireEvent.change(live, { target: { value: "12" } });
   saveError = true;
-  await go("automations/budgets");
+  await go("automations");
   await screen.findByRole("spinbutton", { name: "Runs per hour" });
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
   fireEvent.change(hourly, { target: { value: "4" } });
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() => expect(writes).toHaveLength(2));
-  await go("tasks/specialists");
+  await go("tasks");
   expect(await screen.findByRole("alert")).toHaveTextContent("NyxBot is temporarily unavailable");
-  await go("automations/budgets");
+  await go("automations");
   expect(live).toHaveValue(12);
-  expect(screen.getByText("Unsaved: Specialists")).toBeInTheDocument();
+  expect(screen.getByText("Unsaved: Tasks & specialists")).toBeInTheDocument();
   expect(screen.getByRole("spinbutton", { name: "Runs per hour" })).toHaveValue(
     4,
   );
@@ -838,23 +834,13 @@ it("keeps the posting switch unchanged and exposes a save failure", async () => 
   expect(toggle).not.toBeChecked();
 });
 
-it("opens a nested deep link with ancestors and restores focus through each Back", async () => {
+it("normalizes a removed nested task page and returns focus to the root row", async () => {
   const user = renderPage("tasks/specialists");
-  const heading = await screen.findByRole("heading", {
-    name: "Specialists",
-    level: 2,
-  });
+  const heading = await screen.findByRole("heading", { name: "Tasks & specialists", level: 2 });
   await waitFor(() => expect(heading).toHaveFocus());
-  await user.click(screen.getByRole("button", { name: "Tasks & specialists" }));
-  expect(panelRouter.state.location.search).toEqual({
-    panel: "nyxbot",
-    panelTab: "tasks",
-  });
-  expect(screen.getByRole("button", { name: "Specialists" })).toHaveFocus();
+  expect(panelRouter.state.location.search).toEqual({ panel: "nyxbot", panelTab: "tasks" });
   await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
-  expect(
-    screen.getByRole("button", { name: "Tasks & specialists" }),
-  ).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Tasks & specialists" })).toHaveFocus();
 });
 
 it("falls back from disabled adapters to channels and replaces the URL", async () => {
@@ -875,7 +861,7 @@ it("falls back from disabled adapters to channels and replaces the URL", async (
 });
 
 it("retains a dirty draft on refetch errors and applies live values to pristine fields", async () => {
-  renderPage("tasks/specialists");
+  renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
@@ -899,25 +885,25 @@ it("retains a dirty draft on refetch errors and applies live values to pristine 
   expect(
     screen.getByRole("button", { name: "Permissions" }),
   ).not.toHaveTextContent("Auto");
-  await go("tasks/specialists");
+  await go("tasks");
   expect(
     screen.getByRole("spinbutton", { name: "Live specialists" }),
   ).toHaveValue(12);
 });
 
 it("guards dirty Back once and retains the draft when editing continues", async () => {
-  const user = renderPage("tasks/specialists");
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
   fireEvent.change(live, { target: { value: "12" } });
-  await user.click(screen.getByRole("button", { name: "Tasks & specialists" }));
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
   const guard = await screen.findByRole("dialog", {
     name: "Discard unsaved changes?",
   });
   await user.click(within(guard).getByRole("button", { name: "Keep editing" }));
   expect(live).toHaveValue(12);
-  await user.click(screen.getByRole("button", { name: "Tasks & specialists" }));
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
   await user.click(
     within(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).getByRole("button", {
       name: "Discard",
@@ -926,7 +912,6 @@ it("guards dirty Back once and retains the draft when editing continues", async 
   await waitFor(() =>
     expect(panelRouter.state.location.search).toEqual({
       panel: "nyxbot",
-      panelTab: "tasks",
     }),
   );
   expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).not.toBeInTheDocument();
@@ -984,15 +969,17 @@ it("uses named radio groups with keyboard selection", async () => {
   const user = renderPage("permissions");
   const auto = await screen.findByRole("radio", { name: /^Auto / });
   expect(screen.getByRole("radiogroup", { name: "Access mode" })).toBeVisible();
-  const tabStops = () => screen.getAllByRole("radio").filter(row => row.tabIndex === 0);
+  let group = screen.getByRole("radiogroup", { name: "Access mode" });
+  const tabStops = () => within(group).getAllByRole("radio").filter(row => row.tabIndex === 0);
   expect(tabStops()).toEqual([auto]);
-  expect(screen.getAllByRole("radio").filter(row => row !== auto).every(row => row.tabIndex === -1)).toBe(true);
+  expect(within(group).getAllByRole("radio").filter(row => row !== auto).every(row => row.tabIndex === -1)).toBe(true);
   auto.focus();
   await user.keyboard("{ArrowUp}");
   expect(screen.getByRole("radio", { name: /^Full access / })).toHaveAttribute("aria-checked", "true");
   expect(tabStops()).toEqual([screen.getByRole("radio", { name: /^Full access / })]);
-  await go("permissions/specialists");
-  const deny = screen.getByRole("radio", { name: /^Deny requests / });
+  await go("permissions");
+  group = screen.getByRole("radiogroup", { name: "Specialist access requests" });
+  const deny = within(group).getByRole("radio", { name: /^Deny requests / });
   expect(screen.getByRole("radiogroup", { name: "Specialist access requests" })).toBeVisible();
   expect(tabStops()).toEqual([deny]);
   deny.focus();

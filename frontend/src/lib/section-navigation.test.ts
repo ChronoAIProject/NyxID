@@ -1,6 +1,6 @@
 import { sectionNavigation } from "./section-navigation";
 import { describe, expect, it } from "vitest";
-import { ACCOUNT_SETTINGS_SECTIONS } from "./account-settings-sections";
+import { ACCOUNT_SETTINGS_SECTIONS, accountSettingsSections } from "./account-settings-sections";
 import { BILLING_SECTIONS } from "./billing-sections";
 import {
   AGENT_DETAILS_SECTIONS,
@@ -9,6 +9,7 @@ import {
 } from "./assistant/agent-details-sections";
 import { parseAccountPanelSearch, validateSettingsSearch } from "./assistant/account-panel-search";
 import { parseAssistantSearch } from "./assistant/search";
+import { parseNyxBotSettingsSection } from "./assistant/nyxbot-settings-sections";
 import { billingSearchSchema } from "@/schemas/billing";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 
@@ -97,24 +98,189 @@ it("matches feature, ownership and read-only availability for agent search and n
     can_maintain: true,
   } as unknown as AssistantAgent;
   const options = { orgChannels: false, voice: false, learning: false, owner: "owner" };
-  expect(
-    agentDetailsSections.available("grants/voice", agentDetailsAvailability(agent, options)),
-  ).toBe("grants");
-  expect(
-    agentDetailsSections.available("skills/learning", agentDetailsAvailability(agent, options)),
-  ).toBe("skills");
-  expect(
-    agentDetailsAvailability({ ...agent, share_role: "user" }, options)["overview/access"],
-  ).toBe(false);
-  expect(
-    agentDetailsAvailability({ ...agent, owner_kind: "org", org_role: "member" }, options)[
-      "grants/guests"
-    ],
-  ).toBe(false);
+  expect(agentDetailsSections.available("grants/machines", agentDetailsAvailability({ ...agent, share_role: "user" }, options))).toBe("grants");
+  expect(agentDetailsAvailability({ ...agent, share_role: "user" }, options)["overview/voice"]).toBe(false);
   expect(
     agentDetailsAvailability(
       { ...agent, owner_kind: "org", status: "destroyed" },
       { ...options, voice: true, orgChannels: true },
     ).channels,
   ).toBe(false);
+});
+
+it.each([
+  [
+    "nyxbot",
+    "permissions/specialists",
+    "permissions"
+  ],
+  [
+    "nyxbot",
+    "tasks/specialists",
+    "tasks"
+  ],
+  [
+    "nyxbot",
+    "tasks/groups",
+    "tasks"
+  ],
+  [
+    "nyxbot",
+    "automations/budgets",
+    "automations"
+  ],
+  [
+    "agent",
+    "overview/access",
+    "overview"
+  ],
+  [
+    "agent",
+    "overview/chat",
+    "overview"
+  ],
+  [
+    "agent",
+    "overview/ownership",
+    "overview"
+  ],
+  [
+    "agent",
+    "grants/operations",
+    "grants"
+  ],
+  [
+    "agent",
+    "grants/guests",
+    "grants"
+  ],
+  [
+    "agent",
+    "grants/voice",
+    "grants"
+  ],
+  [
+    "agent",
+    "skills/installed",
+    "skills"
+  ],
+  [
+    "agent",
+    "skills/learning",
+    "skills"
+  ],
+  [
+    "settings",
+    "security/mfa",
+    "security"
+  ],
+  [
+    "settings",
+    "security/password",
+    "security"
+  ],
+  [
+    "settings",
+    "security/linked-accounts",
+    "security"
+  ],
+  [
+    "settings",
+    "mcp/cursor",
+    "mcp"
+  ],
+  [
+    "settings",
+    "mcp/claude-code",
+    "mcp"
+  ],
+  [
+    "settings",
+    "mcp/codex",
+    "mcp"
+  ],
+  [
+    "settings",
+    "display/appearance",
+    "display"
+  ],
+  [
+    "settings",
+    "display/text",
+    "display"
+  ],
+  [
+    "settings",
+    "display/chat",
+    "display"
+  ],
+  [
+    "settings",
+    "display/sidebar",
+    "display"
+  ],
+  [
+    "settings",
+    "display/colors/surfaces",
+    "display/colors"
+  ],
+  [
+    "settings",
+    "display/colors/text",
+    "display/colors"
+  ],
+  [
+    "settings",
+    "display/colors/controls",
+    "display/colors"
+  ],
+  [
+    "settings",
+    "display/readability",
+    "display"
+  ],
+  [
+    "billing",
+    "billing/benefits/wallet",
+    "billing/benefits"
+  ],
+  [
+    "billing",
+    "billing/benefits/grants",
+    "billing/benefits"
+  ],
+  [
+    "billing",
+    "billing/benefits/allowances",
+    "billing/benefits"
+  ],
+  [
+    "billing",
+    "usage/summary",
+    "usage"
+  ],
+  [
+    "billing",
+    "usage/charts/quantities",
+    "usage/charts"
+  ],
+  [
+    "billing",
+    "usage/charts/funding",
+    "usage/charts"
+  ]
+])("normalizes removed %s section %s to %s", (surface, removed, expected) => {
+  if (surface === "nyxbot") {
+    expect(parseNyxBotSettingsSection(removed)).toBe(expected);
+    expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab: removed }).panelTab).toBe(expected);
+  } else if (surface === "settings") {
+    expect(accountSettingsSections.normalize(validateSettingsSearch({ tab: removed }).tab)).toBe(expected);
+    expect(parseAccountPanelSearch({ panel: "settings", panelTab: removed }).panelTab).toBe(expected);
+  } else if (surface === "agent") {
+    expect(parseAssistantSearch({ agent: "a", details: removed }).details).toBe(expected);
+  } else {
+    const tab = removed.split("/")[0];
+    expect(billingSearchSchema.parse({ tab, section: removed }).section).toBe(expected);
+    expect(parseAccountPanelSearch({ panel: "billing", panelTab: tab, panelSection: removed }).panelSection).toBe(expected);
+  }
 });

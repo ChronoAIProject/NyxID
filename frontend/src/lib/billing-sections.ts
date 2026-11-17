@@ -4,17 +4,11 @@ export const BILLING_SECTIONS = [
   "billing",
   "billing/topup",
   "billing/benefits",
-  "billing/benefits/wallet",
-  "billing/benefits/grants",
-  "billing/benefits/allowances",
   "billing/bill",
   "billing/machines",
   "billing/activity",
   "usage",
-  "usage/summary",
   "usage/charts",
-  "usage/charts/quantities",
-  "usage/charts/funding",
   "usage/explorer",
 ] as const;
 export type BillingSection = (typeof BILLING_SECTIONS)[number];
@@ -23,17 +17,11 @@ export const BILLING_SECTION_TITLES: Record<BillingSection, string> = {
   billing: "Billing",
   "billing/topup": "Top up & history",
   "billing/benefits": "Benefits & allowances",
-  "billing/benefits/wallet": "Wallet breakdown",
-  "billing/benefits/grants": "Grants",
-  "billing/benefits/allowances": "Free allowances",
   "billing/bill": "This period's bill",
   "billing/machines": "Machine billing",
   "billing/activity": "Activity",
   usage: "Usage",
-  "usage/summary": "Usage summary",
   "usage/charts": "Usage charts",
-  "usage/charts/quantities": "Metered quantities",
-  "usage/charts/funding": "Funding",
   "usage/explorer": "Usage explorer",
 };
 export const BILLING_FIELD_LABELS = {
@@ -80,20 +68,18 @@ export const BILLING_SECTION_LABELS: Partial<Record<BillingSection, readonly str
     BILLING_FIELD_LABELS.downloadReceipt,
     BILLING_FIELD_LABELS.resumePayment,
   ],
-  "billing/benefits/wallet": [
+  "billing/benefits": [
     BILLING_FIELD_LABELS.availableCredits,
     BILLING_FIELD_LABELS.purchasedCredits,
     BILLING_FIELD_LABELS.walletfunded,
-  ],
-  "billing/benefits/grants": [
+
     BILLING_FIELD_LABELS.individualGrants,
     BILLING_FIELD_LABELS.heldGrants,
     BILLING_FIELD_LABELS.pendingActivation,
     BILLING_FIELD_LABELS.pendingReclaim,
     BILLING_FIELD_LABELS.expiredAwaitingCleanup,
     BILLING_FIELD_LABELS.availableWithServiceRestrictions,
-  ],
-  "billing/benefits/allowances": [
+
     BILLING_FIELD_LABELS.freeAllowances,
     BILLING_FIELD_LABELS.remaining,
     BILLING_FIELD_LABELS.used,
@@ -105,7 +91,7 @@ export const BILLING_SECTION_LABELS: Partial<Record<BillingSection, readonly str
     BILLING_FIELD_LABELS.total,
     BILLING_FIELD_LABELS.downloadInvoice,
   ],
-  "usage/summary": [
+  usage: [
     BILLING_FIELD_LABELS.spend,
     BILLING_FIELD_LABELS.estimatedUsageCost,
     BILLING_FIELD_LABELS.coveredByBenefits,
@@ -115,8 +101,7 @@ export const BILLING_SECTION_LABELS: Partial<Record<BillingSection, readonly str
     BILLING_FIELD_LABELS.inputOutput,
     BILLING_FIELD_LABELS.cacheReadWrite,
   ],
-  "usage/charts/quantities": [BILLING_FIELD_LABELS.meteredQuantities],
-  "usage/charts/funding": [BILLING_FIELD_LABELS.funding],
+  "usage/charts": [BILLING_FIELD_LABELS.meteredQuantities, BILLING_FIELD_LABELS.funding],
   "usage/explorer": [
     BILLING_FIELD_LABELS.groupBy,
     BILLING_FIELD_LABELS.searchUsageGroups,

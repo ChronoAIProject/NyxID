@@ -90,7 +90,7 @@ for (const mode of ["light", "dark"] as const) {
       await content
         .getByRole("textbox", { name: "Name", exact: true })
         .fill("Studio Reader");
-      await accountSection(page, "security/password");
+      await accountSection(page, "security");
       await expect(page).toHaveURL(/tab=security/);
       await expect(
         page.getByRole("dialog", { name: "Discard unsaved changes?" }),
@@ -137,7 +137,7 @@ for (const mode of ["light", "dark"] as const) {
       const writes = await settingsApi(page);
       await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await settings(page);
-      await accountSection(page, "security/mfa");
+      await accountSection(page, "security");
       const toggle = page.getByRole("switch", {
         name: "Toggle two-factor authentication",
         includeHidden: true,
@@ -238,7 +238,7 @@ for (const mode of ["light", "dark"] as const) {
         "Display",
         "Privacy",
       ]) {
-        await accountSection(page, label === "Security" ? "security/password" : label === "Display" ? "display/text" : label.toLowerCase());
+        await accountSection(page, label === "Security" ? "security" : label === "Display" ? "display" : label.toLowerCase());
         const tab = panel;
         await expect(tab.locator("[data-grouped-list]:visible").first()).toBeVisible();
         await expect(
@@ -284,7 +284,7 @@ for (const mode of ["light", "dark"] as const) {
         }
         if (label === "Display") {
           for (const title of ["Text size", "Spacing", "Chat content width"]) {
-            await accountSection(page, title === "Chat content width" ? "display/chat" : "display/text");
+            await accountSection(page, title === "Chat content width" ? "display/layout" : "display");
             const slider = tab.getByRole("slider", {
               name: title,
               exact: true,
@@ -321,7 +321,7 @@ for (const mode of ["light", "dark"] as const) {
       await panel
         .getByRole("textbox", { name: "Name", exact: true })
         .fill("Updated Reader");
-      await accountSection(page, "security/password");
+      await accountSection(page, "security");
       await expect(
         page.getByRole("dialog", { name: "Discard unsaved changes?" }),
       ).toHaveCount(0);
@@ -334,7 +334,7 @@ for (const mode of ["light", "dark"] as const) {
       await panel
         .getByLabel("Confirm New Password", { exact: true })
         .fill("new-password");
-      await accountSection(page, "display/text");
+      await accountSection(page, "display");
       const bar = panel.getByRole("region", { name: "Unsaved changes" });
       await expect(bar).toBeVisible();
       expect(

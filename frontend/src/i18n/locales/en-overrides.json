@@ -65,5 +65,7 @@
   "Byok": "BYOK",
   "Openai chat": "OpenAI Chat",
   "Openai responses": "OpenAI Responses",
-  "Anthropic messages": "Anthropic Messages"
+  "Anthropic messages": "Anthropic Messages",
+  "{{count}} grants_one": "{{count}} grant",
+  "{{count}} grants_other": "{{count}} grants"
 }

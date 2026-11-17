@@ -1,8 +1,9 @@
+import { SegmentedControl, SegmentedControlList, SegmentedControlTrigger } from "@/components/ui/segmented-control";
 import { useSectionSearchParam } from "@/hooks/use-section-search-param";
 import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
 import { SectionPages } from "@/components/ui/section-pages";
 import { GroupedDetailContext } from "@/lib/grouped-detail";
-import { ACCOUNT_SETTINGS_SECTIONS, ACCOUNT_SETTINGS_TITLES, accountSettingsSections, type AccountSettingsSection } from "@/lib/account-settings-sections";
+import { ACCOUNT_SETTINGS_SECTIONS, ACCOUNT_SETTINGS_TITLES, accountSettingsPageTitle, accountSettingsSections, type AccountSettingsSection } from "@/lib/account-settings-sections";
 import { useThemeStore } from "@/stores/theme-store";
 import { UserRound, ShieldCheck, Monitor, Plug, Palette, LockKeyhole } from "lucide-react";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -140,7 +141,7 @@ function SettingsContent({
   const mode = useThemeStore(state => state.mode);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => api.get<readonly Session[]>("/sessions") });
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
-  const availability = { "security/password": user.isSuccess ? user.data.has_password === true : true };
+  const availability = {};
   const current = accountSettingsSections.available(selected, availability);
   function go(section?: AccountSettingsSection) {
     if (presentation === "panel") void account.update({ panelTab: section }, "replace", { force: true });
@@ -153,22 +154,21 @@ function SettingsContent({
   function disclosures(parent?: AccountSettingsSection) {
     return <GroupedList>{ACCOUNT_SETTINGS_SECTIONS.filter(section => accountSettingsSections.parent(section) === parent && availability[section as keyof typeof availability] !== false).map(section => {
       const Icon = icons[section.split("/")[0] as keyof typeof icons];
-      const summary = section === "display" || section === "display/appearance" ? translateUi(mode === "system" ? "System" : mode === "light" ? "Light" : "Dark")
+      const summary = section === "display" ? translateUi(mode === "system" ? "System" : mode === "light" ? "Light" : "Dark")
         : section === "security" && user.isSuccess && !user.error ? translateUi(user.data.mfa_enabled ? "MFA on" : "MFA off")
         : section === "profile" && user.isSuccess && !user.error ? user.data.display_name || user.data.email
         : section === "sessions" && sessions.isSuccess && !sessions.error ? String(sessions.data.length) : undefined;
-      return <GroupedDisclosure key={section} leading={parent ? undefined : <Icon aria-hidden />} accessory={summary ? <span className="text-13 text-text-tertiary">{summary}</span> : undefined} data-drawer-page-trigger={section} onClick={() => go(section)}>{translateUi(ACCOUNT_SETTINGS_TITLES[section])}</GroupedDisclosure>;
+      return <GroupedDisclosure key={section} leading={parent ? undefined : <Icon aria-hidden />} accessory={summary ? <span className="text-13 text-text-tertiary">{summary}</span> : undefined} data-drawer-page-trigger={section} onClick={() => go(section)}>{translateUi(section === "display" ? "Display" : ACCOUNT_SETTINGS_TITLES[section])}</GroupedDisclosure>;
     })}</GroupedList>;
   }
   function page(section: AccountSettingsSection) {
-    if (["security", "mcp", "display", "display/colors"].includes(section)) return disclosures(section);
     if (section === "profile") return <><ProfileTab /><LanguageSettings /></>;
     if (section === "sessions") return <SessionsTab />;
     if (section === "privacy") return <PrivacyTab />;
-    if (section === "security/linked-accounts") return <OwnedOnboardingBindings />;
-    if (section.startsWith("security/")) return <SecurityTab section={section} />;
-    if (section.startsWith("mcp/")) return <McpTab section={section} />;
-    return <DisplaySettings section={section} />;
+    if (section === "security") return <><SecurityTab section={section} /><OwnedOnboardingBindings />{disclosures(section)}</>;
+    if (section === "security/delete") return <SecurityTab section={section} />;
+    if (section === "mcp") return <McpTab />;
+    return <DisplayViews section={current?.startsWith("display/") ? current : "display"} navigate={go} />;
   }
   return <GroupedFormScope viewport>
     <section aria-label={translateUi("Account settings")} className="flex min-h-0 flex-1 flex-col">
@@ -179,13 +179,27 @@ function SettingsContent({
             <CompactScroll active={!current} hidden={Boolean(current)} style={current ? { display: "none" } : undefined} className="assistant-scrollbar flex-1 space-y-6 pb-6">
               {disclosures()}
             </CompactScroll>
-            <SectionPages sections={ACCOUNT_SETTINGS_SECTIONS} titles={ACCOUNT_SETTINGS_TITLES} selected={current} rootTitle="Account Settings" available={availability} navigate={go} render={page} />
+            <SectionPages sections={ACCOUNT_SETTINGS_SECTIONS.filter(section => !section.startsWith("display/"))} titles={{ ...ACCOUNT_SETTINGS_TITLES, display: accountSettingsPageTitle("display") }} selected={current?.startsWith("display/") ? "display" : current} rootTitle="Account Settings" available={availability} navigate={go} render={page} />
           </GroupedDetailContext.Provider>
         </div>
       </FormViewport>
       <GroupedFormBar viewport />
     </section>
   </GroupedFormScope>;
+}
+
+function DisplayViews({ section, navigate }: { readonly section: AccountSettingsSection; readonly navigate: (section: AccountSettingsSection) => void }) {
+  const views = ["display", "display/layout", "display/colors"] as const;
+  const [visited, setVisited] = useState(() => new Set([section]));
+  if (!visited.has(section)) setVisited(new Set([...visited, section]));
+  return <>
+    <SegmentedControl value={section} onValueChange={value => navigate(value as AccountSettingsSection)}>
+      <SegmentedControlList aria-label={translateUi("Display")}>
+        {views.map(value => <SegmentedControlTrigger key={value} value={value}>{translateUi(ACCOUNT_SETTINGS_TITLES[value])}</SegmentedControlTrigger>)}
+      </SegmentedControlList>
+    </SegmentedControl>
+    {views.filter(value => visited.has(value)).map(value => <div key={value} hidden={value !== section} data-settings-view={value}><DisplaySettings section={value} /></div>)}
+  </>;
 }
 
 function ProfileTab() {
@@ -229,7 +243,6 @@ function ProfileForm({ user }: { readonly user: User }) {
         className="space-y-6"
       >
         <GroupedList
-          title={translateUi("Profile")}
           footer={
             <>
               <p>{translateUi("Update your personal information.")}</p>
@@ -457,7 +470,7 @@ function SecurityTab({ section }: { readonly section: string }) {
 
   return (
     <div className="space-y-6">
-      {section === "security/mfa" && <GroupedList
+      {section === "security" && <GroupedList
         title={translateUi(ACCOUNT_FIELD_LABELS.twofactorAuthentication)}
         footer={
           user?.mfa_enabled
@@ -481,7 +494,7 @@ function SecurityTab({ section }: { readonly section: string }) {
           description={user?.mfa_enabled ? translateUi("Enabled") : translateUi("Disabled")}
         />
       </GroupedList>}
-      {section === "security/mfa" && <ApprovedSignInPolicy key={user?.id} />}
+      {section === "security" && <ApprovedSignInPolicy key={user?.id} />}
 
       <MfaSetupDialog open={mfaDialogOpen} onOpenChange={setMfaDialogOpen} />
 
@@ -556,7 +569,7 @@ function SecurityTab({ section }: { readonly section: string }) {
         </DialogContent>
       </Dialog>
 
-      {section === "security/password" && user?.has_password === true && (
+      {section === "security" && user?.has_password === true && (
         <Form {...passwordForm}>
           <form
             aria-label={translateUi("Change password")}
@@ -564,7 +577,7 @@ function SecurityTab({ section }: { readonly section: string }) {
             className="space-y-6"
           >
             <GroupedList
-              title={undefined}
+              title={translateUi("Change password")}
               footer={
                 <>
                   <p>{translateUi("Use 8–128 UTF-8 bytes. Existing sessions remain signed in.")}</p>
@@ -666,7 +679,6 @@ function SecurityTab({ section }: { readonly section: string }) {
       )}
 
       {section === "security/delete" && <GroupedList
-        title={translateUi("Delete account")}
         footer={translateUi("Permanently delete your account and queue managed Machine workspace cleanup. Necessary security and financial records are retained.")}
       >
         <GroupedRow asChild interactive>
@@ -770,9 +782,10 @@ function CopyInlineButton({
   );
 }
 
-function McpTab({ section }: { readonly section: string }) {
+function McpTab() {
   useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
+  const [client, setClient] = useState("cursor");
 
   if (isLoading) {
     return <Skeleton className="h-64 w-full" />;
@@ -789,7 +802,8 @@ function McpTab({ section }: { readonly section: string }) {
   return (
     <div className="space-y-6">
       <p className="px-4 text-13 text-text-tertiary">{translateUi("Install NyxID as an MCP (Model Context Protocol) server in your client of choice.")}</p>
-      {section === "mcp/cursor" && <GroupedList
+      <SegmentedControl value={client} onValueChange={setClient}><SegmentedControlList aria-label={translateUi("MCP client")}><SegmentedControlTrigger value="cursor">{translateUi("Cursor")}</SegmentedControlTrigger><SegmentedControlTrigger value="claude-code">{translateUi("Claude Code")}</SegmentedControlTrigger><SegmentedControlTrigger value="codex">{translateUi("Codex")}</SegmentedControlTrigger></SegmentedControlList></SegmentedControl>
+      {client === "cursor" && <GroupedList
         title={translateUi(ACCOUNT_FIELD_LABELS.installToCursor)}
         footer={translateUi("One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.")}
       >
@@ -806,7 +820,7 @@ function McpTab({ section }: { readonly section: string }) {
           label={translateUi("Cursor config")}
         />
       </GroupedList>}
-      {section === "mcp/claude-code" && <GroupedList
+      {client === "claude-code" && <GroupedList
         title={translateUi(ACCOUNT_FIELD_LABELS.installToClaudeCode)}
         footer={translateUi("Run this command in your terminal to add NyxID as an MCP server in Claude Code.")}
       >
@@ -821,7 +835,7 @@ function McpTab({ section }: { readonly section: string }) {
           label={translateUi("Claude Code config")}
         />
       </GroupedList>}
-      {section === "mcp/codex" && <GroupedList
+      {client === "codex" && <GroupedList
         title={translateUi(ACCOUNT_FIELD_LABELS.installToCodex)}
         footer={translateUi("Run this command in your terminal to add NyxID as an MCP server in Codex CLI.")}
       >

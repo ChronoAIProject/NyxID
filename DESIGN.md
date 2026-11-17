@@ -409,10 +409,15 @@ actions are destructive-colored rows in their own neutral group.
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
 multi-select lists. Single-choice selection lists use named radio groups with
 checkmark rows and arrow-key navigation; search when there are more than eight
-items, and scroll internally only for long lists. Account, agent and billing settings use retained
-`GroupedDetail` pages, with a short root of icon disclosures and saved-value
-summaries. Keep saved summaries during background refetches; omit them before
-first load and on error.
+items, and scroll internally only for long lists. A page earns its place with a
+list, several related fields or long text. Keep a short field, switch or small
+choice inline on its parent. Use root → page, with existing individual-item
+pages as the only third level; never add a page only to list further pages.
+Retain the explicitly separate channel-binding lists and destructive Delete account page.
+Aim for one phone screen: merge related controls into two or three titled groups,
+and cap growing lists with Show all or pagination. Roots remain short and show
+truthful saved summaries; keep them during background refreshes and omit them
+before first load or on error. Display may use three addressed peer views in one shell.
 Derive parents from section paths; deep links mount ancestors, Back walks one level
 with a replace, and focus returns to the originating row. Preserve existing history
 contracts: Account Settings navigation replaces; Billing tab, owner, period and
@@ -427,7 +432,7 @@ current language, alongside synonyms, from the same definitions as the forms.
 Use distinct leading icons only on the first category list of each surface or tab; nested category lists omit them. Root summaries use already loaded values. Unvisited editors must not fetch; retained pages share their original query/form owners.
 Keep settings roots limited to category disclosures and at most one essential
 context sentence per group. Billing roots may also show the existing balance,
-period spend and benefits totals; put charts, tables and history on focused pages.
+period spend and benefits totals; Usage shows its summary inline. Put charts, tables and history on focused pages.
 Keep short editors at one level. Share section vocabulary, parent derivation and
 availability rules between navigation and search; retain the original form owner
 when its fields are spread across pages. Section cleanup waits for the address and
@@ -908,6 +913,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-17 | Consolidate settings pages after the first version over-split | Short choices and fields edit inline; related forms share a page. Roots stay short, lists are capped, and existing saves, authority, billing figures and history remain intact. |
 | 2026-11-17 | Account, agent and billing settings use focused section trees | Short roots expose current values; retained pages keep existing saves and authority fences. Slash paths support deep links and translated field-label search. New drill-ins and parent Back replace; Billing tabs/owner/filters still push, and cleanup replaces. Settings navigation and agent tabs add no entries; formerly local agent-sheet buttons retain no-entry opening/closing. Billing figures and checkout contracts are unchanged. |
 | 2026-11-16 | NyxBot settings use a URL-addressable hierarchy | Short category groups lead to retained focused pages with nested permission, task, automation and channel settings. Section navigation replaces history; one scope preserves reviewed saves and drafts. Live values refresh pristine fields, and NyxBot may change safe settings while approval widening stays with the owner. |
 | 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |

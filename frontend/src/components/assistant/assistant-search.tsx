@@ -132,7 +132,6 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
   const mock = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>).mock,
   });
-  const hasPassword = useAuthStore(state => state.user?.has_password);
   const userId = useAuthStore((state) => state.user?.id);
   const billingAvailable = useAuthStore((state) => isBillingAvailable(state.user));
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
@@ -209,7 +208,7 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
   ];
   const settings: Entry[] = [
     { id: "settings", label: translateUi("Account Settings"), icon: Settings, run: () => panel("settings") },
-    ...ACCOUNT_SETTINGS_SECTIONS.filter(section => section !== "security/password" || hasPassword === true).map(section => ({
+    ...ACCOUNT_SETTINGS_SECTIONS.map(section => ({
       id: `settings:${section}`, label: translateUi(ACCOUNT_SETTINGS_TITLES[section]), hint: translateUi("Account Settings"), icon: Settings,
       keywords: accountSettingsSearchTerms(section), run: () => panel("settings", { panelTab: section }),
     })),
@@ -217,7 +216,7 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
       const available = agentDetailsAvailability(agent, { orgChannels: orgChannelsEnabled, hasOrgChannel: channels.data?.some(channel => channel.agent_id === agent.id && channel.org_specialist), voice: voiceEnabled, learning: learningEnabled, owner: userId });
       return AGENT_DETAILS_SECTIONS.filter(section => agentDetailsSections.available(section, available) === section).map(section => ({
         id: `agent-details:${agent.id}:${section}`, label: translateUi(AGENT_DETAILS_TITLES[section]), hint: agentTitle(agent), icon: Bot,
-        keywords: agentDetailsSearchTerms(section, agent, advancedControls),
+        keywords: agentDetailsSearchTerms(section, agent, advancedControls, { voice: voiceEnabled, learning: learningEnabled, orgChannels: orgChannelsEnabled, owner: userId ?? "" }),
         run: () => go("/assistant", { agent: agent.id, details: section }),
       }));
     }),

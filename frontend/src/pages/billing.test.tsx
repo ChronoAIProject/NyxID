@@ -234,15 +234,14 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
   it("pushes tabs and periods while drill-ins and parent Back replace", async () => {
     const { history } = await renderPage("/billing", false, "/dashboard");
     expect(history.length).toBe(2);
-    await user.click(screen.getByRole("button", { name: "Benefits & allowances" }));
-    await user.click(screen.getByRole("button", { name: "Free allowances" }));
+    await user.click(screen.getByRole("button", { name: /^Benefits & allowances/ }));
     expect(history.length).toBe(2);
-    await user.click(screen.getByRole("button", { name: "Benefits & allowances" }));
+    await user.click(screen.getByRole("button", { name: "Billing" }));
     expect(history.length).toBe(2);
+    await user.click(screen.getByRole("button", { name: /^Benefits & allowances/ }));
     await user.click(screen.getByRole("tab", { name: "Usage" }));
     expect(history.length).toBe(3);
     await user.click(screen.getByRole("button", { name: "Usage charts" }));
-    await user.click(screen.getByRole("button", { name: "Metered quantities" }));
     expect(history.length).toBe(3);
     await select("Time range", "Last 7 days");
     expect(history.length).toBe(4);
@@ -253,13 +252,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(screen.getByRole("heading", { name: "Benefits & allowances" })).toBeVisible();
     await act(() => history.forward());
     await waitFor(() => expect(screen.getByRole("tab", { name: "Usage" })).toHaveAttribute("data-state", "active"));
-    expect(screen.getByRole("heading", { name: "Metered quantities" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Usage charts" })).toBeVisible();
     await act(() => history.forward());
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Time range" })).toHaveTextContent("Last 7 days"));
   });
   it("returns to the prior route after opening and replacing sections", async () => {
     const { history } = await renderPage("/billing", false, "/dashboard");
-    await user.click(screen.getByRole("button", { name: "Benefits & allowances" }));
+    await user.click(screen.getByRole("button", { name: /^Benefits & allowances/ }));
     expect(history.length).toBe(2);
     await act(() => history.back());
     expect(await screen.findByText("Before billing")).toBeVisible();
@@ -398,11 +397,10 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
   it("keeps usage overview concise and puts quantities, funding and tables on focused pages", async () => {
     const { history } = await renderPage("/billing?tab=usage", false);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
-    await visitBilling("usage/charts/quantities");
-    expect(screen.getByRole("combobox", { name: "Compare quantities by" })).toHaveTextContent("Service");
+    expect(document.querySelector(".tab-usage-summary")).toBeVisible();
     expect(screen.queryByRole("region", { name: "Funding composition" })).not.toBeInTheDocument();
-    await visitBilling("usage/charts/funding");
+    await visitBilling("usage/charts");
+    expect(screen.getByRole("combobox", { name: "Compare quantities by" })).toHaveTextContent("Service");
     expect(screen.getByRole("region", { name: "Funding composition" })).toBeVisible();
     await visitBilling("usage/explorer");
     expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
@@ -417,7 +415,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(screen.getByTitle("95")).toBeVisible();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
-    await visitBilling("billing/benefits/wallet");
+    await visitBilling("billing/benefits");
     expect(screen.getByText("100 credits")).toBeVisible();
     await visitBilling("billing/topup");
     expect(screen.getAllByText("Top-up history", { exact: true })).toHaveLength(1);
@@ -820,7 +818,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage();
-    await visitBilling("usage/summary");
+    await visitBilling("usage");
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(
       within(spend).getByText("0.72", { selector: "strong", exact: false }),
@@ -852,7 +850,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage();
-    await visitBilling("usage/summary");
+    await visitBilling("usage");
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(
       within(spend).getByText("≥ 0.00244", { exact: false }),
@@ -993,7 +991,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage();
-    await visitBilling("usage/summary");
+    await visitBilling("usage");
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(spend.querySelector("strong")).toHaveTextContent(
       "Unavailable credits",

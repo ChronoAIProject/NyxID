@@ -5595,11 +5595,11 @@ async fn nyxbot_panel_tools_read_update_audit_and_leave_noops_untouched() {
     );
     let changed = saved["changed_sections"].as_array().unwrap();
     assert!(changed.iter().any(|page| {
-        page["section"] == "automations/budgets"
+        page["section"] == "automations"
             && page["url"]
                 .as_str()
                 .unwrap()
-                .contains("panelTab=automations%2Fbudgets")
+                .contains("panelTab=automations")
     }));
     let logs = state
         .db
@@ -5735,7 +5735,7 @@ async fn nyxbot_panel_refuses_widening_atomically_and_denies_specialists_and_gue
         refused["url"]
             .as_str()
             .unwrap()
-            .ends_with("panelTab=permissions%2Fspecialists")
+            .ends_with("panelTab=permissions")
     );
     assert_ne!(
         settings::get(&state.db, OWNER)
@@ -5775,10 +5775,7 @@ async fn nyxbot_panel_refuses_widening_atomically_and_denies_specialists_and_gue
     .await;
     assert!(!error, "{same}");
     assert_eq!(same["specialist_access_requests"], "routed_to_nyxbot");
-    assert_eq!(
-        same["changed_sections"][0]["section"],
-        "automations/budgets"
-    );
+    assert_eq!(same["changed_sections"][0]["section"], "automations");
     let (denied, error) = execute_tool(
         &state,
         &chat,
@@ -5817,22 +5814,17 @@ async fn nyxbot_panel_refuses_widening_atomically_and_denies_specialists_and_gue
         &state,
         &chat,
         "nyxid__settings_link",
-        &json!({"area":"nyxbot_settings","section":"tasks/groups"}),
+        &json!({"area":"nyxbot_settings","section":"tasks"}),
     )
     .await;
     assert!(!error, "{link}");
-    assert!(
-        link["url"]
-            .as_str()
-            .unwrap()
-            .ends_with("panelTab=tasks%2Fgroups")
-    );
+    assert!(link["url"].as_str().unwrap().ends_with("panelTab=tasks"));
     for (area, section, key) in [
-        ("account_settings", "display/colors/text", "panelTab"),
-        ("security", "security/mfa", "panelTab"),
-        ("billing", "billing/benefits/allowances", "panelSection"),
+        ("account_settings", "display/colors", "panelTab"),
+        ("security", "security", "panelTab"),
+        ("billing", "billing/benefits", "panelSection"),
         ("usage", "usage/explorer", "panelSection"),
-        ("agent_details", "overview/access", "details"),
+        ("agent_details", "overview", "details"),
     ] {
         let (link, error) = execute_tool(
             &state,

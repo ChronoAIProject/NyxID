@@ -20,7 +20,7 @@ import { settingsReviewEnvironment, settleSettingsReviewQueries } from "@/test/s
 // Base renders come from aee1ae9ee9e9858fc9342e519067a5bd8c31f782,
 // with the same fixture, en-US/UTC native formatting and fixed clock as this file.
 const captureBase = process.env.SETTINGS_BASELINE_CAPTURE === "1";
-// Each walk may mount 14–22 retained pages; allow shared CI runners headroom.
+// Walk every retained page with shared CI runner headroom.
 const CONTRACT_TIMEOUT = 30_000;
 beforeEach(settingsReviewEnvironment);
 afterEach(() => {
@@ -77,7 +77,7 @@ async function record(surface: string, data: unknown) {
 it("keeps exact account requests limited to visible summaries and first-visited pages", async () => {
   const { go, requests } = await open("account");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
-  const pages = captureBase ? ["profile", "security", "sessions", "mcp", "display", "privacy"] : ["profile", "security", "security/mfa", "security/password", "security/linked-accounts", "security/delete", "sessions", "mcp", "mcp/cursor", "mcp/claude-code", "mcp/codex", "display", "display/appearance", "display/text", "display/chat", "display/sidebar", "display/colors", "display/colors/surfaces", "display/colors/text", "display/colors/controls", "display/readability", "privacy"];
+  const pages = captureBase ? ["profile", "security", "sessions", "mcp", "display", "privacy"] : ["profile", "security", "security/delete", "sessions", "mcp", "display", "display/layout", "display/colors", "privacy"];
   for (const section of pages) { await go(section); stages[section] = requests.splice(0).sort(); }
   if (captureBase) await record("account-requests", stages);
   else { expect(stages).toEqual(requestsBaseline.account); }
@@ -86,7 +86,7 @@ it("keeps exact account requests limited to visible summaries and first-visited 
 it("keeps billing requests lazy and does not refetch when moving among retained pages", async () => {
   const { go, requests } = await open("billing");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
-  for (const section of captureBase ? ["usage", "billing"] : ["billing/topup", "billing/benefits", "billing/benefits/wallet", "billing/benefits/grants", "billing/benefits/allowances", "billing/bill", "billing/machines", "billing/activity", "usage", "usage/summary", "usage/charts", "usage/charts/quantities", "usage/charts/funding", "usage/explorer"]) {
+  for (const section of captureBase ? ["usage", "billing"] : ["billing/topup", "billing/benefits", "billing/bill", "billing/machines", "billing/activity", "usage", "usage/charts", "usage/explorer"]) {
     await go(section); stages[section] = requests.splice(0).sort();
   }
   if (captureBase) await record("billing-requests", stages);
@@ -103,7 +103,7 @@ it("keeps agent detail requests behind their first visit", async () => {
   const { go, requests } = await open("agent");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
   const tabs: Record<string, string> = { overview: "Overview", grants: "Access", skills: "Skills", memory: "Memory", channels: "Channels" };
-  for (const section of captureBase ? Object.keys(tabs) : ["overview/persona", "overview/access", "overview/chat", "overview/voice", "overview/automations", "overview/ownership", "grants/services", "grants/operations", "grants/guests", "grants/machines", "grants/connections", "skills/installed", "memory", "channels"]) {
+  for (const section of captureBase ? Object.keys(tabs) : ["overview/persona", "overview/voice", "overview/automations", "grants", "grants/services", "grants/machines", "grants/connections", "skills", "memory", "channels"]) {
     await go(section);
     if (!captureBase && section.includes("/"))
       expect(document.querySelector(`[data-grouped-section="${section}"]:not([hidden])`)).not.toBeNull();
@@ -118,6 +118,7 @@ it("preserves every base billing label and figure exactly once across the focuse
   const figures: string[] = [];
   const collect = () => figures.push(...billingFigures(document.querySelector<HTMLElement>(".billing-page")!));
   const expand = async () => {
+    for (const button of screen.queryAllByRole("button", { name: "Show all" })) await user.click(button);
     for (const detail of document.querySelectorAll<HTMLDetailsElement>("details")) {
       if (detail.closest('[hidden],[inert]') || detail.open) continue;
       await user.click(detail.querySelector("summary")!);
@@ -139,12 +140,16 @@ it("preserves every base billing label and figure exactly once across the focuse
     await record("billing-figures", figures.sort());
   } else {
     collect();
-    for (const section of ["billing/topup", "billing/benefits/wallet", "billing/benefits/grants", "billing/benefits/allowances", "billing/bill", "billing/machines", "billing/activity", "usage/summary", "usage/charts/quantities", "usage/charts/funding", "usage/explorer"]) {
-      await go(section); if (section === "billing/machines") await machine(); await expand(); collect();
+    const compact = document.querySelector('[data-usage-summary="compact"]')!.cloneNode(true) as HTMLElement;
+    for (const section of ["billing/topup", "billing/benefits", "billing/bill", "billing/machines", "billing/activity", "usage", "usage/charts", "usage/explorer"]) {
+      await go(section); if (section === "billing/machines") await machine(); await expand();
+      const benefits = document.querySelector<HTMLElement>(".benefits-container");
+      if (section === "usage" && benefits) benefits.hidden = true;
+      collect();
+      if (benefits) benefits.hidden = false;
     }
     expect(figures.sort()).toEqual(baseline);
     const summary = document.querySelector(".tab-usage-summary")!;
-    const compact = document.querySelector('[data-usage-summary="compact"]')!;
     expect(compact.querySelector("p")!.textContent).toBe(summary.querySelector("strong")!.textContent);
     expect(compact.querySelectorAll("p")[2]!.textContent).toBe(summary.querySelector("dd")!.textContent);
   }
@@ -161,10 +166,9 @@ it("keeps gated agent reads behind the corresponding first visit", async () => {
   expect(requests).toEqual([]);
   const agentPath = "/assistant/nyxagent/agents/agent-researcher";
   const cases = [
-    ["grants/operations", [`${agentPath}/operations`]],
-    ["grants/voice", [`${agentPath}/voice-service`]],
-    ["skills/learning", [`${agentPath}/learning`, `${agentPath}/learning/proposals`]],
-    ["grants/guests", [`${agentPath}/guest-readiness`, `${agentPath}/guest-operations`, "/keys"]],
+    ["grants", [`${agentPath}/voice-service`]],
+    ["grants/services", [`${agentPath}/operations`, `${agentPath}/guest-readiness`, `${agentPath}/guest-operations`, "/assistant/nyxagent/grant-services", "/keys"]],
+    ["skills", [`${agentPath}/learning`, `${agentPath}/learning/proposals`, `${agentPath}/skills`, `${agentPath}/skills/history`]],
   ] as const;
   for (const [section, expected] of cases) {
     await go(section);

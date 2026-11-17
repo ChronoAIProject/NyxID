@@ -118,7 +118,7 @@ describe.each(["/settings", "/assistant"] as const)(
       await open(route, "");
       expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-      for (const section of ["profile", "security", "security/mfa", "security/linked-accounts", "security/delete", "sessions", "mcp/cursor", "mcp/claude-code", "mcp/codex", "display/appearance", "display/text", "display/chat", "display/sidebar", "display/colors/surfaces", "display/colors/text", "display/colors/controls", "display/readability", "privacy"]) {
+      for (const section of ["profile", "security", "security", "security", "security/delete", "sessions", "mcp", "mcp", "mcp", "display", "display", "display/layout", "display/layout", "display/colors", "display/colors", "display/colors", "display", "privacy"]) {
         await visit(section);
         const detail = document.querySelector(`[data-grouped-detail]:not([hidden])[aria-label]`)!;
         expect(detail.querySelector("[data-grouped-list]")).not.toBeNull();
@@ -158,7 +158,7 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(email).toHaveAttribute("title", securityUser.email);
       expect(email).toHaveClass("truncate");
       act(() => useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } }));
-      await visit("security/password");
+      await visit("security");
       for (const [label, placeholder] of [["Current Password", "Enter current password"], ["New Password", "Enter new password"], ["Confirm New Password", "Re-enter new password"]] as const) {
         const input = screen.getByLabelText(label, { exact: true });
         expect(input).toHaveAttribute("placeholder", placeholder);
@@ -240,7 +240,7 @@ describe.each(["/settings", "/assistant"] as const)(
 
     it("keeps password validation and hides passwords from the change review", async () => {
       useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } });
-      await open(route, "security/password");
+      await open(route, "security");
       await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "short");
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
@@ -270,7 +270,7 @@ describe.each(["/settings", "/assistant"] as const)(
         }
         return original(url, options);
       });
-      await open(route, "security/password");
+      await open(route, "security");
       await userEvent.type(screen.getByLabelText("Current Password"), "old");
       await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "abcdefé");
       await userEvent.type(screen.getByLabelText("Confirm New Password"), "abcdefé");
@@ -289,7 +289,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/auth/password/change"
         ? new Response(JSON.stringify({ message: "Password changed successfully" }), { status: 200 })
         : original(url, options));
-      await open(route, "security/password");
+      await open(route, "security");
       for (const label of ["Current Password", "New Password", "Confirm New Password"]) {
         await userEvent.type(screen.getByLabelText(label, { exact: true }), "samepassword");
       }
@@ -304,7 +304,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
         : original(url, options));
-      await open(route, "security/mfa");
+      await open(route, "security");
       const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
       expect(toggle).toHaveAttribute("aria-checked", "false");
       await userEvent.click(toggle);
@@ -328,7 +328,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
         : original(url, options));
-      await open(route, "security/mfa");
+      await open(route, "security");
       const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
       expect(toggle).toHaveAttribute("aria-checked", "true");
       expect(screen.getByText(/Enabled by default/)).toBeInTheDocument();
@@ -346,7 +346,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(String(options?.body), { headers: { "Content-Type": "application/json" } })
         : original(url, options));
-      await open(route, "security/mfa");
+      await open(route, "security");
       const toggle = screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" });
       expect(toggle).toBeEnabled();
       expect(screen.getByText(/Takes effect when two-factor authentication is on/)).toBeInTheDocument();
@@ -363,7 +363,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Response(JSON.stringify({ error: "unavailable", error_code: 1000, message: "Try again later" }), { status: 503 })
         : original(url, options));
-      await open(route, "security/mfa");
+      await open(route, "security");
       await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
       await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
       expect(await screen.findByRole("alert")).toHaveTextContent("Try again later");
@@ -382,7 +382,7 @@ describe.each(["/settings", "/assistant"] as const)(
         if (url === "/api/v1/auth/mfa/step-up") return new Response("{}");
         return original(url, options);
       });
-      await open(route, "security/mfa");
+      await open(route, "security");
       await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
       await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
       const verify = await screen.findByRole("region", { name: "Verify this session" });
@@ -394,7 +394,7 @@ describe.each(["/settings", "/assistant"] as const)(
 
     it("disables the unsupported setting for older servers", async () => {
       useAuthStore.setState({ user: { ...useAuthStore.getState().user!, profile_config: undefined } });
-      await open(route, "security/mfa");
+      await open(route, "security");
       expect(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" })).toBeDisabled();
       expect(screen.queryByText("Always enabled")).not.toBeInTheDocument();
     });
@@ -405,7 +405,7 @@ describe.each(["/settings", "/assistant"] as const)(
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/security"
         ? new Promise<Response>((resolve) => { finish = resolve; })
         : original(url, options));
-      await open(route, "security/mfa");
+      await open(route, "security");
       await userEvent.click(screen.getByRole("switch", { name: "Skip MFA for NyxID app sign-ins" }));
       await userEvent.click(screen.getByRole("button", { name: "Enable for app sign-ins" }));
       await waitFor(() => expect(finish).toBeDefined());
@@ -428,7 +428,7 @@ describe.each(["/settings", "/assistant"] as const)(
         useAuthStore.setState({
           user: { ...useAuthStore.getState().user!, ...credentials },
         });
-        await open(route, "security/password");
+        await open(route, "security");
         if (credentials.has_password) {
           expect(
             screen.getByRole("heading", { name: "Change password" }),
@@ -497,17 +497,18 @@ describe.each(["/settings", "/assistant"] as const)(
       const dialog = screen.getByRole("dialog", { name: "Delete Account" });
       const confirm = within(dialog).getByRole("button", { name: "Permanently Delete" });
       expect(confirm).toBeDisabled();
-      expect(transport.mock.calls).toEqual([]);
+      expect(transport.mock.calls).toEqual([["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })]]);
       await userEvent.type(within(dialog).getByLabelText("Email"), "wrong@example.com");
       expect(confirm).toBeDisabled();
       await userEvent.click(confirm);
-      expect(transport.mock.calls).toEqual([]);
+      expect(transport.mock.calls).toEqual([["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })]]);
       await userEvent.clear(within(dialog).getByLabelText("Email"));
       await userEvent.type(within(dialog).getByLabelText("Email"), "reader@example.com");
       expect(confirm).toBeEnabled();
-      expect(transport.mock.calls).toEqual([]);
+      expect(transport.mock.calls).toEqual([["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })]]);
       await userEvent.click(confirm);
       await waitFor(() => expect(transport.mock.calls).toEqual([
+        ["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })],
         ["/api/v1/users/me", expect.objectContaining({
           method: "DELETE",
           credentials: "include",
@@ -529,22 +530,22 @@ describe.each(["/settings", "/assistant"] as const)(
       }
       if (route === "/settings") expect(screen.getByRole("heading", { name: "Account Settings" })).toHaveClass("type-compact-page-title", "sm:type-page-title");
       else expect(screen.queryByRole("heading", { name: "Account Settings" })).not.toBeInTheDocument();
-      await visit("display/colors/text");
-      expect(screen.getByRole("heading", { name: "Text colors" })).toHaveFocus();
-      await userEvent.click(screen.getByRole("button", { name: "Colors" }));
-      expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/colors" } : { panelTab: "display/colors" });
+      await visit("display/colors");
+      expect(screen.getByRole("heading", { name: "Display", level: 2 })).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: "Layout" }));
+      expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/layout" } : { panelTab: "display/layout" });
     });
 
-    it("replaces root-row navigation, nested pages and parent Back", async () => {
+    it("replaces root-row navigation, display views and parent Back", async () => {
       const { history } = await open(route, "");
       await userEvent.click(screen.getByRole("button", { name: /^Display/ }));
-      await userEvent.click(screen.getByRole("button", { name: "Colors" }));
-      await userEvent.click(screen.getByRole("button", { name: "Text colors" }));
-      expect(history.length).toBe(1);
-      await userEvent.click(screen.getByRole("button", { name: "Colors" }));
-      expect(history.length).toBe(1);
-      expect(new URLSearchParams(history.location.search).get(route === "/settings" ? "tab" : "panelTab")).toBe("display/colors");
-      await userEvent.click(screen.getByRole("button", { name: "Display" }));
+      for (const [label, section] of [["Colors", "display/colors"], ["Layout", "display/layout"], ["Appearance", "display"]]) {
+        await userEvent.click(screen.getByRole("tab", { name: label }));
+        expect(history.length).toBe(1);
+        expect(screen.getByRole("heading", { name: "Display", level: 2 })).toBeVisible();
+        expect(screen.getByRole("region", { name: "Display" })).toBeVisible();
+        expect(new URLSearchParams(history.location.search).get(route === "/settings" ? "tab" : "panelTab")).toBe(section);
+      }
       await userEvent.click(screen.getByRole("button", { name: "Account Settings" }));
       await userEvent.click(screen.getByRole("button", { name: /^Security/ }));
       expect(history.length).toBe(1);
@@ -565,14 +566,14 @@ describe("MFA security settings", () => {
   it("offers social-only enrollment while email authentication is disabled", async () => {
     securityUser.social_provider = "google"; securityUser.has_password = false;
     useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
-    const user = userEvent.setup(); await open("/settings", "security/mfa");
+    const user = userEvent.setup(); await open("/settings", "security");
     await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
     expect(screen.getByTestId("mfa-setup")).toBeInTheDocument();
   });
   it.each([{ provider: "google", hasPassword: false }, { provider: null, hasPassword: true }, { provider: "github", hasPassword: true }])("requires code and the actual password availability: $provider / $hasPassword", async ({ provider, hasPassword }) => {
     Object.assign(securityUser, { mfa_enabled: true, social_provider: provider, has_password: hasPassword });
     useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
-    const user = userEvent.setup(); await open("/settings", "security/mfa");
+    const user = userEvent.setup(); await open("/settings", "security");
     await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).queryByLabelText("Password") !== null).toBe(hasPassword);

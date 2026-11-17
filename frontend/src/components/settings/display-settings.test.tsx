@@ -14,7 +14,7 @@ beforeEach(() => {
 
 describe("DisplaySettings", () => {
   it("labels the new default as 1× and formats a precisely migrated preference for the slider", async () => {
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     expect(screen.getByRole("slider", { name: "Text size" })).toHaveAttribute("aria-valuetext", "1×");
     expect(screen.getByRole("button", { name: "Reset text size" })).toHaveAttribute("title", "Reset to 1×");
     expect(screen.getByRole("button", { name: "Reset spacing" })).toHaveAttribute("title", "Reset to 1×");
@@ -26,7 +26,7 @@ describe("DisplaySettings", () => {
 
   it("supports keyboard selection and focus within display radio groups", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const theme = within(screen.getByRole("radiogroup", { name: "Theme" }));
     theme.getByRole("radio", { name: "Light" }).focus();
     await user.keyboard("{ArrowRight}");
@@ -47,7 +47,7 @@ describe("DisplaySettings", () => {
   });
 
   it.each(["Text size", "Spacing", "Chat content width", "Maximum composer height", "Main sidebar width", "Assistant sidebar width"])("gives %s the shared labelled range with one helper and an accessible reset", async (label) => {
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const slider = screen.getByRole("slider", { name: label });
     const range = slider.closest("[data-range-control]")!;
     const heading = range.querySelector("[data-range-heading]")!;
@@ -64,7 +64,7 @@ describe("DisplaySettings", () => {
 
   it("switches theme, text size, spacing and motion", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     await user.click(within(screen.getByRole("radiogroup", { name: "Theme" })).getByRole("radio", { name: "Dark" }));
     fireEvent.change(screen.getByRole("slider", { name: "Text size" }), { target: { value: "1.17" } });
     fireEvent.change(screen.getByRole("slider", { name: "Spacing" }), { target: { value: "0.83" } });
@@ -78,7 +78,7 @@ describe("DisplaySettings", () => {
   ] as const)("adjusts $label across the full range independently", ({ label, field, otherField }) => {
     useThemeStore.getState().setDensity(0.83);
     useThemeStore.getState().setTextScale(0.83);
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const slider = screen.getByRole("slider", { name: label });
     expect(slider).toHaveAttribute("min", "0.5");
     expect(slider).toHaveAttribute("max", "2");
@@ -99,7 +99,7 @@ describe("DisplaySettings", () => {
     { label: "Spacing", field: "density", pointerType: "touch" },
   ] as const)("applies and saves $label only on $pointerType release", ({ label, field, pointerType }) => {
     renderHook(() => useApplyTheme());
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const slider = screen.getByRole("slider", { name: label });
     const persisted = localStorage.getItem("nyxid.theme");
     const root = document.documentElement;
@@ -122,7 +122,7 @@ describe("DisplaySettings", () => {
   });
 
   it.each(["Text size", "Spacing"])("discards a cancelled %s drag", (label) => {
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const slider = screen.getByRole("slider", { name: label });
     const persisted = localStorage.getItem("nyxid.theme");
 
@@ -139,7 +139,7 @@ describe("DisplaySettings", () => {
 
   it("edits a color by hex, flags weak contrast, and resets it", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const field = screen.getByRole("textbox", { name: "Tertiary text hex value" });
     await user.clear(field);
     await user.type(field, "#DDDDDD");
@@ -154,7 +154,7 @@ describe("DisplaySettings", () => {
 
   it("does not commit partial hex input and restores it on blur", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     const field = screen.getByRole("textbox", { name: "Borders and dividers hex value" });
     await user.clear(field);
     await user.type(field, "#12");
@@ -166,7 +166,7 @@ describe("DisplaySettings", () => {
 
   it("sets the sidebar mode and width", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     await user.click(within(screen.getByRole("radiogroup", { name: "Main sidebar" })).getByRole("radio", { name: "Collapsed" }));
     fireEvent.change(screen.getByRole("slider", { name: "Assistant sidebar width" }), { target: { value: "280" } });
     expect(useThemeStore.getState()).toMatchObject({ sidebarMode: "collapsed", sidebarWidths: { assistant: 280 } });
@@ -176,16 +176,16 @@ describe("DisplaySettings", () => {
 
   it("edits the other theme and offers to preview it", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     await user.click(within(screen.getByRole("radiogroup", { name: "Theme to edit" })).getByRole("radio", { name: "Dark" }));
-    expect(screen.getByRole("list", { name: "dark theme colors" })).toBeInTheDocument();
+    expect(screen.getAllByRole("list", { name: "dark theme colors" })).toHaveLength(3);
     await user.click(screen.getByRole("button", { name: "Switch to dark theme to preview" }));
     expect(useThemeStore.getState().mode).toBe("dark");
   });
 
   it("previews and saves chat colors for the edited theme independently", async () => {
     const user = userEvent.setup();
-    render(<DisplaySettings />);
+    render(<><DisplaySettings /><DisplaySettings section="display/layout" /><DisplaySettings section="display/colors" /></>);
     await user.click(within(screen.getByRole("radiogroup", { name: "Theme to edit" })).getByRole("radio", { name: "Dark" }));
     fireEvent.change(screen.getByLabelText("Chat bubble background color"), { target: { value: "#303036" } });
     fireEvent.change(screen.getByLabelText("Chat bubble text color"), { target: { value: "#ffffff" } });

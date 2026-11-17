@@ -19,11 +19,8 @@ export const SETTINGS_LABELS = {
 export const SETTINGS_PAGE_FIELDS: Partial<
   Record<NyxBotSettingsSection, readonly (keyof NyxAgentSettingsForm)[]>
 > = {
-  permissions: ["access_mode"],
-  "permissions/specialists": ["specialist_access_requests"],
-  tasks: ["max_auto_continuations"],
-  "tasks/specialists": ["max_live_subagents", "max_concurrent_subagent_turns"],
-  "tasks/groups": ["max_group_handoffs", "max_group_handoffs_per_hour"],
+  permissions: ["access_mode", "specialist_access_requests"],
+  tasks: ["max_auto_continuations", "max_live_subagents", "max_concurrent_subagent_turns", "max_group_handoffs", "max_group_handoffs_per_hour"],
 };
 
 export const SPECIALIST_ACCESS_LABELS = {

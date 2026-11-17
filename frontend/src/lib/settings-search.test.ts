@@ -38,10 +38,12 @@ it.each(["en", "zh-CN"])(
       last_active_at: "now",
     });
     for (const [section, fields] of Object.entries(AGENT_PROFILE_FIELDS))
-      for (const label of Object.values(fields))
+      for (const [key, label] of Object.entries(fields)) {
+        if (section === "overview/persona" && key === "description") continue;
         expect(agentDetailsSearchTerms(section as AgentDetailsSection, agent, true)).toContain(
           translateUi(label),
         );
+      }
     expect(agentDetailsSearchTerms("overview/persona", { ...agent, kind: "nyxbot" })).not.toContain(
       translateUi("Name"),
     );

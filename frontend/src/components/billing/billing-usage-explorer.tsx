@@ -26,7 +26,7 @@ export function BillingUsageExplorer({
   catalog: BillingCatalog;
   rows: BillingUsageRow[];
   totals?: BillingUsageTotals;
-  view: "quantities" | "funding" | "explorer";
+  view: "charts" | "explorer";
 }) {
   useUiTranslation();
   const [dimension, setDimension] = useState<Dimension>("service");
@@ -58,8 +58,8 @@ export function BillingUsageExplorer({
         )}
         {rows.length > 0 && view !== "explorer" && (
           <div className="usage-overview-visuals">
-            {view !== "funding" && <BillingQuantityChart rows={rows} catalog={catalog} overview />}
-            {view !== "quantities" && <BillingFundingChart rows={rows} />}
+            <BillingQuantityChart rows={rows} catalog={catalog} overview />
+            <BillingFundingChart rows={rows} />
           </div>
         )}
         {rows.length > 0 && view === "explorer" && (

@@ -56,7 +56,7 @@ it("pushes opening NyxBot and replaces every drill-in and parent so browser Back
   await act(() => router.load());
   await act(() => account!.open("nyxbot"));
   expect(history.length).toBe(2);
-  for (const panelTab of ["tasks", "tasks/specialists", "tasks", undefined]) {
+  for (const panelTab of ["tasks", "tasks", "tasks", undefined]) {
     await act(() => account!.update({ panelTab }));
     expect(history.length).toBe(2);
     expect(router.state.location.search).toEqual({ panel: "nyxbot", ...(panelTab ? { panelTab } : {}) });

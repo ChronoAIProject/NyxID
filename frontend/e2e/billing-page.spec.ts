@@ -53,7 +53,7 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await billingSection(page, "billing/benefits/allowances");
+    await billingSection(page, "billing/benefits");
     const allowance = page.locator(".benefit-disclosure").filter({
       has: page.locator(".compact-benefit-label > strong", {
         hasText: "Example LLM",
@@ -130,7 +130,7 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Usage", exact: true }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await billingSection(page, "usage/charts/quantities");
+    await billingSection(page, "usage/charts");
     await expect(
       page.locator(".usage-explorer .usage-quantity-chart").first(),
     ).toBeVisible();
@@ -388,12 +388,12 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       benefits.getByRole("button", { name: "Add credits", exact: true }),
     ).toBeVisible();
-    await billingSection(page, "billing/benefits/grants");
+    await billingSection(page, "billing/benefits");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
     await expect(
       benefits.getByText(/Available: 1.5 credits · Held:/),
     ).toBeVisible();
-    await billingSection(page, "billing/benefits/allowances");
+    await billingSection(page, "billing/benefits");
     // #1673 replaced the image with a focusable stacked meter. Keyboard
     // focus exposes the full allowance breakdown for every viewport.
     await page
@@ -684,13 +684,13 @@ for (const width of [1440, 390]) {
     await page.goto("/billing");
     const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
     await expect(benefits).toContainText("96.5 credits");
-    await billingSection(page, "billing/benefits/grants");
+    await billingSection(page, "billing/benefits");
     await benefits.getByRole("button", { name: "Next grants" }).click();
     await expect(benefits).toContainText("51 grants · page 2");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
     await page.getByRole("tab", { name: "Usage", exact: true }).click();
     await expect(benefits).toContainText("96.5 credits");
-    await billingSection(page, "billing/benefits/grants");
+    await billingSection(page, "billing/benefits");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
     await expect(benefits).toContainText("51 grants · page 2");
     expect(
@@ -722,7 +722,7 @@ test("singular benefit amounts and grant history read correctly on mobile", asyn
   await page.goto("/billing");
   const benefits = page.getByLabel("Current available benefits", { exact: true }).filter({ visible: true });
   await expect(benefits.locator('p[title="1"]')).toHaveText("1 credit");
-  await billingSection(page, "billing/benefits/grants");
+  await billingSection(page, "billing/benefits");
   await expect(benefits).toContainText("1 grant · page 1.");
   await expect(benefits).toContainText("Granted 1 credit ·");
   await page.getByRole("tab", { name: "Usage", exact: true }).click();
@@ -774,9 +774,9 @@ for (const theme of ["light", "dark"] as const) {
     await expect(
       benefits.locator('p[title="123456790.623456789123"]'),
     ).toBeVisible();
-    await billingSection(page, "billing/benefits/wallet");
+    await billingSection(page, "billing/benefits");
     await expect(benefits.getByText("123,456,789.123457 credits", { exact: true })).toBeVisible();
-    await billingSection(page, "billing/benefits/allowances");
+    await billingSection(page, "billing/benefits");
     const allowance = benefits
       .locator(".benefit-disclosure")
       .filter({

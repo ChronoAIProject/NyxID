@@ -430,8 +430,9 @@ impl PanelUpdate {
         if self.specialist_access_requests == Some(SpecialistAccessRequests::RoutedToNyxbot)
             && before.specialist_access_requests != SpecialistAccessRequests::RoutedToNyxbot
         {
-            sections.push("permissions/specialists");
+            sections.push("permissions");
         }
+        sections.dedup();
         sections
     }
     pub fn changed_sections(&self, before: &AssistantSettings) -> Vec<&'static str> {
@@ -447,16 +448,12 @@ impl PanelUpdate {
                 }
             };
         }
-        changed!("permissions", access_mode);
-        changed!("permissions/specialists", specialist_access_requests);
-        changed!("tasks", max_auto_continuations);
+        changed!("permissions", access_mode, specialist_access_requests);
         changed!(
-            "tasks/specialists",
+            "tasks",
+            max_auto_continuations,
             max_live_subagents,
-            max_concurrent_subagent_turns
-        );
-        changed!(
-            "tasks/groups",
+            max_concurrent_subagent_turns,
             max_group_handoffs,
             max_group_handoffs_per_hour
         );
@@ -474,7 +471,7 @@ impl PanelUpdate {
                 .trigger_runs_per_day
                 .is_some_and(|v| v != before.trigger_runs_per_day)
         {
-            sections.push("automations/budgets");
+            sections.push("automations");
         }
         if self
             .notifications

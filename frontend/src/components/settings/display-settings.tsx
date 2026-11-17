@@ -301,7 +301,7 @@ function SidebarSettings() {
   );
 }
 
-function ColorEditor({ section = "all" }: { readonly section?: string }) {
+function ColorEditor() {
   useUiTranslation();
   const resolved = useResolvedTheme();
   const setMode = useThemeStore((s) => s.setMode);
@@ -333,7 +333,7 @@ function ColorEditor({ section = "all" }: { readonly section?: string }) {
         </GroupedRow>
       </GroupedList>
 
-      {section !== "display/readability" && <section
+      <section
         aria-label={translateUi("Chat appearance preview")}
         className="space-y-3 rounded-xl border p-4"
         style={{
@@ -351,13 +351,11 @@ function ColorEditor({ section = "all" }: { readonly section?: string }) {
           }}
         >{translateUi("Show me the services I have connected.")}</UserMessageBubble>
         <p className="text-16">{translateUi("You can manage your connected services in Plugins.")}</p>
-      </section>}
+      </section>
 
-      {section !== "display/readability" && <GroupedList
-        title={editMode === "light" ? translateUi("Light theme colors") : translateUi("Dark theme colors")}
-      >
+      {Object.entries(DISPLAY_COLOR_GROUPS).map(([title, keys]) => <GroupedList key={title} title={translateUi(title)}>
         <ul aria-label={translateUi("{{value1}} theme colors", { value1: editMode })}>
-          {EDITABLE_COLORS.filter(color => section === "all" || DISPLAY_COLOR_GROUPS[section]?.includes(color.key)).map(({ key, label }) => {
+          {EDITABLE_COLORS.filter(color => keys.includes(color.key)).map(({ key, label }) => {
             const value = color(key);
             const customized = key in overrides;
             return (
@@ -401,9 +399,9 @@ function ColorEditor({ section = "all" }: { readonly section?: string }) {
             );
           })}
         </ul>
-      </GroupedList>}
+      </GroupedList>)}
 
-      {(section === "all" || section === "display/readability") && <GroupedList title={translateUi("Readability")}>
+      <GroupedList title={translateUi("Readability")}>
         <ul aria-label={translateUi("Contrast checks")}>
           {CONTRAST_CHECKS.map((check) => {
             const ratio = contrastRatio(color(check.fg), color(check.bg));
@@ -440,7 +438,7 @@ function ColorEditor({ section = "all" }: { readonly section?: string }) {
             );
           })}
         </ul>
-      </GroupedList>}
+      </GroupedList>
 
       <GroupedList>
         <GroupedRow className="justify-end">
@@ -457,7 +455,7 @@ function ColorEditor({ section = "all" }: { readonly section?: string }) {
   );
 }
 
-export function DisplaySettings({ section = "all" }: { readonly section?: string }) {
+export function DisplaySettings({ section = "display" }: { readonly section?: string }) {
   useUiTranslation();
   const mode = useThemeStore((s) => s.mode);
   const setMode = useThemeStore((s) => s.setMode);
@@ -471,11 +469,11 @@ export function DisplaySettings({ section = "all" }: { readonly section?: string
 
   return (
     <div className="space-y-6">
-      {(section === "all" || section === "display/appearance" || section === "display/text") && <GroupedList
+      {section === "display" && <GroupedList
         title={undefined}
         footer={translateUi("Make NyxID comfortable to read. Your choices are saved in this browser.")}
       >
-        {section !== "display/text" && <SettingRow
+        {<SettingRow
           title={translateUi(ACCOUNT_FIELD_LABELS.theme)}
           description={translateUi("System follows your device's light or dark setting.")}
         >
@@ -486,7 +484,7 @@ export function DisplaySettings({ section = "all" }: { readonly section?: string
             onChange={setMode}
           />
         </SettingRow>}
-        {section !== "display/appearance" && <>
+        {<>
         <GroupedRow>
           <ScaleControl
             label={translateUi(ACCOUNT_FIELD_LABELS.textSize)}
@@ -504,7 +502,7 @@ export function DisplaySettings({ section = "all" }: { readonly section?: string
           />
         </GroupedRow>
         </>}
-        {section !== "display/text" && <>
+        {<>
         <SettingRow
           title={translateUi(ACCOUNT_FIELD_LABELS.motion)}
           description={translateUi("Follow your device preference or use fewer animations.")}
@@ -522,7 +520,7 @@ export function DisplaySettings({ section = "all" }: { readonly section?: string
         </GroupedRow>
         </>}
       </GroupedList>}
-      {(section === "all" || section === "display/chat") && <GroupedList
+      {section === "display/layout" && <GroupedList
         title={translateUi("Chat layout")}
         footer={translateUi("Set a comfortable reading width and writing area for all your chats.")}
       >
@@ -533,8 +531,8 @@ export function DisplaySettings({ section = "all" }: { readonly section?: string
           <ComposerHeightControl />
         </GroupedRow>
       </GroupedList>}
-      {(section === "all" || section === "display/sidebar") && <SidebarSettings />}
-      {(section === "all" || section.startsWith("display/colors/") || section === "display/readability") && <ColorEditor section={section} />}
+      {section === "display/layout" && <SidebarSettings />}
+      {section === "display/colors" && <ColorEditor />}
     </div>
   );
 }

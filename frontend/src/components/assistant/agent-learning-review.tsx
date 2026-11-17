@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -37,6 +38,7 @@ export function AgentLearningReview({
   useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
+  const visible = useCappedItems(review.data?.proposals ?? [], 3);
   const [open, setOpen] = useState<string | undefined>(proposalId);
   useEffect(() => {
     if (proposalId && review.data) document.getElementById(`learning-proposal-${proposalId}`)?.scrollIntoView?.({ block: "nearest" });
@@ -168,7 +170,7 @@ export function AgentLearningReview({
         ) : null}
       </GroupedList>
 
-      {proposals.map((proposal) => {
+      {proposals.filter(proposal => visible.items.includes(proposal) || open === proposal.id).map((proposal) => {
         const draft = proposal.draft;
         const isOpen = open === proposal.id;
         const card = cards[proposal.id];
@@ -417,6 +419,7 @@ export function AgentLearningReview({
           </article>
         );
       })}
+      {visible.remaining > 0 && <GroupedList><GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow></GroupedList>}
     </section>
   );
 }

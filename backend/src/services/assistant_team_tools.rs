@@ -857,7 +857,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change NyxBot preferences only when the owner asks: task limits, automation timezone/budgets and push kinds. Higher limits may spend credits faster. Access mode may only tighten (Full access -> Auto -> Ask every time); specialist access requests may change only to denied. Equal authority values are no-ops. To relax approvals or newly route requests to NyxBot, give the returned owner-only page. Agent access_mode_override and voice are human-only and excluded. Omitted fields stay unchanged; returns updated preferences and changed section URLs."
         }
         "settings_link" => {
-            "For NyxBot push preferences use area nyxbot_settings, section notifications; for automation budgets use section automations/budgets; for channel configuration use section channels. Other areas notifications, automations and channel_bots retain their separate destinations. Optional section targets an exact page within nyxbot_settings, account_settings, profile/security/sessions/mcp/display/privacy, billing/usage, or agent_details (with agent). Account security, profile, billing and agent access modes remain human-only; give the page link. add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
+            "For NyxBot push preferences use area nyxbot_settings, section notifications; for automation budgets use section automations; for channel configuration use section channels. Other areas notifications, automations and channel_bots retain their separate destinations. Optional section targets an exact page within nyxbot_settings, account_settings, profile/security/sessions/mcp/display/privacy, billing/usage, or agent_details (with agent). Account security, profile, billing and agent access modes remain human-only; give the page link. add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
             and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
@@ -1376,7 +1376,7 @@ mod tests {
         assert!(
             validate(
                 "settings_link",
-                &json!({"area":"security", "section":"security/mfa"})
+                &json!({"area":"security", "section":"security"})
             )
             .is_ok()
         );
@@ -1391,6 +1391,48 @@ mod tests {
         let sections = settings_sections();
         let unique: std::collections::HashSet<_> = sections.iter().collect();
         assert_eq!(sections.len(), unique.len());
+    }
+
+    #[test]
+    fn removed_settings_sections_are_rejected_by_link_schema() {
+        // Browser URLs retain ancestor fallback; new tool links use only current pages.
+        for (area, section) in [
+            ("nyxbot_settings", "permissions/specialists"),
+            ("nyxbot_settings", "tasks/specialists"),
+            ("nyxbot_settings", "tasks/groups"),
+            ("nyxbot_settings", "automations/budgets"),
+            ("agent_details", "overview/access"),
+            ("agent_details", "overview/chat"),
+            ("agent_details", "overview/ownership"),
+            ("agent_details", "grants/operations"),
+            ("agent_details", "grants/guests"),
+            ("agent_details", "grants/voice"),
+            ("agent_details", "skills/installed"),
+            ("agent_details", "skills/learning"),
+            ("account_settings", "security/mfa"),
+            ("account_settings", "security/password"),
+            ("account_settings", "security/linked-accounts"),
+            ("account_settings", "mcp/cursor"),
+            ("account_settings", "mcp/claude-code"),
+            ("account_settings", "mcp/codex"),
+            ("account_settings", "display/appearance"),
+            ("account_settings", "display/text"),
+            ("account_settings", "display/chat"),
+            ("account_settings", "display/sidebar"),
+            ("account_settings", "display/colors/surfaces"),
+            ("account_settings", "display/colors/text"),
+            ("account_settings", "display/colors/controls"),
+            ("account_settings", "display/readability"),
+            ("billing", "billing/benefits/wallet"),
+            ("billing", "billing/benefits/grants"),
+            ("billing", "billing/benefits/allowances"),
+            ("usage", "usage/summary"),
+            ("usage", "usage/charts/quantities"),
+            ("usage", "usage/charts/funding"),
+        ] {
+            let args = json!({"area": area, "section": section});
+            assert!(validate("settings_link", &args).is_err(), "{args}");
+        }
     }
 
     #[test]

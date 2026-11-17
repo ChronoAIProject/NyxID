@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { useSectionSearchParam } from "@/hooks/use-section-search-param";
 import { radioKeys } from "@/lib/radio-group";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -131,9 +132,6 @@ export function NyxBotSettingsContent() {
     summaries.permissions = translateUi(
       ACCESS_MODE_LABEL[formValues(settings.data).access_mode],
     );
-    summaries["permissions/specialists"] = translateUi(
-      SPECIALIST_ACCESS_LABELS[settings.data.specialist_access_requests ?? "denied"],
-    );
     const push = settings.data.notifications?.push;
     if (push) {
       const count = Object.values(push).filter(Boolean).length;
@@ -200,15 +198,10 @@ export function NyxBotSettingsContent() {
         )}
         onBack={() => navigate(nyxBotSettingsParent(section))}
       >
-        {section === "permissions" ||
-        section === "permissions/specialists" ||
-        section === "tasks" ||
-        section === "tasks/specialists" ||
-        section === "tasks/groups"
+        {section === "permissions" || section === "tasks"
           ? settingsPage(section)
           : null}
-        {section === "automations" && <AutomationList />}
-        {section === "automations/budgets" && <AutomationPreferences detail />}
+        {section === "automations" && <><AutomationList /><AutomationPreferences detail /></>}
         {section === "notifications" && <NotificationPreferences />}
         {section === "channels" && (
           <div className="@container/channel-bots">
@@ -274,9 +267,9 @@ function AutomationList() {
   useUiTranslation();
   const settings = useNyxBotSettings();
   const triggers = useTriggers();
+  const visible = useCappedItems(triggers.data?.triggers.filter(t => t.delivery.type === "assistant") ?? [], 3);
   return (
     <GroupedList
-      title={translateUi("Automations")}
       footer={
         triggers.error ? (
           <ErrorBanner
@@ -292,10 +285,8 @@ function AutomationList() {
           title={translateUi("Loading automations...")}
         />
       )}
-      {!triggers.error &&
-        triggers.data?.triggers
-          .filter((t) => t.delivery.type === "assistant")
-          .map((row) => <AutomationRow key={row.id} row={row} timezone={settings.data?.timezone} />)}
+      {!triggers.error && visible.items.map(row => <AutomationRow key={row.id} row={row} timezone={settings.data?.timezone} />)}
+      {visible.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow>}
 
       <GroupedRow asChild interactive>
         <Link to="/assistant/automations">
@@ -442,9 +433,10 @@ function SettingsForm({
             ))}
           </GroupedList>
         )}
-        {section.startsWith("tasks") && (
-          <GroupedList
-            footer={<>{section !== "tasks" && <p>{translateUi("Every specialist turn and group hand-off is billed to your credits like any other NyxBot turn, so higher limits can spend credits faster.")}</p>}{errors}</>}
+        {section === "tasks" && [fields.slice(0, 1), fields.slice(1)].map((groupFields, index) => (
+          <GroupedList key={index}
+            title={index === 1 ? translateUi("Specialists & group hand-offs") : undefined}
+            footer={<>{index === 1 && <p>{translateUi("Every specialist turn and group hand-off is billed to your credits like any other NyxBot turn, so higher limits can spend credits faster.")}</p>}{index === 1 && errors}</>}
           >
             {(
               [
@@ -485,7 +477,7 @@ function SettingsForm({
                 },
               ] as const
             )
-              .filter(({ name }) => fields.includes(name))
+              .filter(({ name }) => groupFields.includes(name))
               .map(({ name, label, min, max, description }) => (
                 <FormField
                   key={name}
@@ -520,9 +512,9 @@ function SettingsForm({
                 />
               ))}
           </GroupedList>
-        )}
-        {section === "permissions/specialists" && (
-          <GroupedList role="radiogroup" aria-label={translateUi("Specialist access requests")}>
+        ))}
+        {section === "permissions" && (
+          <GroupedList title={translateUi("Specialist access requests")} role="radiogroup" aria-label={translateUi("Specialist access requests")}>
             {(["denied", "routed_to_nyxbot"] as const).map((option) => (
               <GroupedRow key={option} asChild interactive>
                 <button

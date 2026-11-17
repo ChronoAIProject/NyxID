@@ -87,7 +87,6 @@ function NotificationPreferencesForm({
         className="space-y-6"
       >
         <GroupedList
-          title={translateUi("Notifications")}
           footer={
             <>
               <p>

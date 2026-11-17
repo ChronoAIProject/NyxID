@@ -775,7 +775,8 @@ never as in-shell pages. The assistant has no desktop top bar: the sidebar colum
 carries the logo, search (⌘K: recent chats, agents/groups, pages, settings sections,
 theme) and the account menu, and both open the same panel URLs as NyxBot's
 settings links.
-Settings and NyxBot use hierarchical `panelTab` sections (slash paths); Billing
+Settings and NyxBot use `panelTab` sections (slash paths), with short controls inline
+and pages reserved for forms, long text or lists. Root → page is the default; Billing
 adds `panelSection` beneath its two tabs. Agent `details` accepts tab/section paths.
 Nested Back replaces to the parent. One retained form scope preserves drafts; live settings refresh pristine fields.
 Opening account panels pushes history; Settings/NyxBot sections replace. Billing
@@ -784,7 +785,8 @@ replace. Back after opening or only drilling in closes the panel;
 Back after an explicit close reopens it with any pending top-up already consumed.
 Formerly local agent-sheet buttons open/close with replace; linked closes push. Agent
 tabs and drill-ins replace. Notification settings links to Studio. Agent details
-retains its five tabs with focused Overview, Access and Skills pages;
+retains its five tabs: Overview identity/behaviour/ownership and Skills edit inline;
+long text and access lists have pages. Display uses Appearance/Layout/Colors views;
 in-chat connection/setup flows keep their existing presentation. Studio `/settings` and
 `/billing` remain available. Lago checkout returns to `/billing` (as configured in
 `docs/LAGO_SETUP.md`), even when started in the assistant.

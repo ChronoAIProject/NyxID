@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AvailableBenefits, AvailableBenefitsProvider } from "./available-benefits";
+import { AvailableBenefits, AvailableBenefitsCount, AvailableBenefitsProvider } from "./available-benefits";
 import { availableCreditTotal } from "@/lib/credits";
 import {
   billingWallet,
@@ -44,13 +44,13 @@ const response = (page = 1) => ({
   per_page: 50,
 });
 function BenefitsPages({ ownerId, actions }: { ownerId?: string; actions?: ReactNode }) {
-  const [view, setView] = useState<"summary" | "wallet" | "grants" | "allowances">("summary");
+  const [view, setView] = useState<"summary" | "details">("summary");
   return <AvailableBenefitsProvider ownerId={ownerId}>
-    <nav>{(["summary", "wallet", "grants", "allowances"] as const).map(value => <button key={value} onClick={() => setView(value)}>{value}</button>)}</nav>
+    <nav>{(["summary", "details"] as const).map(value => <button key={value} onClick={() => setView(value)}>{value}</button>)}</nav>
     <AvailableBenefits view={view} actions={actions} />
   </AvailableBenefitsProvider>;
 }
-async function visit(view: "summary" | "wallet" | "grants" | "allowances") {
+async function visit(view: "summary" | "details") {
   await userEvent.click(screen.getByRole("button", { name: view }));
 }
 function mount() {
@@ -146,9 +146,9 @@ it("adds exact wallet and spendable grants, with native allowance units and full
   expect(screen.queryByText("Free allowances")).not.toBeInTheDocument();
   expect(screen.queryByText("Pending activation")).not.toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Available credits" })).toBeVisible();
-  await visit("allowances");
+  await visit("details");
   expect(screen.getByText("Free allowances")).toBeVisible();
-  await visit("grants");
+  await visit("details");
   expect(screen.getByText("Pending activation")).toBeVisible();
   expect(screen.getByText(/Available: 12 credits · Held:/)).toBeVisible();
 });
@@ -168,7 +168,7 @@ it("uses singular credit and grant labels in the headline and expanded history",
   );
   mount();
   expect(await screen.findByTitle("1")).toHaveTextContent("1 credit");
-  await visit("grants");
+  await visit("details");
   expect(screen.getByText(/1 grant · page 1\./)).toBeVisible();
   expect(screen.getByText(/Granted 1 credit ·/)).toBeVisible();
 });
@@ -185,7 +185,7 @@ it("preserves the expanded breakdown and authoritative headline while the next p
   );
   mount();
   await screen.findByTitle("107.000000000001");
-  await visit("grants");
+  await visit("details");
   await userEvent.click(screen.getByRole("button", { name: "Next grants" }));
   expect(screen.getByText("Individual grants")).toBeVisible();
   expect(screen.getByRole("button", { name: "Next grants" })).toBeDisabled();
@@ -224,7 +224,7 @@ it("shows a failed refresh as stale and does not silently discard it", async () 
 it("clears benefit details after authorization is lost", async () => {
   const client = mount();
   await screen.findByTitle("14.000000000002");
-  await visit("grants");
+  await visit("details");
   get.mockRejectedValue(
     new ApiError(403, {
       error: "forbidden",
@@ -251,7 +251,7 @@ it("keeps grants spendable when the wallet is negative and shows the signed wall
     "12 credits",
   );
   expect(screen.queryByText("-8 credits")).not.toBeInTheDocument();
-  await visit("wallet");
+  await visit("details");
   expect(screen.getByText("-8 credits")).toBeVisible();
   expect(availableCreditTotal("-8", "12.000000000001")).toBe("12.000000000001");
 });
@@ -312,4 +312,17 @@ it("keeps wallet actions available while benefits load without showing a partial
   expect(screen.getByRole("button", { name: "Add credits" })).toBeVisible();
   expect(screen.getByLabelText("Loading available credits")).toBeVisible();
   expect(screen.queryByTitle("95")).not.toBeInTheDocument();
+});
+
+
+it("summarizes the existing total grant count without an extra read and hides errors", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><AvailableBenefitsProvider><AvailableBenefitsCount /></AvailableBenefitsProvider></QueryClientProvider>);
+  expect(await screen.findByText("51 grants")).toBeVisible();
+  expect(get.mock.calls.map(([path]) => path).sort()).toEqual(["/billing/benefits?page=1", "/billing/wallet"]);
+  const queryKey = ["billing", "credits", "benefits", "account-a", undefined, 1];
+  act(() => client.getQueryCache().find({ queryKey })!.setState({ fetchStatus: "fetching" }));
+  expect(screen.getByText("51 grants")).toBeVisible();
+  act(() => client.getQueryCache().find({ queryKey })!.setState({ status: "error", error: new Error("Unavailable"), fetchStatus: "idle" }));
+  await waitFor(() => expect(screen.queryByText("51 grants")).not.toBeInTheDocument());
 });

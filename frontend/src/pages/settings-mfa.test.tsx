@@ -90,7 +90,7 @@ async function open(enabled = false) {
   const router = createRouter({
     routeTree: root.addChildren([route]),
     history: createMemoryHistory({
-      initialEntries: ["/settings?tab=security%2Fmfa"],
+      initialEntries: ["/settings?tab=security"],
     }),
   });
   client = new QueryClient({

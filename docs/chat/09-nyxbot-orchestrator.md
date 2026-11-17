@@ -2345,8 +2345,7 @@ question. Specialists and guests are refused before settings access.
 
 `nyxid__settings_link` accepts optional `section` with
 `area: "nyxbot_settings"`. Allowed values are `permissions`,
-`permissions/specialists`, `tasks`, `tasks/specialists`, `tasks/groups`,
-`automations`, `automations/budgets`, `notifications`, `channels`,
+`tasks`, `automations`, `notifications`, `channels`,
 `channels/adapters`, `channels/links`. It emits `panelTab` only when supplied;
 missing section retains the existing root link. It also accepts `account_settings`
 with any Account Settings section, the existing `profile`, `security`, `sessions`,
@@ -2359,7 +2358,11 @@ Unknown or cross-area sections reject validation. Omitting section preserves
 existing destinations; `account_settings` opens the root and `agent_details` opens
 Overview. These links grant no new write authority for profile, security, billing
 or per-agent access mode. The UI normalizes unavailable pages to their
-nearest available ancestor.
+nearest available ancestor. Short controls now share their parent forms: Permissions
+includes specialist requests, Tasks includes all five limits, and Automations
+includes timezone/budgets. Account, agent and billing destinations follow the
+consolidated trees in the frontend navigation contract. Removed IDs are no longer
+accepted by the tool; old browser links fall back to a surviving ancestor.
 
 `nyxid__update_settings` accepts at least one panel field, rejects unknown
 properties and shares REST validation and server limits:
@@ -2380,7 +2383,7 @@ properties and shares REST validation and server limits:
 NyxBot changes settings only when the owner asks. It never relaxes its own
 approvals: a wider access mode or a change to `routed_to_nyxbot` returns MCP `isError` with
 `error: "settings_authority_widening"`, `url` and `sections` pointing to
-`permissions` or `permissions/specialists`. The whole mixed patch is refused
+the consolidated `permissions` page. The whole mixed patch is refused
 before any settings write, even if other fields are valid. Refusals retain the
 metadata-only failed tool audit. An unchanged access mode is a no-op; an already
 stored `routed_to_nyxbot` value is also a no-op for that field. An atomic snapshot fence

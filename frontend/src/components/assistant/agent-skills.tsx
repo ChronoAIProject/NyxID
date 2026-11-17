@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -288,6 +289,7 @@ export function AgentSkills({
 }) {
   useUiTranslation();
   const current = useAgentSkills(agentId);
+  const visibleSkills = useCappedItems(current.data?.skills ?? []);
   const canDisable = useAuthStore((s) =>
     userHasFeature(s.user, FEATURE_FLAG.SKILL_PIN_DISABLE),
   );
@@ -399,7 +401,7 @@ export function AgentSkills({
         {current.data?.skills.length === 0 ? (
           <GroupedRow title={translateUi("No skills attached.")} />
         ) : null}
-        {current.data?.skills.map((skill) => (
+        {current.data && visibleSkills.items.map((skill) => (
           <AttachedSkill
             key={skill.skill_id}
             skill={skill}
@@ -432,7 +434,7 @@ export function AgentSkills({
             }
             remove={() =>
               save(
-                current.data.skills.filter(
+                current.data!.skills.filter(
                   (s) => s.skill_id !== skill.skill_id,
                 ),
               )
@@ -465,6 +467,7 @@ export function AgentSkills({
             ) : null}
           </AttachedSkill>
         ))}
+        {visibleSkills.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visibleSkills.showAll}>{translateUi("Show all")}</button></GroupedRow>}
       </GroupedList>
       <GroupedList
         footer={
@@ -674,7 +677,7 @@ export function AgentSkills({
                   onClick={() => {
                     if (preview.data && current.data && selected)
                       save([
-                        ...current.data.skills.filter(
+                        ...current.data!.skills.filter(
                           (s) => s.skill_id !== selected.id,
                         ),
                         preview.data.reference,

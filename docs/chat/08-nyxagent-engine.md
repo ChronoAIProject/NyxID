@@ -2668,7 +2668,11 @@ section URLs, without voice preferences or the legacy approval switch. The
 a closed vocabulary drift-tested against the frontend; cross-area and unknown
 sections reject validation. Omitting it preserves the existing destination.
 Sections add links only: account security, profile, billing and agent overrides
-keep their existing human actions. See the frontend navigation contract.
+keep their existing human actions. Pages contain related forms or lists; short
+choices edit inline. Permissions includes specialist requests, Tasks all five
+limits, and Automations timezone/budgets. Removed section IDs reject tool
+validation; old browser URLs normalize to a surviving ancestor. See the
+[frontend navigation contract](05-frontend-ui.md#account-agent-and-billing-section-navigation).
 
 `update_settings` is a Change under the existing permission classifier. It
 accepts a nonempty partial panel patch, uses REST validation and server bounds,

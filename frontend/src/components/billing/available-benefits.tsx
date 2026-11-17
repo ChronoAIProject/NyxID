@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -49,6 +50,15 @@ export function AvailableBenefitsProvider({ ownerId, children }: { ownerId?: str
   return <BenefitsContext value={{ benefits, wallet, page, setPage }}>{children}</BenefitsContext>;
 }
 
+/** Root disclosure summary from the existing query owner; never starts a read. */
+export function AvailableBenefitsCount() {
+  useUiTranslation();
+  const { benefits } = useContext(BenefitsContext)!;
+  return benefits.data && !benefits.error
+    ? <span className="text-13 text-text-tertiary">{translateUi("{{count}} grants", { count: benefits.data.total_grants })}</span>
+    : null;
+}
+
 export function AvailableBenefits({
   catalog = [],
   actions,
@@ -56,10 +66,11 @@ export function AvailableBenefits({
 }: {
   catalog?: BillingCatalog;
   actions?: ReactNode;
-  view: "summary" | "wallet" | "grants" | "allowances";
+  view: "summary" | "details";
 }) {
   useUiTranslation();
   const { benefits, wallet, page, setPage } = useContext(BenefitsContext)!;
+  const visibleGrants = useCappedItems(benefits.data?.grants ?? [], 3);
   if (benefits.isLoading || wallet.isLoading)
     return (
       <Card
@@ -160,7 +171,7 @@ export function AvailableBenefits({
             className="space-y-4"
           >
             <p className="type-secondary text-muted-foreground">{translateUi("Wallet and eligible grants contribute to available credits. Free allowances are additional usage in their own units. Current balances are independent of usage filters.")}</p>
-            {view === "wallet" && complete && blocked && (
+            {complete && blocked && (
               <p className="type-secondary text-muted-foreground">{translateUi("Balance before billing restrictions:")}{" "}
                 {money(
                   availableCreditTotal(
@@ -171,8 +182,8 @@ export function AvailableBenefits({
                 .
               </p>
             )}
-            {view === "wallet" && wallet.data && <BillingWalletBreakdown wallet={wallet.data} />}
-            {view === "grants" && <>
+            {wallet.data && <BillingWalletBreakdown wallet={wallet.data} />}
+            {<>
             <section aria-label={translateUi("Grant balances")}>
               <h3 className="type-secondary-strong">{translateUi("Billing grants")}</h3>
               <p className="mt-1 type-secondary">{translateUi("Available: ")}{money(data.summary.unreserved)}
@@ -205,7 +216,7 @@ export function AvailableBenefits({
               {data.total_grants.toLocaleString(getFormattingLocale())}{" "}
               {data.total_grants === 1 ? translateUi("credit grant") : translateUi("credit grants")}{translateUi(" · page ")}{data.page}{translateUi(". The available total includes every eligible grant, across all pages. ")}</p>
             <ul className="divide-y divide-border/50">
-              {data.grants.map((g) => (
+              {visibleGrants.items.map((g) => (
                 <li
                   key={g.id}
                   className="min-w-0 space-y-1 break-words py-3 type-secondary"
@@ -260,6 +271,7 @@ export function AvailableBenefits({
                 </li>
               ))}
             </ul>
+            {visibleGrants.remaining > 0 && <Button variant="ghost" onClick={visibleGrants.showAll}>{translateUi("Show all")}</Button>}
             {!data.grants.length && (
               <p className="py-3 type-secondary text-muted-foreground">{translateUi("No grants on this page.")}</p>
             )}
@@ -281,7 +293,7 @@ export function AvailableBenefits({
               </div>
             )}
             </>}
-            {view === "allowances" && <>
+            {<>
             <h3 className="mt-4 type-secondary-strong">{translateUi(BILLING_FIELD_LABELS.freeAllowances)}</h3>
             <BillingAllowanceBenefits
               allowances={data.allowances}
@@ -290,7 +302,7 @@ export function AvailableBenefits({
 
           </div>
         )}
-        {view === "allowances" && data && <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}{translateUi(". Allowances apply first, then eligible grants, then wallet credits. ")}</p>}
+        {view === "details" && data && <p className="mt-3 type-secondary text-text-tertiary">{translateUi("Benefits refreshed ")}{timestamp(data.summary.generated_at)}{translateUi(". Allowances apply first, then eligible grants, then wallet credits. ")}</p>}
       </CardContent>
     </Card>
   );

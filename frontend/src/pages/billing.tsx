@@ -5,9 +5,9 @@ import { Button } from "@/components/ui/button";
 import { SectionPages } from "@/components/ui/section-pages";
 import { GroupedDetailContext } from "@/lib/grouped-detail";
 import { CompactScroll } from "@/components/ui/compact-title";
-import { GroupedList, GroupedDisclosure } from "@/components/ui/grouped-list";
+import { GroupedList, GroupedRow, GroupedDisclosure } from "@/components/ui/grouped-list";
 import { BILLING_SECTIONS, BILLING_SECTION_TITLES, billingSections, type BillingSection } from "@/lib/billing-sections";
-import { Wallet, Gift, ReceiptText, Activity, Monitor, ChartNoAxesCombined, Search, Gauge } from "lucide-react";
+import { Wallet, Gift, ReceiptText, Activity, Monitor, ChartNoAxesCombined, Search } from "lucide-react";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -40,7 +40,7 @@ import {
   useTopUpBilling,
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
-import { AvailableBenefits, AvailableBenefitsProvider } from "@/components/billing/available-benefits";
+import { AvailableBenefits, AvailableBenefitsCount, AvailableBenefitsProvider } from "@/components/billing/available-benefits";
 import { BillingMachines } from "@/components/billing/billing-machines";
 import { BillingWalletActions } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
@@ -320,19 +320,18 @@ function BillingContent({
   />;
   function disclosures(root: BillingSection) {
     return <GroupedList>{BILLING_SECTIONS.filter(child => billingSections.parent(child) === root && availability[child as keyof typeof availability] !== false).map(child => {
-      const Icon = child.endsWith("topup") ? Wallet : child.includes("benefits") ? Gift : child.endsWith("bill") ? ReceiptText : child.endsWith("machines") ? Monitor : child.endsWith("activity") ? Activity : child.endsWith("explorer") ? Search : child.endsWith("summary") ? Gauge : ChartNoAxesCombined;
-      return <GroupedDisclosure key={child} leading={root === "billing" || root === "usage" ? <Icon aria-hidden /> : undefined} data-drawer-page-trigger={child} onClick={() => go(child)}>{translateUi(BILLING_SECTION_TITLES[child])}</GroupedDisclosure>;
+      const Icon = child.endsWith("topup") ? Wallet : child.includes("benefits") ? Gift : child.endsWith("bill") ? ReceiptText : child.endsWith("machines") ? Monitor : child.endsWith("activity") ? Activity : child.endsWith("explorer") ? Search : ChartNoAxesCombined;
+      return <GroupedDisclosure key={child} leading={root === "billing" || root === "usage" ? <Icon aria-hidden /> : undefined} accessory={child === "billing/benefits" ? <AvailableBenefitsCount /> : undefined} data-drawer-page-trigger={child} onClick={() => go(child)}>{translateUi(BILLING_SECTION_TITLES[child])}</GroupedDisclosure>;
     })}</GroupedList>;
   }
   const filters = <UsageFilters services={services} values={selected} disabled={usageQuery.isLoading || usageQuery.isError} onServicesChange={values => updateSearch({ services: values })} period={period} onPeriodChange={value => updateSearch({ period: value })} />;
   function detailPage(value: BillingSection) {
-    if (value === "billing/topup") return <><Button disabled={!topUpReady} onClick={() => setTopUpOpen(true)}>{translateUi(BILLING_FIELD_LABELS.addCredits)}</Button><BillingTopUpHistory ownerId={ownerId} presentation={presentation} /></>;
-    if (value === "billing/benefits" || value === "usage/charts") return disclosures(value);
-    if (value.startsWith("billing/benefits/")) return <AvailableBenefits catalog={catalog} view={value.endsWith("wallet") ? "wallet" : value.endsWith("grants") ? "grants" : "allowances"} />;
+    if (value === "billing/topup") return <><GroupedList><GroupedRow><Button disabled={!topUpReady} onClick={() => setTopUpOpen(true)}>{translateUi(BILLING_FIELD_LABELS.addCredits)}</Button></GroupedRow></GroupedList><BillingTopUpHistory ownerId={ownerId} presentation={presentation} /></>;
+    if (value === "billing/benefits") return <AvailableBenefits catalog={catalog} view="details" />;
     if (value === "billing/bill") return <BillingBill enabled={billingReady && (!ownerId || Boolean(wallet?.lago_subscription_id))} ownerId={ownerId} />;
     if (value === "billing/machines") return <BillingMachines />;
     if (value === "billing/activity") return <BillingActivity />;
-    return <>{filters}{usageQuery.isError ? <ErrorBanner message={errorMessage(usageQuery.error, "Failed to load billing usage.")} onRetry={() => void usageQuery.refetch()} /> : usageQuery.isLoading ? <Skeleton className="h-[320px] w-full" /> : value === "usage/summary" ? <BillingUsageSummary rows={rows} /> : <BillingUsageExplorer catalog={catalog} rows={rows} totals={selected.length ? undefined : usageQuery.data?.totals} view={value === "usage/charts/quantities" ? "quantities" : value === "usage/charts/funding" ? "funding" : "explorer"} />}</>;
+    return <>{filters}{usageQuery.isError ? <ErrorBanner message={errorMessage(usageQuery.error, "Failed to load billing usage.")} onRetry={() => void usageQuery.refetch()} /> : usageQuery.isLoading ? <Skeleton className="h-[320px] w-full" /> : <BillingUsageExplorer catalog={catalog} rows={rows} totals={selected.length ? undefined : usageQuery.data?.totals} view={value === "usage/charts" ? "charts" : "explorer"} />}</>;
   }
   return <AvailableBenefitsProvider key={ownerId ?? "personal"} ownerId={ownerId}><GroupedFormScope viewport><div className="billing-page flex min-h-0 flex-1 flex-col gap-6">
     <Tabs value={tab} onValueChange={value => updateSearch({ tab: value === "usage" ? "usage" : "billing", section: undefined })} className="tabbed-billing flex min-h-0 flex-1 flex-col">
@@ -344,7 +343,7 @@ function BillingContent({
             <AvailableBenefits catalog={catalog} view="summary" actions={walletActions} />
             {billingCapability && !billingReady && <GroupedList footer={translateUi("Billing is not available on this deployment.")} />}
             {catalogQuery.isError && <ErrorBanner message={translateUi("Service display names could not be loaded.")} onRetry={() => void catalogQuery.refetch()} />}
-            {usageQuery.isError ? <ErrorBanner message={translateUi("Billing availability could not be verified. Retry to enable wallet actions.")} onRetry={() => void usageQuery.refetch()} /> : usageQuery.isSuccess && <BillingUsageSummary rows={rows} compact />}
+            {usageQuery.isError ? <ErrorBanner message={translateUi("Billing availability could not be verified. Retry to enable wallet actions.")} onRetry={() => void usageQuery.refetch()} /> : usageQuery.isSuccess && <BillingUsageSummary rows={rows} compact={tab === "billing"} />}
             {disclosures(tab)}
           </CompactScroll>
           {(["billing", "usage"] as const).map(root => <SectionPages key={root} sections={BILLING_SECTIONS} titles={BILLING_SECTION_TITLES} root={root} rootTitle={BILLING_SECTION_TITLES[root]} selected={tab === root ? section : undefined} navigate={go} available={availability} render={detailPage} />)}

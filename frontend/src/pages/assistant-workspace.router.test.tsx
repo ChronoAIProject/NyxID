@@ -402,6 +402,14 @@ for (const nyxagent of [true, false]) {
   });
 }
 
+it.each(["display", "display/layout", "display/colors"])("names the %s peer view Display in the dialog and heading", async section => {
+  await open(`/assistant/plugins?panel=settings&panelTab=${section}`);
+  const dialog = await screen.findByRole("dialog", { name: "Display" });
+  expect(within(dialog).getByRole("heading", { name: "Display" })).toBeVisible();
+  const segment = section === "display" ? "Appearance" : section === "display/layout" ? "Layout" : "Colors";
+  expect(within(dialog).getByRole("tab", { name: segment })).toHaveAttribute("data-state", "active");
+});
+
 it.each([false, undefined])("strips unavailable billing capability %s with replace", async (billing_available) => {
   useAuthStore.setState({ user: { ...person, capabilities: { billing_available } } });
   const router = await open("/assistant?c=chat&panel=billing&panelTab=usage");
@@ -612,17 +620,16 @@ it("pushes Billing opening and tabs while section navigation keeps Back-to-close
   const panel = await screen.findByRole("dialog", { name: "Billing & Usage" });
   expect(router.history.length).toBe(2);
   await userEvent.click(within(panel).getByRole("button", { name: "Benefits & allowances" }));
-  await userEvent.click(within(panel).getByRole("button", { name: "Free allowances" }));
   expect(router.history.length).toBe(2);
   await act(() => router.history.back());
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(router.state.location.search).toEqual({ c: "chat" });
   await act(() => router.history.forward());
-  expect(await screen.findByRole("dialog", { name: "Free allowances" })).toBeVisible();
+  expect(await screen.findByRole("dialog", { name: "Benefits & allowances" })).toBeVisible();
   await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
   expect(router.history.length).toBe(3);
   await act(() => router.history.back());
-  expect(await screen.findByRole("dialog", { name: "Free allowances" })).toBeVisible();
+  expect(await screen.findByRole("dialog", { name: "Benefits & allowances" })).toBeVisible();
 });
 
 it("consumes pending top-up before close so Back cannot replay after wallet resolution", async () => {
@@ -691,9 +698,9 @@ it.each(["settings", "billing", "nyxbot"])("preserves signed-out %s deep links i
 
 it.each(ASSISTANT_SHELL_ROUTES)("retains nested NyxBot addressing over %s", async (route) => {
   const path = route.replace("$machineId", "machine-1");
-  const router = await open(`${path}?panel=nyxbot&panelTab=tasks%2Fgroups`);
-  expect(await screen.findByRole("dialog", { name: "Group hand-offs" })).toBeVisible();
-  expect(router.state.location.search).toMatchObject({ panel: "nyxbot", panelTab: "tasks/groups" });
+  const router = await open(`${path}?panel=nyxbot&panelTab=tasks`);
+  expect(await screen.findByRole("dialog", { name: "Tasks & specialists" })).toBeVisible();
+  expect(router.state.location.search).toMatchObject({ panel: "nyxbot", panelTab: "tasks" });
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(router.state.location.search.panel).toBeUndefined());
   expect(router.state.location.pathname).toBe(path);
@@ -704,8 +711,8 @@ it("searches NyxBot section keywords and opens the exact nested page", async () 
   await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
   const search = await screen.findByRole("combobox");
   await userEvent.type(search, "timezone");
-  await userEvent.click(await screen.findByRole("option", { name: /Timezone and budgets/ }));
-  await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "automations/budgets" }));
+  await userEvent.click(await screen.findByRole("option", { name: /Automations NyxBot settings/ }));
+  await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "automations" }));
   expect(router.state.location.pathname).toBe("/assistant/plugins");
 });
 
@@ -730,15 +737,15 @@ it.each(["en", "zh-CN"])("finds rendered setting labels in %s and opens their ex
   const router = await open("/assistant/plugins");
   const cases = [
     [SETTINGS_LABELS.max_auto_continuations, "tasks"],
-    [SETTINGS_LABELS.max_live_subagents, "tasks/specialists"],
-    [SETTINGS_LABELS.max_concurrent_subagent_turns, "tasks/specialists"],
-    [SETTINGS_LABELS.max_group_handoffs, "tasks/groups"],
-    [SETTINGS_LABELS.max_group_handoffs_per_hour, "tasks/groups"],
-    [AUTOMATION_TIMEZONE_LABEL, "automations/budgets"],
-    ...AUTOMATION_BUDGET_ROWS.map(row => [row[1], "automations/budgets"] as const),
+    [SETTINGS_LABELS.max_live_subagents, "tasks"],
+    [SETTINGS_LABELS.max_concurrent_subagent_turns, "tasks"],
+    [SETTINGS_LABELS.max_group_handoffs, "tasks"],
+    [SETTINGS_LABELS.max_group_handoffs_per_hour, "tasks"],
+    [AUTOMATION_TIMEZONE_LABEL, "automations"],
+    ...AUTOMATION_BUDGET_ROWS.map(row => [row[1], "automations"] as const),
     ...NOTIFICATION_PUSH_ROWS.map(row => [row.label, "notifications"] as const),
     ...Object.values(ACCESS_MODE_LABEL).map(label => [label, "permissions"] as const),
-    ...Object.values(SPECIALIST_ACCESS_LABELS).map(label => [label, "permissions/specialists"] as const),
+    ...Object.values(SPECIALIST_ACCESS_LABELS).map(label => [label, "permissions"] as const),
   ] as const;
   for (const [label, section] of cases) {
     await userEvent.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
@@ -769,10 +776,10 @@ it.each(["en", "zh-CN"])("opens account, agent and billing editors by their rend
   state.agents = [assistantAgentSchema.parse({ id: "scout", name: "Scout", kind: "specialist", status: "idle", created_at: "2026-01-01T00:00:00Z", last_active_at: "2026-01-01T00:00:00Z" })];
   const router = await open("/assistant/plugins");
   const cases = [
-    { label: "Maximum composer height", title: ACCOUNT_SETTINGS_TITLES["display/chat"], hint: "Account Settings", address: { panel: "settings", panelTab: "display/chat" } },
-    { label: "Skip MFA for NyxID app sign-ins", title: ACCOUNT_SETTINGS_TITLES["security/mfa"], hint: "Account Settings", address: { panel: "settings", panelTab: "security/mfa" } },
+    { label: "Maximum composer height", title: ACCOUNT_SETTINGS_TITLES["display/layout"], hint: "Account Settings", address: { panel: "settings", panelTab: "display/layout" } },
+    { label: "Skip MFA for NyxID app sign-ins", title: ACCOUNT_SETTINGS_TITLES["security"], hint: "Account Settings", address: { panel: "settings", panelTab: "security" } },
     { label: "Past usage invoices", title: BILLING_SECTION_TITLES["billing/bill"], hint: "Billing & Usage", address: { panel: "billing", panelTab: "billing", panelSection: "billing/bill" } },
-    { label: "Channel progress reply", title: AGENT_DETAILS_TITLES["overview/chat"], hint: "Scout", address: { agent: "scout", details: "overview/chat" } },
+    { label: "Channel progress reply", title: AGENT_DETAILS_TITLES["overview"], hint: "Scout", address: { agent: "scout", details: "overview" } },
     { label: "Voice instructions", title: AGENT_DETAILS_TITLES["overview/voice"], hint: "Scout", address: { agent: "scout", details: "overview/voice" } },
   ];
   for (const item of cases) {

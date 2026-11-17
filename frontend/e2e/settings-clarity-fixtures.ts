@@ -163,7 +163,7 @@ export async function clarityTheme(page: Page, width: number, mode: "light" | "d
   );
   await page.route("**/api/v1/triggers", (route) => route.fulfill({ json: { triggers: [] } }));
   await page.route("**/api/v1/onboarding/bindings", (route) =>
-    route.fulfill({ json: { bindings: [] } }),
+    route.fulfill({ json: [] }),
   );
 }
 

@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { OrgChannelDisclosure } from "./org-channel-preview";
 import type { OrgChannelPreview } from "@/schemas/org-specialist-channel";
@@ -168,6 +169,7 @@ export function ChannelBotsManager({
   const connected = (channels.data ?? []).filter(
     (row) => !agent || agentOf(row) === agent.id,
   );
+  const visibleConnected = useCappedItems(connected, 3);
   const connectedBotIds = new Set(
     (channels.data ?? []).map((row) => row.channel_bot_id),
   );
@@ -264,6 +266,7 @@ export function ChannelBotsManager({
 
   const [availableOpen, setAvailableOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const visibleAvailable = useCappedItems(available.filter(bot => `${bot.label} ${channelPlatformName(bot.platform)}`.toLowerCase().includes(search.toLowerCase())));
   useDrawerSearchEntries(available.map((bot) => ({ id: `available-bot-${bot.id}`, title: bot.label,
     breadcrumb: "Channels › Available bots", keywords: channelPlatformName(bot.platform), pages: ["available-bots"],
     reveal: () => { setSearch(""); setAvailableOpen(true); },
@@ -308,7 +311,7 @@ export function ChannelBotsManager({
       {connectionId && channels.data && !connected.some((row) => row.id === connectionId) ? <p role="status" className="type-secondary text-text-secondary">{translateUi("This connection is no longer available to you. Refresh connected bots or ask an organization admin.")}</p> : null}
       {connected.length ? (
         <ul aria-label={translateUi("Connected channel bots")} className="space-y-6">
-          {connected.map((row) => {
+          {connected.filter(row => visibleConnected.items.includes(row) || row.id === connectionId).map((row) => {
             const target = targets.find((candidate) => candidate.id === agentOf(row));
             const live = row.status === "pending" || row.status === "active";
             const canManage =
@@ -472,6 +475,7 @@ export function ChannelBotsManager({
           })}
         </ul>
       ) : null}
+      {visibleConnected.remaining > 0 && <GroupedList><GroupedRow asChild interactive><button type="button" onClick={visibleConnected.showAll}>{translateUi("Show all")}</button></GroupedRow></GroupedList>}
       {ownerLink && !availableOpen ? (
         <OwnerLink
           label={ownerLink.label}
@@ -531,13 +535,7 @@ export function ChannelBotsManager({
             </GroupedRow>
           ) : null}
           <ul aria-label={translateUi("Channel bots you can connect")}>
-            {available
-              .filter((bot) =>
-                `${bot.label} ${channelPlatformName(bot.platform)}`
-                  .toLowerCase()
-                  .includes(search.toLowerCase()),
-              )
-              .map((bot) => {
+            {visibleAvailable.items.map((bot) => {
                 const target = agent?.id ?? connectTargets[bot.id] ?? nyxbot?.id;
                 const targetName = agent ? agentLabel(agent) : undefined;
                 const botTargets = targets.filter(
@@ -582,6 +580,7 @@ export function ChannelBotsManager({
                 );
               })}
           </ul>
+          {visibleAvailable.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visibleAvailable.showAll}>{translateUi("Show all")}</button></GroupedRow>}
           {!bots.isPending &&
           !bots.error &&
           !available.some((bot) =>

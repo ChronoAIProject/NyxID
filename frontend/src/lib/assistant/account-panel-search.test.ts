@@ -27,7 +27,7 @@ describe("account panel search", () => {
   });
 });
 
-it.each([undefined, null, "", "tasks/", "/tasks", "tasks/groups/extra", "TASKS", ["tasks"], 1, "permissions%2Fspecialists"])("drops malformed or unknown NyxBot section %j", (panelTab) => {
+it.each([undefined, null, "", "tasks/", "/tasks", "unknown", "TASKS", ["tasks"], 1, "permissions%2Fspecialists"])("drops malformed or unknown NyxBot section %j", (panelTab) => {
   expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab })).toEqual({ panel: "nyxbot" });
 });
 
@@ -36,4 +36,9 @@ it("preserves every typed NyxBot section and ignores unnamespaced tabs", async (
   for (const panelTab of NYXBOT_SETTINGS_SECTIONS) {
     expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab, tab: "security" })).toEqual({ panel: "nyxbot", panelTab });
   }
+});
+
+it("keeps a surviving ancestor for a removed or unknown NyxBot descendant", () => {
+  for (const panelTab of ["tasks/extra", "tasks/specialists", "tasks/groups"])
+    expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab })).toEqual({ panel: "nyxbot", panelTab: "tasks" });
 });

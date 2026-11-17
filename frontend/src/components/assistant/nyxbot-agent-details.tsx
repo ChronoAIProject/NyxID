@@ -1,16 +1,18 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { useTriggers } from "@/hooks/use-triggers";
 import { agentDetailsSearchTerms } from "@/lib/settings-search";
 import { useSectionSearchParam } from "@/hooks/use-section-search-param";
 import { SectionPages } from "@/components/ui/section-pages";
-import { CheckmarkList } from "@/components/ui/checkmark-list";
 import { AGENT_DETAILS_SECTIONS, AGENT_DETAILS_TITLES, AGENT_PROFILE_FIELDS, AGENT_NOTES_LABEL, agentDetailsAvailability, agentDetailsSections, type AgentDetailsSection } from "@/lib/assistant/agent-details-sections";
 import { useRouter } from "@tanstack/react-router";
-import { UserRound, ShieldCheck, MessageSquare, AudioLines, CalendarClock, Wrench, Users, Monitor, Plug, BookOpen, Brain, BadgeInfo, MessageCircle, ListChecks } from "lucide-react";
+import { UserRound, ShieldCheck, MessageSquare, AudioLines, CalendarClock, Monitor, Plug, BookOpen, Brain } from "lucide-react";
 import { OrgGuestGrantsAdoption } from "./org-guest-grants-adoption";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useKeys } from "@/hooks/use-keys";
+import { useMachineAccess } from "@/hooks/use-machine-access";
+import { connectionsForAgent } from "@/lib/assistant/connection-context";
 import { useNodes } from "@/hooks/use-nodes";
 import { useSavedLogins } from "@/hooks/use-saved-logins";
 import { describeChanges, changeList, labelValue, recordChanges, type ChangeField } from "@/lib/grouped-form-changes";
@@ -429,7 +431,7 @@ function AgentDetailsContent({
   const hasOrgChannel = agent.owner_kind === "org" && agent.channels.length > 0;
   const canManageGuests = agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
   const incoming: AgentDetailsSection =
-    proposalId && (!tab || tab === "skills") ? "skills/learning" : (tab ?? "overview");
+    proposalId && (!tab || tab === "skills") ? "skills" : (tab ?? "overview");
   const [active, setActive] = useState<DrawerSearchTab>(incoming.split("/")[0] as DrawerSearchTab);
   const panels = useRef<HTMLDivElement>(null);
   const [pageContainer, setPageContainer] = useState<HTMLDivElement | null>(null);
@@ -489,8 +491,25 @@ function AgentDetailsContent({
   if (!visited.has(page)) setVisited(new Set([...visited, ...agentDetailsSections.ancestry(page)]));
   const automationCache = useTriggers(undefined, false);
   const automationCount = automationCache.data && !automationCache.error ? automationCache.data.triggers.filter(row => row.delivery.type === "assistant" && row.delivery.agent_id === agent.id).length : undefined;
-  const workspaceSettings = useNyxBotSettings(false);
-  const workspaceMode = !workspaceSettings.error ? workspaceSettings.data?.access_mode : undefined;
+  const connectionsCache = useKeys({ enabled: false });
+  const connectionsCount = connectionsCache.data && !connectionsCache.error
+    ? connectionsForAgent(agent, connectionsCache.data).length : undefined;
+  const machinesCache = useMachineAccess(agent.id, false);
+  const machinesCount = agent.kind === "specialist" && agent.machines
+    ? agent.machines.length
+    : machinesCache.data && !machinesCache.error ? machinesCache.data.length : undefined;
+  const personaWords = (agent.persona?.trim() || (agent.kind === "nyxbot" ? agent.description.trim() : "")).split(/\s+/);
+  const personaSummary = personaWords[0]
+    ? `${personaWords.slice(0, 4).join(" ")}${personaWords.length > 4 ? "…" : ""}`
+    : translateUi("Not set");
+  const savedSummaries: Partial<Record<AgentDetailsSection, string>> = {
+    "overview/persona": personaSummary,
+    "overview/voice": translateUi(agent.voice_instructions?.trim() ? "Set" : "Not set"),
+    "overview/automations": automationCount === undefined ? undefined : String(automationCount),
+    "grants/services": agent.kind === "nyxbot" ? translateUi("Full access") : String(agent.services.length),
+    "grants/machines": machinesCount === undefined ? undefined : String(machinesCount),
+    "grants/connections": connectionsCount === undefined ? undefined : String(connectionsCount),
+  };
   function navigateSection(next: AgentDetailsSection = "overview") {
     if (!router) {
       setSection(next);
@@ -503,7 +522,7 @@ function AgentDetailsContent({
           ...previous,
           agent: agent.id,
           details: next,
-          proposal: next === "skills/learning" ? previous.proposal : undefined,
+          proposal: next === "skills" ? previous.proposal : undefined,
         }),
         state: previous => previous,
         replace: true,
@@ -522,52 +541,20 @@ function AgentDetailsContent({
     return (
       <GroupedList>
         {AGENT_DETAILS_SECTIONS.filter(
-          (child) => agentDetailsSections.parent(child) === root && availability[child] !== false,
+          (child) => agentDetailsSections.parent(child) === root && availability[child] !== false && !(agent.share_role && child === "overview/persona"),
         ).map((child) => {
-          const Icon = child.endsWith("access")
-            ? ShieldCheck
-            : child.endsWith("voice")
-              ? AudioLines
-              : child.endsWith("automations")
-                ? CalendarClock
-                : child.endsWith("machines")
-                  ? Monitor
-                  : child.endsWith("connections")
-                    ? Plug
-                    : child.endsWith("guests")
-                      ? Users
-                      : child.endsWith("operations")
-                        ? Wrench
-                        : child === "overview/chat"
-                          ? MessageCircle
-                          : child === "overview/ownership"
-                            ? BadgeInfo
-                            : child === "skills/learning" ? ListChecks : icons[root];
-          const summary =
-            child === "overview/persona"
-              ? agentTitle(agent)
-              : child === "overview/access"
-                ? agent.access_mode_override
-                  ? translateUi(ACCESS_MODE_LABEL[agent.access_mode_override])
-                  : workspaceMode ? translateUi("Workspace setting ({{mode}})", { mode: translateUi(ACCESS_MODE_LABEL[workspaceMode]) }) : undefined
-                : child === "overview/chat"
-                  ? translateUi(agent.channel_checking_notice ? "On" : "Off")
-                  : child === "overview/ownership"
-                    ? agent.owner_kind === "org" || agent.share_role
-                      ? (agent.owner_name ?? agent.owner_id)
-                      : translateUi("Personal agent")
-                    : child === "overview/automations" && automationCount !== undefined
-                      ? String(automationCount)
-                    : child === "grants/services" && agent.kind === "specialist"
-                      ? String(agent.services.length)
-                      : undefined;
+          const Icon = child.endsWith("voice") ? AudioLines
+            : child.endsWith("automations") ? CalendarClock
+              : child.endsWith("machines") ? Monitor
+                : child.endsWith("connections") ? Plug : icons[root];
+          const summary = savedSummaries[child];
           return (
             <GroupedDisclosure
               key={child}
               leading={<Icon aria-hidden />}
               accessory={
                 summaries && summary ? (
-                  <span className="text-13 text-text-tertiary">{summary}</span>
+                  <span className="max-w-36 truncate text-13 text-text-tertiary" title={summary}>{summary}</span>
                 ) : undefined
               }
               data-drawer-page-trigger={child}
@@ -585,22 +572,11 @@ function AgentDetailsContent({
       </GroupedList>
     );
   }
-  function detailPage(
-    value: AgentDetailsSection,
-    renderGrants: (section: GrantsSection) => ReactNode,
-    renderProfile: (section: ProfileSection) => ReactNode,
-  ) {
-    if (value in AGENT_PROFILE_FIELDS)
-      return agent.share_role ? (
-        <SharedAgentProfile agent={agent} />
-      ) : (
-        renderProfile(value as ProfileSection)
-      );
-    if (value === "overview/automations") return <AgentAutomations agentId={agent.id} />;
-    if (value === "overview/ownership")
-      return (
+  function ownership() {
+    return (
         <>
           <GroupedList
+            title={translateUi("Ownership")}
             footer={
               agent.owner_kind === "org"
                 ? translateUi(
@@ -640,8 +616,21 @@ function AgentDetailsContent({
           )}
         </>
       );
-    if (value === "grants/services")
+  }
+  function detailPage(
+    value: AgentDetailsSection,
+    renderGrants: (section: GrantsSection) => ReactNode,
+    renderProfile: (section: ProfileSection) => ReactNode,
+  ) {
+    if (value in AGENT_PROFILE_FIELDS)
       return agent.share_role ? (
+        <SharedAgentProfile agent={agent} />
+      ) : (
+        renderProfile(value as ProfileSection)
+      );
+    if (value === "overview/automations") return <AgentAutomations agentId={agent.id} />;
+    if (value === "grants/services")
+      return <> {agent.share_role ? (
         <SharedConsentCards agentId={agent.id} />
       ) : agent.kind === "specialist" ? (
         renderGrants("services")
@@ -662,7 +651,16 @@ function AgentDetailsContent({
             accessory={translateUi("Full access")}
           />
         </GroupedList>
-      );
+      )}
+        {!agent.share_role && agent.kind === "specialist" && agent.can_maintain !== false && <>
+          <AgentOperationScopes agentId={agent.id} disabled={readOnly} drillIn visible={page === "grants/services"} onClose={onClose} detailContainer={pageContainer} />
+          {agent.owner_kind !== "org" && <CollaborationGuestControls agentId={agent.id} disabled={readOnly} />}
+          {canManageGuests && <>
+            {renderGrants("guests")}
+            <AgentOperationScopes agentId={agent.id} disabled={readOnly} guests drillIn visible={page === "grants/services"} onClose={onClose} detailContainer={pageContainer} />
+          </>}
+        </>}
+      </>;
     if (value === "grants/machines")
       return (
         <>
@@ -672,62 +670,13 @@ function AgentDetailsContent({
           )}
         </>
       );
-    if (value === "grants/operations")
-      return (
-        <AgentOperationScopes
-          agentId={agent.id}
-          disabled={readOnly}
-          drillIn
-          visible={page === "grants/operations"}
-          onClose={onClose}
-          detailContainer={pageContainer}
-        />
-      );
-    if (value === "grants/guests")
-      return (
-        <>
-          {agent.owner_kind !== "org" && (
-            <CollaborationGuestControls agentId={agent.id} disabled={readOnly} />
-          )}
-          {renderGrants("guests")}
-          {canManageGuests && (
-            <AgentOperationScopes
-              agentId={agent.id}
-              disabled={readOnly}
-              guests
-              drillIn
-              visible={page === "grants/guests"}
-              onClose={onClose}
-              detailContainer={pageContainer}
-            />
-          )}
-        </>
-      );
     if (value === "grants/connections") return <AgentConnections agent={agent} />;
-    if (value === "grants/voice") return <AgentVoiceService agent={agent} />;
-    if (value === "skills/installed")
-      return (
-        <AgentSkills
-          id={SKILLS_SECTION_ID}
-          agentId={agent.id}
-          readOnly={readOnly || Boolean(agent.share_role)}
-        />
-      );
-    if (value === "skills/learning")
-      return (
-        <AgentLearningReview
-          key={proposalId ?? ""}
-          agentId={agent.id}
-          proposalId={proposalId}
-          readOnly={readOnly}
-        />
-      );
     return null;
   }
   return (
     <>
       {router && <AgentDetailsAddress agentId={agent.id} section={section} page={page} />}
-      <ProfileEditor agent={agent} modelsEnabled={visited.has("overview/persona")}>
+      <ProfileEditor agent={agent} modelsEnabled={visited.has("overview")}>
         {(renderProfile) => (
           <GrantsEditor agent={agent} requestMode={requestMode} visited={visited}>
             {(renderGrants) => (
@@ -737,7 +686,7 @@ function AgentDetailsContent({
                   fallbackEntries={AGENT_DETAILS_SECTIONS.filter(
                     value => availability[value] !== false && !visited.has(value),
                   ).flatMap(value =>
-                    agentDetailsSearchTerms(value, agent, advancedControls).slice(1).map((title, index) => ({
+                    agentDetailsSearchTerms(value, agent, advancedControls, { voice: voiceEnabled, learning: learningEnabled, orgChannels, owner: owner ?? "" }).slice(1).map((title, index) => ({
                       id: `unvisited/${value}/${index}`,
                       title,
                       tab: value.split("/")[0] as AgentDetailsTab,
@@ -816,10 +765,19 @@ function AgentDetailsContent({
                                         active={selected === value && !searching}
                                         className="assistant-scrollbar flex-1 space-y-6 pb-6"
                                       >
-                                        {value === "overview" ||
-                                        value === "grants" ||
-                                        value === "skills" ? (
-                                          rows(value)
+                                        {value === "overview" && visited.has(value) ? (
+                                          <>
+                                            {agent.share_role ? <SharedAgentProfile agent={agent} /> : renderProfile("overview")}
+                                            {rows(value)}
+                                            {ownership()}
+                                          </>
+                                        ) : value === "grants" && visited.has(value) ? (
+                                          <>{rows(value)}<AgentVoiceService agent={agent} /></>
+                                        ) : value === "skills" && visited.has(value) ? (
+                                          <>
+                                            <AgentSkills id={SKILLS_SECTION_ID} agentId={agent.id} readOnly={readOnly || Boolean(agent.share_role)} />
+                                            {!agent.share_role && <AgentLearningReview key={proposalId ?? ""} agentId={agent.id} proposalId={proposalId} readOnly={readOnly} />}
+                                          </>
                                         ) : value === "memory" && visited.has(value) ? (
                                           agent.share_role ? (
                                             <SharedAgentMemory agent={agent} />
@@ -891,7 +849,8 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
   const models = useNyxAgentModels(advancedControls && modelsEnabled, { agentId: agent.id });
-  const workspaceMode = useNyxBotSettings(false).data?.access_mode;
+  const workspaceSettings = useNyxBotSettings(false);
+  const workspaceMode = workspaceSettings.error ? undefined : workspaceSettings.data?.access_mode;
   const nyxbot = agent.kind === "nyxbot";
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentProfile>({
@@ -910,6 +869,10 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
   });
   const [error, setError] = useState<string>();
   const { dirtyFields } = form.formState;
+  const modeOverride = form.watch("access_mode_override");
+  const inheritedModeLabel = workspaceMode
+    ? translateUi("Workspace setting ({{mode}})", { mode: translateUi(ACCESS_MODE_LABEL[workspaceMode]) })
+    : translateUi("Workspace setting");
 
   async function save(values: AssistantAgentProfile) {
     setError(undefined);
@@ -954,7 +917,7 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
             className="grouped-field"
           >
             <FormItem>
-              <FormLabel>{translateUi(AGENT_PROFILE_FIELDS["overview/persona"].name)}</FormLabel>
+              <FormLabel>{translateUi(AGENT_PROFILE_FIELDS.overview.name)}</FormLabel>
               <FormControl>
                 <GroupedInput
                   maxLength={32}
@@ -991,7 +954,7 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
           >
             <FormItem>
               <FormLabel>
-                {translateUi(AGENT_PROFILE_FIELDS["overview/persona"].display_name)}
+                {translateUi(AGENT_PROFILE_FIELDS.overview.display_name)}
               </FormLabel>
               <FormControl>
                 <GroupedInput
@@ -1036,7 +999,7 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
             className="grouped-field"
           >
             <FormItem>
-              <FormLabel>{translateUi(AGENT_PROFILE_FIELDS["overview/persona"].model)}</FormLabel>
+              <FormLabel>{translateUi(AGENT_PROFILE_FIELDS.overview.model)}</FormLabel>
               <ModelSelect
                 grouped
                 label={translateUi("Agent model")}
@@ -1059,35 +1022,23 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
       />
     ),
     access_mode_override: (
-      <CheckmarkList
-        label={translateUi("Agent access mode")}
-        value={form.watch("access_mode_override") ?? INHERIT}
-        disabled={readOnly}
-        footer={
-          error ? (
-            <p role="alert" className="text-destructive">
-              {translateUi(error)}
-            </p>
-          ) : undefined
+      <GroupedRow
+        title={translateUi(AGENT_PROFILE_FIELDS.overview.access_mode_override)}
+        search={{ id: "profile-access_mode_override", title: AGENT_PROFILE_FIELDS.overview.access_mode_override, breadcrumb: "Overview › Profile", keywords: [inheritedModeLabel, ...Object.values(ACCESS_MODE_LABEL).map(label => translateUi(label))].join(" ") }}
+        accessory={
+        <Select value={modeOverride ?? INHERIT} disabled={readOnly}
+          onValueChange={value => form.setValue("access_mode_override", value === INHERIT ? null : nyxAgentAccessModeSchema.parse(value))}>
+          <GroupedSelectTrigger aria-label={translateUi("Agent access mode")} className="ml-auto w-auto max-w-full">
+            <SelectValue>{modeOverride ? translateUi(ACCESS_MODE_LABEL[modeOverride]) : inheritedModeLabel}</SelectValue>
+          </GroupedSelectTrigger>
+          <SelectContent>
+            <SelectItem value={INHERIT}>{inheritedModeLabel}</SelectItem>
+            {nyxAgentAccessModeSchema.options.map(value => <SelectItem key={value} value={value} textValue={translateUi(ACCESS_MODE_LABEL[value])}>
+              <span>{translateUi(ACCESS_MODE_LABEL[value])}<span className="block text-13 text-text-tertiary">{translateUi(ACCESS_MODE_DESCRIPTION[value])}</span></span>
+            </SelectItem>)}
+          </SelectContent>
+        </Select>
         }
-        onChange={(value) =>
-          form.setValue(
-            "access_mode_override",
-            value === INHERIT ? null : nyxAgentAccessModeSchema.parse(value),
-          )
-        }
-        options={[
-          {
-            value: INHERIT,
-            label: translateUi("Workspace setting"),
-            description: workspaceMode ? translateUi(ACCESS_MODE_LABEL[workspaceMode]) : undefined,
-          },
-          ...nyxAgentAccessModeSchema.options.map((value) => ({
-            value,
-            label: translateUi(ACCESS_MODE_LABEL[value]),
-            description: translateUi(ACCESS_MODE_DESCRIPTION[value]),
-          })),
-        ]}
       />
     ),
     channel_checking_notice: (
@@ -1108,7 +1059,7 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
             <FormItem>
               <div className="flex items-center justify-between gap-3">
                 <FormLabel className="text-foreground">
-                  {translateUi(AGENT_PROFILE_FIELDS["overview/chat"].channel_checking_notice)}
+                  {translateUi(AGENT_PROFILE_FIELDS.overview.channel_checking_notice)}
                 </FormLabel>
                 <FormControl>
                   <Switch
@@ -1147,11 +1098,12 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
               <FormLabel>
                 {nyxbot
                   ? translateUi(AGENT_NOTES_LABEL)
-                  : translateUi(AGENT_PROFILE_FIELDS["overview/persona"].description)}
+                  : translateUi(AGENT_PROFILE_FIELDS.overview.description)}
               </FormLabel>
               <FormControl>
                 <GroupedTextarea
-                  className="min-h-20"
+                  className={nyxbot ? "min-h-20" : "min-h-9"}
+                  rows={nyxbot ? 3 : 1}
                   maxLength={2048}
                   disabled={readOnly}
                   placeholder={
@@ -1260,31 +1212,16 @@ function ProfileEditor({ agent, modelsEnabled, children }: { readonly agent: Ass
             onSubmit={form.handleSubmit(save)}
             className="space-y-3"
           >
-            {section !== "overview/access" && (
-              <GroupedList
-                title={undefined}
-                footer={
-                  error ? (
-                    <p role="alert" className="text-destructive">
-                      {translateUi(error)}
-                    </p>
-                  ) : undefined
-                }
-              >
-                {Object.keys(AGENT_PROFILE_FIELDS[section])
-                  .filter((name) => name !== "access_mode_override")
-                  .map((name) => {
-                    if ((name === "name" && nyxbot) || (name === "model" && !advancedControls))
-                      return null;
-                    return (
-                      <span key={name} className="contents">
-                        {fields[name as keyof typeof fields]}
-                      </span>
-                    );
-                  })}
+            {(section === "overview" ? ["identity", "behaviour"] : ["text"]).map(group => (
+              <GroupedList key={group} title={section === "overview" ? translateUi(group === "identity" ? "Identity" : "Behaviour") : undefined}
+                footer={error && group !== "behaviour" ? <p role="alert" className="text-destructive">{translateUi(error)}</p> : undefined}>
+                {Object.keys(AGENT_PROFILE_FIELDS[section]).filter(name => {
+                  if ((name === "name" && nyxbot) || (name === "model" && !advancedControls)) return false;
+                  if (name === "description") return nyxbot ? section === "overview/persona" : section === "overview" && group === "identity";
+                  return section !== "overview" || (group === "behaviour") === ["access_mode_override", "channel_checking_notice"].includes(name);
+                }).map(name => <span key={name} className="contents">{fields[name as keyof typeof fields]}</span>)}
               </GroupedList>
-            )}
-            {section === "overview/access" && fields.access_mode_override}
+            ))}
             {readOnly ? null : (
               <GroupedFormActions
                 changes={() =>
@@ -1353,9 +1290,9 @@ function GrantsEditor({
   const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
   const canManageGuests =
     agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
-  const readiness = useGuestReadiness(agent.id, visited.has("grants/guests") && agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
+  const readiness = useGuestReadiness(agent.id, visited.has("grants/services") && agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
   const grants = useSetNyxBotAgentGrants();
-  const inventory = useKeys({ enabled: visited.has("grants/services") || visited.has("grants/guests") });
+  const inventory = useKeys({ enabled: visited.has("grants/services") });
   const nodes = useNodes({ enabled: visited.has("grants/machines") });
   const logins = useSavedLogins("all", visited.has("grants/machines"));
   const serviceName = (id: string) => { const key = inventory.data?.find((key) => key.id === id || key.slug === id); return key?.name || key?.label || id; };
@@ -1404,7 +1341,7 @@ function GrantsEditor({
   function render(section: GrantsSection) {
     const keys: (keyof AssistantAgentGrants)[] = section === "services" ? ["services", "account_read"] : section === "machines" ? ["machines", "logins"] : ["guest_access"];
     return (
-    <section id={`${GRANTS_SECTION_ID}-${section}`} aria-label={translateUi("Grants")} className="space-y-3">
+    <section id={`${GRANTS_SECTION_ID}-${section}`} aria-label={translateUi(section === "services" ? "Grants" : section === "machines" ? "Machine assignments" : "Guest access")} className="space-y-3">
       <Form {...form}>
         <form
           aria-label={translateUi(section === "services" ? "Grants" : section === "machines" ? "Machine assignments" : "Guest access")}
@@ -1565,6 +1502,7 @@ function GuestAccessList({
   readonly footer?: React.ReactNode;
 }) {
   useUiTranslation();
+  const visible = useCappedItems(services, 3);
   return (
     <GroupedList
       title={translateUi("What others in its chats may do")}
@@ -1574,7 +1512,7 @@ function GuestAccessList({
       }
     >
       <div role="list" aria-label={translateUi("Guest access")}>
-        {services.map((slug) => {
+        {visible.items.map((slug) => {
           const id = `guest-access-${slug}`;
           return (
             <GroupedRow key={slug} role="listitem" search={{ id: `guest-${slug}`, title: slug, breadcrumb: "Access › Guest access", keywords: GUEST_ACCESS_LABEL[value[slug] ?? "use"] }}>
@@ -1608,6 +1546,7 @@ function GuestAccessList({
           );
         })}
       </div>
+      {visible.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow>}
     </GroupedList>
   );
 }
@@ -1620,6 +1559,7 @@ function MemoryList({
   readonly memory: readonly AssistantAgentMemoryNote[];
 }) {
   useUiTranslation();
+  const visible = useCappedItems(memory);
   const forget = useForgetNyxBotMemory();
   const [error, setError] = useState<string>();
   const name = agentTitle(agent);
@@ -1750,7 +1690,7 @@ function MemoryList({
           }
         >
           <div role="list" aria-label={translateUi("{{value1}} memory", { value1: name })}>
-            {memory.map((note) => (
+            {visible.items.map((note) => (
               <GroupedRow search={{ id: `memory-${note.id}`, title: note.text, breadcrumb: "Memory" }} key={note.id} role="listitem" className="items-start">
                 <div className="min-w-0 flex-1 space-y-0.5">
                   <p className="whitespace-pre-wrap break-words text-14 text-foreground">
@@ -1783,6 +1723,7 @@ function MemoryList({
               </GroupedRow>
             ))}
           </div>
+          {visible.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow>}
         </GroupedList>
       ) : (
         <GroupedList

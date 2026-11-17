@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label, FieldHelp } from "@/components/ui/label";
@@ -74,6 +75,7 @@ export function AgentOperationScopes({
   const returnFocus = useRef<HTMLButtonElement>(null);
   const enabled = useFeature(guests ? FEATURE_FLAG.GUEST_OPERATION_SCOPES : FEATURE_FLAG.AGENT_OPERATION_SCOPES);
   const query = useAgentOperations(agentId, enabled && !disabled, guests);
+  const visibleServices = useCappedItems(query.data ?? [], 3);
   const searchId = (id: string) => `operations-${guests ? "guest-" : ""}${id}`;
   useDrawerSearchEntries(enabled && drillIn ? (query.data ?? []).map((service) => ({
     id: searchId(service.service_id), title: `${service.service_name} · ${guests ? "Guest operations" : "Operations"}`,
@@ -160,7 +162,7 @@ export function AgentOperationScopes({
           </GroupedRow>
         ) : null}
         {drillIn
-          ? query.data?.map((service) => (
+          ? visibleServices.items.map((service) => (
               <GroupedDisclosure
                 key={service.service_id}
                 data-operation-link={service.service_id}
@@ -185,6 +187,7 @@ export function AgentOperationScopes({
               </GroupedDisclosure>
             ))
           : null}
+        {drillIn && visibleServices.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visibleServices.showAll}>{translateUi("Show all")}</button></GroupedRow>}
         {drillIn && !query.isLoading && !query.error && !query.data?.length ? (
           <GroupedRow title={translateUi("No granted services")} />
         ) : null}

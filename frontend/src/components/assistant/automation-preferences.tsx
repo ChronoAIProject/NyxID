@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import type { TriggerResponse } from "@/schemas/triggers";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -45,9 +46,11 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
     triggers.data?.triggers.filter(
       (t) => t.delivery.type === "assistant" && t.delivery.agent_id === agentId,
     ) ?? [];
+  const visible = useCappedItems(rows, 3);
   return (
-    <GroupedList title={translateUi("Automations")}>
-      {rows.map(row => <AutomationRow key={row.id} row={row} timezone={settings.data?.timezone} agentId={agentId} />)}
+    <GroupedList>
+      {visible.items.map(row => <AutomationRow key={row.id} row={row} timezone={settings.data?.timezone} agentId={agentId} />)}
+      {visible.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow>}
       <GroupedRow search={{ id: "manage-automations", title: `Manage automations (${rows.length})`, breadcrumb: "Overview › Automations" }} asChild interactive>
         <Link to="/assistant/automations" search={{ agent: agentId }}>
           <span className="flex-1">{translateUi("Manage automations (")}{rows.length})</span>

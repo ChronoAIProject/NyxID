@@ -29,7 +29,7 @@ column edge.
 Hover or keyboard focus reveals a vertical guide that stays visible while
 dragging a tab. Either tab can be dragged to resize;
 arrow keys adjust a focused edge, Home/End select its limits, and double-click
-resets it. Chat layout and Settings → Display → Chat layout also expose the width.
+resets it. Chat layout and Settings → Display → Layout also expose the width.
 One browser-wide preference applies to existing and new NyxBot, specialist,
 group, Direct, and typed chats. It is capped to the available space and fits smaller screens
 without horizontal page scrolling. Cancelled drags preserve the saved width.
@@ -473,7 +473,7 @@ supported effort field. Do not infer supported effort levels from model names.
 - Enter during IME composition does not send; both composition state and key code 229 are guarded.
 - The composer uses a minimal Tiptap/ProseMirror editor with atomic inline mention pills. Agent pills show display names; attachment pills show numbered handles: `image-1`, `file-1`, and `text-1` for long pasted text. Autocomplete, plain-text paste, copy, undo/redo, and Shift+Enter are supported. Serialization preserves the existing `@handle` text contract; attachment handles still resolve before sending. Draft storage remains plain text. Undo history resets across conversation/owner changes, after sending, and when removing an upload so deleted references cannot return. Formatting controls are not enabled in this first iteration.
 - Composer attachments occupy one horizontally scrollable row: square image previews and compact document cards with filename, type, and size. Long pastes show a text excerpt. Corner controls remove individual files; upload progress and errors remain within the fixed card height. Attachment mention handles remain available through autocomplete and card hover text. Adding attachments scrolls the row to the newest card; upload progress and removal preserve manual scrolling. Edge fades indicate additional cards offscreen.
-- The text editor grows with the draft up to a shared maximum (92px by default), then scrolls internally. Settings → Display → Chat layout configures this maximum from 64px to 1600px. The expanded composer's top-edge resize handle updates the same browser-wide preference on release; cancelled drags preserve it. All existing and new chats share it, including across reloads. Explicit resizing still expands short multiline drafts; single-line drafts stay compact. The complete surface, including controls, attachments and padding, fits within 90% of the visible viewport and below the chat header without overwriting the saved maximum. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. The index rail clears the actual composer surface even when it overlays the transcript. Arrow keys adjust the height, Home/End select its visible limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
+- The text editor grows with the draft up to a shared maximum (92px by default), then scrolls internally. Settings → Display → Layout configures this maximum from 64px to 1600px. The expanded composer's top-edge resize handle updates the same browser-wide preference on release; cancelled drags preserve it. All existing and new chats share it, including across reloads. Explicit resizing still expands short multiline drafts; single-line drafts stay compact. The complete surface, including controls, attachments and padding, fits within 90% of the visible viewport and below the chat header without overwriting the saved maximum. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. The index rail clears the actual composer surface even when it overlays the transcript. Arrow keys adjust the height, Home/End select its visible limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
 - A long one-line draft switches controls to the multiline layout before text overlaps the button.
 
 The idle placeholder is `Message NyxID Assistant...`. During an active turn it is `Assistant is working...` and the textbox is disabled.
@@ -721,22 +721,18 @@ during background refetches; omit them before first load and on error.
 
 | Section | Contents |
 | --- | --- |
-| `permissions` | Access-mode checkmark selection and Full access warning |
-| `permissions/specialists` | Specialist access-request checkmark selection |
-| `tasks` | Automatic task continuations |
-| `tasks/specialists` | Live specialists and simultaneous specialist turns |
-| `tasks/groups` | Group hand-offs per message and per hour |
-| `automations` | Automation list and Manage automations |
-| `automations/budgets` | Timezone, schedule interval and run budgets |
+| `permissions` | Access mode and specialist access requests in two checkmark groups; Full access warning |
+| `tasks` | Five limits in continuations and specialist/group hand-off groups |
+| `automations` | Capped automation list, Manage automations, timezone and budgets |
 | `notifications` | Push-kind switches and explanations |
 | `channels` | Channel bot manager |
-| `channels/adapters` | Feature-gated adapter bindings |
-| `channels/links` | Personal platform links |
+| `channels/adapters` | Feature-gated adapter bindings list |
+| `channels/links` | Personal platform links list |
 
-For example, `/assistant?panel=nyxbot&panelTab=tasks%2Fspecialists` opens the
-specialist limits. The section vocabulary is defined once in
-`nyxbot-settings-sections.ts`; parents are derived from slash-separated paths.
-Missing, malformed or unknown sections select the root and drop `panelTab`.
+For example, `/assistant?panel=nyxbot&panelTab=tasks` opens all task limits.
+The section vocabulary is defined once in `nyxbot-settings-sections.ts`; parents
+come from slash paths. Removed/unknown descendants normalize to the nearest
+surviving ancestor; missing or malformed paths select the root and drop `panelTab`.
 Unavailable adapter bindings replace the URL with `channels`. The Notifications
 row and search entry require the notifications feature; its unavailable URL
 replaces to the root. Personal links renders loading, empty, error and populated
@@ -773,24 +769,26 @@ page keeps its header and uses the same tree with `tab` instead of `panelTab`.
 Existing category URLs remain valid. Sections are:
 
 - `profile`, `sessions`, `privacy`: the existing short editors/lists.
-- `security`: `security/mfa`, `security/password` (only password accounts),
-  `security/linked-accounts`, `security/delete`.
-- `mcp`: `mcp/cursor`, `mcp/claude-code`, `mcp/codex`.
-- `display`: `display/appearance` (theme, motion and reset), `display/text`,
-  `display/chat`, `display/sidebar`, `display/colors`, `display/readability`.
-  Colors opens `display/colors/surfaces`, `display/colors/text` and
-  `display/colors/controls`.
+- `security`: MFA, approved-sign-in policy, password (password accounts only),
+  linked accounts and the existing destructive `security/delete` page.
+- `mcp`: one page with a Cursor / Claude Code / Codex client selector.
+- `display`: Appearance (theme, motion/reset, text size and spacing),
+  `display/layout` (chat and sidebar) and `display/colors` (three color groups, preview and readability checks for the theme being edited).
+  These are addressed peer views in one retained shell titled Display; the segments name the views. Back returns to Account Settings.
 
 Agent details keeps Overview, Access (`grants`), Skills, Memory and Channels tabs.
-`?agent=<id>&details=<section>` extends the existing tab contract. Overview has
-`overview/persona`, `overview/access`, `overview/chat`, `overview/voice`,
-`overview/automations` and `overview/ownership`; Ownership retains existing share
-and lifecycle actions with the read-only owner identity. Access has
-`grants/services`, `grants/operations`, `grants/guests`, `grants/machines`,
-`grants/connections`, `grants/voice`. Skills has `skills/installed` and
-`skills/learning`; Memory and Channels retain their existing lists and drill-ins.
+`?agent=<id>&details=<section>` extends the existing tab contract. Overview edits
+Identity (name, display name, role and model), Behaviour (access-mode select and
+channel-progress switch) and Ownership inline. Long text opens `overview/persona`
+(Persona & notes) or `overview/voice`; the list opens `overview/automations`.
+Access has `grants/services` (service grants, operation limits and guest access),
+`grants/machines` (assignments, saved logins and capabilities), and
+`grants/connections` (connected-account list). Device voice stays inline on Access.
+Skills combines installed skills and Learning groups; Memory and Channels retain
+existing lists and individual-item drill-ins. Growing lists are capped with Show all
+or retain server pagination. No short choice has a dedicated page.
 Visibility, editability, feature gates and legacy organisation channel access
-follow the original editors. The Overview access summary includes the effective workspace mode when inherited; automations counts use cached data only. Shared profile/grants forms retain one draft and
+follow the original editors. The inline Overview access select includes the effective workspace mode when inherited; automations counts use cached data only. Shared profile/grants forms retain one draft and
 mutation across their pages; operation/machine forms retain independent revision
 fences. Tab changes preserve drafts; Back and search leaving an editor use its
 discard guard. Existing channel connection/proposal links remain supported.
@@ -800,10 +798,10 @@ Billing retains Billing and Usage tabs. Assistant URLs add
 uses `section` alongside `tab`. Both roots show existing available credits,
 period spend and benefits figures plus rows. Billing sections are
 `billing/topup`, `billing/benefits`, `billing/bill`, `billing/machines`,
-`billing/activity`. Benefits splits into `billing/benefits/wallet`,
-`billing/benefits/grants`, `billing/benefits/allowances`. Usage sections are
-`usage/summary`, `usage/charts`, `usage/explorer`; charts split into
-`usage/charts/quantities` and `usage/charts/funding`. Organisation billing omits
+`billing/activity`. Benefits combines wallet, grants and allowances in one page;
+grant/allowance lists are capped with Show all and retain pagination. Usage shows
+its full summary inline and opens `usage/charts` (both charts) or `usage/explorer`.
+Organisation billing omits
 personal machine/activity pages. Figures, tax, rounding, owner and service/period
 filters keep their original computations. Root reads are limited to wallet, benefits, period usage, catalogue and the existing owner selector. History, bill/invoices and activity fetch on first visit; benefit pages share one query owner and section navigation does not refetch. Compact spend/benefits values appear only at the root. Top-up history retains its
 independent period selector. `panelAction=topup`/`action=topup` remain one-shot;
@@ -823,7 +821,7 @@ Existing linked sheet closes still push; tabs and new drill-ins replace. Slash p
 derive parents and mount ancestors for deep links. Unknown descendants and
 unavailable pages replace to the nearest valid available ancestor (or root).
 Canonicalization waits for navigation to settle. One viewport form scope/save bar
-owns the retained editors. Only visited editors mount; labels remain searchable before visiting without fetching their data. Account roots read the user for name/MFA and sessions for the count; MFA needs no extra endpoint. Agent roots read the agent and workspace settings, including linked-route metadata for legacy organisation tab availability. Distinct icons mark first-level categories only. Review, dirty-field payloads, immediate controls, MFA
+owns the retained editors. Only visited editors mount; labels remain searchable before visiting without fetching their data. Account roots read the user for name/MFA and sessions for the count; MFA needs no extra endpoint. Agent Overview reads the agent, workspace settings and, behind its flag, models for the inline selector; linked-route metadata determines legacy organisation tab availability. Security loads linked accounts on first visit; MCP loads its config on first visit. Distinct icons mark first-level categories only. Review, dirty-field payloads, immediate controls, MFA
 step-up, password handling and dismissal guards are unchanged. Workspace search
 indexes the available pages using their rendered field/option labels in the
 current locale from shared definitions, plus existing synonyms. NyxBot's

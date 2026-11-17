@@ -1,4 +1,4 @@
-import { accountSettingsSections, ACCOUNT_SETTINGS_TITLES } from "@/lib/account-settings-sections";
+import { accountSettingsSections, accountSettingsPageTitle } from "@/lib/account-settings-sections";
 import { billingSections, BILLING_SECTION_TITLES } from "@/lib/billing-sections";
 import { parseNyxBotSettingsSection, NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -63,7 +63,7 @@ export function AssistantAccountPanel() {
   const section = current.panel === "nyxbot" ? parseNyxBotSettingsSection(current.panelTab) : undefined;
   const accountSection = current.panel === "settings" ? accountSettingsSections.parse(current.panelTab) : undefined;
   const billingSection = current.panel === "billing" ? billingSections.parse(current.panelSection) : undefined;
-  const dialogTitle = section ? NYXBOT_SETTINGS_TITLES[section] : accountSection ? ACCOUNT_SETTINGS_TITLES[accountSection] : billingSection ? BILLING_SECTION_TITLES[billingSection] : panel.title;
+  const dialogTitle = section ? NYXBOT_SETTINGS_TITLES[section] : accountSection ? accountSettingsPageTitle(accountSection) : billingSection ? BILLING_SECTION_TITLES[billingSection] : panel.title;
   return (
     <GroupedDialog
       open
