@@ -8,6 +8,10 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import type { AssistantParams } from "../../app/navigationTypes";
+import {
+  openScannerSheetAction,
+  workspaceNavigateAction,
+} from "../../app/navigationHierarchy";
 import type { AssistantUploadedMessage } from "./AssistantUploadSession";
 import * as voiceSelection from "./voice/voiceSelection";
 import {
@@ -86,11 +90,13 @@ function setup(
 ) {
   let onAdopt: ((id: string) => void) | undefined;
   let headerOptions: Record<string, any> = {};
+  let columnHeader: Record<string, any> | undefined;
   const headerModule = {};
   let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
-  const alerts: { text: string; onPress?: () => void }[][] = [];
+  const alerts: { text: string; style?: string; onPress?: () => void }[][] =
+    [];
   const drafts: {
     agentId: string;
     signal: AbortSignal;
@@ -98,6 +104,15 @@ function setup(
   }[] = [];
   const featureQueries: { enabled: boolean }[] = [];
   let epoch = 7;
+  // Ordinary iPhone width: below the persistent-sidebar breakpoint.
+  let windowWidth = 390;
+  let bellEnabled = false;
+  let fontScale = 1;
+  // A nonzero right inset stands in for the folded Duo's corner cluster.
+  let rightInset = 0;
+  // The folded Duo's quick rail is showing (it owns New chat and Scan QR).
+  let quickRail = false;
+  let dictating = false;
   let focused = true;
   let keyboardVisible = false;
   let hideOnDismiss = false;
@@ -234,7 +249,22 @@ function setup(
       assistantDraftStore: createAssistantDraftStore(() => epoch),
     },
     "./ChatIdentityHeader": headerModule,
-    "react-native-safe-area-context": { SafeAreaView: "SafeAreaView" },
+    "react-native-safe-area-context": {
+      SafeAreaView: "SafeAreaView",
+      useSafeAreaInsets: () => ({ top: 0, left: 0, bottom: 0, right: rightInset }),
+    },
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: {
+        get value() {
+          return rightInset > 0;
+        },
+      },
+      WorkspaceQuickRailContext: {
+        get value() {
+          return quickRail;
+        },
+      },
+    },
     "../display/ChatLayoutContext": {
       useComposerHeight: () => 120,
       useChatColumn: () => ({
@@ -271,7 +301,11 @@ function setup(
       }),
     },
     "react-native": {
-      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
+      useWindowDimensions: () => ({
+        width: windowWidth,
+        height: 844,
+        fontScale,
+      }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -354,6 +388,7 @@ function setup(
         "Check",
         "MoreHorizontal",
         "Paperclip",
+        "ScanQrCode",
         "SquarePen",
         "ArrowUp",
         "Square",
@@ -369,20 +404,25 @@ function setup(
         navigationDisabled = input.disabled;
         headerOptions = input.options;
       },
+      useWorkspaceColumnHeader: (input: Record<string, any>) => {
+        columnHeader = input;
+      },
       WorkspaceHeaderVisibility: "WorkspaceHeaderVisibility",
     },
-    "../../app/navigationHierarchy": {},
+    "../../components/workspace/WorkspaceSheetSurface": {
+      WorkspaceSheetSurface: "WorkspaceSheetSurface",
+    },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["WorkspacePage", "ActionButton", "Card", "Field", "Label", "Notice"].map(
         (name) => [name, name],
       ),
     ),
     "../../theme/ThemeContext": {
-      useTheme: () => ({ colors: { warningTone: {} } }),
+      useTheme: () => ({ colors: { warningTone: {} }, mode: "light" }),
     },
-    "../../components/workspace/WorkspaceChatList": {
-      WorkspaceChatList: (props: Record<string, any>) => ({
-        type: "WorkspaceChatList",
+    "../../components/workspace/WorkspaceAgentPicker": {
+      WorkspaceAgentPicker: (props: Record<string, any>) => ({
+        type: "WorkspaceAgentPicker",
         props: { ...props, children: [props.scrollHeader, props.scrollFooter] },
       }),
     },
@@ -391,7 +431,13 @@ function setup(
     "./ComposerConnectionPicker": {
       ComposerConnectionPicker: "ConnectionPicker",
     },
+    "../../components/workspace/WorkspaceRightPanel": {
+      RightPanelProvider: "RightPanelProvider",
+      RightPanelRegistration: "RightPanelRegistration",
+      RightPanelSlot: "RightPanelSlot",
+    },
     "./NyxBotHome": { NyxBotHome: "NyxBotHome" },
+    "./AssistantRightPanel": { AssistantRightPanel: "AssistantRightPanel" },
     "./useAssistant": {
       useAssistant: (_id: unknown, _agent: unknown, adopt: typeof onAdopt) => {
         onAdopt = adopt;
@@ -400,7 +446,10 @@ function setup(
     },
     "./useAssistantUploads": { useAssistantUploads: () => uploads },
     "./useComposerDictation": {
-      useComposerDictation: () => ({ active: false, phase: "idle" }),
+      useComposerDictation: () =>
+        dictating
+          ? { active: true, phase: "listening" }
+          : { active: false, phase: "idle" },
       appendDictation: (draft: string, text: string) =>
         `${draft}${draft ? " " : ""}${text}`,
     },
@@ -516,7 +565,7 @@ function setup(
     },
     "../notifications/useNotifications": {
       useNotificationIndicator: () => ({
-        enabled: false,
+        enabled: bellEnabled,
         live: false,
         unread: 0,
         needsDecision: 0,
@@ -526,6 +575,7 @@ function setup(
       useVisibleThreadRead: () => {},
     },
   });
+  harness.mock("expo-linear-gradient", { LinearGradient: "LinearGradient" });
   Object.assign(
     headerModule,
     harness.load(
@@ -548,6 +598,12 @@ function setup(
     "./ChatSurface",
     harness.load(fileURLToPath(new URL("./ChatSurface.tsx", import.meta.url))),
   );
+  harness.mock(
+    "./ChatHeaderActions",
+    harness.load(
+      fileURLToPath(new URL("./ChatHeaderActions.tsx", import.meta.url)),
+    ),
+  );
   const Screen = harness.load(
     fileURLToPath(new URL("./AssistantScreen.tsx", import.meta.url)),
   ).AssistantScreen as (input: typeof props) => Element;
@@ -560,7 +616,6 @@ function setup(
   return {
     harness,
     navigationDisabled: () => navigationDisabled,
-    headerActions: () => elements(expand(headerOptions.headerRight())),
     assistant,
     uploads,
     connection,
@@ -578,12 +633,52 @@ function setup(
     },
     all,
     button,
+    columnHeader: () => columnHeader!,
     header: () => expand(headerOptions.headerTitle()),
+    headerRight: () => expand(headerOptions.headerRight()),
+    headerActions: () =>
+      elements(expand(headerOptions.headerRight())).filter(
+        (n) => n.type === "FloatingButton",
+      ),
     options: () => {
       elements(expand(headerOptions.headerRight()))
         .find((n) => n.props.accessibilityLabel === "Chat options")!
         .props.onPress();
       harness.flush();
+    },
+    chooseOption: (text: string) => {
+      elements(expand(headerOptions.headerRight()))
+        .find((n) => n.props.accessibilityLabel === "Chat options")!
+        .props.onPress();
+      alerts
+        .at(-1)!
+        .find((action) => action.text === text)!
+        .onPress!();
+      harness.flush();
+    },
+    setWidth: (value: number) => {
+      windowWidth = value;
+      harness.render();
+    },
+    setBell: (value: boolean) => {
+      bellEnabled = value;
+      harness.render();
+    },
+    setFontScale: (value: number) => {
+      fontScale = value;
+      harness.render();
+    },
+    setDictating: (value: boolean) => {
+      dictating = value;
+      harness.render();
+    },
+    setQuickRail: (value: boolean) => {
+      quickRail = value;
+      harness.render();
+    },
+    setCornerSensor: (inset: number) => {
+      rightInset = inset;
+      harness.render();
     },
     compose: () => {
       const actions = expand(headerOptions.headerRight());
@@ -1036,10 +1131,25 @@ test("old voice callbacks cannot populate a different chat or account", async ()
   }
 });
 
-test("voice preferences are reached through header More and ordinary chat still opens Details directly", async () => {
+test("the Duo: More always opens Details, even during a voice call, whose own control opens its preferences", async () => {
   const x = setup(A);
+  x.setQuickRail(true);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.options();
+  assert.equal(x.alerts.length, 0);
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  // Uncontrolled: the call shows its own Voice preferences control.
+  assert.equal(x.voice()!.props.preferencesOpen, undefined);
+  x.harness.unmount();
+});
+
+test("wide windows: More opens Details directly and voice adds its preferences menu", async () => {
+  const x = setup(A);
+  x.setWidth(1024);
   x.options();
   assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  assert.equal(x.alerts.length, 0);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.options();
@@ -1053,6 +1163,63 @@ test("voice preferences are reached through header More and ordinary chat still 
   x.voice()!.props.onPreferencesClose();
   x.harness.flush();
   assert.equal(x.voice()!.props.preferencesOpen, false);
+  x.harness.unmount();
+});
+
+test("narrow More lists chat details, Notifications and Settings; Settings opens the sidebar's sheet", async () => {
+  const x = setup(A);
+  x.options();
+  assert.deepEqual(
+    Array.from(x.alerts.at(-1)!, (action) => action.text),
+    ["Chat details", "Settings", "Cancel"],
+  );
+  assert.equal(x.alerts.at(-1)!.at(-1)!.style, "cancel");
+  x.alerts.at(-1)![1]!.onPress!();
+  x.harness.flush();
+  // The sidebar's Settings row dispatches workspaceNavigateAction("AccountSettings").
+  assert.deepEqual(x.events.at(-1), [
+    "dispatch",
+    workspaceNavigateAction("AccountSettings"),
+  ]);
+  x.chooseOption("Chat details");
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  x.setBell(true);
+  x.options();
+  assert.deepEqual(
+    Array.from(x.alerts.at(-1)!, (action) => action.text),
+    ["Chat details", "Notifications", "Settings", "Cancel"],
+  );
+  x.alerts.at(-1)![1]!.onPress!();
+  x.harness.flush();
+  assert.deepEqual(x.events.at(-1), ["push", "Notifications", undefined]);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.options();
+  assert.deepEqual(
+    Array.from(x.alerts.at(-1)!, (action) => action.text),
+    [
+      "Voice preferences",
+      "Chat details",
+      "Notifications",
+      "Settings",
+      "Cancel",
+    ],
+  );
+  x.alerts.at(-1)![0]!.onPress!();
+  x.harness.flush();
+  assert.equal(x.voice()!.props.preferencesOpen, true);
+  x.harness.unmount();
+});
+
+test("an account change while More is open makes its Settings and Details entries inert", () => {
+  const x = setup(A);
+  x.options();
+  const menu = x.alerts.at(-1)!;
+  const before = x.events.length;
+  x.setEpoch(8);
+  for (const action of menu) action.onPress?.();
+  x.harness.flush();
+  assert.equal(x.events.length, before);
   x.harness.unmount();
 });
 
@@ -2085,6 +2252,29 @@ test("home roster Chat reuses latest-thread navigation and crew navigation retai
   x.harness.unmount();
 });
 
+test("the folded Duo's agent picker is the workspace bottom sheet ending before the rail; elsewhere a native page sheet", () => {
+  const x = setup(A);
+  x.setWidth(678);
+  x.setCornerSensor(104);
+  x.chooseAgent();
+  const modal = () =>
+    x.all().find((n) => n.type === "Modal" && n.props.visible && n.props.children)!;
+  // A transparent Modal hosting the shared surface (its own travel, scrim,
+  // handle, and the rail reserve), never a full-window page sheet.
+  assert.equal(modal().props.transparent, true);
+  assert.equal(modal().props.presentationStyle, undefined);
+  assert.ok(x.all().some((n) => n.type === "WorkspaceSheetSurface"));
+  assert.ok(x.all().some((n) => n.type === "WorkspaceAgentPicker"));
+  x.harness.unmount();
+  const phone = setup(A);
+  phone.chooseAgent();
+  assert.ok(
+    phone.all().some((n) => n.type === "Modal" && n.props.visible && n.props.presentationStyle === "pageSheet"),
+  );
+  assert.equal(phone.all().some((n) => n.type === "WorkspaceSheetSurface"), false);
+  phone.harness.unmount();
+});
+
 test("Choose agent preserves its hierarchy and dismisses before pushing History or Details into main content", () => {
   for (const [label, route] of [
     ["History", "AssistantHistory"],
@@ -2092,8 +2282,8 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
   ]) {
     const x = setup(A);
     x.chooseAgent();
-    const hierarchy = x.all().find((n) => n.type === "WorkspaceChatList")!;
-    assert.equal(hierarchy.props.mode, "picker");
+    const hierarchy = x.all().find((n) => n.type === "WorkspaceAgentPicker")!;
+    assert.equal(hierarchy.props.visible, true);
     assert.equal(hierarchy.props.current.agentId, "agent-a");
     assert.equal(hierarchy.props.current.conversationId, A);
     const labels = x
@@ -2102,7 +2292,7 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
       .flatMap((n) => n.props.children.flat(Infinity));
     assert.ok(labels.includes("This thread"));
     assert.ok(labels.includes("Saved chat"));
-    assert.ok(labels.includes(12));
+    assert.ok(labels.some((label) => typeof label === "string" && label.includes("12 messages")));
     const button = x
       .all()
       .find((n) => n.type === "ActionButton" && n.props.label === label)!;
@@ -2110,7 +2300,7 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
     button.props.onPress();
     x.harness.flush();
     assert.equal(
-      x.all().some((n) => n.type === "WorkspaceChatList"),
+      x.all().some((n) => n.type === "WorkspaceAgentPicker"),
       false,
     );
     assert.equal(
@@ -2134,7 +2324,7 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
 test("header Details uses the latest conversation even when header identity stays unchanged", () => {
   const x = setup(A);
   x.adopt(B);
-  x.options();
+  x.chooseOption("Chat details");
   const pushed = x.events.find((e) => e[0] === "push")!;
   assert.equal(pushed[1], "AssistantDetails");
   assert.equal((pushed[2] as any).conversationId, B);
@@ -2165,7 +2355,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   x.harness.flush();
   x.chooseAgent();
   x.all()
-    .find((node) => node.type === "WorkspaceChatList")!
+    .find((node) => node.type === "WorkspaceAgentPicker")!
     .props.onSelect({ kind: "agent", agentId: "agent-a", conversationId: A });
   x.harness.flush();
   assert.equal(x.input().props.value, "Unsent review");
@@ -2175,7 +2365,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   );
   x.chooseAgent();
   x.all()
-    .find((node) => node.type === "WorkspaceChatList")!
+    .find((node) => node.type === "WorkspaceAgentPicker")!
     .props.onSelect({ kind: "agent", agentId: "agent-a", conversationId: B });
   x.harness.flush();
   assert.equal(x.input().props.value, "");
@@ -2194,7 +2384,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   ]);
   x.chooseAgent();
   x.all()
-    .find((node) => node.type === "WorkspaceChatList")!
+    .find((node) => node.type === "WorkspaceAgentPicker")!
     .props.onSelect({ kind: "agent", agentId: "agent-a" });
   x.harness.flush();
   assert.deepEqual(x.events.at(-1), [
@@ -2337,6 +2527,9 @@ test("settled decisions fold into their exact recorded turn and CMA operations f
 test("private, specialist and contextual header identities open the picker without changing the draft", () => {
   for (const mode of ["nyxbot", "specialist", "contextual"] as const) {
     const x = setup(A, false);
+    // Wide bars float the same compact glass pill as narrow bars (covered
+    // below); the thread line stays in the accessibility label.
+    x.setWidth(1024);
     if (mode !== "nyxbot") {
       x.assistant.agent.kind = "specialist";
       x.assistant.agent.name = "researcher";
@@ -2345,14 +2538,14 @@ test("private, specialist and contextual header identities open the picker witho
     }
     x.input().props.onChangeText("Unsent draft");
     x.harness.flush();
-    const identity = elements(x.header()).find((n) => n.type === "Pressable")!;
+    const identity = elements(x.header()).find((n) => n.type === "FloatingButton")!;
     assert.match(
       identity.props.accessibilityLabel,
       /Chatting with .*Saved chat.*Choose agent/,
     );
     assert.ok(
       elements(x.header()).some(
-        (n) => n.type === "AgentAvatar" && n.props.size === "xl",
+        (n) => n.type === "AgentAvatar" && n.props.size === "lg",
       ),
     );
     identity.props.onPress();
@@ -2372,11 +2565,272 @@ test("private, specialist and contextual header identities open the picker witho
   draft.props.route.params = { home: false, draft: true };
   draft.harness.render();
   assert.match(
-    elements(draft.header()).find((n) => n.type === "Pressable")!.props
+    elements(draft.header()).find((n) => n.type === "FloatingButton")!.props
       .accessibilityLabel,
     /NyxBot, New chat\. Choose agent/,
   );
   draft.harness.unmount();
+});
+
+test("narrow bars read Menu, title, Scan QR, New chat, More as the shared 44pt glass buttons", () => {
+  const x = setup(A, false);
+  const actions = x.headerActions();
+  assert.deepEqual(
+    actions.map((n) => n.props.accessibilityLabel),
+    ["Scan QR code", "New chat", "Chat options"],
+  );
+  for (const action of actions) {
+    // The one glass primitive (44pt target, its own interactive glass
+    // capsule, the shared highlight), with no styling of its own.
+    assert.equal(action.type, "FloatingButton");
+    assert.equal(action.props.style, undefined);
+    assert.equal(action.props.capsuleStyle, undefined);
+  }
+  const bar = elements(x.headerRight()).find(
+    (n) => n.props.testID === "chat-header-actions",
+  )!;
+  const barStyle = Object.assign({}, ...[bar.props.style].flat().filter(Boolean));
+  assert.equal(barStyle.flexShrink, 0);
+  assert.equal(barStyle.gap, 8, "floating circles sit 8pt apart");
+  actions[0]!.props.onPress();
+  x.harness.flush();
+  // The sidebar quick action dispatches this same scanner sheet action.
+  assert.deepEqual(x.events.at(-1), ["dispatch", openScannerSheetAction()]);
+  x.setBell(true);
+  assert.deepEqual(
+    x.headerActions().map((n) => n.props.accessibilityLabel),
+    ["Scan QR code", "New chat", "Chat options"],
+    "narrow bars move Notifications into More",
+  );
+  x.setWidth(1024);
+  assert.equal(
+    x.headerActions().some((n) => n.props.accessibilityLabel === "Scan QR code"),
+    false,
+    "the persistent sidebar keeps its own scanner",
+  );
+  // The wide bar floats the same glass buttons: the bell, New chat, More.
+  assert.deepEqual(
+    elements(x.headerRight())
+      .filter((n) => n.type === "FloatingButton" || n.type === "NotificationBell")
+      .map((n) => n.props.accessibilityLabel ?? n.type),
+    ["NotificationBell", "New chat", "Chat options"],
+  );
+  x.harness.unmount();
+});
+
+test("beside the Duo's rail (folded or unfolded, either mode) the chat's controls live in the column and More is always Chat details; without a rail the bars are unchanged", () => {
+  const x = setup(A, false);
+  x.setBell(true);
+  x.setQuickRail(true);
+  // No top bar on the Duo (ChatHeaderFrame renders none): the column shows
+  // this chat's Menu, agent and More, registered with the bar's handlers.
+  const column = x.columnHeader();
+  assert.deepEqual(
+    [column.role, column.identity.label, column.more.label],
+    ["menu", "{{name}}. Choose agent", "Chat options"],
+  );
+  // More opens Chat details directly: Settings and Notifications are on the
+  // rail. The Duo's full-screen bar carries only More after the identity.
+  const alerts = x.alerts.length;
+  column.more.onPress();
+  x.harness.flush();
+  assert.equal(x.alerts.length, alerts, "no Chat options menu on the Duo");
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  assert.deepEqual(
+    x.headerActions().map((n) => n.props.accessibilityLabel),
+    ["Chat options"],
+  );
+  x.setQuickRail(false);
+  assert.deepEqual(
+    x.headerActions().map((n) => n.props.accessibilityLabel),
+    ["Scan QR code", "New chat", "Chat options"],
+  );
+  x.options();
+  assert.deepEqual(
+    Array.from(x.alerts.at(-1)!, (action) => action.text),
+    ["Chat details", "Notifications", "Settings", "Cancel"],
+  );
+  // iPad's wide bar (no corner cluster, no rail) is unchanged: the bell,
+  // New chat, More.
+  x.setWidth(1024);
+  const wideBar = () =>
+    elements(x.headerRight())
+      .filter((n) => n.type === "FloatingButton" || n.type === "NotificationBell")
+      .map((n) => n.props.accessibilityLabel ?? n.type);
+  assert.deepEqual(wideBar(), ["NotificationBell", "New chat", "Chat options"]);
+  x.harness.unmount();
+});
+
+test("on the Duo this chat's controls go to the column in both modes: Menu, the agent's picker and More, with the bar's handlers", () => {
+  const x = setup(A, false);
+  const column = x.columnHeader();
+  // Menu on the primary chat (contextual chats get Back), like the bar.
+  assert.equal(column.role, "menu");
+  assert.equal(column.disabled, false);
+  // The agent: its avatar and one complete translated phrase (this test's
+  // translator returns the template; the name is its placeholder).
+  assert.equal(column.identity.agent.id, "agent-a");
+  assert.equal(column.identity.label, "{{name}}. Choose agent");
+  assert.equal(column.more.label, "Chat options");
+  // The agent opens the identity pill's picker (the same Modal).
+  const modals = () =>
+    x.all().filter((n) => n.type === "Modal" && n.props.visible).length;
+  const before = modals();
+  column.identity.onPress();
+  x.harness.flush();
+  assert.equal(modals(), before + 1);
+  // More runs the bar's More (narrow: the Chat options menu).
+  const alerts = x.alerts.length;
+  column.more.onPress();
+  x.harness.flush();
+  assert.equal(x.alerts.length, alerts + 1);
+  assert.deepEqual(
+    Array.from(x.alerts.at(-1)!, (action) => action.text).slice(0, 1),
+    ["Chat details"],
+  );
+  // A contextual chat (pushed from another page) has Back, like its bar.
+  x.props.contextual = true;
+  x.harness.render();
+  assert.equal(x.columnHeader().role, "back");
+  x.harness.unmount();
+});
+
+test("phone composers collapse to one row only while idle; uploads, dictation and wide windows keep two rows", () => {
+  const x = setup(A, false);
+  const idle = () => x.input().props.compactWhenIdle;
+  assert.equal(idle(), true, "an ordinary phone composer may collapse");
+  x.uploads.files.push({ key: "photo", status: "uploaded" });
+  x.harness.render();
+  assert.equal(idle(), false, "pending attachments stay visible");
+  x.uploads.files.length = 0;
+  x.uploads.picking = true;
+  x.harness.render();
+  assert.equal(idle(), false);
+  x.uploads.picking = false;
+  x.setDictating(true);
+  assert.equal(idle(), false, "dictation keeps its controls");
+  x.setDictating(false);
+  assert.equal(idle(), true);
+  x.setWidth(1024);
+  assert.equal(idle(), false, "the persistent-sidebar layout is unchanged");
+  x.harness.unmount();
+});
+
+test("the narrow bar keeps a fixed avatar; its title is the one tail-truncating line before the actions", () => {
+  const x = setup(A, false);
+  x.assistant.agent.display_name =
+    "A very long specialist name that cannot fit beside three actions";
+  x.harness.render();
+  const identity = elements(x.header()).find((n) => n.type === "FloatingButton")!;
+  // One shared glass pill around avatar, title and chevron; its glass hugs
+  // the pill and yields width.
+  const capsule = Object.assign(
+    {},
+    ...[identity.props.capsuleStyle].flat(Infinity).filter(Boolean),
+  );
+  assert.equal(capsule.alignSelf, "flex-start");
+  assert.equal(capsule.maxWidth, "100%");
+  const lines = elements(identity).filter((n) => n.type === "Text");
+  const title = lines.find((n) => n.props.ellipsizeMode === "tail")!;
+  assert.equal(
+    lines.filter((n) => n.props.ellipsizeMode === "tail").length,
+    1,
+    "the thread line is omitted on narrow bars",
+  );
+  assert.equal(title.props.numberOfLines, 1);
+  assert.equal(title.props.allowFontScaling, true);
+  // Largest accessibility size: capped growth, still a single shrinking line.
+  assert.ok(title.props.maxFontSizeMultiplier <= 1.35);
+  const titleStyle = Object.assign({}, ...[title.props.style].flat());
+  assert.equal(titleStyle.flexShrink, 1);
+  assert.equal(
+    titleStyle.lineHeight,
+    undefined,
+    "a fixed line box would clip scaled descenders",
+  );
+  const labels = elements(identity).find(
+    (n) => n.type === "View" && n.props.style?.flexShrink === 1,
+  );
+  assert.ok(labels, "the label column shrinks instead of the actions");
+  // ☰ | avatar + title ⌄ | actions: the avatar is a fixed 32pt mark.
+  const order = elements(identity).map((n) =>
+    n.type === "AgentAvatar"
+      ? "avatar"
+      : n === title
+        ? "title"
+        : n.type === "ChevronDown"
+          ? "chevron"
+          : undefined,
+  );
+  assert.deepEqual(
+    order.filter(Boolean),
+    ["avatar", "title", "chevron"],
+  );
+  const avatar = elements(identity).find((n) => n.type === "AgentAvatar")!;
+  assert.equal(avatar.props.size, "lg");
+  assert.equal(avatar.props.agent.id, "agent-a");
+  x.harness.unmount();
+});
+
+test("on a corner-sensor phone the agent picker's header stays at the top; its full-width body starts below the cluster", () => {
+  const x = setup(A, false);
+  const sheet = () => {
+    const modal = x.all().find((n) => n.type === "Modal")!;
+    const panel = modal.props.children[0];
+    return { panel, header: panel.props.children[0], body: panel.props.children[1] };
+  };
+  x.chooseAgent();
+  const style = (node: { props: Record<string, any> }) =>
+    Object.assign({}, ...[node.props.style].flat().filter(Boolean));
+  const bodyStyle = () =>
+    Object.assign(
+      {},
+      ...[sheet().body.props.contentContainerStyle ?? sheet().body.props.style]
+        .flat()
+        .filter(Boolean),
+    );
+  assert.equal(style(sheet().panel).paddingTop, 20);
+  assert.equal(style(sheet().header).paddingHorizontal, 20);
+  assert.equal(style(sheet().header).paddingRight, undefined);
+  assert.equal(style(sheet().header).marginBottom, 0);
+  x.setCornerSensor(83);
+  // The header stays flush at its 20pt top padding and its trailing Close
+  // stays left of the column; the full-width body starts at the measured
+  // 152pt cluster bottom (20pt top + 44pt row + 88pt), rail or not.
+  for (const rail of [false, true]) {
+    x.setQuickRail(rail);
+    assert.equal(style(sheet().panel).paddingTop, 20);
+    assert.equal(style(sheet().header).paddingRight, 20 + 83);
+    assert.equal(20 + 44 + style(sheet().header).marginBottom, 152);
+    assert.equal(bodyStyle().paddingRight, undefined, "runs to the edge");
+  }
+  x.setQuickRail(false);
+  x.setWidth(1024);
+  assert.equal(style(sheet().panel).paddingTop, 20, "centered sheets clear it already");
+  assert.equal(style(sheet().header).marginBottom, 0);
+  x.harness.unmount();
+});
+
+test("scrolling the transcript dismisses the keyboard and never swallows a first tap", () => {
+  const x = setup(A, false);
+  const list = x.all().find((n) => n.type === "FlatList")!;
+  // On-drag dismissal; taps on links, message actions and cards act while
+  // the keyboard is up instead of only dismissing it.
+  assert.equal(list.props.keyboardDismissMode, "on-drag");
+  assert.equal(list.props.keyboardShouldPersistTaps, "handled");
+  x.harness.unmount();
+});
+
+test("a live text-size change remounts the transcript so message, date and Markdown text re-measure", () => {
+  const x = setup(A, false);
+  const list = () => x.all().find((n) => n.type === "FlatList")!;
+  const before = list().key;
+  x.harness.render();
+  assert.equal(list().key, before, "ordinary renders keep the list and its scroll");
+  x.setFontScale(3.12);
+  assert.notEqual(list().key, before);
+  assert.ok(String(list().key).startsWith(`${A}:`), "still scoped to its chat");
+  x.harness.unmount();
 });
 
 test("header needs-you status takes precedence over active-turn running status", () => {
@@ -2385,7 +2839,7 @@ test("header needs-you status takes precedence over active-turn running status",
   conversation.active_turn = { id: "turn", tools: [] };
   x.harness.render();
   assert.match(
-    elements(x.header()).find((n) => n.type === "Pressable")!.props
+    elements(x.header()).find((n) => n.type === "FloatingButton")!.props
       .accessibilityLabel,
     /Running/,
   );
@@ -2404,7 +2858,7 @@ test("header needs-you status takes precedence over active-turn running status",
   ];
   x.harness.render();
   assert.match(
-    elements(x.header()).find((n) => n.type === "Pressable")!.props
+    elements(x.header()).find((n) => n.type === "FloatingButton")!.props
       .accessibilityLabel,
     /Needs you/,
   );
@@ -2515,7 +2969,7 @@ test("header compose preserves the viewed agent and starts a normal empty chat f
       origin,
     );
     assert.match(
-      elements(x.header()).find((n) => n.type === "Pressable")!.props
+      elements(x.header()).find((n) => n.type === "FloatingButton")!.props
         .accessibilityLabel,
       new RegExp(`Chatting with ${x.assistant.agent.display_name}, New chat`),
       origin,
@@ -2556,7 +3010,7 @@ test("agent picker New chat starts NyxBot and specialists in the normal empty-ch
     x.harness.flush();
     x.chooseAgent();
     x.all()
-      .find((n) => n.type === "WorkspaceChatList")!
+      .find((n) => n.type === "WorkspaceAgentPicker")!
       .props.onSelect({ kind: "agent", agentId: x.assistant.agent.id });
     x.harness.flush();
     assert.equal(x.props.route.params.agentId, x.assistant.agent.id);
@@ -2775,7 +3229,7 @@ test("Home header names the dashboard without calling it a new chat", () => {
   x.props.route.params = { home: true, openLatest: false };
   x.harness.render();
   assert.match(
-    elements(x.header()).find((node) => node.type === "Pressable")!.props
+    elements(x.header()).find((node) => node.type === "FloatingButton")!.props
       .accessibilityLabel,
     /NyxBot, Home\. Choose agent/,
   );
@@ -2783,7 +3237,7 @@ test("Home header names the dashboard without calling it a new chat", () => {
   x.compose();
   x.harness.flush();
   assert.match(
-    elements(x.header()).find((node) => node.type === "Pressable")!.props
+    elements(x.header()).find((node) => node.type === "FloatingButton")!.props
       .accessibilityLabel,
     /NyxBot, New chat\. Choose agent/,
   );

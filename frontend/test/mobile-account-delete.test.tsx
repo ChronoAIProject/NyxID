@@ -77,6 +77,7 @@ function harness() {
         if (name === "react/jsx-runtime") return jsxRuntime;
         if (name === "@tanstack/react-query") return query;
         if (name === "react-native") return native;
+        if (name === "react-native-safe-area-context") return { SafeAreaView: box };
         if (name === "@react-native-async-storage/async-storage") return { __esModule: true, default: {
           getItem: async (key: string) => deviceStorage.get(key) ?? null,
           setItem: async (key: string, value: string) => { deviceStorage.set(key, value); },
@@ -87,6 +88,22 @@ function harness() {
         if (name === "expo/fetch") return { fetch: transport };
         if (name === "lucide-react-native") return new Proxy({ __esModule: true }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => null });
         if (name === "expo-linear-gradient") return { LinearGradient: box };
+        // Shared page containers animate the Duo rail inset; outside the
+        // Duo they render a plain view, so a static stand-in suffices.
+        // Floating header controls fall back to the theme surface without
+        // liquid glass.
+        if (name === "expo-glass-effect") return { GlassView: box, GlassContainer: box, isLiquidGlassAvailable: () => false };
+        if (name === "react-native-reanimated") {
+          const transition = { duration: () => transition, reduceMotion: () => transition };
+          return {
+            __esModule: true,
+            default: { View: box },
+            useAnimatedStyle: () => ({}),
+            FadeIn: transition,
+            FadeOut: transition,
+            ReduceMotion: { System: "system" },
+          };
+        }
         if (name === "expo-constants") return { __esModule: true, default: { expoConfig: { version: "test" } } };
         // Native keyboard measurements are inert in this account deletion suite.
         if (name.endsWith("/KeyboardViewport")) return { KeyboardViewport: box };

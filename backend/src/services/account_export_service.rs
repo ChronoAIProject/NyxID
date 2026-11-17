@@ -611,6 +611,7 @@ const PROFILE_FIELDS: &[&str] = &[
     "profile_config.analytics.enabled",
     "profile_config.services_view",
     "profile_config.service_views",
+    "profile_config.quick_access",
     "profile_config.onboarding.ai_services_completed_at",
 ];
 const AUTHORED_GROUP_MESSAGE_FIELDS: &[&str] = &["group_id", "role", "text", "created_at"];
@@ -1353,6 +1354,7 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "profile_config.analytics.enabled",
             "profile_config.services_view",
             "profile_config.service_views",
+            "profile_config.quick_access",
             "profile_config.onboarding.ai_services_completed_at",
         ],
         "audit_log" => &["event_type", "created_at"],
@@ -2596,6 +2598,41 @@ mod tests {
         let value = safe_item(&row, &["actor.person_id", "actor.name"]);
         assert_eq!(value["actor"]["person_id"], "opaque");
         assert_eq!(value["actor"]["name"], "Deleted account");
+    }
+
+    #[test]
+    fn profile_export_includes_the_saved_quick_access_list() {
+        let row = doc! {
+            "email": "person@example.test",
+            "profile_config": {
+                "quick_access": {"items": [
+                    {"kind": "destination", "id": "machines"},
+                    {"kind": "agent", "id": "6f9619ff-8b86-4011-b42d-00c04fc964ff"},
+                    {"kind": "crew", "id": "nyxg-0123456789abcdef0123456789abcdef"},
+                ]},
+                "analytics": {"enabled": true, "revision": 3_i32},
+            },
+        };
+        let value = safe_item(&row, PROFILE_FIELDS);
+        assert_eq!(
+            value["profile_config"]["quick_access"]["items"],
+            serde_json::json!([
+                {"kind": "destination", "id": "machines"},
+                {"kind": "agent", "id": "6f9619ff-8b86-4011-b42d-00c04fc964ff"},
+                {"kind": "crew", "id": "nyxg-0123456789abcdef0123456789abcdef"},
+            ])
+        );
+        // Sibling settings outside the allowlist stay out.
+        assert!(
+            value["profile_config"]["analytics"]
+                .get("revision")
+                .is_none()
+        );
+        assert_eq!(
+            fields_for("users").unwrap(),
+            PROFILE_FIELDS,
+            "the users registry export and the profile section list the same fields"
+        );
     }
 
     #[test]

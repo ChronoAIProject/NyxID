@@ -131,7 +131,7 @@ Every declared registry export view has one subsection; a source collection may 
 | `account` | `platform_personal_bindings` | `user_id`, `conversation_id`, `state`, `created_at`, `updated_at` |
 | `account` | `platform_public_probe_consents` | `expires_at` |
 | `account` | `platform_setups` | `owner_user_id`, `state`, `created_at`, `updated_at`, `expires_at` |
-| `account` | `profile` | `email`, `display_name`, `avatar_url`, `email_verified`, `mfa_enabled`, `social_provider`, `created_at`, `updated_at`, `last_login_at`, `profile_config.security.skip_mfa_for_approved_sign_ins`, `profile_config.analytics.enabled`, `profile_config.services_view`, `profile_config.service_views`, `profile_config.onboarding.ai_services_completed_at` |
+| `account` | `profile` | `email`, `display_name`, `avatar_url`, `email_verified`, `mfa_enabled`, `social_provider`, `created_at`, `updated_at`, `last_login_at`, `profile_config.security.skip_mfa_for_approved_sign_ins`, `profile_config.analytics.enabled`, `profile_config.services_view`, `profile_config.service_views`, `profile_config.quick_access`, `profile_config.onboarding.ai_services_completed_at` |
 | `account` | `saved_logins` | `user_id`, `created_at`, `updated_at` |
 | `account` | `trigger_deliveries` | `user_id`, `status`, `created_at`, `updated_at`, `expires_at` |
 | `account` | `trigger_owner_limits` | `version` |

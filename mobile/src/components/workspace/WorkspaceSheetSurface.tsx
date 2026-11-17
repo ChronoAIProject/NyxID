@@ -1,7 +1,10 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
 import { workspaceFocus } from "../../lib/accessibility/workspaceFocus";
 import {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -29,6 +32,20 @@ import {
 import { useReducedMotionPreference } from "../../lib/accessibility/useReducedMotion";
 import { SheetThemeProvider, useTheme } from "../../theme/ThemeContext";
 import { darkSheetColors, lightSheetColors } from "../../theme/mobileTheme";
+import {
+  WorkspaceCornerSensorContext,
+  WorkspaceRailWindowContext,
+  WorkspaceSheetHeaderBandContext,
+} from "./WorkspaceLayoutContext";
+import { WorkspaceFloatingInsetContext } from "./workspaceFloatingInset";
+import {
+  CENTERED_SHEET_MIN_WIDTH,
+  workspaceCornerSensor,
+  workspaceStatusCluster,
+  workspaceHeaderBand,
+  workspaceQuickRailAvailable,
+  workspaceSheetRailReserve,
+} from "./workspaceLayout";
 
 export type WorkspaceSheetHandle = { dismiss: () => void };
 
@@ -48,6 +65,7 @@ export function WorkspaceSheetSurface({
   canHandleHardwareBack?: () => boolean;
   controller?: RefObject<WorkspaceSheetHandle | null>;
 }>) {
+  useAppLanguage();
   const { colors, mode } = useTheme();
   const sheet = mode === "light" ? lightSheetColors : darkSheetColors;
   const { height, width } = useWindowDimensions();
@@ -64,7 +82,21 @@ export function WorkspaceSheetSurface({
     viewport?.windowWidth === width && viewport.windowHeight === height
       ? viewport
       : { width, height };
-  const wide = available.width >= 768;
+  const wide = available.width >= CENTERED_SHEET_MIN_WIDTH;
+  // The folded Duo: the sheet ends before the quick rail's column, which
+  // stays in view beside it (under the scrim; a tap there dismisses).
+  const railReserve = workspaceSheetRailReserve({
+    width: available.width,
+    height: available.height,
+    rightInset: insets.right,
+  });
+  // Whether the window behind this sheet shows the quick rail (measured with
+  // the window's own insets, before the panel rewrites them).
+  const railWindow = workspaceQuickRailAvailable({
+    width: available.width,
+    height: available.height,
+    rightInset: insets.right,
+  });
   const gap = insets.top + (wide ? 24 : 10);
   const bottomGap = wide ? insets.bottom + 24 : 0;
   const panelWidth = wide
@@ -72,7 +104,7 @@ export function WorkspaceSheetSurface({
         720,
         Math.max(0, available.width - insets.left - insets.right - 48),
       )
-    : available.width;
+    : available.width - railReserve;
   const panelHeight = Math.max(
     0,
     Math.min(wide ? 860 : Infinity, available.height - gap - bottomGap),
@@ -80,6 +112,25 @@ export function WorkspaceSheetSurface({
   const panelTop = wide
     ? gap + Math.max(0, available.height - gap - bottomGap - panelHeight) / 2
     : gap;
+  // Beside the rail the panel no longer reaches the status column.
+  const trailingInset = wide || railReserve > 0 ? 0 : insets.right;
+  const sheetWindow = { width, height, rightInset: trailingInset };
+  const cornerSensor = workspaceCornerSensor(sheetWindow);
+  // The row sits flush under the handle, left of the status column; the
+  // full-width body starts below the cluster.
+  const headerTop = panelTop + styles.handleArea.height;
+  const band = workspaceHeaderBand(
+    headerTop,
+    cornerSensor,
+    workspaceStatusCluster(sheetWindow),
+  );
+  const headerBand = useMemo(
+    () => ({
+      paddingTop: band.paddingTop - headerTop,
+      paddingBottom: band.paddingBottom,
+    }),
+    [band.paddingTop, band.paddingBottom, headerTop],
+  );
   const reducedMotion = useReducedMotionPreference();
   const reduced = reducedMotion !== false || nativePresentation;
   const offset = useRef(
@@ -252,7 +303,7 @@ export function WorkspaceSheetSurface({
       />
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Dismiss drawer"
+        accessibilityLabel={translateApp("Dismiss drawer")}
         onPress={() => void dismiss()}
         style={StyleSheet.absoluteFill}
       />
@@ -278,12 +329,13 @@ export function WorkspaceSheetSurface({
             styles.host,
             { paddingTop: gap, paddingBottom: bottomGap },
             wide && styles.centeredHost,
+            railReserve > 0 && styles.leadingHost,
           ]}
         >
           <Animated.View
             pointerEvents={interacting ? "auto" : "none"}
             accessible={false}
-            accessibilityLabel="Workspace drawer"
+            accessibilityLabel={translateApp("Workspace drawer")}
             style={[
               styles.panel,
               {
@@ -308,7 +360,7 @@ export function WorkspaceSheetSurface({
                 style={styles.fill}
                 initialMetrics={{
                   frame: {
-                    x: (available.width - panelWidth) / 2,
+                    x: railReserve > 0 ? 0 : (available.width - panelWidth) / 2,
                     y: panelTop,
                     width: panelWidth,
                     height: panelHeight,
@@ -316,12 +368,17 @@ export function WorkspaceSheetSurface({
                   insets: {
                     top: 0,
                     left: wide ? 0 : insets.left,
-                    right: wide ? 0 : insets.right,
+                    right: trailingInset,
                     bottom: wide ? 0 : insets.bottom,
                   },
                 }}
               >
-                <SheetThemeProvider>
+                {/* The panel already ends before the rail (or covers no
+                    rail): no floating-control inset inside. */}
+                <WorkspaceFloatingInsetContext.Provider value={0}>
+                <WorkspaceRailWindowContext.Provider value={railWindow}>
+                <WorkspaceCornerSensorContext.Provider value={cornerSensor}>
+                  <SheetThemeProvider>
                   <View
                     {...pan.panHandlers}
                     accessible={false}
@@ -334,8 +391,13 @@ export function WorkspaceSheetSurface({
                       ]}
                     />
                   </View>
-                  <View style={styles.fill}>{children}</View>
+                  <WorkspaceSheetHeaderBandContext.Provider value={headerBand}>
+                    <View style={styles.fill}>{children}</View>
+                  </WorkspaceSheetHeaderBandContext.Provider>
                 </SheetThemeProvider>
+                </WorkspaceCornerSensorContext.Provider>
+                </WorkspaceRailWindowContext.Provider>
+                </WorkspaceFloatingInsetContext.Provider>
               </SafeAreaProvider>
             </View>
           </Animated.View>
@@ -355,6 +417,7 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
   },
   centeredHost: { justifyContent: "center" },
+  leadingHost: { alignItems: "flex-start" },
   // The outer panel carries the light-mode shadow, so only the inner surface clips.
   panel: { borderTopLeftRadius: 24, borderTopRightRadius: 24 },
   centeredPanel: { borderRadius: 24 },

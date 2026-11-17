@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 /** Matches the owner upload contract used by the Web composer. */
 export const MAX_ASSISTANT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_ASSISTANT_ATTACHMENTS = 10;
@@ -90,7 +91,7 @@ export function attachmentFileError(
   file: AssistantUploadFile,
   actualByteSize: number | null | undefined = file.size,
 ): string | null {
-  if (!isSupportedAttachment(file)) return UNSUPPORTED_ATTACHMENT_MESSAGE;
+  if (!isSupportedAttachment(file)) return translateApp(UNSUPPORTED_ATTACHMENT_MESSAGE);
   if (
     actualByteSize !== undefined &&
     actualByteSize !== null &&
@@ -98,7 +99,7 @@ export function attachmentFileError(
       actualByteSize < 1 ||
       actualByteSize > MAX_ASSISTANT_ATTACHMENT_BYTES)
   )
-    return ATTACHMENT_SIZE_MESSAGE;
+    return translateApp(ATTACHMENT_SIZE_MESSAGE);
   return null;
 }
 
@@ -106,9 +107,9 @@ export function assistantAttachmentPath(
   scope: AssistantUploadScope,
   attachmentId?: string,
 ): string {
-  if (!scope.id?.trim()) throw new Error("Choose a conversation first.");
+  if (!scope.id?.trim()) throw new Error(translateApp("Choose a conversation first."));
   if (attachmentId !== undefined && !attachmentId.trim())
-    throw new Error("Choose an attachment first.");
+    throw new Error(translateApp("Choose an attachment first."));
   return `/assistant/nyxagent/${scope.kind}/${encodeURIComponent(scope.id)}/attachments${
     attachmentId === undefined ? "" : `/${encodeURIComponent(attachmentId)}`
   }`;
@@ -131,11 +132,11 @@ export function attachmentUploadHeaders(name: string): Record<string, string> {
 }
 
 export function attachmentUploadError(error: unknown): string {
-  if (!(error instanceof Error)) return "Upload failed. Please try again.";
+  if (!(error instanceof Error)) return translateApp("Upload failed. Please try again.");
   if (/malformed or unsupported attachment/i.test(error.message))
-    return UNSUPPORTED_ATTACHMENT_MESSAGE;
-  if (error.name === "AbortError") return "Upload cancelled.";
-  return error.message || "Upload failed. Please try again.";
+    return translateApp(UNSUPPORTED_ATTACHMENT_MESSAGE);
+  if (error.name === "AbortError") return translateApp("Upload cancelled.");
+  return error.message || translateApp("Upload failed. Please try again.");
 }
 
 /** Cancels transport work and stops a stuck upload without replaying its POST. */
@@ -145,7 +146,7 @@ export async function withAttachmentUploadDeadline<T>(
   milliseconds = ASSISTANT_UPLOAD_TIMEOUT_MS,
 ): Promise<T> {
   const cancelled = () =>
-    Object.assign(new Error("Upload cancelled."), { name: "AbortError" });
+    Object.assign(new Error(translateApp("Upload cancelled.")), { name: "AbortError" });
   if (signal?.aborted) throw cancelled();
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -153,7 +154,7 @@ export async function withAttachmentUploadDeadline<T>(
   const deadline = new Promise<never>((_, reject) => {
     rejectDeadline = reject;
     timer = setTimeout(() => {
-      reject(new Error("Upload timed out. Try a smaller file."));
+      reject(new Error(translateApp("Upload timed out. Try a smaller file.")));
       controller.abort();
     }, milliseconds);
   });

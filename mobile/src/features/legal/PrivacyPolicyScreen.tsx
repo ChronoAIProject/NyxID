@@ -1,12 +1,15 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { LegalDocumentScreen } from "./LegalDocumentScreen";
 
 type Props = SheetScreenProps<"PrivacyPolicy">;
 
 export function PrivacyPolicyScreen({ navigation }: Props) {
+  useAppLanguage();
   return (
     <LegalDocumentScreen
-      title="Privacy Policy"
+      title={translateApp("Privacy Policy")}
       docKey="privacy"
       telemetryBackTarget="privacy_back"
       onBack={() => navigation.goBack()}

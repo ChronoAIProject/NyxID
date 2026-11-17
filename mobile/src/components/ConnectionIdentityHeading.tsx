@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { StyleSheet, Text, View } from "react-native";
 import Svg, { Circle, SvgXml } from "react-native-svg";
 import { useTheme } from "../theme/ThemeContext";
@@ -30,6 +32,7 @@ export function ConnectionIdentityHeading({
   subtitle?: string;
   complete?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const circle = [
     styles.circle,
@@ -40,7 +43,9 @@ export function ConnectionIdentityHeading({
       <View
         accessible
         accessibilityRole="image"
-        accessibilityLabel={`NyxID connects to ${serviceName}`}
+        accessibilityLabel={translateApp("NyxID connects to {{service}}", {
+          service: serviceName,
+        })}
         style={styles.identities}
       >
         <View style={styles.identity}>
@@ -48,7 +53,7 @@ export function ConnectionIdentityHeading({
             <SvgXml xml={nyxidIconXml} width={36} height={36} />
           </View>
           <Text style={[styles.name, { color: colors.textPrimary }]}>
-            NyxID
+            {"NyxID"}
           </Text>
         </View>
         <Svg width={80} height={32} viewBox="0 0 80 32" style={styles.arc}>

@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../../i18n/LanguageProvider";
+import { translateApp } from "../../../i18n/appTranslation";
 import { useEffect, useMemo, useRef } from "react";
 import { Platform, StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
@@ -27,7 +29,7 @@ type MediaDiagnostic = {
   counts?: Record<string, number>;
 };
 
-const closedError = () => new Error("Voice audio was closed.");
+const closedError = () => new Error(translateApp("Voice audio was closed."));
 
 /** No authentication material is ever passed to the local media document. */
 export class NativeVoiceMedia implements VoiceMediaAdapter {
@@ -323,14 +325,16 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       ]);
       this.unavailable(
         typeof event.message === "string" && allowed.has(event.message)
-          ? event.message
+          ? translateApp(event.message)
           : undefined,
       );
     }
   }
 
   unavailable(
-    message = "Voice audio connection was lost. Please try again.",
+    message = translateApp(
+      "Voice audio connection was lost. Please try again.",
+    ),
   ): void {
     if (this.closed) return;
     if (this.failedGeneration !== this.generation) {
@@ -372,10 +376,14 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(
-          new Error("Voice audio took too long to start. Please try again."),
+          new Error(
+            translateApp(
+              "Voice audio took too long to start. Please try again.",
+            ),
+          ),
         );
         this.unavailable(
-          "Voice audio took too long to start. Please try again.",
+          translateApp("Voice audio took too long to start. Please try again."),
         );
       }, 20000);
       this.pending.set(requestId, { resolve, reject, timer });
@@ -389,7 +397,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   ): Promise<string> {
     this.close();
     if (microphoneOwner && microphoneOwner !== this)
-      throw new Error("The microphone is already in use.");
+      throw new Error(translateApp("The microphone is already in use."));
     microphoneOwner = this;
     this.closed = false;
     this.diagnostics = [];
@@ -433,7 +441,9 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
           const timer = setTimeout(
             () =>
               waiter.reject(
-                new Error("Voice audio is not ready. Please try again."),
+                new Error(
+                  translateApp("Voice audio is not ready. Please try again."),
+                ),
               ),
             15000,
           );
@@ -453,7 +463,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         result.length > 131072 ||
         (protocol === "openai_live" && !result)
       )
-        throw new Error("Voice audio returned an invalid offer.");
+        throw new Error(translateApp("Voice audio returned an invalid offer."));
       return result;
     } catch (error) {
       if (generation === this.generation) this.close();
@@ -465,7 +475,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
 
   async answer(sdp: string): Promise<void> {
     if (this.closed) return;
-    if (!sdp || sdp.length > 131072) throw new Error("Invalid voice answer.");
+    if (!sdp || sdp.length > 131072) throw new Error(translateApp("Invalid voice answer."));
     if (this.native) return this.native.answer(sdp);
     await this.request({ type: "answer", sdp });
   }
@@ -560,6 +570,7 @@ export function VoiceMediaBridge({
   media: NativeVoiceMedia;
   origin: string;
 }) {
+  useAppLanguage();
   const webView = useRef<WebView>(null);
   const loaded = useRef(false);
   const source = useMemo(

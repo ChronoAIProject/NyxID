@@ -1,10 +1,21 @@
-import type { PropsWithChildren, ReactNode } from "react";
+import { DynamicTypeText as Text } from "../DynamicTypeText";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
+import { useContext, type PropsWithChildren, type ReactNode } from "react";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { workspaceBodyEdges } from "./workspaceLayout";
+import { useRailScrollIndicator } from "./workspaceFloatingInset";
+import { ownTrailingPadding } from "./workspaceTrailingInset";
+import { RailInsetView } from "./WorkspaceSlabMotion";
+import {
+  WORKSPACE_TITLE_MAX_FONT_SCALE,
+  WORKSPACE_TITLE_MAX_LINES,
+} from "./workspaceHeaderMetrics";
 import {
   ActivityIndicator,
   Pressable,
   RefreshControl,
   StyleSheet,
-  Text,
   TextInput,
   View,
   type StyleProp,
@@ -15,13 +26,12 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../../theme/ThemeContext";
-import { fonts, radius, TOUCH_TARGET } from "../../theme/designTokens";
+import { fonts, radius, typeScale, TOUCH_TARGET } from "../../theme/designTokens";
 import { KeyboardViewport } from "./KeyboardViewport";
 import { PageScrollView } from "./ScrollEdgeFades";
 
 export function WorkspacePage({
   title,
-  titleNumberOfLines,
   subtitle,
   children,
   scroll = true,
@@ -31,7 +41,6 @@ export function WorkspacePage({
   contentStyle,
 }: PropsWithChildren<{
   title: string;
-  titleNumberOfLines?: number;
   subtitle?: string;
   scroll?: boolean;
   showHeading?: boolean;
@@ -40,7 +49,13 @@ export function WorkspacePage({
   onRefresh?: () => void;
   contentStyle?: StyleProp<ViewStyle>;
 }>) {
+  useAppLanguage();
   const { colors } = useTheme();
+  const cornerSensor = useContext(WorkspaceCornerSensorContext);
+  // On the Duo (folded or unfolded), readable and interactive content keeps
+  // clear of the rail in rail mode and runs to the 12pt margin in full screen
+  // (RailInsetView animates the inset); the page background runs underneath.
+  const railIndicator = useRailScrollIndicator();
   const content = (
     <>
       {showHeading && (
@@ -49,7 +64,7 @@ export function WorkspacePage({
             accessibilityRole="header"
             accessibilityLabel={title}
             accessibilityActions={
-              onRefresh ? [{ name: "refresh", label: "Refresh" }] : undefined
+              onRefresh ? [{ name: "refresh", label: translateApp("Refresh") }] : undefined
             }
             onAccessibilityAction={
               onRefresh
@@ -60,8 +75,11 @@ export function WorkspacePage({
                   }
                 : undefined
             }
-            numberOfLines={titleNumberOfLines}
+            // Capped like the header bar so no title word outgrows a line:
+            // breaks fall between words, and a longer title ends in "…".
+            numberOfLines={WORKSPACE_TITLE_MAX_LINES}
             ellipsizeMode="tail"
+            maxFontSizeMultiplier={WORKSPACE_TITLE_MAX_FONT_SCALE}
             style={[styles.title, { color: colors.textPrimary }]}
           >
             {title}
@@ -77,8 +95,11 @@ export function WorkspacePage({
     </>
   );
   const body = scroll ? (
+    // The scroller itself narrows past the rail (its indicator with it).
+    <RailInsetView style={styles.fill}>
     <PageScrollView
       fadeColor={colors.bg}
+
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
       contentContainerStyle={[styles.content, contentStyle]}
@@ -86,7 +107,7 @@ export function WorkspacePage({
       refreshControl={
         onRefresh ? (
           <RefreshControl
-            accessibilityLabel="Refresh"
+            accessibilityLabel={translateApp("Refresh")}
             refreshing={refreshing}
             onRefresh={onRefresh}
             tintColor={colors.primary}
@@ -95,15 +116,24 @@ export function WorkspacePage({
           />
         ) : undefined
       }
+      {...railIndicator}
     >
       {content}
     </PageScrollView>
+    </RailInsetView>
   ) : (
-    <View style={[styles.content, styles.fill, contentStyle]}>{content}</View>
+    <RailInsetView
+      ownPaddingRight={ownTrailingPadding([styles.content, contentStyle])}
+      style={[styles.content, styles.fill, contentStyle]}
+    >
+      {content}
+    </RailInsetView>
   );
   return (
     <SafeAreaView
-      edges={["bottom", "left", "right"]}
+      // Beside the Duo's status column bodies run to the right edge below the
+      // header band; the rail's glass buttons float over them.
+      edges={workspaceBodyEdges(cornerSensor)}
       style={[styles.fill, { backgroundColor: colors.bg }]}
     >
       <KeyboardViewport>{body}</KeyboardViewport>
@@ -115,6 +145,7 @@ export function Card({
   children,
   style,
 }: PropsWithChildren<{ style?: StyleProp<ViewStyle> }>) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -142,6 +173,7 @@ export function Section({
   footer,
   children,
 }: PropsWithChildren<{ title?: string; footer?: string }>) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.section}>
@@ -150,7 +182,7 @@ export function Section({
           accessibilityRole="header"
           style={[styles.sectionTitle, { color: colors.textMuted }]}
         >
-          {title.toUpperCase()}
+          {title}
         </Text>
       ) : null}
       <Card>{children}</Card>
@@ -170,6 +202,7 @@ export function Label({
   style,
   ...props
 }: TextProps & { muted?: boolean; mono?: boolean }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Text
@@ -193,6 +226,7 @@ export function Field({
   style,
   ...props
 }: TextInputProps & { label: string }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.field}>
@@ -242,6 +276,7 @@ export function ActionButton({
   /** Decorative icon after the label, such as the web's arrowed primary action. */
   trailingIcon?: (color: string) => ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const blocked = disabled || loading;
   const color =
@@ -332,6 +367,7 @@ export function Notice({
   message: string;
   tone?: "error" | "info" | "success";
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const palette =
     tone === "error"
@@ -425,9 +461,7 @@ const styles = StyleSheet.create({
   notice: { padding: 12, borderWidth: 1, borderRadius: radius.md },
   section: { gap: 8 },
   sectionTitle: {
-    fontFamily: fonts.body,
-    fontSize: 12,
-    letterSpacing: 0.6,
+    ...typeScale.groupLabel,
     paddingHorizontal: 16,
   },
   sectionFooter: {

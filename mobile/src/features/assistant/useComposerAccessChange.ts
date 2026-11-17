@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { assistantApi } from "../../lib/api/assistantApi";
@@ -83,7 +84,7 @@ export function useComposerAccessChange(props: {
         setError(
           cause instanceof Error
             ? cause.message
-            : "Could not change permissions.",
+            : translateApp("Could not change permissions."),
         );
     } finally {
       lock.current = false;

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 export class MachineReviewRequired extends Error {}
@@ -117,7 +118,9 @@ export function machinePolicyInput(node: MachineNode, input: MachinePolicy) {
     !body.acknowledge_single_user_risk
   )
     throw new MachineReviewRequired(
-      "Acknowledge that commands running as the browser user could read typed saved-login values.",
+      translateApp(
+        "Acknowledge that commands running as the browser user could read typed saved-login values.",
+      ),
     );
   return body;
 }
@@ -175,11 +178,17 @@ export function updateResultMessage(
 ) {
   switch (result.status) {
     case "queued":
-      return "Update queued. This is acceptance, not completion. Refresh to check the version and phase.";
+      return translateApp(
+        "Update queued. This is acceptance, not completion. Refresh to check the version and phase.",
+      );
     case "manual_step":
-      return "A manual step is required. Open the machine on the web for verified host instructions. The app has not completed this update.";
+      return translateApp(
+        "A manual step is required. Open the machine on the web for verified host instructions. The app has not completed this update.",
+      );
     case "failed":
-      return `Update failed: ${result.reason}`;
+      return translateApp("Update failed: {{reason}}", {
+        reason: result.reason,
+      });
   }
 }
 export function updateInProgress(update: MachineUpdate) {

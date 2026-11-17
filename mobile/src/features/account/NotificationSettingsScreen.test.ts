@@ -101,7 +101,7 @@ test("approval default is one row with its value that opens an in-app menu", () 
 test("NyxBot push switches appear only with the flag, one per kind, and save the whole set", () => {
   const off = setup(true, 1);
   assert.equal(
-    off.all().some((node) => node.type === "Text" && node.props.children === "NYXBOT NOTIFICATIONS"),
+    off.all().some((node) => node.type === "Text" && node.props.children === "NyxBot notifications"),
     false,
   );
   off.harness.unmount();
@@ -114,7 +114,8 @@ test("NyxBot push switches appear only with the flag, one per kind, and save the
       nyxbotNotifications: { enabled: true, push: { needs_decision: true } },
     },
   );
-  assert.ok(env.text("NYXBOT NOTIFICATIONS"));
+  assert.equal(style(env.text("NyxBot notifications")).textTransform, "uppercase");
+  assert.equal(style(env.text("NyxBot notifications")).letterSpacing, 1.5);
   const labels = [
     "Automation results",
     "Automation problems",

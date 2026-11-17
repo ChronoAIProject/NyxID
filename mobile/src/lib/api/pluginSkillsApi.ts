@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { requestJson } from "./http";
 import {
@@ -31,7 +32,9 @@ export const pluginSkillsApi = {
     );
     if (result.id !== proposalId || result.agent_id !== agentId)
       throw new Error(
-        "The server returned a different skill draft. Reload the confirmation.",
+        translateApp(
+          "The server returned a different skill draft. Reload the confirmation.",
+        ),
       );
     return result;
   },
@@ -56,7 +59,9 @@ export const pluginSkillsApi = {
     );
     if (result.agent_id && result.agent_id !== agentId)
       throw new Error(
-        "The server returned another agent's skills. Reload to continue.",
+        translateApp(
+          "The server returned another agent's skills. Reload to continue.",
+        ),
       );
     return result;
   },

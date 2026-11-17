@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 const shareAudienceFields = z.object({
@@ -13,7 +14,7 @@ const validateAudience = (
   if (s.subject_kind === "org" && s.role !== "user") {
     ctx.addIssue({
       code: "custom",
-      message: "Organizations receive user access",
+      message: translateApp("Organizations receive user access"),
       path: ["role"],
     });
   }
@@ -24,8 +25,10 @@ const validateAudience = (
       code: "custom",
       message:
         s.subject_kind === "person"
-          ? "Use an ID for an existing person or an email for a new person"
-          : "Organizations require an ID",
+          ? translateApp(
+              "Use an ID for an existing person or an email for a new person",
+            )
+          : translateApp("Organizations require an ID"),
       path: [hasEmail ? "email" : "subject_id"],
     });
   }
@@ -41,14 +44,14 @@ const shareAudienceViewSchema = shareAudienceFields
     if (s.subject_kind === "org" && s.role !== "user") {
       ctx.addIssue({
         code: "custom",
-        message: "Organizations receive user access",
+        message: translateApp("Organizations receive user access"),
         path: ["role"],
       });
     }
     if (!s.subject_id) {
       ctx.addIssue({
         code: "custom",
-        message: "Audience rows require an ID",
+        message: translateApp("Audience rows require an ID"),
         path: ["subject_id"],
       });
     }
