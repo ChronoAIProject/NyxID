@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { HISTORY_UNAVAILABLE } from "./assistantHistoryCompat";
 
 export const ASSISTANT_HISTORY_TIMEOUT_MS = 10_000;
@@ -9,7 +9,7 @@ export function withAssistantHistoryDeadline<T>(
   read: () => Promise<T>,
 ): Promise<T> {
   const cancelled = () =>
-    Object.assign(new Error(translateApp("Request cancelled")), { name: "AbortError" });
+    Object.assign(localizedError("Request cancelled"), { name: "AbortError" });
   if (controller.signal.aborted) return Promise.reject(cancelled());
 
   let interrupt!: (error: Error) => void;
@@ -19,7 +19,7 @@ export function withAssistantHistoryDeadline<T>(
   const abort = () => interrupt(cancelled());
   controller.signal.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => {
-    const error = Object.assign(new Error(translateApp(HISTORY_UNAVAILABLE)), {
+    const error = Object.assign(localizedError(HISTORY_UNAVAILABLE), {
       name: "HistoryRequestTimeoutError",
     });
     // Preserve the timeout reason when abort synchronously rejects the transport.

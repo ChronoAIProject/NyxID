@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useState } from "react";
@@ -103,7 +105,7 @@ export function MachinePolicyScreen({
           onRefresh={async () => {
             const result = await query.refetch();
             if (result.error) throw result.error;
-            if (!result.data) throw new Error(translateApp("Machine unavailable"));
+            if (!result.data) throw localizedError("Machine unavailable");
             return result.data.node;
           }}
         />
@@ -132,8 +134,8 @@ export function PolicyEditor({
   const [ack, setAck] = useState(false);
   const [automaticDraft, setAutomaticDraft] = useState<boolean>();
   const [confirmUpdate, setConfirmUpdate] = useState(false);
-  const [notice, setNotice] = useState<string>();
-  const [refreshError, setRefreshError] = useState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
+  const [refreshError, setRefreshError] = useLocalizedState<string>();
   const automatic = automaticDraft ?? update?.automatic ?? false;
   const policyDirty =
     confirm !== baseline.machine_confirm ||
@@ -173,7 +175,7 @@ export function PolicyEditor({
       write.reviewed();
       setRefreshError(undefined);
     } catch (cause) {
-      if (write.current()) setRefreshError(machineError(cause));
+      if (write.current()) setRefreshError(() => (machineError(cause)));
     }
   }
   async function settled() {
@@ -198,9 +200,9 @@ export function PolicyEditor({
       });
       setAck(false);
       setNotice(
-        translateApp(
+        () => (translateApp(
           "Owner policy saved. Automatic-update policy is saved separately.",
-        ),
+        )),
       );
       await settled();
     });
@@ -317,9 +319,9 @@ export function PolicyEditor({
                   if (!current()) return;
                   setAutomaticDraft(undefined);
                   setNotice(
-                    translateApp(
+                    () => (translateApp(
                       "Automatic-update policy saved. Owner policy is saved separately.",
-                    ),
+                    )),
                   );
                   await settled();
                 })
@@ -360,7 +362,7 @@ export function PolicyEditor({
                       );
                       if (!current()) return;
                       setConfirmUpdate(false);
-                      setNotice(updateResultMessage(result));
+                      setNotice(() => (updateResultMessage(result)));
                       await settled();
                     })
                   }

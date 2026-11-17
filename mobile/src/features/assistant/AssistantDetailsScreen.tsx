@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -88,7 +90,7 @@ export function AssistantDetailsScreen({
   const scope = `${runtime.epoch}:${conversationId ?? "new"}:${requestedAgent ?? "nyxbot"}`;
   const [busy, setBusy] = useState(false);
   const [deleted, setDeleted] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const mounted = useRef(true);
   const lock = useRef(false);
   const unavailable =
@@ -163,9 +165,9 @@ export function AssistantDetailsScreen({
     } catch (cause) {
       if (alive())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : translateApp("Could not update the chat. Try again."),
+            : translateApp("Could not update the chat. Try again.")),
         );
     } finally {
       lock.current = false;
@@ -350,7 +352,7 @@ export function AssistantTitleEditScreen({
   const [title, setTitle] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const mounted = useRef(true);
   const lock = useRef(false);
   const unavailable =
@@ -397,9 +399,7 @@ export function AssistantTitleEditScreen({
         title ?? conversation!.title,
       );
       if (result.id !== conversationId)
-        throw new Error(
-          translateApp("The server returned a different chat. Please reload."),
-        );
+        throw localizedError("The server returned a different chat. Please reload.");
       if (!alive()) return;
       await client.cancelQueries({ queryKey: historyKey, exact: true });
       if (!alive()) return;
@@ -417,9 +417,9 @@ export function AssistantTitleEditScreen({
     } catch (cause) {
       if (alive())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : translateApp("Could not update the chat. Try again."),
+            : translateApp("Could not update the chat. Try again.")),
         );
     } finally {
       lock.current = false;

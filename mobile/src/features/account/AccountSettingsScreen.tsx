@@ -1,3 +1,4 @@
+import { localizedToast } from "../../i18n/localizedToast";
 import { translateApp } from "../../i18n/appTranslation";
 import { LANGUAGES } from "../../i18n/language";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
@@ -222,8 +223,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
   });
   const voiceEnabled = !!voiceFeatures.data?.includes("assistant:voice");
 
-  const showToast = (message: string, kind: ToastKind) =>
-    setToast({ message, kind });
+  const showToast = (message: () => string, kind: ToastKind) =>
+    setToast(localizedToast(() => ({ message: message(), kind })));
 
   useEffect(() => {
     if (!toast) return;
@@ -235,11 +236,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async (result) => {
       showToast(
-        result.status === "complete"
+        () => (result.status === "complete"
           ? translateApp("Account erasure complete. You have been signed out.")
           : translateApp(
               "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
-            ),
+            )),
         "success",
       );
       try {
@@ -249,7 +250,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     },
     onError: (error) => {
       const resolved = resolveDeleteAccountError(error);
-      showToast(resolved.message, "error");
+      showToast(() => (resolveDeleteAccountError(error).message), "error");
       if (resolved.shouldForceSignOut) {
         void signOut()
           .then(() => queryClient.clear())
@@ -267,7 +268,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         text: translateApp("Sign Out"),
         style: "destructive",
         onPress: () => {
-          showToast(translateApp("You are signed out."), "info");
+          showToast(() => (translateApp("You are signed out.")), "info");
           void signOut()
             .then(() => queryClient.clear())
             .catch(() => {});
@@ -319,7 +320,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
               if (online) void refetchProfile();
               else
                 showToast(
-                  translateApp("Still offline — will retry when connected"), "error");
+                  () => (translateApp("Still offline — will retry when connected")), "error");
             }}
           />
         )}

@@ -77,8 +77,8 @@ const BAD_REQUEST_OVERRIDES: Array<{ pattern: string; message: string }> = [
 export function resolveErrorMessage(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") return translateApp("Request cancelled");
   if (!isApiError(error)) {
-    if (error instanceof Error) return error.message;
-    return "Something went wrong. Please try again.";
+    if (error instanceof Error) return translateApp(error.message);
+    return translateApp("Something went wrong. Please try again.");
   }
 
   if (error.errorCode === 2000 || error.errorKey === "authentication_failed") {
@@ -87,33 +87,33 @@ export function resolveErrorMessage(error: unknown): string {
 
   // 1. Exact code match
   const mapped = ERROR_MESSAGES[error.errorCode];
-  if (mapped) return mapped;
+  if (mapped) return translateApp(mapped);
 
   // 2. Keyword match for generic codes (bad_request = 1000, validation = 1008)
   if (error.errorCode === 1000 || error.errorCode === 1008) {
     const serverMsg = error.message.toLowerCase();
     for (const override of BAD_REQUEST_OVERRIDES) {
       if (serverMsg.includes(override.pattern)) {
-        return override.message;
+        return translateApp(override.message);
       }
     }
   }
 
   // 3. Server message (strip "Bad request: " prefix from thiserror Display impl)
   const cleaned = error.message.replace(/^Bad request:\s*/i, "");
-  if (cleaned) return cleaned;
+  if (cleaned) return translateApp(cleaned);
 
-  return "Something went wrong. Please try again.";
+  return translateApp("Something went wrong. Please try again.");
 }
 
 export function resolveAuthDeviceErrorMessage(error: unknown): string {
   if (isApiError(error) && error.statusCode === 403 && error.errorCode === 2003 && error.errorKey === "mfa_step_up_required") {
-    return MOBILE_MFA_STEP_UP_MESSAGE;
+    return translateApp(MOBILE_MFA_STEP_UP_MESSAGE);
   }
   if (isApiError(error) && error.errorCode >= 11200 && error.errorCode <= 11207) {
     const mapped = ERROR_MESSAGES[error.errorCode];
-    if (mapped) return mapped;
+    if (mapped) return translateApp(mapped);
   }
 
-  return AUTH_DEVICE_CONNECTION_ERROR_MESSAGE;
+  return translateApp(AUTH_DEVICE_CONNECTION_ERROR_MESSAGE);
 }

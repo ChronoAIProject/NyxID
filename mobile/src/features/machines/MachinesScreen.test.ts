@@ -48,6 +48,7 @@ function linkedMachine() {
   const jsx = (type: unknown, props: unknown) => ({ type, props });
   const mocks: Record<string, unknown> = {
     ...translationTestMocks,
+    "../../i18n/useLocalizedState": { useLocalizedState: () => [undefined, () => {}] },
     react: {
       useLayoutEffect: (effect: Effect) => layouts.push(effect),
       useEffect: (effect: Effect) => passive.push(effect),

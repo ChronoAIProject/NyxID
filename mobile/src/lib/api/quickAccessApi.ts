@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { requestJson } from "./http";
 import {
   QUICK_ACCESS_MAX_ITEMS,
@@ -13,9 +13,7 @@ const PATH = "/users/me/quick-access";
 function parseState(payload: unknown): QuickAccessState {
   const result = quickAccessResponseSchema.safeParse(payload);
   if (!result.success)
-    throw new Error(
-      translateApp("NyxID returned an unexpected response. Please try again."),
-    );
+    throw localizedError("NyxID returned an unexpected response. Please try again.");
   return result.data;
 }
 

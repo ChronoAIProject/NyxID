@@ -1,3 +1,5 @@
+import { appLocale, setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
+import { translate } from "../../i18n/translate";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -90,6 +92,7 @@ function setup({
   });
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ language: appLocale(), t: translateApp }) },
     "expo-web-browser": {
       openBrowserAsync: async (url: string) => {
         registrationUrls.push(url);
@@ -939,4 +942,18 @@ for (const platform of ["ios", "android"] as const) test(`P11 wrong password is 
   assert.deepEqual(screen.announcements,platform==="ios"?["Invalid email or password"]:[]);
   screen.harness.render(); assert.match(textContent(screen.harness.value()),/Invalid email or password/);
   screen.change("Password","changed"); assert.doesNotMatch(textContent(screen.harness.value()),/Invalid email or password/);
+});
+
+
+test("P1-6 retained login error follows language changes without resubmitting or changing input", async (t) => {
+  const screen = setup(); t.after(() => {screen.harness.unmount();setAppTranslationLanguage('en');});
+  screen.change("Email", "reviewer@example.test");screen.change("Password", "wrong");
+  screen.setLogin(async()=>{throw new ApiError({statusCode:401,errorCode:2000,errorKey:'authentication_failed',message:'Authentication failed: Invalid email or password'});});
+  screen.submit().props.onPress();await screen.harness.settle();
+  for (const language of ['zh-CN','zh-TW','en'] as const) {
+    setAppTranslationLanguage(language);screen.harness.render();
+    const alert=elements(screen.harness.value()).find(e=>e.props.accessibilityRole==='alert');
+    assert.ok(alert);assert.equal(textContent(alert).trim(),translate(language,'Invalid email or password'));
+    assert.equal(screen.calls.length,1);assert.equal(screen.input(translate(language,'Email')).props.value,'reviewer@example.test');
+  }
 });

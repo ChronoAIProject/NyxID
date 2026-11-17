@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { LoginRequestTerminalView } from "./LoginRequestTerminalView";
@@ -155,7 +157,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
     label: translateApp("Back to login"),
     onBack: () => setScanning(false),
   });
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   const lastAction = useRef(0);
   const actionBusy = useRef(false);
   const operation = useRef<{
@@ -308,7 +310,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
       return;
     }
     if (!verifiedRetry && Date.now() - lastAction.current < 750) {
-      setError(t("Please wait a moment before trying again."));
+      setError(() => (translateApp("Please wait a moment before trying again.")));
       return;
     }
     if (!automatic) uncertainPreview.reset();
@@ -347,9 +349,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         finish(terminal);
       else if (!automatic)
         setError(
-          t(agentKeyActionErrorCopy(failure, step), {
+          () => (translateApp(agentKeyActionErrorCopy(failure, step), {
             host: loginServerHost(),
-          }),
+          })),
         );
       cooldown.sync();
     } finally {
@@ -495,9 +497,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         Date.parse(parsed.credential_expires_at) >
           Date.parse(summary.expires_at)
       )
-        throw new Error(
-          translateApp("Credential expiry cannot exceed key expiry."),
-        );
+        throw localizedError("Credential expiry cannot exceed key expiry.");
       if (operation.current) {
         operation.current.decision = "approve";
         operation.current.dispatched = true;

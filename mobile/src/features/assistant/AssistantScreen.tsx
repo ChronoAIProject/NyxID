@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AssistantRightPanel } from "./AssistantRightPanel";
 import {
@@ -216,13 +218,13 @@ function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
       if (error) reject(error);
       else resolve();
     };
-    const aborted = () => finish(new Error(translateApp("Voice start was cancelled.")));
+    const aborted = () => finish(localizedError("Voice start was cancelled."));
     try {
       // Keep the text input mounted until Android confirms the IME is hidden,
       // before the voice WebView can take focus away from that input.
       subscription = Keyboard.addListener("keyboardDidHide", () => finish());
       timeout = setTimeout(
-        () => finish(new Error(translateApp("Voice could not open. Try again."))),
+        () => finish(localizedError("Voice could not open. Try again.")),
         1500,
       );
       signal.addEventListener("abort", aborted, { once: true });
@@ -230,7 +232,7 @@ function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
       else if (!Keyboard.isVisible()) finish();
       else Keyboard.dismiss();
     } catch {
-      finish(new Error(translateApp("Voice could not open. Try again.")));
+      finish(localizedError("Voice could not open. Try again."));
     }
   });
 }
@@ -254,7 +256,7 @@ async function createVoiceDraft(
       "name" in cause &&
       cause.name === "VoiceRequestTimeoutError"
     )
-      throw new Error(translateApp("Voice could not open. Try again."));
+      throw localizedError("Voice could not open. Try again.");
     throw cause;
   } finally {
     signal.removeEventListener("abort", cancel);
@@ -318,7 +320,7 @@ export function AssistantScreen({
     setDraft(value);
   }
   const [sheet, setSheet] = useState<"agents" | "permissions">();
-  const [localError, setLocalError] = useState<string>();
+  const [localError, setLocalError] = useLocalizedState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
   const [voicePreferencesOpen, setVoicePreferencesOpen] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState<{
@@ -705,11 +707,11 @@ export function AssistantScreen({
     } catch (cause) {
       if (current())
         setLocalError(
-          t(
+          () => (translateApp(
             cause instanceof Error
               ? cause.message
               : translateApp("Voice could not open. Try again."),
-          ),
+          )),
         );
     } finally {
       if (voiceOpening.current === controller) {
@@ -804,9 +806,9 @@ export function AssistantScreen({
       await operation();
     } catch (cause) {
       setLocalError(
-        cause instanceof Error
+        () => (cause instanceof Error
           ? cause.message
-          : translateApp("Could not complete this action."),
+          : translateApp("Could not complete this action.")),
       );
     }
   }
@@ -1540,9 +1542,9 @@ export function AssistantScreen({
             onStartNextStep={(step) => {
               if (newChatDisabled || running || uploads.session.sending) {
                 setLocalError(
-                        translateApp(
+                        () => (translateApp(
                           "NyxBot is busy. Start this step once it finishes.",
-                        ),
+                        )),
                       );
                 return;
               }

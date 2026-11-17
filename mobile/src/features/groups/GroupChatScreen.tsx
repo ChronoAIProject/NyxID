@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
@@ -217,7 +218,7 @@ function GroupChat({
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setVoiceMinimized(minimized);
   }
-  const [localError, setLocalError] = useState<string>();
+  const [localError, setLocalError] = useLocalizedState<string>();
   const group = chat.isError ? undefined : chat.data?.group;
   const recipientRoster = useRef<Group["members"]>(
     assistantDraftStore.get<Group["members"]>(`recipient-roster:${draftKey}`) ??
@@ -652,11 +653,11 @@ function GroupChat({
     } catch (cause) {
       if (mounted.current && chat.available())
         setLocalError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
             : translateApp(
                 "The message was not delivered. Refresh the crew before trying again.",
-              ),
+              )),
         );
       return false;
     } finally {

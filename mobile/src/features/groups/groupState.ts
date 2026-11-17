@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import type { AssistantAgent } from "../agents/agentContracts";
 import type {
@@ -268,9 +269,7 @@ export function mergeGroupPage(
   if (!current)
     return { ...incoming, messages: mergeGroupMessages([], incoming.messages) };
   if (current.group.id !== incoming.group.id)
-    throw new Error(
-      translateApp("Cannot combine messages from different crews."),
-    );
+    throw localizedError("Cannot combine messages from different crews.");
   if (mode === "older")
     return {
       ...current,

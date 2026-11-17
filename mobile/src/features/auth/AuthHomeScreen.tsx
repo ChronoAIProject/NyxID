@@ -1,3 +1,5 @@
+import { localizedToast } from "../../i18n/localizedToast";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Translation } from "../../i18n/Translation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
@@ -193,8 +195,8 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [mfaCode, setMfaCode] = useState("");
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const socialLoginLock = useRef(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [registrationNotice, setRegistrationNotice] = useState<string | null>(null);
+  const [loginError, setLoginError] = useLocalizedState<string | null>(null);
+  const [registrationNotice, setRegistrationNotice] = useLocalizedState<string | null>(null);
   const [registrationPending, setRegistrationPending] = useState(false);
   const registrationLock = useRef(false);
   const { signInWithSession } = useAuthSession();
@@ -249,8 +251,8 @@ export function AuthHomeScreen({ navigation }: Props) {
     }
   }, [loginError]);
 
-  const showToast = (message: string, kind: ToastKind) => {
-    setToast({ message, kind });
+  const showToast = (message: () => string, kind: ToastKind) => {
+    setToast(localizedToast(() => ({ message: message(), kind })));
   };
 
   useEffect(() => {
@@ -294,7 +296,7 @@ export function AuthHomeScreen({ navigation }: Props) {
       lastHandledSocialUrlRef.current = url;
 
       if (callback.status === "error") {
-        setLoginError(resolveSocialAuthError(callback.error));
+        setLoginError(() => (resolveSocialAuthError(callback.error)));
         resetSocialState();
         return;
       }
@@ -310,7 +312,7 @@ export function AuthHomeScreen({ navigation }: Props) {
       }
 
       if (!callback.accessToken) {
-        setLoginError(translateApp("Missing social auth access token."));
+        setLoginError(() => (translateApp("Missing social auth access token.")));
         resetSocialState();
         return;
       }
@@ -325,7 +327,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               : undefined,
         });
       } catch (error) {
-        setLoginError(resolveErrorMessage(error));
+        setLoginError(() => (resolveErrorMessage(error)));
       } finally {
         resetSocialState();
       }
@@ -393,20 +395,20 @@ export function AuthHomeScreen({ navigation }: Props) {
 
       if (result.type === "cancel" || result.type === "dismiss") {
         setLoginError(
-          translateApp("Sign-in was closed ({{type}}). Please try again.", {
+          () => (translateApp("Sign-in was closed ({{type}}). Please try again.", {
             type: result.type,
-          }),
+          })),
         );
         return;
       }
 
       setLoginError(
-        translateApp("Social sign-in failed: {{type}}", {
+        () => (translateApp("Social sign-in failed: {{type}}", {
           type: result.type,
-        }),
+        })),
       );
     } catch (error) {
-      setLoginError(resolveErrorMessage(error));
+      setLoginError(() => (resolveErrorMessage(error)));
     } finally {
       socialLoginLock.current = false;
       if (isMountedRef.current) {
@@ -451,11 +453,11 @@ export function AuthHomeScreen({ navigation }: Props) {
             if (error instanceof ApiError && error.reason === "mfa_challenge_expired") {
               setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null);
               setLoginError(
-                translateApp(
+                () => (translateApp(
                   "Your verification expired. Please sign in again.",
-                ),
+                )),
               );
-            } else { setLoginError(resolveErrorMessage(error)); }
+            } else { setLoginError(() => (resolveErrorMessage(error))); }
           }
         },
         () => isMountedRef.current,
@@ -479,21 +481,21 @@ export function AuthHomeScreen({ navigation }: Props) {
     registrationLock.current = true;
     setRegistrationPending(true);
     setRegistrationNotice(
-      translateApp(
+      () => (translateApp(
         "Registration opens on the NyxID website. Close the browser to return here and sign in after verifying your email.",
-      ),
+      )),
     );
     try {
       await WebBrowser.openBrowserAsync(
         accountWebUrl(getFrontendUrl(), "/register"),
       );
       if (isMountedRef.current) setRegistrationNotice(
-          translateApp(
+          () => (translateApp(
             "Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.",
-          ),
+          )),
         );
     } catch (error) {
-      setLoginError(resolveAuthError(error));
+      setLoginError(() => (resolveAuthError(error)));
     } finally {
       registrationLock.current = false;
       if (isMountedRef.current) setRegistrationPending(false);

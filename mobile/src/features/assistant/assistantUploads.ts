@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 /** Matches the owner upload contract used by the Web composer. */
 export const MAX_ASSISTANT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -107,9 +108,9 @@ export function assistantAttachmentPath(
   scope: AssistantUploadScope,
   attachmentId?: string,
 ): string {
-  if (!scope.id?.trim()) throw new Error(translateApp("Choose a conversation first."));
+  if (!scope.id?.trim()) throw localizedError("Choose a conversation first.");
   if (attachmentId !== undefined && !attachmentId.trim())
-    throw new Error(translateApp("Choose an attachment first."));
+    throw localizedError("Choose an attachment first.");
   return `/assistant/nyxagent/${scope.kind}/${encodeURIComponent(scope.id)}/attachments${
     attachmentId === undefined ? "" : `/${encodeURIComponent(attachmentId)}`
   }`;
@@ -146,7 +147,7 @@ export async function withAttachmentUploadDeadline<T>(
   milliseconds = ASSISTANT_UPLOAD_TIMEOUT_MS,
 ): Promise<T> {
   const cancelled = () =>
-    Object.assign(new Error(translateApp("Upload cancelled.")), { name: "AbortError" });
+    Object.assign(localizedError("Upload cancelled."), { name: "AbortError" });
   if (signal?.aborted) throw cancelled();
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -154,7 +155,7 @@ export async function withAttachmentUploadDeadline<T>(
   const deadline = new Promise<never>((_, reject) => {
     rejectDeadline = reject;
     timer = setTimeout(() => {
-      reject(new Error(translateApp("Upload timed out. Try a smaller file.")));
+      reject(localizedError("Upload timed out. Try a smaller file."));
       controller.abort();
     }, milliseconds);
   });

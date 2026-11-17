@@ -1,3 +1,4 @@
+import { localizedError } from "../../../i18n/localizedError";
 import { translateApp } from "../../../i18n/appTranslation";
 import {
   voicePreferencesSchema,
@@ -109,6 +110,7 @@ export interface AssistantVoiceClientOptions {
     message: string,
     recovery?: VoiceStartRecovery,
     kind?: "conflict" | "playback",
+    source?: () => string,
   ): void;
   onClosed?(): void;
   /** Durable cleanup ownership; may settle after this view has unmounted. */
@@ -309,7 +311,7 @@ export class AssistantVoiceClient {
         preferences.input_mode !== "push_to_talk"
       ) {
         this.fail(
-          translateApp("Grok voice requires Hold to talk and headphones."),
+          () => (translateApp("Grok voice requires Hold to talk and headphones.")),
         );
         return;
       }
@@ -326,7 +328,7 @@ export class AssistantVoiceClient {
       }
       if (protocol === "openai_live" && !sdp.trim()) {
         this.fail(
-          translateApp("Voice media could not be prepared. Please try again."),
+          () => (translateApp("Voice media could not be prepared. Please try again.")),
         );
         return;
       }
@@ -352,7 +354,7 @@ export class AssistantVoiceClient {
       }
       if (protocol === "openai_live") {
         if (!result.sdp_answer.trim()) {
-          this.fail(voiceStartError(undefined, "response"));
+          this.fail(() => (voiceStartError(undefined, "response")));
           return;
         }
         step = "webrtc";
@@ -374,7 +376,7 @@ export class AssistantVoiceClient {
         error instanceof Error &&
         error.name === "VoiceRequestTimeoutError"
       )
-        this.fail(voiceStartError(error, step));
+        this.fail(() => (voiceStartError(error, step)));
       // A cancelled attempt can still return an owned session with a malformed
       // answer. Its validated identity remains enough to end that call, even
       // though the closed client must not publish errors or observe another one.
@@ -393,7 +395,7 @@ export class AssistantVoiceClient {
           (("statusCode" in error && error.statusCode === 409) ||
             ("status" in error && error.status === 409));
         this.fail(
-          conflict
+          () => (conflict
             ? active
               ? active.session.end_requested ||
                 active.session.state === "closing"
@@ -410,7 +412,7 @@ export class AssistantVoiceClient {
                 error instanceof Error &&
                 error.message === translateApp(simulatorMicrophoneMessage)
               ? translateApp(simulatorMicrophoneMessage)
-              : voiceStartError(error, step),
+              : voiceStartError(error, step)),
           conflict ? undefined : voiceStartRecovery(error, step),
           conflict ? "conflict" : undefined,
         );
@@ -511,7 +513,7 @@ export class AssistantVoiceClient {
     const disconnected = () => {
       if (this.closed || this.socket !== socket) return;
       this.fail(
-        translateApp("Voice connection lost. Start a new call to reconnect."),
+        () => (translateApp("Voice connection lost. Start a new call to reconnect.")),
       );
     };
     socket.onclose = disconnected;
@@ -519,9 +521,9 @@ export class AssistantVoiceClient {
     this.readinessTimeout = this.clock.setTimeout(() => {
       if (!this.closed)
         this.fail(
-          translateApp(
+          () => (translateApp(
             "Voice connection timed out. Start a new call to reconnect.",
-          ),
+          )),
         );
     }, 15_000);
     this.heartbeat = this.clock.setInterval(() => this.sendHeartbeat(), 1000);
@@ -534,19 +536,19 @@ export class AssistantVoiceClient {
       this.updateInput();
       this.notifyReady();
     } else if (event.type === "playback-blocked") {
-      this.options.onError(
-        translateApp("Tap Resume audio to hear the assistant."),
+      this.publishError(
+        () => (translateApp("Tap Resume audio to hear the assistant.")),
         undefined,
         "playback",
       );
     } else if (event.type === "error") {
       // Media exception strings may include device/provider details. Keep UI bounded.
       this.fail(
-        event.message === translateApp(simulatorMicrophoneMessage)
+        () => (event.message === translateApp(simulatorMicrophoneMessage)
           ? translateApp(simulatorMicrophoneMessage)
           : translateApp(
               "Voice media stopped. Check microphone permission and start a new call.",
-            ),
+            )),
       );
     } else if (
       event.type === "pcm" &&
@@ -560,15 +562,15 @@ export class AssistantVoiceClient {
         bytes.byteLength % 2
       ) {
         this.fail(
-          translateApp("Voice audio could not be verified. Start a new call."),
+          () => (translateApp("Voice audio could not be verified. Start a new call.")),
         );
         return;
       }
       if ((this.socket?.bufferedAmount ?? 0) > 96_000) {
         this.fail(
-          translateApp(
+          () => (translateApp(
             "Voice connection is too slow. Start a new call to reconnect.",
-          ),
+          )),
         );
         return;
       }
@@ -588,18 +590,18 @@ export class AssistantVoiceClient {
           data.byteLength > 1920 ||
           data.byteLength % 2
         )
-          throw new Error(translateApp("Invalid PCM frame"));
+          throw localizedError("Invalid PCM frame");
         if (!frame.discard) this.options.media.enqueue(data, frame.endMs);
         return;
       }
       if (typeof data !== "string" || data.length > 262_144)
-        throw new Error(translateApp("Invalid voice event"));
+        throw localizedError("Invalid voice event");
       const event: unknown = JSON.parse(data);
       if (!event || typeof event !== "object" || !("type" in event))
-        throw new Error(translateApp("Invalid voice event"));
+        throw localizedError("Invalid voice event");
       if (event.type === "audio" || event.type === "audio_flush") {
         if (this.protocol !== "xai_realtime" || !("generation" in event))
-          throw new Error(translateApp("Unexpected voice audio"));
+          throw localizedError("Unexpected voice audio");
         if (event.type === "audio_flush") {
           if (event.generation === this.session?.generation) {
             this.options.media.flush();
@@ -614,7 +616,7 @@ export class AssistantVoiceClient {
           (event.end_ms as number) < 0 ||
           (event.end_ms as number) > 1_830_000
         )
-          throw new Error(translateApp("Invalid playback watermark"));
+          throw localizedError("Invalid playback watermark");
         this.pendingAudio = {
           endMs: event.end_ms as number,
           discard: event.generation !== this.session?.generation,
@@ -631,7 +633,7 @@ export class AssistantVoiceClient {
           details: failure.details,
         });
         this.fail(
-          voiceStartError(error, "server"),
+          () => (voiceStartError(error, "server")),
           voiceStartRecovery(error, "server"),
         );
         return;
@@ -663,16 +665,16 @@ export class AssistantVoiceClient {
         snapshot.session.state === "failed"
       ) {
         if (snapshot.session.end_reason === "server_update")
-          this.options.onError(
-            translateApp(
+          this.publishError(
+            () => (translateApp(
               "The call ended during a server update. Start a new call.",
-            ),
+            )),
           );
         this.dispose();
       }
     } catch {
       this.fail(
-        translateApp("Voice state could not be verified. Start a new call."),
+        () => (translateApp("Voice state could not be verified. Start a new call.")),
       );
     }
   }
@@ -739,7 +741,7 @@ export class AssistantVoiceClient {
     if (this.closed) return false;
     if (this.socket?.readyState !== 1) {
       this.fail(
-        translateApp("Voice connection lost. Start a new call to reconnect."),
+        () => (translateApp("Voice connection lost. Start a new call to reconnect.")),
       );
       return false;
     }
@@ -748,7 +750,7 @@ export class AssistantVoiceClient {
       return true;
     } catch {
       this.fail(
-        translateApp("Voice connection lost. Start a new call to reconnect."),
+        () => (translateApp("Voice connection lost. Start a new call to reconnect.")),
       );
       return false;
     }
@@ -764,7 +766,7 @@ export class AssistantVoiceClient {
       typeof playback.playback_audible !== "boolean"
     ) {
       this.fail(
-        translateApp("Voice playback could not be verified. Start a new call."),
+        () => (translateApp("Voice playback could not be verified. Start a new call.")),
       );
       return;
     }
@@ -883,8 +885,8 @@ export class AssistantVoiceClient {
       await this.options.media.resume();
     } catch {
       if (!this.closed)
-        this.options.onError(
-          translateApp("Tap Resume audio to hear the assistant."),
+        this.publishError(
+          () => (translateApp("Tap Resume audio to hear the assistant.")),
           undefined,
           "playback",
         );
@@ -911,7 +913,7 @@ export class AssistantVoiceClient {
         ),
       );
       if (this.closed) return;
-      if (next.id !== session.id) throw new Error(translateApp("Voice session changed"));
+      if (next.id !== session.id) throw localizedError("Voice session changed");
       if (
         next.generation > this.session!.generation ||
         (next.generation === this.session!.generation &&
@@ -921,9 +923,9 @@ export class AssistantVoiceClient {
     } catch {
       if (!this.closed)
         this.fail(
-          translateApp(
+          () => (translateApp(
             "Voice controls changed. End this call and start a new call.",
-          ),
+          )),
         );
     } finally {
       this.controlPending = false;
@@ -941,10 +943,10 @@ export class AssistantVoiceClient {
       );
     } catch {
       if (!this.closed)
-        this.options.onError(
-          translateApp(
+        this.publishError(
+          () => (translateApp(
             "The task could not be stopped. Try again from the chat.",
-          ),
+          )),
         );
     }
   }
@@ -1120,13 +1122,21 @@ export class AssistantVoiceClient {
     );
   }
 
+  private publishError(
+    source: () => string,
+    recovery?: VoiceStartRecovery,
+    kind?: "conflict" | "playback",
+  ) {
+    this.options.onError(source(), recovery, kind, source);
+  }
+
   private fail(
-    message: string,
+    message: () => string,
     recovery?: VoiceStartRecovery,
     kind?: "conflict",
   ) {
     if (this.closed) return;
-    this.options.onError(message, recovery, kind);
+    this.publishError(message, recovery, kind);
     // Device/transport faults require immediate local teardown. A human End
     // preserves quiet transport briefly; a failed transport cannot drain it.
     void this.endCall(false);

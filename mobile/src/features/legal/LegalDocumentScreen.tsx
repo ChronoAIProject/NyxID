@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -80,7 +82,7 @@ export function LegalDocumentScreen({
   const [url, setUrl] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -97,7 +99,7 @@ export function LegalDocumentScreen({
       } else if (link.kind === "external") {
         await Linking.openURL(link.url);
       } else {
-        throw new Error(translateApp("Unsupported legal document link"));
+        throw localizedError("Unsupported legal document link");
       }
     } catch {
       if (!mounted.current) return;
@@ -122,16 +124,14 @@ export function LegalDocumentScreen({
     setError(null);
     if (!url) {
       setError(
-        translateApp("Legal document URL is not configured (LEGAL_BASE_URL)."),
+        () => (translateApp("Legal document URL is not configured (LEGAL_BASE_URL).")),
       );
       return;
     }
     let cancelled = false;
     fetch(url, { cache: "no-store" })
       .then((r) => {
-        if (!r.ok) throw new Error(
-            translateApp("HTTP {{code}}", { code: r.status}),
-          );
+        if (!r.ok) throw localizedError("HTTP {{code}}", { code: r.status});
         return r.text();
       })
       .then((md) => {
@@ -148,7 +148,7 @@ export function LegalDocumentScreen({
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : translateApp("Failed to load"),
+        setError(() => (e instanceof Error ? e.message : translateApp("Failed to load")),
         );
       });
     return () => {

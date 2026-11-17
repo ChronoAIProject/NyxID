@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
@@ -56,7 +57,7 @@ export function AssistantComposerSettings(props: Props) {
     refetchOnReconnect: true,
   });
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
   const mounted = useRef(true);
   const latest = useRef({ props, availability });
@@ -107,9 +108,9 @@ export function AssistantComposerSettings(props: Props) {
     } catch (cause) {
       if (current())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : translateApp("Could not change permissions."),
+            : translateApp("Could not change permissions.")),
         );
     } finally {
       lock.current = false;

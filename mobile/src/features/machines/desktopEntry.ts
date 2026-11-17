@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import type { MachineDesktopParams } from "./desktop/desktopRoutes";
 
@@ -25,15 +25,13 @@ export function desktopRouteParams(
     params.conversation_id &&
     params.conversationId !== params.conversation_id
   )
-    throw new Error(
-      translateApp("Conflicting desktop conversation selectors."),
-    );
+    throw localizedError("Conflicting desktop conversation selectors.");
   if (
     params.contextId &&
     params.context_id &&
     params.contextId !== params.context_id
   )
-    throw new Error(translateApp("Conflicting desktop context selectors."));
+    throw localizedError("Conflicting desktop context selectors.");
   return routeSchema.parse({
     nodeId: params.nodeId,
     conversationId: params.conversationId ?? params.conversation_id,

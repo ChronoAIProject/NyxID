@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import type { RequestOptions } from "./authenticatedTransport";
 import {
   automationIdSchema,
@@ -31,11 +31,7 @@ export function createAutomationsApi(request: JsonRequest) {
         }),
       );
       if (row.id !== id)
-        throw new Error(
-          translateApp(
-            "The server returned a different automation. Please reload.",
-          ),
-        );
+        throw localizedError("The server returned a different automation. Please reload.");
       return row;
     },
     async runs(

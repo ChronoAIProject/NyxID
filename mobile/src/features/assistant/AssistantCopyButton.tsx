@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
@@ -46,7 +47,7 @@ export function AssistantCopyButton({
     setCopying(true);
     try {
       const success = await Clipboard.setStringAsync(text);
-      if (!success) throw new Error(translateApp("Clipboard unavailable"));
+      if (!success) throw localizedError("Clipboard unavailable");
       if (mounted.current) setCopiedText(text);
     } catch {
       if (mounted.current)

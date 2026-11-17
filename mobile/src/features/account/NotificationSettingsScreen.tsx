@@ -1,3 +1,4 @@
+import { localizedToast } from "../../i18n/localizedToast";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useMemo, useState } from "react";
@@ -75,8 +76,8 @@ export function NotificationSettingsScreen(
   const { isConnected, recheckConnection } = useNetworkStatus();
   const isOffline = !isConnected;
   const [toast, setToast] = useState<ToastState | null>(null);
-  const showToast = (message: string, kind: ToastKind) =>
-    setToast({ message, kind });
+  const showToast = (message: () => string, kind: ToastKind) =>
+    setToast(localizedToast(() => ({ message: message(), kind })));
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 2400);
@@ -105,10 +106,10 @@ export function NotificationSettingsScreen(
       void queryClient.invalidateQueries({
         queryKey: ["account", "notificationSettings"],
       });
-      showToast(translateApp("Notification settings updated"), "success");
+      showToast(() => (translateApp("Notification settings updated")), "success");
     },
     onError: (error) => {
-      showToast(resolveErrorMessage(error), "error");
+      showToast(() => (resolveErrorMessage(error)), "error");
       void refetchNotifSettings();
     },
   });
@@ -123,8 +124,8 @@ export function NotificationSettingsScreen(
     pushPreferenceMutation.mutate(next, {
       onSuccess: () =>
         showToast(
-          translateApp("NyxBot notification settings updated"), "success"),
-      onError: (error) => showToast(resolveErrorMessage(error), "error"),
+          () => (translateApp("NyxBot notification settings updated")), "success"),
+      onError: (error) => showToast(() => (resolveErrorMessage(error)), "error"),
     });
   };
 
@@ -164,7 +165,7 @@ export function NotificationSettingsScreen(
       void queryClient.invalidateQueries({
         queryKey: ["account", "notificationSettings"],
       });
-      showToast(translateApp("Push enabled on this device"), "success");
+      showToast(() => (translateApp("Push enabled on this device")), "success");
     },
     onError: (error) => {
       if (
@@ -186,7 +187,7 @@ export function NotificationSettingsScreen(
               onPress: () => {
                 Linking.openSettings().catch(() => {
                   showToast(
-                    translateApp("Couldn't open Settings — open it manually."),
+                    () => (translateApp("Couldn't open Settings — open it manually.")),
                     "error",
                   );
                 });
@@ -196,7 +197,7 @@ export function NotificationSettingsScreen(
         );
         return;
       }
-      showToast(resolveErrorMessage(error), "error");
+      showToast(() => (resolveErrorMessage(error)), "error");
     },
   });
 
@@ -206,10 +207,10 @@ export function NotificationSettingsScreen(
       void queryClient.invalidateQueries({
         queryKey: ["account", "notificationSettings"],
       });
-      showToast(translateApp("Telegram disconnected"), "success");
+      showToast(() => (translateApp("Telegram disconnected")), "success");
     },
     onError: (error) => {
-      showToast(resolveErrorMessage(error), "error");
+      showToast(() => (resolveErrorMessage(error)), "error");
     },
   });
 
@@ -229,7 +230,7 @@ export function NotificationSettingsScreen(
     void queryClient.invalidateQueries({
       queryKey: ["account", "notificationSettings"],
     });
-    showToast(translateApp("Telegram connected!"), "success");
+    showToast(() => (translateApp("Telegram connected!")), "success");
   };
 
   // Helper: emit `ui.mobile_preference_toggled` only after a settings
@@ -368,7 +369,7 @@ export function NotificationSettingsScreen(
               if (online) void refetchNotifSettings();
               else
                 showToast(
-                  translateApp("Still offline — will retry when connected"), "error");
+                  () => (translateApp("Still offline — will retry when connected")), "error");
             }}
           />
         )}

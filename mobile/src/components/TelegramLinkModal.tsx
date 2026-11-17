@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../i18n/useLocalizedState";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp } from "../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -45,7 +46,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [linkInfo, setLinkInfo] = useState<TelegramLinkInfo | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [connected, setConnected] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -79,7 +80,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
       const info = await mobileApi.telegramLink();
       setLinkInfo(info);
     } catch (e) {
-      setError(e instanceof Error ? e.message : translateApp("Failed to generate link code"),
+      setError(() => (e instanceof Error ? e.message : translateApp("Failed to generate link code")),
       );
     } finally {
       setIsLoading(false);
@@ -140,7 +141,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
       try {
         await Linking.openURL(webUrl);
       } catch {
-        setError(translateApp("Could not open Telegram"));
+        setError(() => (translateApp("Could not open Telegram")));
       }
     }
   }, [linkInfo]);

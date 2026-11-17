@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Translation } from "../../i18n/Translation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
@@ -390,7 +391,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [decisionPending, setDecisionPending] = useState<
     "approve" | "deny" | null
   >(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useLocalizedState<string | null>(null);
   const [clockMs, setClockMs] = useState(Date.now());
   const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
   const currentDeadline = useRef<number | null>(null);
@@ -561,7 +562,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           setTerminal((previous) => terminalFromError(error) ?? previous);
           if (!automatic)
             setErrorMessage(
-              t(deviceLoginErrorCopy(error), { host: loginServerHost() }),
+              () => (translateApp(deviceLoginErrorCopy(error), { host: loginServerHost() })),
             );
           cooldown.sync();
         },
@@ -615,7 +616,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
       if (!automatic) setLinkedPreview(null);
       if (automatic ? previewCooldownMs() > 0 : cooldown.coolingDown) return false;
       if (actionBusy.current || !claimAction()) {
-        setErrorMessage(t("Please wait a moment before trying again."));
+        setErrorMessage(() => (translateApp("Please wait a moment before trying again.")));
         return false;
       }
       actionBusy.current = true;
@@ -642,7 +643,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             setManualEntryVisible(false);
           }
           setErrorMessage(
-            t(deviceLoginErrorCopy(error), { host: loginServerHost() }),
+            () => (translateApp(deviceLoginErrorCopy(error), { host: loginServerHost() })),
           );
           cooldown.sync();
         }
@@ -716,7 +717,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
       return;
     }
     if (!verifiedRetry && !claimAction()) {
-      setErrorMessage(t("Please wait a moment before trying again."));
+      setErrorMessage(() => (translateApp("Please wait a moment before trying again.")));
       return;
     }
 
@@ -751,7 +752,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
       setTerminal(
         (previous) => terminalFromError(error, decisionUncertain) ?? previous,
       );
-      setErrorMessage(t(deviceLoginErrorCopy(error), { host: loginServerHost() }));
+      setErrorMessage(() => (translateApp(deviceLoginErrorCopy(error), { host: loginServerHost() })));
     } finally {
       if (decisionOperation.current === owner) {
         decisionOperation.current = null;
