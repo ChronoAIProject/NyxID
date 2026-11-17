@@ -5,7 +5,7 @@ effective_date: 2026-11-17
 
 # Data Deletion Instructions
 
-This page explains how to delete the data NyxID holds about you, including data NyxID receives from Meta products such as WhatsApp and Facebook Login. Our [Privacy Policy](/privacy) describes what we collect and how long we keep it.
+This page explains how to delete the data NyxID holds about you, including data NyxID receives from Meta products such as WhatsApp and Facebook Login. Our [Privacy Policy](https://nyxid.ai/privacy) describes what we collect and how long we keep it.
 
 ## Delete your NyxID account
 
@@ -24,7 +24,7 @@ To stop NyxID from sending and receiving messages for one channel, such as a Wha
 1. Open **Channel Bots** and select the channel.
 2. Choose **Delete** and confirm.
 
-Messaging through that channel stops immediately and its routes are retired. For WhatsApp numbers connected with **Connect with Meta**, NyxID also removes its webhook override from your WhatsApp Business Account when no other channel of yours uses it. The deactivated channel's encrypted credentials are removed when you delete your account or ask us to remove them.
+Messaging through that channel stops immediately and its routes are deactivated. For WhatsApp numbers connected with **Connect with Meta**, NyxID also attempts to remove its webhook override from the WhatsApp Business Account when no other active channel connected through NyxID uses that account; this cleanup can fail. Deleting a channel does not revoke the access you granted NyxID in Meta (see below). The deactivated channel's encrypted credentials are removed when you delete your account or ask us to remove them.
 
 ## Remove NyxID's access in Meta
 
