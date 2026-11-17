@@ -138,17 +138,19 @@ function StartupDiagnostics({
   useUiTranslation();
   if (diagnostics.length === 0) return null;
 
-  const warming = diagnostics.find((item) => item.code === "billing_usage_warming");
-  const failures = diagnostics.filter((item) => item.code !== "billing_usage_warming");
+  const informationalCodes = ["billing_usage_warming", "billing_usage_coverage"];
+  const informational = diagnostics.filter((item) => informationalCodes.includes(item.code));
+  const failures = diagnostics.filter((item) => !informationalCodes.includes(item.code));
   return (
     <>
-      {warming ? (
-        <p role="status" className="text-14 text-muted-foreground" title={warming.detail}>
-          {warming.summary} · {translateUi("Since {{value1}}", {
-            value1: formatTimestamp(warming.detected_at),
-          })}
-        </p>
-      ) : null}
+      {informational.map((diagnostic) => (
+        <div key={diagnostic.code} role="status" className="space-y-1 text-14 text-muted-foreground">
+          <p>{diagnostic.summary}{diagnostic.code === "billing_usage_warming" ? <> · {translateUi("Since {{value1}}", {
+            value1: formatTimestamp(diagnostic.detected_at),
+          })}</> : null}</p>
+          <p>{diagnostic.detail}</p>
+        </div>
+      ))}
       {failures.length > 0 ? (
         <Card className="border-destructive/50">
           <CardHeader className="flex flex-row items-center justify-between space-y-0">

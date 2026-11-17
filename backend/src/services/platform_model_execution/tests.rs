@@ -1271,21 +1271,67 @@ async fn paid_provider_evidence(images: bool, family: bool, checkpoint_crash: bo
         );
         assert!(receipt.acknowledgement_sequence.is_some());
     }
-    // Capture records emitted wallet quantities; warming performs no provider read.
+    // Activated capture learns the current period once, then waits for a full one.
+    let comparison_start = Utc::now() - chrono::Duration::days(1);
+    let comparison_end = Utc::now() + chrono::Duration::days(1);
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/customers/{actor}/current_usage")))
-        .respond_with(ResponseTemplate::new(503))
-        .expect(0)
+        .and(wiremock::matchers::query_param(
+            "external_subscription_id",
+            "subscription",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"customer_usage": {
+                "from_datetime":comparison_start.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "to_datetime":comparison_end.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "charges_usage":[]
+            }})),
+        )
+        .expect(u64::from(images || family))
         .mount(&server)
         .await;
+    let runtime = crate::services::coordination_service::cluster_lease_runtime();
+    let token = crate::services::coordination_service::LeaseStore::acquire(
+        db,
+        "billing:reconcile",
+        &runtime.holder,
+        runtime.ttl,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         reconciler
-            .compare_usage_for_test()
+            .compare_usage_for_test(&token)
             .await
             .unwrap()
             .drift_alerts,
         0
     );
+    assert_eq!(
+        reconciler
+            .compare_usage_for_test(&token)
+            .await
+            .unwrap()
+            .drift_alerts,
+        0
+    );
+    if images || family {
+        let target = db
+            .collection::<Document>("billing_usage_comparisons")
+            .find_one(doc! {"owner_id":actor})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.get_bool("coverage_verified"), Ok(false));
+        assert_eq!(
+            target.get_document("comparison").unwrap().get_str("reason"),
+            Ok("warming_full_period")
+        );
+    }
+    crate::services::coordination_service::LeaseStore::release(db, &token)
+        .await
+        .unwrap();
     server.verify().await;
     db.drop().await.unwrap();
 }

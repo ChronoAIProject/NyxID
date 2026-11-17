@@ -37,6 +37,7 @@ mod targets;
 pub mod taxes;
 pub mod topup_expiry;
 pub(crate) mod usage_checkpoint;
+pub(crate) mod usage_comparison;
 pub(crate) mod usage_delivery;
 pub mod usage_rollup;
 pub mod webhook;
@@ -203,6 +204,7 @@ pub async fn startup_diagnostics(
         });
     }
     items.extend(reconcile_status::diagnostics(db).await);
+    items.extend(usage_comparison::diagnostics(db).await?);
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
     items.extend(hold_conservation::diagnostics(db).await?);
     items.extend(stuck_requests::diagnostics(db).await?);

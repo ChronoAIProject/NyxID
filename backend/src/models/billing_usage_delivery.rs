@@ -45,6 +45,8 @@ pub struct BillingUsageDelivery {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub prepared_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub usage_created_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub acknowledged_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub resolved_at: Option<DateTime<Utc>>,

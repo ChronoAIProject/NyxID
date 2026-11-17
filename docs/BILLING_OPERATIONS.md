@@ -179,11 +179,13 @@ particularly `app/services/fees/apply_taxes_service.rb`,
 
 ## Usage delivery capture
 
-Usage comparison currently reports an informational **warming** line and its
-first completed capture-pass time on Integrity. It makes no current-usage request,
-compares no quantities, and reports neither agreement nor numeric drift. Other
-maintenance failures still appear separately. The timestamp records observation
-startup, not proof of uninterrupted capture across a mixed fleet.
+The leased `usage_comparison` step compares acknowledged delivery receipts with
+one provider current-usage response per owner, customer and subscription. It
+uses the immutable emitted event second and exact emitted wallet-funded quantity,
+not total metered usage or wallet balance. Prepared/rejected receipts, benefit-only
+usage and acknowledgements without a capture sequence do not enter the totals.
+Nothing is repaired, charged or sent again by this comparison. Request paths and
+Integrity reads make no provider call.
 
 The background usage push prepares an immutable `billing_usage_deliveries` row
 before sending. Retries reuse its target, metric, exact quantity representation,
@@ -215,7 +217,7 @@ not copy meter documents, request/response bodies, error text, actor/key ids,
 names or email addresses. Runtime receipts retain the customer and subscription
 from existing verification; ordinary receipts retain the memoized wallet target.
 
-Capture has no provider period bounds yet. A prepared receipt has no expiry while
+A prepared receipt has no expiry while
 it is unresolved; acknowledgement or rejection sets `resolved_at` and an
 `expires_at` exactly 100 days later, and the `expires_at` TTL index removes it.
 Repeated rejection preserves its original deadline; a later accepted delivery
@@ -226,18 +228,101 @@ row per unresolved transaction, subject to normal TTL-monitor delay. Capture
 state has one document per distinct owner/customer/subscription, independent of
 event count. Owner erasure and org deletion retain both collections just as they
 retain financial usage-meter records; those paths do not shorten either TTL.
-Patch B may replace this interim bound with period-aware retention.
+Comparison keeps this fixed retention: delayed period discovery cannot safely
+shorten it. A period starting 100 or more days ago is unverified even if a cached
+projection exists; missing incremental sequences are failed units, never zeroes.
 
-Coverage remains unverified. Old holders can preserve unknown lease-checkpoint
-fields while acknowledging events without receipts; a surviving marker cannot
-certify continuity, and per-row markers cannot recover already expired rows.
-Numeric comparison must establish continuous coverage before using these records.
+Coverage requires durable activation of `billing:usage-receipts-v1` and a
+continuous capture interval beginning strictly before the provider period. Once
+per leased comparison pass, a bounded lookup checks retained `security_replicas`
+heartbeat rows for an unsupported capability or unknown protocol observed since
+that interval began. Rows survive seven days; a successful check older than six
+days resets coverage, leaving a one-day evidence-retention margin. Ordinary
+deployment gaps and failed database/readiness reads do not reset coverage. A
+failed check compares nothing and reports failure without changing the interval.
+The readiness heartbeat has no added commands.
+
+Unsupported evidence resets the generation, including a generation that lived
+and died between passes. If none is still live and activation exists, the new
+interval starts at the successful check; otherwise it remains unset. Rollback to
+a visible build without capture invalidates the overlapping period. A later
+roll-forward starts a new interval. Builds older than the readiness observation
+protocol remain invisible. Lease checkpoints and per-row markers cannot certify
+coverage. Initial generation publication succeeds before workers or HTTP serving
+start.
+
+A capture-unknown reason advances a durable uncertainty revision and invalid-through
+time. Duplicate acknowledgements from normal lost-response retries do not advance
+uncertainty: the receipt stores the usage row's creation time in its preparation
+write. A duplicate counts normally only when that creation time is after the
+continuous-capture boundary. Older or missing creation times keep that period
+unverified, remembered in its projection; a new period can recover. Future-dated
+events invalidate coverage through their event time, preventing fixed-TTL gaps in
+a later period. These markers share the existing sequence update and do not
+affect delivery. Legacy uncertainty is adopted conservatively on first comparison.
+Each read pins both acknowledgement sequence and uncertainty revision. Before
+publishing the pass, the comparator reads the live lease and coverage generation
+once. Each target publishes through one atomic update guarded by those pinned
+values, the capture reason, one publication per pass and database-time period
+bounds. The observation time is the database time of the pass's coverage check.
+A lease loss after the read can leave a true observation of pinned evidence;
+observations from an old coverage generation are shown as stale.
 The documented plan is monthly and NyxID creates calendar-billed subscriptions:
-the first eligible period starts at the next calendar month boundary in the
-provider's returned bounds after continuous capture is established. Capture alone
-continues warming until comparison is enabled. A subscription with continuous
-acknowledgements is not compared until it is quiet for ten minutes and shows as
-waiting.
+the first eligible period starts at the next calendar month boundary after
+continuous support is established (or the next provider-returned anniversary
+boundary for an externally configured anniversary subscription). No historical
+baseline is inferred. A subscription with continuous acknowledgements is not
+compared until it is quiet for ten minutes and shows as waiting. Prepared receipts in the returned period also keep comparison waiting:
+an uncertain send may already be included remotely. Integrity shows bounded
+prepared/rejected quantity samples separately, explicitly not a complete
+historical backlog.
+
+Targets are selected by durable next-visit time, at most 20 per pass. Known current
+periods are checked locally first: coverage, ten quiet minutes, then unresolved
+prepared receipts. Uncoverable periods wait until their end; busy periods wait
+until the last acknowledgement plus ten minutes; prepared deliveries wait ten
+minutes. Equal observations wait six hours, pending or confirmed differences ten
+minutes, and stable unsupported findings one day. Failed visits use exponential
+backoff from five minutes up to six hours. Unknown or elapsed period bounds need
+one read to learn the current period. For 100 healthy subscriptions, warming
+normally costs 100 reads per period (about 3.33/day for a 30-day period), and equal
+steady state costs about 400/day.
+
+Provider reads run at concurrency four with a five-second timeout and no retries;
+each publication is one guarded target update with no transaction. It never
+writes the lease or coverage control row. Billing keeps the existing shared lease
+renewal runner unchanged. Persisted reservations count all attempts against 20
+reads per rolling five minutes and 5,760 per UTC day. Restarts do not reset these ceilings.
+Discovery reads 100 wallets and existing targets in one batch each, writes only
+missing or changed bindings, and avoids an unchanged cursor write. Missing or
+changed wallet bindings retire old targets; discovery reactivates a binding if
+it becomes current again. This also applies to captured runtime targets. Each
+visit folds at most 1,000 receipts; period/layout changes rebuild through the event
+index, then acknowledgements fold in sequence order. Incomplete projections stay
+visible. Responses are capped at 1 MiB and 256 metrics.
+
+A nonzero difference becomes `billing_usage_drift` only after two complete
+observations in distinct passes at least ten database-time minutes apart, with
+identical local/remote totals and differences. New acknowledgements, changed
+periods, changed coverage and failed/incomplete observations break confirmation.
+Equality clears immediately on a complete eligible observation. Transport, timeout
+and 5xx failures are one failed unit each; other targets continue. HTTP 401/403
+also fail a unit with the normal outage backoff because credentials or permissions
+may affect every subscription. HTTP 429 is a wait. HTTP 404/410 are
+subscription-unavailable findings; other 4xx responses are request-rejected
+findings, revisited daily without storing response bodies. No subscription means
+no work. Confirmed differences retain the existing
+`Billing Lago usage drift detected` warning and increment `drift_alerts` once per
+differing metric per published visit.
+
+Integrity separates `billing_usage_coverage` (warming, waits, incomplete or stale
+evidence) from `billing_usage_unsupported` and numeric `billing_usage_drift`.
+Details are sentences bounded to 4,096 characters. Drift includes the affected
+target count, up to five owner/subscription examples, period, first/last observation
+and one exact signed local-minus-remote metric difference per example, with a count
+of additional differing metrics. Unsupported reasons have counts and up to five
+subscription ids. The retained prepared/rejected sample has at most five examples. A stale generation, changed
+sequence or elapsed period cannot display a live numeric finding.
 
 The response parser supports the nested plain per-metric shape used by the bill
 fixtures, exact decimal-string units, integer units, and inclusive final-second
