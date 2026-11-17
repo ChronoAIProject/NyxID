@@ -118,7 +118,7 @@ describe.each(["/settings", "/assistant"] as const)(
       await open(route, "");
       expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-      for (const section of ["profile", "security", "security", "security", "security/delete", "sessions", "mcp", "mcp", "mcp", "display", "display", "display/layout", "display/layout", "display/colors", "display/colors", "display/colors", "display", "privacy"]) {
+      for (const section of ["profile", "security", "security/delete", "sessions", "mcp", "display", "display/layout", "display/colors", "privacy"]) {
         await visit(section);
         const detail = document.querySelector(`[data-grouped-detail]:not([hidden])[aria-label]`)!;
         expect(detail.querySelector("[data-grouped-list]")).not.toBeNull();

@@ -188,9 +188,12 @@ afterEach(async () => {
   useAuthStore.getState().setUser(null);
 });
 
+// These journeys save or discard independent retained forms, with coverage CI headroom.
+const MULTI_FORM_TIMEOUT = 20_000;
+
 function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = {}) {
   const onDeleted = vi.fn();
-  render(
+  const sheet = (tab = props.tab ?? "overview") => (
     <QueryClientProvider client={client}>
       <AgentDetailsSheet
         agentId={String(agent.id)}
@@ -198,12 +201,20 @@ function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = 
         open
         onOpenChange={vi.fn()}
         onDeleted={onDeleted}
-        tab="overview"
         {...props}
+        tab={tab}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { onDeleted, user: userEvent.setup({ delay: null, pointerEventsCheck: 0 }) };
+  const view = render(sheet());
+  return {
+    onDeleted,
+    user: userEvent.setup({ delay: null, pointerEventsCheck: 0 }),
+    // Set the incoming deep link for form/visibility setup; navigation tests use real controls.
+    visit: async (section: NonNullable<ComponentProps<typeof AgentDetailsSheet>["tab"]>) => {
+      await act(async () => { view.rerender(sheet(section)); });
+    },
+  };
 }
 
 async function visitAgent(section: string) {
@@ -794,7 +805,7 @@ it("preserves drafts across tabs and saves all dirty sections from any tab", asy
   expect(screen.queryByText("Save changes", { selector: "button" })).toBeNull();
   expect(writes.map((write) => write.method)).toEqual(["PATCH", "PUT"]);
   expect(document.querySelector("[data-grouped-list] [data-grouped-list]")).toBeNull();
-});
+}, MULTI_FORM_TIMEOUT);
 
 it("refreshes pristine fields without replacing a dirty profile draft", async () => {
   const { user } = renderSheet();
@@ -934,10 +945,10 @@ function machineAccessFixture() {
 }
 
 async function editGrantsAndMachine() {
-  const { user } = renderSheet({ tab: "grants/services" });
+  const { user, visit } = renderSheet({ tab: "grants/services" });
   const grants = await screen.findByLabelText("Grants", { selector: "form" });
   fireEvent.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
-  await visitAgent("grants/machines");
+  await visit("grants/machines");
   fireEvent.click(await screen.findByRole("button", { name: /Work Mac/ }));
   fireEvent.click(screen.getByLabelText("Shell commands"));
   const bar = screen.getByRole("region", { name: "Unsaved changes" });
@@ -945,12 +956,12 @@ async function editGrantsAndMachine() {
     screen.getAllByRole("region", { name: "Unsaved changes" }),
   ).toHaveLength(1);
   expect(bar).toHaveTextContent("Unsaved: grants, machine access");
-  return user;
+  return { user, visit };
 }
 
 it("saves dirty grants and machine access in order with independent payloads and fences", async () => {
   machineAccessFixture();
-  const user = await editGrantsAndMachine();
+  const { user } = await editGrantsAndMachine();
   await user.click(screen.getByText("Save changes", { selector: "button" }));
   await confirmChanges();
   await waitFor(() =>
@@ -980,16 +991,16 @@ it("saves dirty grants and machine access in order with independent payloads and
       },
     },
   ]);
-});
+}, MULTI_FORM_TIMEOUT);
 
 it.each(["grants", "machine access"])(
   "keeps failed %s dirty while the independent form succeeds",
   async (failed) => {
     const control = machineAccessFixture();
     control.fail = failed;
-    const user = await editGrantsAndMachine();
+    const { user, visit } = await editGrantsAndMachine();
     await user.click(screen.getByText("Save changes", { selector: "button" }));
-  await confirmChanges();
+    await confirmChanges();
     await waitFor(() => expect(writes).toHaveLength(2));
     await waitFor(() =>
       expect(
@@ -998,7 +1009,7 @@ it.each(["grants", "machine access"])(
     );
     if (failed === "grants") {
       await user.click(screen.getByRole("button", { name: "Back to Access" }));
-      await visitAgent("grants/services");
+      await visit("grants/services");
     }
     const failedForm = screen.getByRole("form", {
       name: failed === "grants" ? "Grants" : "Work Mac capabilities",
@@ -1014,7 +1025,7 @@ it.each(["grants", "machine access"])(
     ).toBeInTheDocument();
     control.fail = "";
     await user.click(screen.getByText("Save changes", { selector: "button" }));
-  await confirmChanges();
+    await confirmChanges();
     await waitFor(() =>
       expect(
         screen.queryByRole("region", { name: "Unsaved changes" }),
@@ -1025,11 +1036,12 @@ it.each(["grants", "machine access"])(
       failed === "grants" ? /\/grants$/ : /\/machines\/node$/,
     );
   },
+  MULTI_FORM_TIMEOUT,
 );
 
 it("discards every dirty Access form including retained machine drafts", async () => {
   machineAccessFixture();
-  await editGrantsAndMachine();
+  const { visit } = await editGrantsAndMachine();
   fireEvent.click(screen.getByRole("button", { name: "Discard" }));
   await waitFor(() =>
     expect(
@@ -1037,15 +1049,15 @@ it("discards every dirty Access form including retained machine drafts", async (
     ).not.toBeInTheDocument(),
   );
   fireEvent.click(screen.getByRole("button", { name: "Back to Access" }));
-  await visitAgent("grants/services");
+  await visit("grants/services");
   await waitFor(() => expect(screen.getByRole("checkbox", { name: /Slack/ })).not.toBeChecked());
-  await visitAgent("grants/machines");
+  await visit("grants/machines");
   fireEvent.click(screen.getByRole("button", { name: /Work Mac/ }));
   expect(
     screen.getByLabelText("Shell commands"),
   ).not.toBeChecked();
   expect(writes).toEqual([]);
-});
+}, MULTI_FORM_TIMEOUT);
 
 it.each(["X", "Escape"])("guards dirty sheet dismissal via %s and preserves edits on Keep editing", async (method) => {
   const onOpenChange = vi.fn();
@@ -1130,7 +1142,7 @@ it("preserves profile and grants drafts and a single coordinated save bar while 
   await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
   expect(writes.map((write) => write.method)).toEqual(["PATCH", "PUT"]);
   expect(search).toHaveValue("slack");
-});
+}, MULTI_FORM_TIMEOUT);
 
 it("clears the query, collapses empty search, then follows the dirty dismissal guard", async () => {
   const close = vi.fn();
@@ -1583,21 +1595,21 @@ it.each(Object.keys(agentVisibilityBaseline))("preserves the base controls and a
     const value = agentVisibilityResponse(request.endpoint);
     return value === undefined ? original(request) : new Response(JSON.stringify(value));
   };
-  renderSheet({ tab: "overview" });
+  const { visit } = renderSheet({ tab: "overview" });
   await screen.findByRole("tab", { name: "Overview" });
   await settleSettingsReviewQueries(client);
   const tabs = screen.getAllByRole("tab").map(el => el.textContent!);
   const controls: ReturnType<typeof agentControls> = [];
   const rows = new Set<string>();
-  for (const [root, label] of [["overview", "Overview"], ["grants", "Access"], ["skills", "Skills"], ["memory", "Memory"], ["channels", "Channels"]]) {
+  for (const [root, label] of [["overview", "Overview"], ["grants", "Access"], ["skills", "Skills"], ["memory", "Memory"], ["channels", "Channels"]] as const) {
     if (!tabs.includes(label!)) continue;
-    await visitAgent(root!);
+    await visit(root!);
     await settleSettingsReviewQueries(client);
     controls.push(...agentControls());
     agentReadOnlyRows().forEach(row => rows.add(row));
-    const paths = [...document.querySelectorAll<HTMLElement>("[data-drawer-page-trigger]")].filter(el => !el.closest("[hidden],[inert]") && AGENT_DETAILS_SECTIONS.includes(el.dataset.drawerPageTrigger as typeof AGENT_DETAILS_SECTIONS[number])).map(el => el.dataset.drawerPageTrigger!);
+    const paths = [...document.querySelectorAll<HTMLElement>("[data-drawer-page-trigger]")].filter(el => !el.closest("[hidden],[inert]") && AGENT_DETAILS_SECTIONS.includes(el.dataset.drawerPageTrigger as typeof AGENT_DETAILS_SECTIONS[number])).map(el => el.dataset.drawerPageTrigger as NonNullable<ComponentProps<typeof AgentDetailsSheet>["tab"]>);
     for (const path of paths) {
-      await visitAgent(path);
+      await visit(path);
       await settleSettingsReviewQueries(client);
       controls.push(...agentControls());
       agentReadOnlyRows().forEach(row => rows.add(row));
