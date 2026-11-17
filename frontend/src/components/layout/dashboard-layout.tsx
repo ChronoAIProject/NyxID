@@ -22,6 +22,7 @@ import { buildStudioBreadcrumbs } from "@/lib/studio-breadcrumbs";
 import { StudioBreadcrumbTrail } from "./studio-breadcrumb-trail";
 export { useBreadcrumbLabel } from "./breadcrumb-context";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
+import { useDocumentTitle } from "@/hooks/use-document-title";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -79,9 +80,7 @@ export function DashboardLayout() {
   // rules-of-hooks.
   useApplyTheme();
 
-  useEffect(() => {
-    document.title = `nyxid - ${sectionTitleFor(pathname)}`;
-  }, [pathname]);
+  useDocumentTitle(`nyxid - ${sectionTitleFor(pathname)}`);
 
   useEffect(() => {
     const screenKey = normalizeScreenKey(pathname);
