@@ -446,49 +446,61 @@ the leading `/service <UUID>` and actual newline; the server binds the choice
 to the admitted turn. Organization connections still require the existing action
 card in Auto and Ask every time.
 
-Composer 仅将明确不可执行的连接设为不可选，仍显示连接及不可用原因（包括
-screen reader 描述）。该判断优先采用 routing classifier 明确不可用的结果，再检查后端
-`execution_unavailable_reason`；`unverified`、可刷新的 OAuth access token 和
-有 fallback 的离线节点不因此被禁用。Agent Details 与长期 grants 保持原有语义。
+Composer 将明确不可执行的连接显示为不可用选项，通过 `aria-disabled` 和独立的
+screen reader 描述说明原因。该判断优先采用 routing classifier 明确不可用的结果，
+再检查后端 `execution_unavailable_reason`；`unverified`、可刷新的 OAuth access token
+和有 fallback 的离线节点仍可选择。Agent Details 与长期 grants 保持原有语义。
 
-The composer retains explicitly unavailable connections as disabled choices with
-visible and accessible reasons. Its execution predicate first checks the routing
-classifier's hard-unavailable results, then the backend's `execution_unavailable_reason`.
-Unverified connections, refreshable OAuth access tokens and offline nodes with
-fallback remain selectable. Agent Details and durable grants keep their existing
-eligibility rules.
+The composer retains explicitly unavailable connections as unavailable choices
+exposed with `aria-disabled`, visible reasons and separate accessible descriptions.
+Its execution predicate first checks the routing classifier's hard-unavailable
+results, then the backend's `execution_unavailable_reason`. Unverified connections,
+refreshable OAuth access tokens and offline nodes with fallback remain selectable.
+Agent Details and durable grants keep their existing eligibility rules.
 
-选择只保存连接 ID；keys 刷新后，picker 和已选 chip 使用 live 数据。已选连接
-失效或从列表消失时，提示重新选择或移除，在清除编辑器、持久化草稿或附件前拒绝鼠标/键盘发送；不自动
-切换账号。异步 model 设置完成后、发送消息前，再次检查最新选择。服务端仍是最终
-执行授权的权威。回滚只需回退前端变更，无数据迁移。
+选择只保存连接 ID；keys 刷新后，picker 和已选 chip 使用 live 数据。已选连接失效
+或从列表消失时，提示重新选择或移除，在清除编辑器、持久化草稿或附件前拒绝鼠标
+和键盘发送，不自动切换账号。异步 model 设置完成后、发送消息前，再次检查最新选择。
+服务端仍是最终执行授权的权威。回滚只需回退前端变更，无数据迁移。
 
 Selection stores only the connection ID; refreshed keys update both the picker
 and the selected chip. An unavailable or missing selected connection asks the
 owner to replace or remove it and refuses pointer/keyboard sends before clearing
-the editor, persisted draft or attachments, without switching accounts.
-The send path rechecks current selection after
-asynchronous model setup. Server admission remains authoritative. Rollback is a
-frontend revert with no data migration.
+the editor, persisted draft or attachments, without switching accounts. The send
+path rechecks current selection after asynchronous model setup. Server admission
+remains authoritative. Rollback is a frontend revert with no data migration.
 
-不可用的选项仍可通过 Tab 聚焦，使用 `aria-disabled` 和独立的原因描述；点击、Enter
-及空格均不会选择它。打开选择器时刷新一次连接（已有请求时复用），刷新期间保留
-当前列表。凭证到期计时器同步更新选项、chip 与发送检查；节点路由仍遵循原有 fallback
-语义。后端节点原因通过固定模板本地化，节点名和未知原因仅作为文本显示。
+不可用的选项仍可通过 Tab 聚焦；点击、Enter 及空格均不会选择它。打开选择器时
+刷新一次连接（已有请求时复用），刷新期间保留当前列表。凭证到期计时器同步更新
+选项和 chip；发送检查采用当前时间，即使后台页面延迟执行计时器也会拒绝已过期的
+非 OAuth 凭证，并立即更新显示。节点路由仍遵循原有 fallback 语义。后端节点原因
+通过固定模板本地化；未知状态统一显示节点不可用，不显示原始状态。节点名和其他
+未知后端原因仅作为文本显示。
 
-Unavailable options stay in the Tab order with `aria-disabled` and a separate
-accessible description; click, Enter and Space leave them unselected. Opening
-the picker refreshes keys once, joining an existing fetch and keeping cached rows
-visible while it runs. One expiry timer updates the picker, chip and send check
-at the next credential boundary. Node routing retains the classifier's existing
-fallback semantics. Fixed templates localize backend node reasons; node names
-and unknown backend reasons remain literal text.
+Unavailable options stay in the Tab order; click, Enter and Space leave them
+unselected. Opening the picker refreshes keys once, joining an existing fetch
+and keeping cached rows visible while it runs. One expiry timer updates the
+picker and chip at the next credential boundary. The send guard also checks
+wall time, refusing expired non-OAuth credentials and updating the display even
+if a background tab delayed the timer. Node routing retains the classifier's
+existing fallback semantics. Fixed templates localize backend node reasons;
+unknown statuses show a generic node-unavailable reason without the raw status.
+Node names and other unknown backend reasons remain literal text.
 
-The chip always offers Change and Remove actions, so replacing an account uses
-the same discoverable control before and after invalidation. Both actions lock
-with the composer. Removing a selection or closing the picker returns focus to
-the editor under its existing pointer policy; coarse pointers do not raise the
-keyboard automatically. A lock closes the picker without reopening it on unlock.
+Chip 始终提供文字按钮 **Change**（更改）和移除按钮，失效前后均可直接更换账号。
+这两个操作随 composer 一起锁定。精细指针设备在选择、关闭选择器或移除后，将焦点
+返回编辑器。粗指针设备不自动弹出键盘：成功选择后聚焦 Change；未选择就关闭时，
+若从 Change 打开则返回 Change，否则返回 **Add context**（添加上下文）按钮；移除后
+也聚焦 Add context。锁定时关闭选择器，解锁后不自动重新打开。
+
+The chip always offers a visible **Change** text button and a Remove action, so
+replacing an account uses the same control before and after invalidation. Both
+actions lock with the composer. On fine pointers, selection, closing the picker
+and removal return focus to the editor. On coarse pointers, selection focuses
+Change; closing without a selection returns to Change if it opened the picker,
+otherwise to **Add context**; removal also focuses Add context. These controls
+preserve focus without raising the keyboard. A lock closes the picker without
+reopening it on unlock.
 
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses

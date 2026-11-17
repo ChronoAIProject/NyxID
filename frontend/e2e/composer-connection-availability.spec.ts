@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { KeyInfo } from "../src/types/keys";
@@ -161,7 +161,7 @@ test("live selection updates its label, refuses mouse and keyboard sends on inva
     animations: "disabled",
   });
   await page
-    .getByRole("button", { name: "Choose another connection for this message" })
+    .getByRole("button", { name: "Change connection for this message" })
     .click();
   await dialog.getByRole("button", { name: /Personal documents/ }).click();
   await input.press("Enter");
@@ -190,6 +190,64 @@ test("selection and removal return focus to the editor; locks never reopen the p
   await expect(dialog).not.toBeVisible();
   await page.getByRole("button", { name: "Toggle composer lock" }).click();
   await expect(dialog).not.toBeVisible();
+});
+
+test.describe("coarse pointer focus", () => {
+  const pixel = devices["Pixel 7"];
+  test.use({
+    viewport: pixel.viewport,
+    screen: pixel.screen,
+    userAgent: pixel.userAgent,
+    deviceScaleFactor: pixel.deviceScaleFactor,
+    isMobile: pixel.isMobile,
+    hasTouch: pixel.hasTouch,
+  });
+
+  test("selection, close and removal return to stable controls without focusing the editor", async ({ page }) => {
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const addContext = page.getByRole("button", { name: "Add context", exact: true });
+    const change = page.getByRole("button", { name: "Change connection for this message" });
+    const editor = page.locator("[data-composer-textbox]");
+    const dialog = await openPicker(page);
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(addContext).toBeFocused();
+    await openPicker(page);
+    await page.keyboard.press("Escape");
+    await expect(addContext).toBeFocused();
+    await openPicker(page);
+    await dialog.getByRole("button", { name: /Work documents/ }).click();
+    await expect(change).toBeFocused();
+    await expect(editor).not.toBeFocused();
+    await openPicker(page);
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(addContext).toBeFocused();
+    await change.click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(change).toBeFocused();
+    await change.click();
+    await page.keyboard.press("Escape");
+    await expect(change).toBeFocused();
+    await page.getByRole("button", { name: "Remove connection for this message" }).click();
+    await expect(addContext).toBeFocused();
+    await expect(editor).not.toBeFocused();
+  });
+});
+
+test("restoring connections resets both the chip and the next picker refresh", async ({ page }) => {
+  const dialog = await openPicker(page);
+  await dialog.getByRole("button", { name: /Work documents/ }).click();
+  const chip = page.getByRole("group", { name: "Connection for this message" });
+  await page.getByRole("button", { name: "Invalidate work connection" }).click();
+  await expect(chip).toContainText("Credential missing");
+  await page.getByRole("button", { name: "Restore connections" }).click();
+  await expect(chip).toContainText("This message");
+  const refreshed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/keys");
+  await openPicker(page);
+  const { keys } = await (await refreshed).json() as { keys: KeyInfo[] };
+  expect(keys.find((key) => key.id === "work")?.credential_missing).toBeFalsy();
+  await expect(dialog.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-disabled", "false");
+  await page.keyboard.press("Escape");
+  await expect(chip).not.toContainText("Unavailable");
 });
 
 test("opening refreshes cached connections once, updates live choices and offers Retry on failure", async ({
@@ -243,7 +301,7 @@ test("expiry updates an open picker and chip without a cache refresh", async ({
   await page.clock.install();
   await update(page, { expires_at: new Date(Date.now() + 2000).toISOString() });
   await page
-    .getByRole("button", { name: "Choose another connection for this message" })
+    .getByRole("button", { name: "Change connection for this message" })
     .click();
   await page.clock.fastForward(2100);
   await expect(
@@ -277,18 +335,21 @@ for (const variant of ["light", "dark", "mobile"] as const) {
     await expect(chip).toContainText("Credential missing");
     await expect(
       chip.getByRole("button", {
-        name: "Choose another connection for this message",
+        name: "Change connection for this message",
       }),
     ).toBeVisible();
     await expect(
       chip.getByRole("button", { name: "Remove connection for this message" }),
     ).toBeVisible();
+    await expect(chip.getByRole("button", { name: "Change connection for this message" })).toHaveText("Change");
+    expect(await chip.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const evidence = process.env.NYXID_CONNECTION_EVIDENCE_DIR;
     if (evidence) await mkdir(evidence, { recursive: true });
     const shot = (name: string) =>
       evidence
-        ? path.join(evidence, `${variant}-${name}.png`)
-        : testInfo.outputPath(`${variant}-${name}.png`);
+        ? path.join(evidence, `phase2-${variant}-${name}.png`)
+        : testInfo.outputPath(`phase2-${variant}-${name}.png`);
     await page.screenshot({
       path: shot("unavailable-chip"),
       fullPage: true,
@@ -296,7 +357,7 @@ for (const variant of ["light", "dark", "mobile"] as const) {
     });
     await chip
       .getByRole("button", {
-        name: "Choose another connection for this message",
+        name: "Change connection for this message",
       })
       .click();
     const search = dialog.getByRole("textbox", { name: "Search connections" });

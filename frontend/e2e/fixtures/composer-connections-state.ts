@@ -67,8 +67,13 @@ export const keys: KeyInfo[] = [
     platform_key_available: false,
   },
 ];
-export let serverConnections = keys;
-client.setQueryData(queryKey, keys);
+export let serverConnections: KeyInfo[];
+
+export function restoreConnections() {
+  serverConnections = structuredClone(keys);
+  client.setQueryData(queryKey, serverConnections);
+}
+restoreConnections();
 
 export function updateConnection(id: string, patch: Partial<KeyInfo>) {
   serverConnections = serverConnections.map((key) =>

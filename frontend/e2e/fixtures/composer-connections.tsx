@@ -6,8 +6,7 @@ import { Button } from "../../src/components/ui/button";
 import { useApplyTheme } from "../../src/hooks/use-theme";
 import {
   client,
-  keys,
-  queryKey,
+  restoreConnections,
   updateConnection,
 } from "./composer-connections-state";
 import { useAuthStore } from "../../src/stores/auth-store";
@@ -41,7 +40,7 @@ export function ComposerConnectionsFixture() {
         </Button>
         <Button
           type="button"
-          onClick={() => client.setQueryData(queryKey, keys)}
+          onClick={restoreConnections}
         >
           Restore connections
         </Button>
