@@ -1,0 +1,12 @@
+{
+  "Chat width": "聊天寬度",
+  "Composer height": "輸入欄高度",
+  "No supported device language": "裝置偏好的語言均不受支援",
+  "Shared with the selected app.": "已分享至所選 App。",
+  "Signs in with": "登入方式",
+  "Speech recognition isn't available right now. Check microphone access and your device's speech recognition service, then try again. You can keep typing.": "語音辨識暫時無法使用。請檢查麥克風權限和裝置的語音辨識服務，然後重試。你也可以繼續打字。",
+  "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.": "語音辨識暫時無法使用。請檢查「設定 › 一般 › 鍵盤」中的聽寫已開啟，然後重試。",
+  "Speech recognition needs a connection for your language. Check your connection and try again.": "此語言的語音辨識需要連線。請檢查網路連線後重試。",
+  "The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending.": "訊息輸入欄的麥克風使用裝置的語音辨識，可用時會在本機處理。辨識文字會顯示在訊息中，您可在傳送前編輯。",
+  "{{name}}, {{count}} pending": "{{name}}，{{count}} 項待處理"
+}

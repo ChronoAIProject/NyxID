@@ -87,6 +87,27 @@ bindings fail closed with `thread_target_unavailable`; there is no parent-chat
 fallback. Delayed sends retain their original encrypted reference, expiry,
 authorization and dispatch barrier, never a newer event reference.
 
+Organization replies use the retained event's committed conversation and verified
+execution actor, independently of the transport admin. Readers also accept this
+committed identity on events admitted before the fix; they never select a newer
+conversation or rewrite the event. Exact child, source, route and live authority
+checks still apply. The reply token is consumed only after initial target checks
+and live eligibility, before creating delivery metadata. Target checks precede
+attachment downloads. Rejected preflight leaves it usable; once claimed, an
+uncertain platform effect never releases it. Concurrent uses share the existing
+unique token-use barrier; replay cannot alter receipts or Health.
+Closed target/authority rejections and send failures update bot outbound
+diagnostics/Health once and emit `nyxbot_thread_reply_failed` with a bounded
+reason and numeric error code. Pre-dispatch authorization refusals and inconclusive database/provider lookups
+do not set a thread failure. Failed sends retain the existing outbound reason,
+including platform rate limits and outages, with additive `thread_reason` metadata.
+Shared inbound resolution keeps its existing fallback on unavailable history.
+A delayed reference past 29 minutes has the separate
+`thread_reply_reference_expired` reason. The next confirmed bot outbound clears
+the thread error.
+A streamed answer still is not a platform receipt; followed-thread durable
+response recovery and gateway terminal receipts are separate work.
+
 Deploy NyxID to **all** replicas first, then upgrade **all** gateway replicas
 before authoring opted-in definitions (old strict gateway readers cannot
 deserialize the new policy). Keep Lark/Feishu gateway platform flags off during

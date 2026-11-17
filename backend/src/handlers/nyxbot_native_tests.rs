@@ -180,6 +180,24 @@ async fn native_response_replays_after_restart_with_cursor_and_current_binding()
         .unwrap()
         .unwrap();
     assert!(saved.conversation_id.is_some());
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let mut lookup_headers = bearer(&key);
+    lookup_headers.insert("idempotency-key", "native-500".parse().unwrap());
+    let found = dispatches::get(
+        State(state.clone()),
+        lookup_headers,
+        axum::extract::Query(dispatches::Query {
+            dispatched_at: None,
+        }),
+    )
+    .await;
+    assert_eq!(found.status(), StatusCode::OK);
+    let found: Value = serde_json::from_str(&body_text(found).await).unwrap();
+    assert_eq!(found["state"], "finished");
+    assert_eq!(found["response_id"], id);
+    assert_eq!(found["provider_delivery"], "none");
+    assert_eq!(found["stored_response"], true);
+
     assert!(!String::from_utf8_lossy(&saved.payload_ciphertext).contains("Here is your answer"));
     // No broadcast receiver, producer task or process cache is needed by GET.
     let snap =
@@ -1385,6 +1403,9 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
         let result = images::send_turn_images(
             &state,
             images::ImageSendContext {
+                source: crate::models::image_preparation::Source::Event {
+                    event_id: String::new(),
+                },
                 owner: OWNER,
                 conversation_id: stored.conversation_id.as_deref().unwrap(),
                 turn_id: "turn",
@@ -1954,4 +1975,46 @@ async fn native_intake_admission_clears_only_uncertainty_and_throttles_live_bind
     }
     assert!(calls.lock().await.is_empty());
     server.abort();
+}
+
+#[tokio::test]
+async fn supplemental_native_progress_leaves_primary_replay_intact() {
+    Box::pin(async {
+        let (state, _, _) = setup("supplemental_native_progress").await;
+        let (channel, key) = native_channel(&state).await;
+        let request = native_event(&channel, "500", "Hello");
+        let response = Box::pin(respond(&state, &key, &request, "native-supplemental")).await;
+        let id = response.headers()["x-cma-response-id"].to_str().unwrap().to_owned();
+        assert!(body_text(response).await.contains("Here is your answer"));
+        let stored = state.db.collection::<Stored>(RESPONSES).find_one(doc!{"response_id":&id}).await.unwrap().unwrap();
+        let conversation = engine::get(&state.db, OWNER, stored.conversation_id.as_deref().unwrap()).await.unwrap();
+        let event = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc!{"_id":&stored.event_key}).await.unwrap().unwrap();
+        let origin = &event.delivery.as_ref().unwrap().origin;
+        let baseline = body_text(native_responses::snapshot(State(state.clone()), Path(id.clone()), bearer(&key)).await).await;
+        let gateway = wiremock::MockServer::start().await;
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = GATEWAY_SLUG.into();
+        service.base_url = gateway.uri();
+        state.db.collection::<DownstreamService>(SERVICES).insert_one(service).await.unwrap();
+        for purpose in [supplemental::Purpose::CheckingNotice, supplemental::Purpose::CapacityNotice, supplemental::Purpose::MachineDesktopNotice] {
+            deliver_to_for(&state, &conversation, origin, "progress", None, purpose).await;
+        }
+        assert!(gateway.received_requests().await.unwrap().is_empty());
+        let after = body_text(native_responses::snapshot(State(state.clone()), Path(id), bearer(&key)).await).await;
+        assert_eq!(baseline, after);
+        let event = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc!{"_id":&stored.event_key}).await.unwrap().unwrap();
+        assert_eq!(event.delivery.unwrap().state, "replay");
+        let audits: Vec<bson::Document> = state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find(doc!{"event_type":"nyxbot_channel_supplemental_delivery"}).await.unwrap().try_collect().await.unwrap();
+        assert_eq!(audits.len(), 3);
+        for audit in audits { assert_eq!(audit.get_document("event_data").unwrap().get_str("reason"), Ok("native_progress_unsupported")); }
+        wiremock::Mock::given(wiremock::matchers::path("/events/opaque-native-ref/replies"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"delivery":{"outcome":"confirmed"}})))
+            .expect(1).mount(&gateway).await;
+        deliver_to(&state,&conversation,origin,"independent result",None).await;
+        gateway.verify().await;
+        let audit=state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc!{"event_type":"nyxbot_channel_supplemental_delivery","event_data.purpose":"team_result"}).await.unwrap().unwrap();
+        assert_eq!(audit.get_document("event_data").unwrap().get_str("egress"),Ok("gateway_event"));
+        state.db.drop().await.unwrap();
+    }).await;
 }

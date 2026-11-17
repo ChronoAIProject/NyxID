@@ -46,6 +46,8 @@ pub struct Delivery {
     pub task: super::execution_permission::TaskAdmission,
     pub state: String,
     pub claim_id: Option<String>,
+    #[serde(default)]
+    pub preparation: Option<ResultPreparation>,
     #[serde(default, with = "super::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -59,4 +61,15 @@ impl std::fmt::Debug for Delivery {
             .field("state", &self.state)
             .finish_non_exhaustive()
     }
+}
+
+/// Immutable plan identity and confirmed prefix; no reply content.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ResultPreparation {
+    pub fingerprint: String,
+    pub total: u32,
+    #[serde(default)]
+    pub next: u32,
+    #[serde(default)]
+    pub receipts: Vec<super::channel_turn_preparation::Receipt>,
 }

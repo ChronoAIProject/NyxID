@@ -3531,11 +3531,11 @@ pub(crate) async fn settle_push(
 /// Delivery and decision expiry have their own interval. Slow push transport
 /// cannot delay watches, execution recovery, or the shared assistant sweep.
 pub fn spawn_worker(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else { break; };
             if sweep(&state).await.is_err() {
                 tracing::warn!(target: "nyxid::assistant_notifications", "Notification worker deferred");
             }
@@ -3668,6 +3668,9 @@ where
     F: Fn(String, String, String, HashMap<String, String>) -> Fut,
     Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
 {
+    let Some(_work) = state.shutdown.background() else {
+        return Ok(());
+    };
     with_worker_lease(
         &state.db,
         PUSH_WORKER_TIMEOUT,
@@ -3683,6 +3686,12 @@ where
     F: std::future::Future<Output = AppResult<()>>,
 {
     let token = Uuid::new_v4().to_string();
+    let release = super::shutdown::process().register_release(super::shutdown::Release {
+        safe_after_stop: true,
+        db: db.clone(), collection: PUSH_WORKER_STATE,
+        filter: doc! {"_id": "push", "token": &token},
+        update: doc! {"$set": {"lease_until": bson::DateTime::from_millis(0)}, "$unset": {"token": ""}},
+    });
     let mut acquired = None;
     let result = match tokio::time::timeout(timeout, async {
         let owns_lease = acquire_worker(db, &token).await?;
@@ -3697,6 +3706,7 @@ where
         )),
     };
     if acquired == Some(false) {
+        release.completed();
         return result;
     }
     // Cleanup also runs when acquisition was cancelled with an unknown commit.
@@ -3718,6 +3728,9 @@ where
     if released.is_err() {
         tracing::warn!(target: "nyxid::assistant_notifications",
             "Notification worker lease release failed; expiry remains the recovery path");
+    }
+    if released.is_ok() {
+        release.completed();
     }
     result?;
     released

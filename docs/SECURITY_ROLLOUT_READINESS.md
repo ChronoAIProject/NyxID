@@ -1,159 +1,220 @@
-# Security rollout readiness and required approval
+# Security readiness from observed fleet support
 
-Security rollout has two boundaries: what the serving deployment supports, and
-what a stored policy authorizes. New configuration must not be mistaken for
-proof that every serving process can enforce it. Stored operation scopes,
-machine assignments and live ACLs keep their enforcement even when their
-configuration flags are off. This change does not rewrite grants or turn every
-feature flag on.
+No configuration or operator step is required for security readiness. Start any
+number of backend replicas with the default environment. Each process publishes
+its generation and capabilities before serving, then renews every ten seconds.
+A new capability becomes usable after every live generation supports it across a
+90-second observation window. Roster names and drain declarations are optional
+advisories; they never authorize or refuse a request.
 
-## Deploy and declare the serving roster
+Feature flags retain their defaults and precedence. The security-gated flags are
+default off and still need an admin enable; recording capability support does not
+enable a flag, publish a model, grant permission, or configure a provider. Stored
+policy, live ACLs, revision checks, entitlements, tariffs and all other fences remain.
 
-Drain all old or unregistered serving backend replicas and relevant writers.
-Upgrade every replica, including replicas reachable through alternate ingress
-or internal routing, before relying on required web approval or enabling the
-listed security features. For activation, each process must use a unique, stable
-`INSTANCE_NAME`, the same complete comma-separated `SECURITY_ROLLOUT_REPLICAS`,
-and `SECURITY_ROLLOUT_DRAINED=true`. A single local deployment must explicitly
-declare its own one-name roster too. Restart a process to change its local
-roster or drain declaration.
+## Convergence and self-healing
 
-The drain declaration and roster are operator assertions. Mongo observations
-cannot discover an old binary hidden behind a load balancer, prove that an
-omitted process was drained, or prevent an old binary from serving. A green
-report is meaningful only after that operational cutover. Do not restart old
-binaries against the cutover deployment.
-
-Every upgraded process registers its actual startup generation before serving
-and renews its observation every 10 seconds. Readiness accepts observations up
-to 45 seconds old and rejects timestamps more than five seconds in the future.
-It is anchored to the executing process's immutable generation and roster:
-another fresh singleton cannot certify a process whose own observation expired.
-Missing, duplicate, undeclared or differently declared rosters block **activation**.
-Restarts retain distinct generations; an old fresh generation with the same name
-blocks activation until it expires. Already activated capabilities can continue
-serving through that overlap if every live generation supports them and all hard
-checks pass. Observation reads use an
+Observations are live for 45 seconds and timestamps more than five seconds ahead
+are refused. The executing process must have its own live generation observed;
+a different healthy process cannot stand in for it. All live generations count,
+including duplicate names and names absent from an optional roster. Reads use an
 `observed_at` index and fail closed above 256 live generations. A seven-day TTL
-removes old diagnostic rows; TTL deletion is not required for freshness.
+removes old diagnostic rows, but expiry from readiness does not wait for TTL deletion.
 
-Use the admin/operator endpoint `GET /api/v1/admin/security-readiness` to inspect
-per-capability activation and serving state, expected roster and live generation count.
+Serving, model/route/tariff publication, model-only credentials, model-evidence
+allowances and gated flag enables/clear-that-enables all require durable activation
+and **no hard blocker**:
+
+- The executing generation is missing or expired.
+- Any live generation lacks the capability or uses another observation protocol.
+- Any live observation is future-dated beyond the five-second allowance.
+- For `platform:operation-policy` only: local or fleet policy configuration is
+  disabled/inconsistent, or an active master-capable catalog row lacks its policy.
+- More than 256 live generations, uninitialized runtime, malformed evidence or a
+  database error prevents a complete assessment.
+- No durable activation record exists yet (this is what the heartbeat resolves).
+
+All roster conditions and `old_replicas_not_declared_drained` are **advisory**.
+Missing or duplicate declared names, undeclared names, differing or empty rosters,
+and a false drain declaration locally or on any live row never refuse serving,
+publication, enables or recording. They still appear in the legacy strict result.
+
+The heartbeat records immediately when the legacy `ready` assessment is clean.
+Otherwise it records after consecutive assessments without a hard blocker across
+`ACTIVATION_SETTLE_WINDOW = 2 × MAX_AGE_SECS` (90 seconds), with no gap between
+successful assessments longer than `MAX_AGE_SECS` (45 seconds). A longer gap
+restarts the window at the next successful assessment and resets its reported
+countdown to 90 seconds; a gap of exactly 45 seconds retains continuity. This includes
+empty rosters, missing declared replicas and false drain declarations. A hard blocker,
+failed assessment, malformed evidence or inventory/write error resets the affected
+window; a shared read/bound failure resets all pending windows. Each `Runtime`
+owns a monotonic in-memory debounce; restart starts it over. It is advisory progress,
+not cross-process authority, and requests never use it to authorize anything.
+
+Activation is a separate UUID row (`record_kind: capability_activation_v1`) in
+`security_rollouts`, with a unique capability index and insert-only upsert. It is
+permanent and fleet-shared; competing replicas preserve the first timestamp.
+Publishing the observation keeps its existing error contract. Recording is best
+effort: its failures do not fail startup/observation, and one capability's recording
+failure does not skip the others. Requests never write activation records or cache
+them as authority; evidence shares the existing cutover read, so command counts stay
+unchanged. Even a clean request waits until the heartbeat records its capability.
+
+A supported scale-up, restart or crash does not erase recorded support. A newly
+unsupported generation refuses that capability while it is live; after its last
+observation expires, recorded capabilities resume automatically. A never-recorded
+capability starts its 90-second window only after the unsupported observation is
+no longer live: at least 45 seconds of freshness plus 90 seconds of settling after
+that old generation's last heartbeat. Other capabilities remain independently usable.
+
+## Optional declarations and what to set
+
+For an ordinary Deployment, leave `SECURITY_ROLLOUT_REPLICAS` and
+`SECURITY_ROLLOUT_DRAINED` unset. `INSTANCE_NAME` needs no special value: its existing
+fallback is `POD_NAME`, then `HOSTNAME`, then `nyxid-backend`. Distinct generated pod
+names and a shared name both work. After convergence, normal capabilities report
+`activated: true` and `serving_ready: true`; `ready` remains false and the advisory
+list explains the absent declarations. No roster-mismatch event is emitted for this
+supported default. Without a roster there is no declared missing-replica diagnostic.
+
+Optional declarations preserve the old diagnostic and immediate-recording path:
+
+- Shared-name example: `INSTANCE_NAME=nyxid-backend`,
+  `SECURITY_ROLLOUT_REPLICAS=nyxid-backend`, `SECURITY_ROLLOUT_DRAINED=true` on every
+  replica. Two or more live generations produce `ready: false` and the duplicate
+  warning; they serve and permit flag enables/publication after activation. New
+  capabilities wait 90 seconds. This cannot detect a missing replica by count.
+- Stable per-replica names (for example a StatefulSet): optionally list every name
+  identically on every replica and set drained true to obtain legacy `ready: true`
+  and immediate first recording while that declaration matches observations.
+- If a Deployment uses generated pod names but an optional roster omits them,
+  those generations are reported as undeclared. This is advisory, never a refusal.
+
+These settings are still parsed and published unchanged so older binaries can read
+them. In this binary, false and unset drain values have the same advisory meaning.
+A declaration exists for mismatch logging when the local process or a live row
+contains a nonempty roster or a positive `drained=true` assertion; historical false
+booleans cannot distinguish explicit false from an unset variable.
+
+Node socket ownership and cluster leases do not require unique instance names:
+`node_dispatch.rs` compares name plus generation, `NodeOwnerFence` also binds the
+connection, and `coordination_service.rs` filters by holder instance, generation
+and lease ID. Generation identity, not the name alone, fences each process.
+
+## Reading the report
+
+`GET /api/v1/admin/security-readiness` requires admin/operator access and returns
+one entry per capability, including optional `automation:coordinator-completion-v2`.
+Public `/health` remains process health, not a fleet-support signal.
 
 | Field | Meaning |
 | --- | --- |
-| `ready`, `blockers` | Existing strict activation result and unchanged blocker strings. |
-| `activated`, `active_since` | Whether MongoDB records a prior strictly clean assessment, and its first timestamp (UTC, or null). This is capability support evidence, not a feature flag or an authorization grant. |
-| `serving_ready` | A clean assessment, or recorded activation with only roster warnings. |
-| `serving_with_roster_warnings`, `roster_warnings` | Whether serving is permitted despite roster inconsistencies, and the exact roster blocker strings (also listed when serving is refused). |
-| `serving_blockers` | Hard blockers plus `capability_not_activated` when an unready capability lacks activation evidence. |
+| `ready`, `blockers` | Unchanged legacy clean, declared, drained-roster assessment. Pure diagnostic and immediate-recording signal; nothing enforces it. |
+| `activated`, `active_since` | Durable evidence exists and its first UTC timestamp (null without evidence). |
+| `serving_ready`, `serving_blockers` | Durable activation plus no hard blocker; the sorted blocker list includes `capability_not_activated` until evidence exists. |
+| `serving_with_roster_warnings`, `roster_warnings` | Serving with advisory roster/drain conditions; sorted existing blocker strings, also shown when hard blockers refuse serving. The drain condition is included here so all declaration advisories share the existing report/diagnostic envelope. |
+| `activation_pending_seconds` | Nullable nonnegative integer: this responding replica's advisory seconds remaining, rounded up. Null without pending progress, after activation, or while currently hard-blocked. Zero awaits a successful heartbeat. It grants no authority. |
+| `expected_replicas`, `live_generations` | Optional local declaration and the observed live-generation count. |
+| `platform_policy_required`, `catalog_missing_policy`, `catalog_explicit_empty_policy` | Existing sticky policy state and catalog inventory diagnostics. |
 
-Startup and the ten-second heartbeat record clean capabilities as separate UUID
-rows (`record_kind: capability_activation_v1`) in `security_rollouts`. A unique
-capability index and insert-only updates preserve the first activation across
-concurrent replicas. Records have no TTL and do not turn any flag on.
-Recording is best effort: a failed evidence read/write never fails the observation
-upsert or startup; the next heartbeat retries, and one capability's failure does
-not prevent recording the others. Requests
-never write activation records or trust a local activation cache; the existing
-cutover read also loads activation evidence, keeping the healthy path at two
-MongoDB commands (plus the existing platform catalog inventory). A clean request
-can serve before the next heartbeat records evidence, but an inconsistent roster
-cannot bootstrap an unrecorded capability.
+Use `serving_blockers`, not `ready`, to diagnose an unavailable capability.
+A missing record with a pending countdown converges automatically. A persistent
+hard blocker identifies the unsupported process, policy issue, or unavailable
+assessment. Recording errors have distinct `Security capability activation
+recording` logs. Optional platform policy and automation still require their own
+feature settings; readiness does not turn those settings on.
 
-Only `missing_or_duplicate_replica:*`, `undeclared_replica:*`,
-`inconsistent_serving_roster` and `serving_roster_not_declared` are tolerable.
-`SECURITY_ROLLOUT_DRAINED=false` on **any** live generation still fails all gated
-traffic; option B does not relax the drain assertion.
-Missing/expired executing-process observation, any undrained process, future
-observations, unsupported protocol/capability on **any** live generation (including
-duplicates and undeclared names), all platform-policy blockers and missing catalog
-policy remain hard refusals. More than 256 live generations, an uninitialized
-runtime, malformed persisted state and database errors also fail closed.
+## Diagnostics
 
-Serving under warnings schedules `security_readiness_serving_with_roster_warnings`
-at warn level and as a system audit event through the chained append service.
-A local throttle runs before any diagnostic I/O, followed by the shared
-`RateWindowStore` (one event per distinct sorted roster-warning set per hour
-cluster-wide). Both use a SHA-256 digest of the warnings, never raw names as keys.
-The local map holds at most 256 conditions and evicts the oldest; the shared
-window still limits emissions after eviction. Changed warning sets are reported
-immediately. Payloads contain the warnings, live generation count, expected roster,
-and `first_observed_capability`, which identifies the triggering capability and is
-not an exhaustive list of affected capabilities. Diagnostics
-run asynchronously with a five-second timeout; failures never fail or delay the
-request. Failed attempts retry locally after 60 seconds; success and shared-window
-denial retain the one-hour local delay. Shared admission and the chained audit
-append commit together, so a failed append does not consume the shared hour. The admin report itself does not emit a serving event.
+A pass inserting one or more records emits one info log and one chained
+`security_capability_activated` system event. Payload: sorted `capabilities`
+actually inserted by this process, `roster_clean`, `roster_warnings` (including drain
+advisories), `live_generations`, `expected_replicas`. No insert means no event.
+Audit work has a five-second timeout; failure is debug-logged and never changes
+activation or observation success.
 
-### Rolling out the serving fix (#2277)
+Serving with a mismatched **declared** roster/drain schedules
+`security_readiness_serving_with_roster_warnings`: one warn and chained audit per
+sorted advisory set per **24 hours cluster-wide**. An entirely undeclared fleet
+emits none. A bounded local throttle runs before extra I/O; then a shared rate
+window admits the append transaction. Digest keys contain no raw names and use a
+daily domain distinct from old binaries' hourly keys. Changed advisory sets report
+immediately. The local map holds at most 256 sets, evicts the oldest, and retries
+failures after 60 seconds. Work is asynchronous with a five-second timeout and never
+holds up a request. Shared admission and audit append commit together. Payloads
+include advisories, count, expected roster and `first_observed_capability` (the
+triggering capability, not an exhaustive list). The admin report emits no serving event.
 
-1. Keep a clean, drained one-generation roster while introducing the fixed binary.
-   An already-running pre-fix binary retains strict runtime behavior and **still
-   fails closed during its own overlap**. Route traffic to the fixed process only
-   after its readiness is established; this change is not graceful-drain support.
-2. Let old observations expire (45 seconds), with every actual old worker drained.
-   On the fixed process, inspect `/api/v1/admin/security-readiness`. For every
-   capability needed by traffic, confirm `ready: true`, `activated: true` and a
-   non-null `active_since`. Do not scale out based only on `/health` or a flag value.
-3. Scale to two supported fixed replicas, even if the Deployment reuses one
-   `INSTANCE_NAME`. Confirm `serving_ready: true`, `serving_with_roster_warnings:
-   true` and the expected duplicate-name warning, while `ready` remains false.
-   Exercise NyxBot/model traffic and inspect the warning audit. A supporting
-   old/new generation overlap follows the same serving rules.
-4. Before a platform rollout-control or publication action in the exhaustive
-   [strict list below](#activation-versus-serving-entry-points), restore a clean
-   complete roster and drain obsolete generations. Ordinary user and worker
-   traffic, including permission creation and per-run enrollment, keeps serving.
-   Shared names deliberately cannot activate a new capability. Roster-by-count
-   or prefix, SIGTERM/graceful drain and verifying all background sweeps under
-   multiple replicas remain separate work on #2277.
+Enabled gated reads emit `security_readiness_flag_in_effect_unready` only when the
+capability cannot serve, at most once per flag per minute cluster-wide. It includes
+legacy `blockers` and actionable `serving_blockers`. Advisory-only states do not
+produce this event. Ordinary flag reads retain their resolved booleans and existing
+local-before-I/O throttle; diagnostics failures remain non-fatal.
 
-Activation evidence certifies a past observed snapshot; it cannot certify a
-future replica or discover a hidden worker. Every serving request rechecks live
-support. Activation records are permanent: binary rollback and later roll-forward
-retain them, so supported traffic can resume under roster warnings without another
-clean roster. This does not make old binaries safe readers or undo sticky cutover.
+## Upgrade, rollback and the observation floor
 
-If that resumption is unacceptable, use an explicit maintenance reset: disable
-affected ingress and subsystem flags where available, drain all accepted work,
-and stop **every** backend/worker that publishes observations. Wait at least
-45 seconds so the capability is hard-unready, then remove only its evidence:
+Observations were introduced in commit `000672691` (#1976, 22 October 2026); the
+first release tag containing that publisher is **v0.74.0**. A binary older than
+that protocol which publishes no observation is invisible. This is the remaining
+assumption: every serving process/worker relevant to these gates participates in
+observations. The settle window restarts after assessment gaps longer than the
+45-second freshness horizon, so time without observation cannot satisfy it. It
+still cannot prove that a non-publishing or partitioned process is gone, or prevent
+support from changing between an assessment and a request's effect. Observation
+cannot discover a hidden pre-protocol binary or certify node OS isolation, provider
+contracts or externally anchored audit integrity.
 
-```javascript
-db.security_rollouts.deleteOne({
-  record_kind: "capability_activation_v1",
-  capability: "<exact capability key>"
-})
-```
+Current production #2422 (`f22e7048e`) can deserialize every record written here.
+The UUID/string ID, record kind, capability and BSON `active_since` shape are unchanged;
+no new fields are added to persisted activation or observation documents. Its own
+declaration rules remain stricter, including a hard false-drain condition and
+clean-only recording, flag enables and publication. Its legacy clean assessment
+can also serve before a record exists; this binary always requires durable evidence.
+This binary cannot change old code's decisions.
 
-Keep ingress disabled while bringing up a fully upgraded, clean, drained roster.
-Confirm fresh `ready: true`, `activated: true` and `active_since` before reopening
-traffic or scaling. Never delete `security_rollouts/platform-policy-v1`; that
-separate sticky enforcement marker has no live downgrade procedure. Do not delete
-activation evidence while healthy heartbeats can immediately recreate it.
+With production's current shared-name roster and drained=true settings, existing
+activated capabilities serve on both versions during overlap. Old replicas still
+refuse publication/enables under duplicates; new replicas allow them. A newly
+introduced capability remains refused while an observed old replica lacks it.
+After expiry, recording is immediate if the legacy declaration now matches;
+otherwise the settle window applies. No declaration change is required.
+Removing the declarations from new pods while #2422 pods still run publishes
+undrained observations that those old pods refuse, even if their own drain setting
+is true. The new pods tolerate those advisories; they cannot alter the old decision.
 
-To check the report before scaling (set `disabled` only to deliberately unused
-optional capabilities, such as platform policy while its env is false and
-automation v2 while its env is false):
+With no readiness settings, #2422 is already unready. New replicas can record and
+serve supported capabilities after their window even while supporting old replicas
+are visible; old replicas keep refusing because their local/observed drain settings
+are false. New capabilities unsupported by the old version wait for its observation
+to expire. Once all replicas run this version, convergence requires no operator step.
 
-```sh
-curl --fail --silent --show-error -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "$NYXID_URL/api/v1/admin/security-readiness" > readiness.json
-jq -e --argjson disabled '["platform:operation-policy","automation:coordinator-completion-v2"]' \
-  'to_entries | map(select(.key as $key | $disabled | index($key) | not)) |
-   all(.[]; .value.ready and .value.activated and (.value.active_since != null))' readiness.json
-```
+Rollback preserves readable documents and permanent activation timestamps. #2422
+still applies its old gates: with valid drained declarations it can reuse records
+written by the settle path for its supported capabilities; with no declarations it
+fails closed again. A later roll-forward reuses the same records and rechecks current
+support. This does not make unrelated new data formats safe for old readers:
+feature-specific upgrade/rollback and retained-work requirements below still apply.
+No clean-roster window, drain assertion, manual activation write or reset is required
+for this readiness system. Use feature flags and authorization to disable behaviour;
+deleting support evidence only delays it until a heartbeat records it again.
 
-Use `disabled: []` when every capability is required. For a failing entry inspect
-`blockers` first, correct the clean-roster/drain/support/policy issue, and wait for
-the next heartbeat. If `ready` is true but `activated` remains false, inspect the
-distinct `Security capability activation recording` logs and restore MongoDB
-read/write/index/validator health; requests do not create missing evidence.
+## Entry points and what requires a clean roster
 
-The public `/health` endpoint remains a process health check. Neither endpoint
-establishes OS user separation, node key-service custody, or externally
-witnessed audit integrity.
+**Nothing is refused for roster or drain warnings once a capability is recorded.**
+A clean legacy assessment only makes first recording immediate rather than waiting
+90 seconds. Empty rosters and missing declared names can settle too.
+
+- `require_serving` / `serving_report(...).serving_ready`: user/worker execution,
+  model and tariff publication, routes, model-only credentials, model-evidence
+  allowances, admin projections, enrollment and native/Discord gateway work.
+- `require_flag_enable`: flag enables and clear-that-enables at every scope,
+  including execution-permissions prerequisites and all three platform-model
+  prerequisites. It uses the same serving gate. Unknown ordinary flag keys remain
+  ungated with zero readiness I/O; unknown execution capabilities fail closed.
+- `report`: diagnostics expose both states. The heartbeat alone writes evidence.
+
+Soft gates retain legacy fallback on hard support loss. Existing authorization,
+revision, validation, funding, entitlement and protocol fences remain unchanged.
 
 ## Feature configuration and execution
 
@@ -170,15 +231,15 @@ feature flags requires deployment readiness:
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
 | `permissions:execution-v1` | Explicit execution-contract reader. Per-person activation requires reader/dispatch/authoring; broad activation additionally requires enrollment readiness below. See [contract](EXECUTION_PERMISSIONS.md). |
 | `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
-| `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Upgrade/drain every writer before activation. |
+| `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Every live writer must advertise support before activation. |
 | `permissions:execution-authoring-v2` | B1 personal external-key, standalone LLM, native-key, watch and human voice-task proposals. Default connected waits never become background work; external background execution requires explicit async opt-in. Required for person/org/global activation alongside the existing capabilities. |
-| `permissions:execution-authoring-private-conversations-v1` | Optional v3 assistant proposal reader/writer and explicit across-private-conversations choice. Gates v3 creation, decisions, resume and send; does not become a prerequisite for existing cohort activation or v1/v2 sources. Upgrade/drain every reader and worker first. |
+| `permissions:execution-authoring-private-conversations-v1` | Optional v3 assistant proposal reader/writer and explicit across-private-conversations choice. Gates v3 creation, decisions, resume and send; does not become a prerequisite for existing cohort activation or v1/v2 sources. Every live reader and worker must advertise support. |
 | `permissions:execution-enrollment-v1` | Broad enrollment snapshot, scoped hints and live admission integration. Advertised by production heartbeats with complete auth/admission and Phase B integration. Required for global/org activation and clear-that-enables. |
 | `assistant:org-instruction-v1` | Exact owner instruction or a single-use owner card before covered org credential effects, in every access mode. |
 | `assistant:hosted-connect-intent-v1` | New assistant MCP and Plugins links persist immutable personal/platform intent; completion always enforces an existing lock. |
 
 Admin enable writes return HTTP 503 (`security_readiness_unavailable`, code
-12900) while readiness is red; disabling remains allowed. Request-path reads
+12900) when durable activation is absent or a hard support check fails; advisory roster/drain conditions do not refuse an enable. Disabling remains allowed. Request-path reads
 return the resolved boolean, preserving existing overrides, membership changes,
 override clearing and defaults even if readiness later becomes unavailable.
 Enabled gated reads emit `security_readiness_flag_in_effect_unready` only when
@@ -187,7 +248,7 @@ minute cluster-wide. A local per-replica throttle runs before any diagnostic I/O
 then a shared rate window admits the serving-readiness report. The event includes
 the flag key, user ID, strict `blockers` and actionable `serving_blockers`, with
 the user as audit actor. An activated capability serving with roster warnings
-emits no per-flag event: the same serving report schedules the shared hourly
+emits no per-flag event: the same serving report schedules the shared daily
 roster-warning diagnostic described above. Healthy reads retain the existing
 diagnostic command count. Readiness report or rate-window errors
 are debug-logged and do not fail requests. An effective false value retains
@@ -202,7 +263,7 @@ rolling back to writers that do not coordinate the gateway handoff; see
 `assistant:channel-media-v2` gates new owner ingestion for Discord, Slack,
 WhatsApp and X relay sources under the existing `assistant:channel-media` flag.
 It is an execution capability, not a separate feature flag: admission and
-fetch/bind rechecks require serving readiness after a clean, drained activation.
+fetch/bind rechecks require serving readiness after durable activation with all hard checks passing.
 Lark/Feishu/Telegram retain their existing owner-media gates. No guest-media
 authority is added. Keep upgraded workers until accepted media drains before
 binary rollback; see [channel media](chat/10-uploads.md#channel-rollout-and-rollback).
@@ -220,8 +281,9 @@ with it true persists `security_rollouts/platform-policy-v1` before registering
 that process or serving traffic. This marker is sticky and does not expire.
 All actor-addressed catalog master-credential authorization then requires the
 executing process and every live generation to support this capability
-and have the setting true. Initial capability activation is strict; subsequent
-credential use may tolerate only roster warnings with durable activation evidence.
+and have the setting true. Initial capability activation is immediate on a clean roster or follows the
+hard-blocker-free settle window; both paths retain every platform-policy hard check.
+Subsequent credential use may tolerate roster warnings with durable activation evidence.
 The sticky marker is enforcement intent, **not** activation evidence. A false-local
 process must refuse even after the true sibling's heartbeat expires.
 
@@ -234,9 +296,9 @@ separately, is ready as configured, and denies all actual operations through
 the existing operation evaluator. Server-chosen master-credential consumers
 retain their separate existing contract.
 
-Prepare policies and the exact serving roster before enabling this variable.
-Once cut over, restore all hard checks and policies to recover serving; restore
-a complete clean roster to recover activation readiness. Changing an env value to
+Prepare the catalog policies before enabling this variable.
+Once cut over, policy/configuration hard checks must pass to recover serving; no
+roster or drain declaration is required. Changing an env value to
 false, losing a heartbeat, or waiting for a lease does not downgrade enforcement. A deliberate rollback requires full
 maintenance drain and an explicit deployment/data recovery plan; the product
 does not automatically clear this marker or provide a live downgrade command.
@@ -291,14 +353,13 @@ changes do not alter the separate mobile dependency remediation constraints.
 
 ## Protected org use and assistant hosted intent rollout
 
-The default-off capabilities `assistant:org-instruction-v1` and `assistant:hosted-connect-intent-v1` use the same admin enable readiness checks for global, org and user overrides. Deploy compatible backend readers and the frontend first: they must understand `org_connection`, preserve its pending cards/controls in Full, and read defaulted intent locks/receipt fields. Then upgrade and drain every API/admission, executor, job/watch worker and link-completer writer, including alternate ingress. Declare the complete `INSTANCE_NAME`/`SECURITY_ROLLOUT_REPLICAS` roster and `SECURITY_ROLLOUT_DRAINED=true`; confirm both capabilities ready before enabling the rules or locked writes. Old binaries must not rejoin after activation. Flag disabling is not a binary rollback plan.
+The default-off capabilities `assistant:org-instruction-v1` and `assistant:hosted-connect-intent-v1` use the same admin enable readiness checks for global, org and user overrides. Deploy compatible backend readers and the frontend first: they must understand `org_connection`, preserve its pending cards/controls in Full, and read defaulted intent locks/receipt fields. Every observed API/admission, executor, job/watch worker and link-completer must support both capabilities; their durable recording and serving readiness converge automatically before enabling the rules or locked writes. Old binaries must not rejoin after activation. Flag disabling is not a binary rollback plan.
 
 Legacy selection rows have no positive owner provenance and never become instruction. New exact org bindings omit only mode preference, so pending cards remain redeemable after Auto-to-Full; old bindings are revalidated and may require a fresh exact card. New bounded jobs/watches persist server-owned instruction receipts. Old org jobs without proof refuse and require a reviewed replacement command; old org watches pause for an owner card covering the existing remote operation's declared status/result/cancel lifecycle. Old automatic Full receipts are insufficient. Legacy connect links default the lock to false and retain completion overrides; locked links enforce intent even if the write flag is later disabled. Complete deployment and activation evidence belongs in the implementation/PR review report; do not infer a drained writer from a green load-balancer health check.
 
 ## Execution-permission broad cohorts
 
-Before global/org activation, upgrade every serving replica and worker, drain old
-writers, and verify `permissions:execution-v1`, `permissions:execution-dispatch-v1`,
+Global/org enables require durable activation and live support for `permissions:execution-v1`, `permissions:execution-dispatch-v1`,
 `permissions:execution-authoring-v1`, `permissions:execution-authoring-v2` and
 `permissions:execution-enrollment-v1`. The
 last capability also gates clear-that-enables; explicit disabling is always allowed.
@@ -328,8 +389,8 @@ a retained occurrence into a legacy request or permits another send.
 `permissions:execution-authoring-channel-v1` is an optional v4 channel source,
 review and result-delivery capability. It is not a new prerequisite for existing
 web/v1/v3 or B2/v2 cohorts. Upgrade all API replicas/workers, deploy the monotonic
-channel/settings policy writers and outbox cleanup, then drain old writers before
-allowing this capability to become ready. Fresh unready sources stay legacy;
+channel/settings policy writers and outbox cleanup. Observed support and durable
+activation then allow this capability to serve without a drain declaration. Fresh unready sources stay legacy;
 existing marked work refuses at task/decision/send/delivery barriers. Disable
 and drain on upgraded binaries before a binary rollback. The saved permission
 remains v1 with a Channel audience; it never becomes a private permission.
@@ -357,9 +418,9 @@ environment setting or automatic model/rate activation is introduced.
 
 `assistant:channel-guest-media` is a separate default-off flag and replica
 capability. Its readers also require `assistant:channel-media-v2`: Stage A alone
-is insufficient to enforce the exact-current-turn guest boundary. Deploy all API
-and async workers, drain older workers, inspect both readiness reports, then
-opt in a linking person before broader rollout. Flag-off denies new guest
+is insufficient to enforce the exact-current-turn guest boundary. Both capabilities
+must be recorded and supported by every observed API/async worker before a linking
+person opts in; no roster/drain declaration is required. Flag-off denies new guest
 fetch/model reads, including model-setup waits, without deleting retained
 human-owner uploads. Retention and erasure continue normally.
 
@@ -368,8 +429,8 @@ human-owner uploads. Retention and erasure continue normally.
 `inference:platform-model-contracts-v1` gates authoring and executing the new v2
 family/transport fixture digests. Historical v1 tariffs keep their gates and
 immutable digests. New tariffs use existing fields only, so old readers can
-inspect rows, but old selectors/certification reject v2 before send. Upgrade and
-drain all API/worker replicas before activation. New executors recheck the live
+inspect rows, but old selectors/certification reject v2 before send. Observed
+API/worker support gates activation automatically. New executors recheck the live
 fleet before private credentials/funding and at dispatch; assistant callbacks
 share these checks. Admin readiness includes the capability for affected models,
 and public executable-price/image projections fail closed while it is unready.
@@ -378,8 +439,7 @@ See [platform models](PLATFORM_MODELS.md#current-models-through-versioned-api-co
 ## Organization guest Grants cutover (#2366)
 
 `nyxbot:org-guest-grants-v1` gates cap removal and explicit Grants adoption.
-Verify it with `GET /api/v1/admin/security-readiness` after upgrading/draining
-all API, proxy/MCP/LLM and queued/delivery workers in the existing declared roster.
+Verify it with `GET /api/v1/admin/security-readiness` after all observed API, proxy/MCP/LLM and queued/delivery workers support it.
 No new environment variables or feature-flag policy are introduced; the existing
 `nyxbot:org-specialist-channels` flag/readiness still applies.
 
@@ -390,34 +450,8 @@ No new environment variables or feature-flag policy are introduced; the existing
 - New ready bindings: guest-off; enabling uses Grants (including default Use).
 - Hard serving-readiness loss: use retained legacy restrictions; continue settling all holds. Roster warnings alone preserve already activated Grants execution and explicit adoption.
 
-A registered green fleet cannot detect hidden old workers: roster/drain assertions
-remain mandatory. Rollback disables guests and drains/settles work on upgraded
+A green fleet cannot detect invisible pre-observation workers; the observation
+floor above still applies. Rollback disables guests and drains/settles work on upgraded
 binaries before downgrade. Cap-free spend and all legacy settings remain retained;
 old code may refuse above-cap admissions or changed digests. Never reset spend or
 silently regenerate legacy authority to make rollback permissive.
-
-### Activation versus serving entry points
-
-This is the authoritative exhaustive list of operations requiring a clean roster:
-
-- Platform feature-flag override enables and clear-that-enables, for every scope.
-- Platform-admin model activation/enable, active route publication, model tariff
-  creation, model-only catalog credential configuration, and model-evidence
-  allowance authoring. The admin model enable-switch projection remains strict.
-- Startup/heartbeat recording of a capability's first activation evidence.
-
-Pure diagnostics (`/admin/security-readiness`, automation completion diagnostics,
-and the existing flag-in-effect warning) retain strict `ready` and expose the
-additive serving state; they do not authorize traffic.
-
-Every end-user, org-admin, agent/API-key, channel and worker path uses
-`require_serving` / `serving_report(...).serving_ready`. This includes permission
-proposal creation/decisions, collaboration membership, native gateway selection,
-org-channel linking/guest configuration/adoption, automation v2 per-run enrollment,
-model execution, media, permission execution/resume/readback, and Discord socket
-acquisition/renewal. Soft gates keep their existing legacy fallback on **hard**
-serving-readiness loss. Database/operational errors retain each caller's existing
-propagation behavior; this change does not turn such errors into a successful
-fallback. Existing flag reads keep their boolean semantics.
-`require_activation` permits unknown flag keys because ordinary flags are ungated;
-`require_serving` explicitly refuses unknown execution capabilities.

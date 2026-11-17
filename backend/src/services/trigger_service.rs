@@ -1076,7 +1076,7 @@ pub fn dispatch_webhook_event(
     body: Zeroizing<Vec<u8>>,
     max_body_bytes: usize,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let event_id = record.event_id.clone();
         let outcome = deliver_webhook_body(
             &encryption_keys,

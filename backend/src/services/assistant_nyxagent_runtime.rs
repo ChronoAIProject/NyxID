@@ -758,13 +758,14 @@ async fn request(
 pub(crate) async fn run_owner_turn(
     state: AppState,
     egress: std::sync::Arc<dyn contract::NyxAgentEgress>,
-    row: AssistantConversation,
+    mut row: AssistantConversation,
     text: String,
     mut credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
     mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    let shutdown_work = state.shutdown.turn(&row);
     let trace = row
         .active_turn
         .as_ref()
@@ -784,6 +785,11 @@ pub(crate) async fn run_owner_turn(
         .is_err()
     {
         return None;
+    }
+    // Platform recovery claims the worker in the existing transaction. Keep
+    // the local settlement snapshot on that same process fence.
+    if let Some(turn) = row.active_turn.as_mut() {
+        turn.worker_instance = Some(super::assistant_engine_worker::instance().clone());
     }
     let turn_id = row
         .active_turn
@@ -813,7 +819,7 @@ pub(crate) async fn run_owner_turn(
     let heartbeat_turn = turn_id.clone();
     // AbortOnDropHandle ties the child to this worker: a panic or task abort
     // cannot leave a fresh heartbeat behind to hide an orphaned turn.
-    let heartbeat_task = AbortOnDropHandle::new(tokio::spawn(async move {
+    let heartbeat_task = AbortOnDropHandle::new(crate::services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS));
         interval.tick().await;
@@ -871,7 +877,11 @@ pub(crate) async fn run_owner_turn(
     let queued = match queue_deadline {
         Some((since, deadline)) => {
             let queued =
-                wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline).await;
+                tokio::select! {
+                    biased;
+                    () = state.shutdown.interrupted() => Err(TurnError::internal("turn_lost", "shutdown")),
+                    result = wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline) => result,
+                };
             if queued.is_ok() {
                 events.emit(
                     "turn.status",
@@ -952,6 +962,7 @@ pub(crate) async fn run_owner_turn(
             outcome
         });
         tokio::select! {
+            () = state.shutdown.interrupted() => Err(TurnError::internal("turn_lost", "shutdown")),
             result = &mut execution => result,
             () = permit.cancelled() => Err(TurnError::internal("assistant_unavailable", "permit")),
             error = watch_stop(&state, &row, &turn_id) => Err(error),
@@ -992,6 +1003,14 @@ pub(crate) async fn run_owner_turn(
     result.text = result
         .text
         .replace(credential.raw_key.as_str(), "[redacted]");
+    // A voice task's model-authored reply cannot reconstruct private URLs.
+    // Sanitize before checkpoint/settlement as well as at visible publication.
+    if row.voice_parent_conversation_id.is_some() {
+        result.text = super::voice::links::redact_task_reply(
+            &result.text,
+            &super::voice::links::frontend_origins(&state.config),
+        );
+    }
     let settled = complete_turn(
         &state.db,
         &row,
@@ -1014,6 +1033,9 @@ pub(crate) async fn run_owner_turn(
         },
     )
     .await;
+    if let (Some(work), SettledExecution::Saved { error, .. }) = (&shutdown_work, &settled) {
+        work.settled(error.as_ref().is_some_and(|error| error.stage == "shutdown"));
+    }
     let _ = heartbeat_stop.send(());
     let _ = heartbeat_task.await;
     match settled {
@@ -1051,7 +1073,7 @@ pub(crate) async fn wait_for_running_slot(
     // Display only, for the moments before the engine request starts, which
     // clears the markers durably; the lease set on queuing covers execution.
     let (db, row, turn_id) = (state.db.clone(), row.clone(), turn_id.to_owned());
-    tokio::spawn(async move {
+    state.shutdown.spawn(async move {
         let _ = tokio::time::timeout(
             QUEUE_WRITE_TIMEOUT,
             engine::mark_dequeued(&db, &row, &turn_id),
@@ -1770,7 +1792,7 @@ async fn execute_turn_inner(
     // A recap leads with the durable checkpoint; guest audiences never get it.
     if !row.guest_turn {
         context.set_checkpoint(
-            engine::checkpoint(&state.db, &row.user_id, &row.id)
+            engine::checkpoint_for_conversation(&state.db, row)
                 .await
                 .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
         );
@@ -2012,12 +2034,17 @@ async fn execute_turn_inner(
             _ => Vec::new(),
         };
         for origin in origins.into_iter().filter(|o| o.thread.is_some()) {
+            let conversation = crate::services::org_channel_service::follow_conversation(
+                &state.db, row, origin, None,
+            )
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
             Box::pin(
                 crate::services::channel_thread_follow_service::validate_delivery(
                     &state.db,
                     &row.user_id,
                     origin,
-                    &row.id,
+                    &conversation,
                 ),
             )
             .await

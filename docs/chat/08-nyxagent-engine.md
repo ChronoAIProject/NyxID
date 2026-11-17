@@ -852,7 +852,17 @@ first use) and persistent `specialist` agents with a name, role description,
 `created_by`, `destroyed_at`, and an optional `display_name` (≤ 40) and
 `persona` (≤ 2000, style only). Conversations are threads of an agent
 (`agent_id`; legacy rows are NyxBot's) with a denormalized `role`, `report_to`,
-`pending_events` and `event_streak`. NyxAgent is unchanged: every thread is an
+`pending_events` and `event_streak`. Optional metadata-only `wake` references
+are rendered and consumed in the existing admission transaction; preparing
+watch events stay queued until completion or lease expiry. Their source fences
+and any verification-code hash changes commit with admission. Ordinary events
+without a reference keep their existing path and database command count. See
+[durable wake admission](09-nyxbot-orchestrator.md#durable-wake-admission-and-rollout).
+Personal-group turns admitted with `group_reply_in_settlement` also publish
+their public reply, safe machine receipts and bounded hand-offs in their
+settlement transaction. Repeated settlement or a late callback cannot duplicate the post
+or its budget spend. The marker defaults to false for older active turns.
+NyxAgent is unchanged: every thread is an
 ordinary conversation with its own key.
 
 NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent`,
@@ -1144,6 +1154,20 @@ before their verbatim text is retained. Empty MIME, `application/octet-stream`
 and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
 ## Managed attachment writes
+
+Published stored catalog Binary operations also accept server-resolved
+`attachment_id` for every eligible live, non-guest owner chat key, without a
+feature-flag read. Discovery advertises both the original base64 `body` and
+`attachment_id`, requiring exactly one: use body for content the assistant wrote
+itself and attachment_id for an existing uploaded or downloaded file. Both inputs
+together are refused. During a rolling deploy, a handle call reaching an old
+replica gets its existing base64-body-required error until that replica is upgraded;
+body-only calls continue to work. Confirmed binary files captured within the byte
+and memory limits become encrypted tool files and return metadata handles.
+Textual candidates and unavailable capture preserve the legacy response reader.
+See [Assistant uploads](10-uploads.md#binary-tool-files) for limits, extraction,
+confirmation, egress fences and rollout. This generic capability changes only
+rendered chat schemas; the Lark multipart contract below remains separate.
 
 `bitable_media_upload` is available for trusted Lark/Feishu catalog operations
 in a live, non-guest owner chat with the default-off, per-person
@@ -1469,7 +1493,16 @@ rows without it keep the same lease/TTL behavior. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
 A 15-second cross-replica sweep reclaims only rows whose heartbeat is at least 75 seconds old,
-through the same fenced settlement path; a fresh long-running turn is never swept.
+through the same fenced settlement path, with stage `sweep`; a fresh long-running
+turn is never swept. Planned SIGTERM/ctrl-c drains keep heartbeats alive and wait
+for the detached workers. At the shutdown work deadline or second signal,
+remaining turns use the same fenced settlement with code `turn_lost` and stage
+`shutdown`, additionally matching this process's worker identity. A terminal
+reply clears `active_turn`, so old replicas' sweep and next-send reclamation
+cannot create a second reply. Stop still wins as `cancelled`/`stop`. A crash,
+early platform kill, or unavailable shutdown settlement retains stale-heartbeat
+recovery. Neither shutdown nor crash automatically replays execution. See
+[graceful drain](../DEPLOYMENT.md#rolling-deploys-and-graceful-drain).
 Delete stops and cancels before removing the row, and a late worker settlement against
 the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
 
@@ -2521,7 +2554,7 @@ Personal credential catalogs, including OAuth/device-code/API-key providers with
 
 Specialists never mint links, even in routed mode. Their refusal includes only same-catalog connection facts already within the key's effective grants (including active auto/platform rows only when authentication grants them) and asks the owner to have NyxBot perform setup, followed by a separate specialist grant; direct specialist work never transfers automatically to NyxBot. An org-owned specialist thread keeps the acting member as its key owner, while the owner-bound grant resolver limits its connection IDs to the agent organization's own rows; personal or other-organization rows are excluded. Guests receive no inventory. Organization cards retain exact operation approval and current connection facts; their `connect_own` is setup guidance, not a minted link or approval. When the owner requests personal setup, use the connect tool immediately with its existing-connection narration. Unsupported hosted card offers share the connect tool's reason codes; `no_separate_account` instead explains the one-step setup contract. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Hosted preview carries the declared credential fields so a failed catalog/pricing lookup cannot hide them (clients retain catalog fallback for older servers). Web and mobile hosted credential forms render declared token-exchange fields separately (for example, App ID and App Secret), then submit one JSON credential. Lark/Feishu startup corrects only exact prior system-seed instructions, preserving admin text and explicit clears.
 
-`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Use compatible readers/UI; observed support from every live writer/completer gates automatic activation without roster/drain declarations. Old readers that ignore the stored lock remain incompatible. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
 
 ### Shared-agent transport continuations
 

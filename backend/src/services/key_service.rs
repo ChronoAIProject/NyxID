@@ -1726,6 +1726,33 @@ pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
 ) -> AppResult<(String, ApiKey, Option<String>)> {
+    let (user_id, key, credential_id) = observe_api_key(db, raw_key).await?;
+    // Update last_used_at
+    let now = Utc::now();
+    key_mutations::update_one(
+        db,
+        doc! { "_id": &key.id },
+        doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
+        None,
+    )
+    .await?;
+
+    if let Some(id) = credential_id.as_deref() {
+        db.collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
+            .update_one(
+                doc! {"_id": id},
+                doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(now)}},
+            )
+            .await?;
+    }
+    Ok((user_id, key, credential_id))
+}
+
+/// Identical credential validation without recording a use or mutating authority.
+pub(crate) async fn observe_api_key(
+    db: &mongodb::Database,
+    raw_key: &str,
+) -> AppResult<(String, ApiKey, Option<String>)> {
     let key_hash = hash_token(raw_key);
 
     let primary = db
@@ -1769,26 +1796,7 @@ pub async fn validate_api_key(
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }
 
-    // Update last_used_at
-    let user_id = key.user_id.clone();
-    let now = Utc::now();
-    key_mutations::update_one(
-        db,
-        doc! { "_id": &key.id },
-        doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
-        None,
-    )
-    .await?;
-
-    if let Some(id) = credential_id.as_deref() {
-        db.collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
-            .update_one(
-                doc! {"_id": id},
-                doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(now)}},
-            )
-            .await?;
-    }
-    Ok((user_id, key, credential_id))
+    Ok((key.user_id.clone(), key, credential_id))
 }
 
 #[cfg(test)]

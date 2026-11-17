@@ -24,6 +24,7 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     ["Privacy", "PrivacySettings"],
     ["Terms of Service", "TermsOfService"],
     ["Privacy Policy", "PrivacyPolicy"],
+    ["Open-source notices", "OpenSourceNotices"],
   ];
   for (const [label, route] of routes) {
     const row = env.row(label!);

@@ -244,7 +244,7 @@ pub async fn start_publication_migration(state: &AppState) {
         return;
     }
     let state = state.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let mut delay = std::time::Duration::from_secs(5);
         let mut pass = 1;
         loop {

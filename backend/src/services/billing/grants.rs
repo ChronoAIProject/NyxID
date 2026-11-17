@@ -1,3 +1,4 @@
+use super::recovery_batch::{self, Failures};
 use crate::models::credits::Credits;
 #[cfg(test)]
 pub const CREDIT_MICROS: i64 = 1_000_000;
@@ -411,43 +412,64 @@ pub async fn finalize_reclaim(db: &mongodb::Database, grant_id: &str) -> AppResu
     Ok(())
 }
 
-pub async fn finalize_pending_reclaims(db: &mongodb::Database) -> AppResult<u64> {
+async fn finalize_pending_reclaims(
+    db: &mongodb::Database,
+    failures: &mut Failures,
+) -> AppResult<u64> {
     let mut cursor = db
-        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .collection::<bson::Document>(CREDIT_GRANTS)
         .find(doc! {
             "status": "active", "revoke_requested_at": { "$type": "date" },
             "reserved": Credits::ZERO, "active_settlement": Bson::Null,
         })
-        .limit(500)
+        .limit(recovery_batch::limit(500))
         .await?;
     let mut count = 0;
-    while let Some(grant) = cursor.try_next().await? {
-        finalize_reclaim(db, &grant.id).await?;
-        count += 1;
+    while let Some(raw) = cursor.try_next().await? {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        if failures
+            .unit(async {
+                let grant: CreditGrant = recovery_batch::decode(&raw)?;
+                finalize_reclaim(db, &grant.id).await
+            })
+            .await
+            .is_some()
+        {
+            count += 1;
+        }
     }
     Ok(count)
 }
 
 pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> AppResult<u64> {
     super::exact_migration::require_ready(db).await?;
-    finalize_pending_reclaims(db).await?;
+    let mut failures = Failures::default();
+    finalize_pending_reclaims(db, &mut failures).await?;
+    let mut failed_ids = Vec::new();
     let mut expired = 0;
     let mut examined = 0;
-    while examined < MAX_EXPIRATIONS_PER_TICK {
-        let batch_limit = EXPIRY_SWEEP_BATCH.min((MAX_EXPIRATIONS_PER_TICK - examined) as i64);
-        let due: Vec<CreditGrant> = db
-            .collection::<CreditGrant>(CREDIT_GRANTS)
-            .find(doc! {
-                "status": "active",
-                "revoke_requested_at": Bson::Null,
-                "reserved": Credits::ZERO,
-                "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
-                "$or": [
-                    { "active_settlement": Bson::Null },
-                    { "active_settlement": { "$exists": false } },
-                ],
-            })
-            .sort(doc! { "expires_at": 1, "_id": 1 })
+    while examined < recovery_batch::limit(MAX_EXPIRATIONS_PER_TICK as i64) as usize {
+        let batch_limit = recovery_batch::limit(EXPIRY_SWEEP_BATCH)
+            .min(recovery_batch::limit(MAX_EXPIRATIONS_PER_TICK as i64) - examined as i64);
+        let mut filter = doc! {
+            "status": "active",
+            "revoke_requested_at": Bson::Null,
+            "reserved": Credits::ZERO,
+            "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+            "$or": [
+                { "active_settlement": Bson::Null },
+                { "active_settlement": { "$exists": false } },
+            ],
+        };
+        if !failed_ids.is_empty() {
+            filter.insert("_id", doc! {"$nin":&failed_ids});
+        }
+        let due: Vec<bson::Document> = db
+            .collection::<bson::Document>(CREDIT_GRANTS)
+            .find(filter)
+            .sort(doc! {"expires_at":1,"_id":1})
             .limit(batch_limit)
             .await?
             .try_collect()
@@ -457,55 +479,66 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
         }
         examined += due.len();
         let short_batch = due.len() < batch_limit as usize;
-        for grant in due {
-            let result = db
-                .collection::<CreditGrant>(CREDIT_GRANTS)
-                .find_one_and_update(
-                    doc! {
-                            "_id": &grant.id,
-                            "status": "active",
-                    "revoke_requested_at": Bson::Null,
+        for raw in due {
+            if !super::reconcile::continue_reconcile() {
+                return failures.finish(expired);
+            }
+            let result: AppResult<()> = async {
+                let grant: CreditGrant = recovery_batch::decode(&raw)?;
+                let result = db
+                    .collection::<CreditGrant>(CREDIT_GRANTS)
+                    .find_one_and_update(
+                        doc! {
+                                "_id": &grant.id,
+                                "status": "active",
+                        "revoke_requested_at": Bson::Null,
+                                "reserved": Credits::ZERO,
+                                "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+                                "$or": [
+                                    { "active_settlement": Bson::Null },
+                                    { "active_settlement": { "$exists": false } },
+                                ],
+                            },
+                        vec![doc! { "$set": {
+                            "status": "expired",
+                            "terminal_amount": "$remaining",
+                            "remaining": Credits::ZERO,
                             "reserved": Credits::ZERO,
-                            "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
-                            "$or": [
-                                { "active_settlement": Bson::Null },
-                                { "active_settlement": { "$exists": false } },
-                            ],
-                        },
-                    vec![doc! { "$set": {
-                        "status": "expired",
-                        "terminal_amount": "$remaining",
-                        "remaining": Credits::ZERO,
-                        "reserved": Credits::ZERO,
-                        "expired_at": bson::DateTime::from_chrono(now),
-                        "updated_at": bson::DateTime::from_chrono(now),
-                    } }],
+                            "expired_at": bson::DateTime::from_chrono(now),
+                            "updated_at": bson::DateTime::from_chrono(now),
+                        } }],
+                    )
+                    .await?;
+                let Some(grant) = result else {
+                    return Ok(());
+                };
+                expired += 1;
+                if super::ledger::record_grant_event(
+                    db,
+                    BillingLedgerEventType::GrantExpired,
+                    &grant.recipient_user_id,
+                    &grant.id,
+                    grant.remaining.max(Credits::ZERO),
+                    None,
+                    format!("grant-expired:{}", grant.id),
                 )
-                .await?;
-            let Some(grant) = result else {
-                continue;
-            };
-            expired += 1;
-            if super::ledger::record_grant_event(
-                db,
-                BillingLedgerEventType::GrantExpired,
-                &grant.recipient_user_id,
-                &grant.id,
-                grant.remaining.max(Credits::ZERO),
-                None,
-                format!("grant-expired:{}", grant.id),
-            )
-            .await
-                && let Err(error) = mark_terminal_ledgered(db, &grant.id, now).await
-            {
-                tracing::warn!(grant_id = %grant.id, %error, "grant expiry ledger marker will retry");
+                .await
+                {
+                    mark_terminal_ledgered(db, &grant.id, now).await?;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = result {
+                failed_ids.push(raw.get("_id").cloned().unwrap_or(Bson::Null));
+                failures.note(error);
             }
         }
         if short_batch {
             break;
         }
     }
-    Ok(expired)
+    failures.finish(expired)
 }
 
 /// Retry grant lifecycle journal writes left pending by a process crash or a
@@ -517,8 +550,8 @@ pub async fn recover_unledgered_events(
     now: DateTime<Utc>,
 ) -> AppResult<u64> {
     super::exact_migration::require_ready(db).await?;
-    let grants: Vec<CreditGrant> = db
-        .collection::<CreditGrant>(CREDIT_GRANTS)
+    let grants: Vec<bson::Document> = db
+        .collection::<bson::Document>(CREDIT_GRANTS)
         .find(doc! {
             "$or": [
                 { "issued_ledgered_at": Bson::Null },
@@ -532,60 +565,70 @@ pub async fn recover_unledgered_events(
                 },
             ],
         })
-        .sort(doc! { "created_at": 1, "_id": 1 })
-        .limit(LEDGER_RECOVERY_BATCH)
+        .sort(doc! {"created_at":1,"_id":1})
+        .limit(recovery_batch::limit(LEDGER_RECOVERY_BATCH))
         .await?
         .try_collect()
         .await?;
     let mut recovered = 0;
-    for grant in grants {
-        if grant.issued_ledgered_at.is_none()
-            && super::ledger::record_grant_event(
-                db,
-                BillingLedgerEventType::GrantIssued,
-                &grant.recipient_user_id,
-                &grant.id,
-                grant.amount,
-                None,
-                format!("grant-issued:{}", grant.id),
-            )
-            .await
-        {
-            mark_issued_ledgered(db, &grant.id, now).await?;
-            recovered += 1;
+    let mut failures = Failures::default();
+    for raw in grants {
+        if !super::reconcile::continue_reconcile() {
+            break;
         }
+        failures
+            .unit(async {
+                let grant: CreditGrant = recovery_batch::decode(&raw)?;
+                if grant.issued_ledgered_at.is_none()
+                    && super::ledger::record_grant_event(
+                        db,
+                        BillingLedgerEventType::GrantIssued,
+                        &grant.recipient_user_id,
+                        &grant.id,
+                        grant.amount,
+                        None,
+                        format!("grant-issued:{}", grant.id),
+                    )
+                    .await
+                {
+                    mark_issued_ledgered(db, &grant.id, now).await?;
+                    recovered += 1;
+                }
 
-        let terminal = match grant.status {
-            CreditGrantStatus::Expired => Some((
-                BillingLedgerEventType::GrantExpired,
-                grant.terminal_amount.max(Credits::ZERO),
-                format!("grant-expired:{}", grant.id),
-            )),
-            CreditGrantStatus::Revoked => Some((
-                BillingLedgerEventType::GrantRevoked,
-                grant.terminal_amount.max(Credits::ZERO),
-                format!("grant-revoked:{}", grant.id),
-            )),
-            CreditGrantStatus::Active | CreditGrantStatus::Consumed => None,
-        };
-        if grant.terminal_ledgered_at.is_none()
-            && let Some((event_type, amount, dedupe_key)) = terminal
-            && super::ledger::record_grant_event(
-                db,
-                event_type,
-                &grant.recipient_user_id,
-                &grant.id,
-                amount,
-                None,
-                dedupe_key,
-            )
-            .await
-        {
-            mark_terminal_ledgered(db, &grant.id, now).await?;
-            recovered += 1;
-        }
+                let terminal = match grant.status {
+                    CreditGrantStatus::Expired => Some((
+                        BillingLedgerEventType::GrantExpired,
+                        grant.terminal_amount.max(Credits::ZERO),
+                        format!("grant-expired:{}", grant.id),
+                    )),
+                    CreditGrantStatus::Revoked => Some((
+                        BillingLedgerEventType::GrantRevoked,
+                        grant.terminal_amount.max(Credits::ZERO),
+                        format!("grant-revoked:{}", grant.id),
+                    )),
+                    CreditGrantStatus::Active | CreditGrantStatus::Consumed => None,
+                };
+                if grant.terminal_ledgered_at.is_none()
+                    && let Some((event_type, amount, dedupe_key)) = terminal
+                    && super::ledger::record_grant_event(
+                        db,
+                        event_type,
+                        &grant.recipient_user_id,
+                        &grant.id,
+                        amount,
+                        None,
+                        dedupe_key,
+                    )
+                    .await
+                {
+                    mark_terminal_ledgered(db, &grant.id, now).await?;
+                    recovered += 1;
+                }
+                Ok(())
+            })
+            .await;
     }
-    Ok(recovered)
+    failures.finish(recovered)
 }
 
 pub(super) async fn mark_issued_ledgered(

@@ -348,7 +348,7 @@ pub async fn upgrade(
     Ok(ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             relay(
                 state,
                 node,
@@ -358,7 +358,7 @@ pub async fn upgrade(
                 zeroize::Zeroizing::new(secret.to_vec()),
                 socket,
             )
-        }))
+        })))
 }
 
 fn signed(node: &str, operation: Operation, parameters: Value, secret: &[u8]) -> Request {
@@ -980,7 +980,14 @@ pub async fn request_control(
         node.name
     );
     let conversation = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
-    super::nyxbot::deliver_update(state, &conversation, &message, None).await;
+    super::nyxbot::deliver_update_for(
+        state,
+        &conversation,
+        &message,
+        None,
+        super::nyxbot::supplemental::Purpose::MachineDesktopNotice,
+    )
+    .await;
     let _ = crate::services::notification_service::machine_control_requested(
         state,
         &chat.user_id,

@@ -18,6 +18,8 @@ import errorsZhCN from "./locales/errors-zh-CN.json";
 import errorsZhTW from "./locales/errors-zh-TW.json";
 import { catalogBackend } from "./catalog-loader";
 
+export const englishErrorMessages = new Set(Object.keys(errorsEn));
+
 // Shared by the app and standalone CLI wizard; each entry registers its own catalogs.
 export const appI18n = createInstance();
 void appI18n.use(catalogBackend).use(initReactI18next).init({

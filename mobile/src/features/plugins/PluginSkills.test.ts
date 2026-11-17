@@ -310,6 +310,9 @@ function setup({
     "./pluginSkillsTypes": skillTypes,
     "./SkillLibrary": { SkillLibrary: "SkillLibrary" },
   });
+  harness.mock("../../components/settings/Pager", harness.load(
+    fileURLToPath(new URL("../../components/settings/Pager.tsx", import.meta.url)),
+  ));
   const { PluginSkills, PluginSkillPage } = harness.load(
     fileURLToPath(new URL("./PluginSkills.tsx", import.meta.url)),
   ) as {

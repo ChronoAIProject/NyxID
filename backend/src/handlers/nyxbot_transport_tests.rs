@@ -108,7 +108,7 @@ async fn due(state: &AppState, id: &str) {
         .unwrap();
 }
 
-async fn native_discord_identity(
+pub(super) async fn native_discord_identity(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> (
@@ -152,7 +152,7 @@ async fn native_discord_identity(
     )
 }
 
-async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
+pub(super) async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
     use crate::services::{
         discord_gateway::transport::relay_allowed,
         nyxbot_gateway_release_service::settle_native_drains,
@@ -606,6 +606,31 @@ async fn pending_org_return_waits_for_stale_cleanup_before_retrying() {
     assert!(recovered.pending_route_api_key_id.is_none());
     inactive_key(&state, &org, &pending.id).await;
     inactive_key(&state, &org, &row.route_api_key_id).await;
+    // A newly queued retirement can be ahead of MongoDB time. Complete its
+    // captured obligation before asserting remote cleanup, as a later pass does.
+    let releases = state
+        .db
+        .collection::<crate::models::nyxbot_gateway_release::NyxbotGatewayRelease>(
+            crate::models::nyxbot_gateway_release::COLLECTION_NAME,
+        );
+    releases
+        .update_many(
+            doc! {"channel_id": &row.id, "state": "due"},
+            doc! {"$set": {"next_attempt_at": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let mut due = releases
+        .find(doc! {"channel_id": &row.id, "state": "due"})
+        .await
+        .unwrap();
+    while let Some(obligation) = due.try_next().await.unwrap() {
+        let claimed = releases::claim(&state.db, Some(&obligation.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(releases::execute(&state, claimed).await.unwrap());
+    }
     assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
     gateway.abort();
     agent.abort();
@@ -955,6 +980,7 @@ async fn discord_definitive_create_refusal_restores_relay_after_bounded_drain() 
     );
     assert!(requests.iter().all(|r| r.method.as_str() != "DELETE"));
     complete_native_drain(&state, &before).await;
+    assert_relay_receives(&state, &before).await;
     agent.abort();
 }
 
@@ -1120,4 +1146,184 @@ async fn notification_unread_chat_rows_survive_gateway_and_relay_swaps() {
 #[tokio::test]
 async fn notification_unread_chat_rows_survive_gateway_fallback() {
     unread_activity_survives_transport_move(true, true).await;
+}
+
+#[tokio::test]
+async fn discord_2323_preflight_refusal_does_not_pause_working_relay() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    for status in [200, 503] {
+        let (mut state, _, agent) = setup("discord_preflight_refusal").await;
+        let row = linked(&state, None, "discord").await;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let server = MockServer::start().await;
+        state.config.jwt_issuer = "http://localhost:3001".into();
+        let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+        svc.id = Uuid::new_v4().to_string();
+        svc.slug = "cmaeg".into();
+        svc.base_url = server.uri();
+        svc.requires_user_credential = false;
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(svc)
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/channel-capabilities"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(
+                    json!({"relay_authoring":{"native_discord_writes_enabled":false}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        for _ in 0..2 {
+            assert_eq!(
+                move_to_gateway(&state, &row).await,
+                Err("gateway_native_unavailable")
+            );
+            assert!(
+                crate::services::discord_gateway::transport::relay_allowed(
+                    &state.db,
+                    &row.channel_bot_id
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::nyxbot_gateway_release::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {"channel_bot_id":&row.channel_bot_id})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+            assert_eq!(after.route_api_key_id, row.route_api_key_id);
+            assert!(after.pending_agent_api_key_id.is_none());
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "GET")
+        );
+        assert_relay_receives(&state, &row).await;
+        agent.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+async fn assert_relay_receives(state: &AppState, row: &NyxbotChannel) {
+    use crate::services::{coordination_service::LeaseStore, discord_gateway::Fence};
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let lease = LeaseStore::acquire(
+        &state.db,
+        &format!("discord-gateway:{}", bot.id),
+        &crate::models::coordination::CoordinationHolder {
+            instance_id: "recovered".into(),
+            generation_id: Uuid::new_v4().to_string(),
+        },
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fence = Fence { bot, lease };
+    assert!(fence.current(&state.db).await.unwrap());
+    fence.record_inbound(&state.db).await.unwrap();
+    let observed = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.diagnostics.last_inbound_source.as_deref(),
+        Some("discord_gateway")
+    );
+    assert!(observed.diagnostics.last_inbound_at.is_some());
+    assert!(LeaseStore::release(&state.db, &fence.lease).await.unwrap());
+}
+
+#[tokio::test]
+async fn discord_2323_create_503_recovers_record_and_relay_without_repeating_create() {
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let (mut state, _, agent) = setup("discord_create_503_recovery").await;
+    let row = linked(&state, None, "discord").await;
+    let (_discord, _guard) = native_discord_identity(&state, &row).await;
+    let server = MockServer::start().await;
+    state.config.jwt_issuer = "http://localhost:3001".into();
+    let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+    svc.id = Uuid::new_v4().to_string();
+    svc.slug = "cmaeg".into();
+    svc.base_url = server.uri();
+    svc.requires_user_credential = false;
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(svc)
+        .await
+        .unwrap();
+    Mock::given(method("GET")).and(path("/channel-capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"relay_authoring":{
+            "native_discord_writes_enabled":true,"native_discord_auto_activation_enabled":true,"multi_consumer_writes_enabled":true}})))
+        .mount(&server).await;
+    let captured = Arc::new(std::sync::Mutex::new(Value::Null));
+    let written = captured.clone();
+    Mock::given(method("POST"))
+        .and(path("/channels"))
+        .respond_with(move |r: &Request| {
+            *written.lock().unwrap() = serde_json::from_slice(&r.body).unwrap();
+            ResponseTemplate::new(503)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let read = captured.clone();
+    Mock::given(method("GET")).and(wiremock::matchers::path_regex("^/channel-records/"))
+        .respond_with(move |_:&Request| {
+            let body=read.lock().unwrap();
+            let record=body["record_id"].as_str().unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({"record_id":record,"channel_id":"cmaeg1.ch.remote","version":1,
+                "provider":{"slug":"nyxbot","binding_id":format!("bnd_{}",Uuid::parse_str(record).unwrap().simple())},
+                "definition":{"owner":{"kind":"human","subject":OWNER},"sources":[{"type":"discord","bot_id":"100"}]}}))
+        }).mount(&server).await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        move_to_gateway(&state, &row).await,
+        Err("gateway_unavailable")
+    );
+    let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(after.transport, "direct");
+    assert_eq!(after.route_api_key_id, row.route_api_key_id);
+    let release = state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+        .find_one(doc! {"channel_id":&row.id,"native_drain_for":bson::Bson::Null})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(release.get_str("resolution"), Ok("released"));
+    complete_native_drain(&state, &row).await;
+    assert_relay_receives(&state, &row).await;
+    releases::sweep(&state).await.unwrap();
+    server.verify().await;
+    agent.abort();
+    state.db.drop().await.unwrap();
 }

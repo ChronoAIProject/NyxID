@@ -12,9 +12,18 @@ function diagnosticId(value: string | null | undefined): string | undefined {
 }
 
 export function errorDiagnostics(headers?: ErrorHeaders) {
+  const retry = headers?.get("Retry-After");
+  const seconds = retry == null || !retry.trim() ? NaN : Number(retry);
+  const retryAfterMs =
+    retry == null
+      ? undefined
+      : Number.isFinite(seconds)
+        ? Math.max(0, seconds * 1000)
+        : Math.max(0, Date.parse(retry) - Date.now());
   return {
     requestId: diagnosticId(headers?.get("x-request-id")),
     traceId: diagnosticId(headers?.get("X-NyxID-Trace-Id")),
+    ...(Number.isFinite(retryAfterMs) ? { retryAfterMs } : {}),
   };
 }
 

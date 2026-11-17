@@ -39,6 +39,14 @@ const channelErrors: Record<string, string> = {
     "NyxBot could not create this bot's message route. Try again shortly.",
   org_access_lost:
     "You no longer administer the organization that owns this bot, so NyxBot stopped answering through it.",
+  org_access_restoration_pending:
+    "This organization channel is being restored automatically; it normally returns in under a minute. Members must verify their chat account again.",
+  org_access_restoration_waiting_readiness:
+    "This organization channel is waiting for required safety checks to become available. NyxID will retry automatically; no administrator rights were lost.",
+  org_access_restoration_retrying_gateway:
+    "The channel connection is retrying restoration. The retry schedule can take hours; no administrator rights were lost.",
+  org_access_restored:
+    "This organization channel was restored. Members must verify their chat account again. Guest access is preserved as before.",
 };
 
 export function nyxBotChannelError(code: string): string {

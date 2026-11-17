@@ -285,6 +285,7 @@ pub struct ExchangedTokens {
     pub external_subject: Option<ExternalSubjectRef>,
     pub binding_grant_id: Option<String>,
     pub broker_capability_enabled: bool,
+    pub broker_require_sender_constraint: bool,
     pub resource_uris: Vec<String>,
     // Populated by the token exchange for the granted per-service access, but not
     // yet consumed on the access-token path (only the refresh_token_* siblings are
@@ -384,12 +385,49 @@ pub async fn issue_oauth_refresh_token(
     })
 }
 
+/// A missing value is an unverified permissive gate, not a policy denial.
+#[derive(Clone, Copy)]
+pub struct CodeBrokerRequirements {
+    pub require_admin_capability: Option<bool>,
+    pub require_sender_constraint: Option<bool>,
+}
+
+impl CodeBrokerRequirements {
+    pub fn known(require_admin_capability: bool, require_sender_constraint: bool) -> Self {
+        Self {
+            require_admin_capability: Some(require_admin_capability),
+            require_sender_constraint: Some(require_sender_constraint),
+        }
+    }
+
+    /// Resolve only gates that can change this exchange's result. None asks for
+    /// one live refresh before the code is consumed.
+    fn for_client(self, client: &OauthClient, sender_constrained: bool) -> Option<(bool, bool)> {
+        let broker = if super::oauth_broker_service::is_broker_client_with_policy(client, true) {
+            true
+        } else if !super::oauth_broker_service::is_broker_client_with_policy(client, false) {
+            false
+        } else {
+            !self.require_admin_capability?
+        };
+        let require_sender = if broker && !sender_constrained {
+            self.require_sender_constraint?
+        } else {
+            // Either this is not a broker exchange, or the sender already
+            // satisfies both possible policies.
+            self.require_sender_constraint.unwrap_or(false)
+        };
+        Some((broker, require_sender))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
-    broker_require_admin_capability: bool,
+    broker_requirements: CodeBrokerRequirements,
+    refresh_broker_requirements: impl std::future::Future<Output = CodeBrokerRequirements>,
     code: &str,
     client_id: &str,
     redirect_uri: &str,
@@ -400,6 +438,29 @@ pub async fn exchange_authorization_code(
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
 ) -> AppResult<ExchangedTokens> {
+    // Load the live client before claiming the code. Policy uncertainty must
+    // leave the code usable, and a non-broker client needs no policy refresh.
+    // Keep the active filter so soft-deleted clients cannot redeem old codes.
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id, "is_active": true })
+        .await?;
+    let sender_constrained = dpop_jkt.is_some() || mtls_x5t_s256.is_some();
+    let (broker_capability_enabled, broker_require_sender_constraint) =
+        if let Some(client) = &client {
+            match broker_requirements.for_client(client, sender_constrained) {
+                Some(resolved) => resolved,
+                None => refresh_broker_requirements
+                    .await
+                    .for_client(client, sender_constrained)
+                    .ok_or(AppError::OAuthAuthorityUnavailable)?,
+            }
+        } else {
+            // Retain replay revocation even after the client was removed. A
+            // missing/inactive client cannot issue tokens under either policy.
+            (false, false)
+        };
+
     let code_hash = hash_token(code);
 
     // Atomically claim the authorization code (prevents TOCTOU race condition).
@@ -466,26 +527,9 @@ pub async fn exchange_authorization_code(
         return Err(AppError::InvalidRedirectUri);
     }
 
-    // Validate client_secret for confidential clients. Reject auth
-    // codes against soft-deleted clients (`is_active = false`) so an
-    // already-issued code cannot be exchanged after the developer
-    // app -- or its owning org -- has been deleted. The legacy
-    // delete path on `oauth_clients` is a soft-delete, so the row
-    // can linger with `is_active = false` until the org cascade
-    // sweeps it; without this filter the code window is up to the
-    // auth-code TTL after the delete.
-    let client = db
-        .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one(doc! { "_id": client_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
-
+    let client =
+        client.ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
     validate_client_secret(&client, client_secret)?;
-    let broker_capability_enabled =
-        crate::services::oauth_broker_service::is_broker_client_with_policy(
-            &client,
-            broker_require_admin_capability,
-        );
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
@@ -669,6 +713,7 @@ pub async fn exchange_authorization_code(
         external_subject: stored.external_subject,
         binding_grant_id: stored.binding_grant_id,
         broker_capability_enabled,
+        broker_require_sender_constraint,
         resource_uris: token_resource_scope.resource_uris,
         allowed_service_ids: token_resource_scope.allowed_service_ids,
         allow_all_services: token_resource_scope.allow_all_services,
@@ -1103,7 +1148,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1210,7 +1256,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1325,7 +1372,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1414,7 +1462,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             client_id,
             "https://app.example/callback",

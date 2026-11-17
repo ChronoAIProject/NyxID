@@ -443,8 +443,11 @@ Successful `deliver_to: {"type":"chat"}` results send retained tool images,
 one per message, before the result text. Images use the same prepared target and
 live agent, org, bot and `allow_posts` checks. The text consumes one initiate
 limiter token for the logical result; its at most eight images consume none.
-Image claims are inside the single `result_claimed` attempt and never resend an
-ambiguous send. A partial image failure appends a count to the text; only an
+Image claims are created inside the result attempt. New claims retain a
+MongoDB-time preparation lease before the first upload, so a survivor can finish
+that attachment independently of the text claim, using the original run, source,
+destination and delivery expiry. Recovery rechecks current posting authority and
+never resends an ambiguous upload or repeats result text. A partial image failure appends a count to the text; only an
 owner-private chat mentions the automation's thread in the NyxID app. Failed
 runs and confirmation notices send text only. Thread results retain their web
 attachments; notification delivery remains text-only.
@@ -479,8 +482,22 @@ old/new replicas can still race during rollout. Remove the v1 read path and
 collection/index one release later, at least seven days after deployment;
 see `CHANNEL_BOT_RELAY.md` for the full compatibility contract.
 
-Final delivery is claimed once. If a replica dies around a remote send, recovery
-reports `result_delivery_interrupted` rather than duplicating an ambiguous send.
+Chat results keep the existing leased result claim and per-part text journal.
+Text preparation keeps a part pending under an exact MongoDB-time lease; the
+provider boundary transaction checks both the current result claim and the part
+attempt before changing it to sending. The existing trigger worker can recover
+an expired preparation, revalidate the destination, and send only the unsent
+suffix. It never replays the admitted turn or an accepted part. The parent lease,
+retry deadlines and expiry decisions use MongoDB time. A send attempt is bounded
+to five minutes and can make no further effect after its database deadline.
+
+A replica lost after a possible provider effect remains uncertain. Legacy claimed
+results without recovery evidence report `result_delivery_interrupted`; a
+receipt-less text part fails delivery without resending it. No operator action is
+needed for this additive change during an ordinary rolling update. An older
+multipart-capable replica may claim a pending preparation with its own attempt,
+which fences the newer worker; rollback preserves those states and receipts but
+loses recovery for preparation started by the old binary.
 Schedule-to-webhook delivery retains the existing signed delivery record and
 optional encrypted replay envelope. Plain notification/device deliveries use
 their existing transport paths.
@@ -683,7 +700,7 @@ claim.
 
 `AUTOMATION_CONTINUATION_V2_ENABLED=false` preserves legacy completion. With it
 on, first assistant admission uses `automation:coordinator-completion-v2` serving
-readiness. After a clean activation is recorded, supported roster overlaps retain
+readiness. After activation is recorded, advisory roster/drain conditions retain
 v2 enrollment. Hard serving-readiness loss falls back to legacy admission. Started runs and confirmation waits admitted by legacy code
 finish using legacy behavior. No trigger protocol stamp or data migration exists.
 
@@ -737,17 +754,15 @@ run. Use Cancel on a waiting run in Automations history, or the first-party huma
 `POST /api/v1/triggers/{id}/runs/{run_id}/cancel` route. Cancel is owner-scoped,
 idempotent after termination, and fences descendants and queued results.
 
-Deploy upgraded binaries with the option off first. Drain old/unregistered
-writers, configure the complete identical `SECURITY_ROLLOUT_REPLICAS` roster,
-unique `INSTANCE_NAME`s and `SECURITY_ROLLOUT_DRAINED=true`, then enable the option
-on every replica. `GET /api/v1/admin/automation-continuations/readiness` is a
+Deploy compatible binaries and enable the option on participating replicas.
+Capability activation converges after observed support settles for 90 seconds;
+no readiness roster, unique instance names or drain assertion is required. `GET /api/v1/admin/automation-continuations/readiness` is a
 metadata-only admin/operator diagnostic for admission readiness and indexed drain
 blockers. Disabling prevents new enrollment while existing v2 runs and their
 children continue draining. Before downgrading, disable everywhere, drain or
 cancel enrolled runs, and require no nonterminal runs, bound queued events,
 active children, pending receipts, group followers, cards or async watches in the
-diagnostic. The roster is an operator assertion; it cannot discover hidden old
-writers. A disabled option alone does not make a downgrade safe.
+diagnostic. Observation cannot discover writers predating the observation protocol. A disabled option alone does not make a downgrade safe.
 
 Completion records the coordinator's settled result; verifying external business
 outcomes such as published post IDs remains the coordinator agent's job and is

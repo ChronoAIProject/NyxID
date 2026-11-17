@@ -461,6 +461,9 @@ pub(crate) async fn bound_target(
         service.requires_user_credential = false;
     }
     Ok(Some(proxy_service::ProxyTarget {
+        catalog_is_public: crate::services::catalog_service::is_public_unowned_discovery_entry(
+            &service,
+        ),
         catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,

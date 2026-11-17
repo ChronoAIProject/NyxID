@@ -152,6 +152,12 @@ pub async fn resolve(
     .unwrap_or(Ok(None))
 }
 
+enum Resolution {
+    Target(Box<ThreadReplyTarget>),
+    Unavailable,
+    LookupUnavailable,
+}
+
 async fn resolve_inner(
     db: &mongodb::Database,
     adapter: &dyn PlatformAdapter,
@@ -160,29 +166,68 @@ async fn resolve_inner(
     message_id: &str,
     require_flag: bool,
 ) -> AppResult<Option<ThreadReplyTarget>> {
+    Ok(
+        match resolve_detailed(db, adapter, bot, credentials, message_id, require_flag).await? {
+            Resolution::Target(target) => Some(*target),
+            Resolution::Unavailable | Resolution::LookupUnavailable => None,
+        },
+    )
+}
+
+/// Only reply callers distinguish unavailable source authority from an
+/// inconclusive adapter lookup. Inbound resolution keeps its original fallback.
+pub(super) async fn resolve_for_reply(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    message: &str,
+) -> gateway::ReplyResult<ThreadReplyTarget> {
+    use gateway::ReplyError;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(HISTORY_SECONDS),
+        resolve_detailed(db, adapter, bot, credentials, message, false),
+    )
+    .await
+    .map_err(|_| ReplyError::from(gateway::reply_unavailable()))??;
+    match result {
+        Resolution::Target(target) => Ok(*target),
+        Resolution::Unavailable => Err(ReplyError::target(gateway::reply_unavailable())),
+        Resolution::LookupUnavailable => Err(ReplyError::from(gateway::reply_unavailable())),
+    }
+}
+
+async fn resolve_detailed(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    message_id: &str,
+    require_flag: bool,
+) -> AppResult<Resolution> {
     if adapter.platform_id() != bot.platform || !adapter.thread_capabilities().thread_reply {
-        return Ok(None);
+        return Ok(Resolution::Unavailable);
     }
     let Some(source) = db
         .collection::<ChannelMessage>(MESSAGES)
         .find_one(doc! {"_id": message_id, "channel_bot_id": &bot.id, "user_id": &bot.user_id})
         .await?
     else {
-        return Ok(None);
+        return Ok(Resolution::Unavailable);
     };
     if !(if require_flag {
         eligible_source(db, bot, &source).await?
     } else {
         eligible_source_live(db, bot, &source).await?
     }) {
-        return Ok(None);
+        return Ok(Resolution::Unavailable);
     }
     let Some(facts) = source
         .thread_context
         .as_ref()
         .filter(|f| source_matches(f, &source))
     else {
-        return Ok(None);
+        return Ok(Resolution::Unavailable);
     };
     let mut ancestors = Vec::new();
     let mut next = facts.parent_message_id.clone();
@@ -190,7 +235,7 @@ async fn resolve_inner(
     // Exact bot/chat/owner/platform scope, finite traversal and ambiguity check.
     while let Some(id) = next {
         if ancestors.len() == ANCESTORS || !seen.insert(id.clone()) {
-            return Ok(None);
+            return Ok(Resolution::Unavailable);
         }
         use futures::TryStreamExt;
         let rows: Vec<ChannelMessage> = db
@@ -227,22 +272,22 @@ async fn resolve_inner(
     )
     .await;
     let Ok(Ok(Some(resolved))) = resolved else {
-        return Ok(None);
+        return Ok(Resolution::LookupUnavailable);
     };
     if !source_matches(&resolved, &source)
         || resolved.kind == ThreadKind::Unknown
         || resolved.root_id.as_deref().is_none_or(|id| !valid_id(id))
     {
-        return Ok(None);
+        return Ok(Resolution::Unavailable);
     }
     let updated = db.collection::<ChannelMessage>(MESSAGES).update_one(
         doc! {"_id": &source.id, "thread_context": bson::to_bson(facts).map_err(|_| unavailable())?},
         doc! {"$set": {"thread_context": bson::to_bson(&resolved).map_err(|_| unavailable())?}},
     ).await?;
     if updated.matched_count != 1 {
-        return Ok(None);
+        return Ok(Resolution::Unavailable);
     }
-    Ok(Some(ThreadReplyTarget {
+    Ok(Resolution::Target(Box::new(ThreadReplyTarget {
         bot_id: bot.id.clone(),
         owner_id: bot.user_id.clone(),
         message_id: source.id,
@@ -250,7 +295,7 @@ async fn resolve_inner(
         platform: bot.platform.clone(),
         facts: resolved,
         admitted: None,
-    }))
+    })))
 }
 
 pub(super) fn source_matches(facts: &ChannelThreadFacts, source: &ChannelMessage) -> bool {

@@ -191,6 +191,32 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("renders a shielded voice link publication as a completed message without pending UI", async () => {
+    const page = history();
+    const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
+    page.messages = [nyxAgentMessageSchema.parse({
+      id: "published-link", seq: 3, turn_id: "hidden-turn", role: "assistant",
+      text: `<${link}>`, status: "completed", execution_pending: true, via: "voice",
+      error_code: null, created_at: start, activities: [], attachments: [],
+    })];
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const session = transport.session(id);
+    expect(transport.isRunning(id)).toBe(false);
+    expect(session.messages).toHaveLength(1);
+    expect(session.messages[0]).toMatchObject({
+      id: "published-link", status: "complete", content: `<${link}>`,
+    });
+    expect(session.messages[0]?.queued).toBeFalsy();
+    const { container } = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+    expect(screen.getByRole("link", { name: link })).toHaveAttribute("href", link);
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeVisible();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+    expect(container).not.toHaveTextContent(/Queued|Waiting for|Working|Thinking/);
+  });
+
   it("keeps CMA status independent of the completed reply, refreshes it, and restores it after reload", async () => {
     const page = history();
     page.cma_operations = [{

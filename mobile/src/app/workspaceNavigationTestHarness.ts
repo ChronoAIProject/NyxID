@@ -20,8 +20,10 @@ export const contentNames = [
   "Agents",
   "Plugins",
   "Services",
+  "SshTerminal",
   "Machines",
   "Activity",
+  "ActivityReview",
   "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",
@@ -68,6 +70,7 @@ export const settingsNames = [
   "AgentKeyLogin",
   "TermsOfService",
   "PrivacyPolicy",
+  "OpenSourceNotices",
 ];
 export const rootNames = [
   "Workspace",

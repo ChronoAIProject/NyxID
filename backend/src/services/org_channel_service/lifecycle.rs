@@ -240,5 +240,6 @@ pub(crate) async fn erase_org(db: &Database, org: &str) -> AppResult<()> {
     db.collection::<Document>(MESSAGES)
         .delete_many(doc! {"user_id":org})
         .await?;
+    super::defaults::erase(db, doc! {"org_id":org}).await?;
     Ok(())
 }

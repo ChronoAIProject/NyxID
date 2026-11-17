@@ -34,10 +34,15 @@ pub(crate) async fn adopt_private_partition(
         let Some(legacy) = threads.find_one(doc!{"channel_id":&channel.id,"user_id":&channel.user_id,"kind":"private",
             "$or":[{"partition":relay},{"relay_partition":relay}]}).session(&mut *tx).await? else {return Ok(())};
         if legacy.partition == *gateway {return Ok(())}
-        if threads.find_one(doc!{"channel_id":&channel.id,"partition":gateway,"kind":{"$ne":null}})
-            .session(&mut *tx).await?.is_some() {return Ok(())}
-        threads.delete_many(doc!{"channel_id":&channel.id,"partition":gateway,"kind":null}).session(&mut *tx).await?;
-        let changed = threads.update_one(doc!{"_id":&legacy.id,"partition":&legacy.partition},
+        let destination = threads.find_one(doc!{"channel_id":&channel.id,"partition":gateway})
+            .session(&mut *tx).await?;
+        if destination.as_ref().is_some_and(|row|row.kind.is_some()) {return Ok(())}
+        use super::super::nyxbot_thread_mutation::exact;
+        #[cfg(test)]
+        super::super::nyxbot_thread_mutation::pause::after_read("org_adoption", &[exact(&legacy)], destination.as_ref().map(exact)).await;
+        if let Some(destination) = destination
+            && threads.delete_one(exact(&destination)).session(&mut *tx).await?.deleted_count != 1 {return Err(super::denied())}
+        let changed = threads.update_one(exact(&legacy),
             doc!{"$set":{"partition":gateway,"relay_partition":relay,"updated_at":bson::DateTime::now()}})
             .session(&mut *tx).await?;
         if changed.matched_count != 1 {return Err(super::denied())}

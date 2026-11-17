@@ -652,7 +652,7 @@ pub async fn restore_relay(
             .inspect_err(|_| {
                 let db = db.clone();
                 let bot = bot.clone();
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     let _ = db
                         .collection::<NativeWhatsapp>(COLLECTION_NAME)
                         .update_one(

@@ -340,7 +340,7 @@ async fn quote_and_live_rate_profile_mismatches_abort_before_shared_funds() {
         .await
         .is_err()
     );
-    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), before);
+    assert_only_tax_guard_changed(before, bson::to_document(&wallet(&f).await).unwrap());
     for collection in [RUN_COLLECTION, INTERVAL_COLLECTION, USAGE] {
         assert_eq!(
             f.db.collection::<Document>(collection)

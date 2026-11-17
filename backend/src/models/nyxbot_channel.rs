@@ -1,6 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Aliases added to legacy admissions retain version zero.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DispatchIdentity {
+    pub version: i32,
+    pub keys: Vec<String>,
+}
+
 pub const COLLECTION_NAME: &str = "nyxbot_channels";
 pub const THREADS_COLLECTION_NAME: &str = "nyxbot_threads";
 pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
@@ -232,6 +240,26 @@ pub struct NyxbotChannel {
     /// When the agent was last told that delivery is failing.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub delivery_notified_at: Option<DateTime<Utc>>,
+    /// Recovery bookkeeping for the bounded pre-#2288 org-access repair. These
+    /// fields are operational only and are ignored by older replicas.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub org_restore_next_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub org_restore_attempts: i32,
+    /// Rule version that last evaluated this restoration candidate. Older
+    /// parked rows are reconsidered once by a newer binary.
+    #[serde(default)]
+    pub org_restore_rule_version: i32,
+    #[serde(default)]
+    pub org_restore_last_reason: Option<String>,
+    #[serde(default)]
+    pub org_restore_claim_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub org_restore_lease_until: Option<DateTime<Utc>>,
+    /// Set on the newly restored row so the member-facing prompt explains the
+    /// fresh verification boundary where members encounter it.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub org_restored_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -320,17 +348,23 @@ pub struct NyxbotThread {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_message_at: Option<DateTime<Utc>>,
     /// Gateway only: the newest sealed event reference, encrypted; used to
-    /// deliver asynchronous replies while it is unexpired. Opaque, never logged.
+    /// gate supplemental-send eligibility while it is unexpired. Opaque, never logged.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub event_ref_ciphertext: Option<Vec<u8>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub event_ref_expires_at: Option<DateTime<Utc>>,
+    /// Relay inbound paired with the reference, including bot-originated activity.
+    #[serde(default)]
+    pub event_ref_relay_message_id: Option<String>,
+    /// Digest of the ciphertext and expiry; detects a reference replaced by an old writer.
+    #[serde(default)]
+    pub event_ref_relay_binding: Option<String>,
     /// Direct only: the newest inbound NyxID message ID, for asynchronous replies.
     #[serde(default)]
     pub last_message_id: Option<String>,
     /// Newest inbound NyxID relay message ID, regardless of transport.
-    /// Kept separate from `last_message_id` so gateway text routing semantics
-    /// remain unchanged while image delivery can target the relay adapter.
+    /// Used by images and unbound supplemental text. Source-bound sends retain
+    /// their admitted event's own inbound instead.
     #[serde(default)]
     pub last_relay_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -410,6 +444,8 @@ impl std::fmt::Debug for EventMedia {
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_identity: Option<DispatchIdentity>,
     /// Server-issued ingress association, piggybacked on the source insert.
     /// Retained across queue/replay; never execution authority or a caller ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,6 +517,8 @@ impl std::fmt::Debug for NyxbotEvent {
 /// TTL-expired.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyxbotWatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_claim: Option<super::assistant_wake::WatchClaim>,
     /// Binds setup origin to the exact hosted request. Legacy writers replacing
     /// a pending watch may leave unknown fields behind; a mismatch is unknown context.
     #[serde(default, skip_serializing_if = "Option::is_none")]

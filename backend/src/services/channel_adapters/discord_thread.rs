@@ -167,6 +167,7 @@ impl DiscordAdapter {
             }
             response
         } else {
+            crate::services::channel_turn_preparation::effect().await?;
             support::json(request).await?
         };
         response["id"]

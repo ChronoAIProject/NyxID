@@ -7,6 +7,7 @@ import {
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { scrollEdges, type ScrollEdges } from "./scrollEdges";
+import { KeyboardScrollView } from "./KeyboardScrollView";
 
 export function useScrollEdges() {
   const geometry = useRef({ viewport: 0, content: 0, offset: 0 });
@@ -119,30 +120,38 @@ export function PageScrollView({
   children,
   fadeColor,
   scrollRef,
+  keyboardAware = false,
   ...props
-}: ScrollViewProps & { fadeColor: string; scrollRef?: Ref<ScrollView> }) {
+}: ScrollViewProps & {
+  fadeColor: string;
+  scrollRef?: Ref<ScrollView>;
+  keyboardAware?: boolean;
+}) {
   const overflow = useScrollEdges();
+  const scrollProps: ScrollViewProps = {
+    ...props,
+    children,
+    scrollEventThrottle: 32,
+    onLayout: (event) => {
+      props.onLayout?.(event);
+      overflow.layout(event.nativeEvent.layout.height);
+    },
+    onContentSizeChange: (width, height) => {
+      props.onContentSizeChange?.(width, height);
+      overflow.content(height);
+    },
+    onScroll: (event) => {
+      props.onScroll?.(event);
+      overflow.scroll(event.nativeEvent.contentOffset.y);
+    },
+  };
   return (
     <View style={styles.page}>
-      <ScrollView
-        ref={scrollRef}
-        {...props}
-        scrollEventThrottle={32}
-        onLayout={(event) => {
-          props.onLayout?.(event);
-          overflow.layout(event.nativeEvent.layout.height);
-        }}
-        onContentSizeChange={(width, height) => {
-          props.onContentSizeChange?.(width, height);
-          overflow.content(height);
-        }}
-        onScroll={(event) => {
-          props.onScroll?.(event);
-          overflow.scroll(event.nativeEvent.contentOffset.y);
-        }}
-      >
-        {children}
-      </ScrollView>
+      {keyboardAware ? (
+        <KeyboardScrollView scrollRef={scrollRef} {...scrollProps} />
+      ) : (
+        <ScrollView ref={scrollRef} {...scrollProps} />
+      )}
       <ScrollEdgeFades edges={overflow.edges} color={fadeColor} page />
     </View>
   );

@@ -28,6 +28,8 @@ function loadServicesApi(requestJson: (path: string) => Promise<unknown>) {
       exports,
       URLSearchParams,
       require: (name: string) => {
+        if (name === "../../features/services/serviceOAuthModel")
+          return { serviceOAuthReturnUri: () => "nyxid://services/oauth-return" };
         if (name === "./http") return { requestJson };
         if (name === "../../features/services/serviceContracts")
           return { catalogEntrySchema, serviceConnectionSchema };
@@ -88,7 +90,20 @@ test("OAuth creation without an override keeps the existing provider-default con
   await api.initiateOAuth("provider", "new-connection");
   const url = new URL(requestedPath, "https://nyxid.example");
   assert.equal(url.searchParams.get("key_id"), "new-connection");
+  assert.equal(url.searchParams.get("app_return_uri"), "nyxid://services/oauth-return");
   assert.equal(url.searchParams.has("scope_override"), false);
+});
+
+test("OAuth fallback can explicitly omit the app return destination", async () => {
+  let requestedPath = "";
+  const api = loadServicesApi(async (path) => {
+    requestedPath = path;
+    return { authorization_url: "https://provider.example/authorize" };
+  });
+  await api.initiateOAuth("provider", "connection", undefined, undefined, {
+    appReturnUri: null,
+  });
+  assert.equal(new URL(requestedPath, "https://nyxid.example").searchParams.has("app_return_uri"), false);
 });
 
 test("provider-policy rejection reaches the caller without filtering or retrying scopes", async () => {

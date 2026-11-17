@@ -460,6 +460,7 @@ fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -620,6 +621,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -660,6 +662,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -711,6 +714,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -794,6 +798,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -866,6 +871,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -938,6 +944,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -1288,6 +1295,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            group_reply_in_settlement: false,
             platform_model_context: None,
             automation_work: None,
             artifact_watch_id: None,
@@ -3555,6 +3563,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -4642,6 +4651,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -4706,6 +4716,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -8192,16 +8203,39 @@ async fn model_approval_proposal_claim_is_once_across_concurrent_attempts() {
         .await
         .unwrap()
         .unwrap();
-    let (a, b) = tokio::join!(
-        observed::CURRENT_MODEL.scope(
+    // The stop watcher must not see a proposal claim until its transaction
+    // commits, and an aborted insert must leave another attempt able to claim.
+    let mut aborted = db.client().start_session().await.unwrap();
+    aborted.start_transaction().await.unwrap();
+    observed::CURRENT_MODEL
+        .scope(
             Some(first.clone()),
-            observed::before_approval_request("https://example.test", true)
-        ),
-        observed::CURRENT_MODEL.scope(
-            Some(second.clone()),
-            observed::before_approval_request("https://example.test", true)
+            observed::before_approval_request(Some(&mut aborted)),
         )
-    );
+        .await
+        .unwrap();
+    let pending = get(&db, "owner", &row.id).await.unwrap();
+    assert!(observed::approval_error(pending.active_turn.as_ref().unwrap()).is_none());
+    aborted.abort_transaction().await.unwrap();
+    let claim = |request: observed::ModelRequest| {
+        let db = db.clone();
+        async move {
+            observed::CURRENT_MODEL
+                .scope(Some(request), async {
+                    let mut session = db.client().start_session().await?;
+                    session
+                        .start_transaction()
+                        .and_run2(async |session| {
+                            let result = observed::before_approval_request(Some(session)).await;
+                            crate::services::api_key_mutation_service::transaction_result(result)
+                        })
+                        .await
+                        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+                })
+                .await
+        }
+    };
+    let (a, b) = tokio::join!(claim(first.clone()), claim(second.clone()));
     assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1);
     assert!(
         matches!(a, Err(AppError::ApprovalUnsupported))
@@ -8211,5 +8245,241 @@ async fn model_approval_proposal_claim_is_once_across_concurrent_attempts() {
     second.complete().await.unwrap();
     let saved = get(&db, "owner", &row.id).await.unwrap();
     assert!(observed::approval_error(&saved.active_turn.unwrap()).is_some());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
+    let db = connect_transaction_test_database("voice_context_scope").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&user, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let text = "Keep nyx_bcl_example and nyx_clk_example exactly.";
+    for scope in ["text", "voice_parent", "voice_task"] {
+        let mut row = begin_turn(&db, &user, &request(None, text), &state.encryption_keys)
+            .await
+            .unwrap();
+        if scope == "voice_task" {
+            row.voice_parent_conversation_id = Some("parent".into());
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id": &row.id},
+                    doc! {"$set": {"voice_parent_conversation_id": "parent"}},
+                )
+                .await
+                .unwrap();
+        }
+        if scope == "voice_parent" {
+            db.collection::<bson::Document>(MESSAGES)
+                .update_many(
+                    doc! {"conversation_id": &row.id},
+                    doc! {"$set": {"via": "voice"}},
+                )
+                .await
+                .unwrap();
+        }
+        settle(&db, &state.encryption_keys, &user, &row, text, None).await;
+        let redacted = super::super::voice::links::redact_tokens(text);
+        let expected_goal = if scope == "text" { text } else { &redacted };
+        let expected_output = if scope == "voice_task" {
+            &redacted
+        } else {
+            text
+        };
+        let stored = db
+            .collection::<AssistantCheckpoint>(CHECKPOINTS)
+            .find_one(doc! {"_id": &row.id, "user_id": &user})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.goal.as_deref(), Some(expected_goal), "{scope}");
+        assert_eq!(stored.output.as_deref(), Some(expected_output), "{scope}");
+        let saved = checkpoint(&db, &user, &row.id).await.unwrap().unwrap();
+        assert_eq!(saved.goal.as_deref(), Some(expected_goal), "{scope}");
+        assert_eq!(saved.output.as_deref(), Some(expected_output), "{scope}");
+        let line = checkpoint_line(&saved, scope == "voice_task");
+        assert_eq!(
+            line,
+            format!(
+                "\nCheckpoint (turn {}, completed; last successful turn {}):\n- goal: {expected_goal}\n- last output: {expected_output}",
+                saved.turn_id, saved.turn_id
+            )
+        );
+        let history = messages(&db, &user, &row.id, 20, None).await.unwrap();
+        let recap = recap(&db, &row, &history, "other-turn").await.unwrap();
+        assert!(recap.contains(expected_output), "{scope}");
+        let last = super::super::assistant_team_service::last_reply(&db, &user, &row.id, 1000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(last.text, expected_output, "{scope}");
+        if scope == "text" {
+            assert_eq!(
+                recap_line(&history[0], false, 4096).unwrap().text,
+                format!("\nuser: {text} [error: none]")
+            );
+            assert_eq!(
+                owner_recap_line(&history[0], 4096).text,
+                format!("\nuser: {text}")
+            );
+            assert!(bounded_recap(&history).contains(text));
+        } else if scope == "voice_task" {
+            assert!(!recap.contains("nyx_bcl_") && !recap.contains("nyx_clk_"));
+        } else {
+            assert_eq!(
+                recap_line(&history[0], false, 4096).unwrap().text,
+                format!("\nuser: {redacted} [error: none]")
+            );
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+fn token_checkpoint(row: &AssistantConversation) -> AssistantCheckpoint {
+    AssistantCheckpoint {
+        conversation_id: row.id.clone(),
+        user_id: row.user_id.clone(),
+        turn_id: "turn".into(),
+        status: "completed".into(),
+        error_code: None,
+        goal: Some("Keep nyx_clk_checkpoint_goal exactly.".into()),
+        output: Some("Keep nyx_bcl_checkpoint_output exactly.".into()),
+        completed_actions: vec![CheckpointAction {
+            label: "nyx_clk_checkpoint_action".into(),
+            turn_id: "turn".into(),
+        }],
+        failed_actions: vec![],
+        last_successful_turn_id: None,
+        last_successful_at: None,
+        updated_at: DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_voice_scope_reuses_loaded_rows_and_only_projects_unloaded_threads() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "checkpoint_scope_reads",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "find"
+            {
+                observed.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await;
+    for hidden in [false, true] {
+        let mut row = stale_test_row(Utc::now());
+        row.voice_parent_conversation_id = hidden.then(|| "parent".into());
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        let original = token_checkpoint(&row);
+        db.collection::<AssistantCheckpoint>(CHECKPOINTS)
+            .insert_one(&original)
+            .await
+            .unwrap();
+        commands.lock().unwrap().clear();
+        let loaded = checkpoint_for_conversation(&db, &row)
+            .await
+            .unwrap()
+            .unwrap();
+        let loaded_commands = commands.lock().unwrap().clone();
+        assert_eq!(
+            loaded_commands.len(),
+            1,
+            "loaded thread adds no scope reads"
+        );
+        assert_eq!(loaded_commands[0].get_str("find").unwrap(), CHECKPOINTS);
+        if hidden {
+            assert!(!checkpoint_line(&loaded, false).contains("nyx_clk_"));
+            assert!(!checkpoint_line(&loaded, false).contains("nyx_bcl_"));
+        } else {
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap(),
+                serde_json::to_value(&original).unwrap(),
+                "visible checkpoint preserves every byte"
+            );
+        }
+        commands.lock().unwrap().clear();
+        let unloaded = checkpoint(&db, &row.user_id, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&unloaded).unwrap(),
+            serde_json::to_value(&loaded).unwrap()
+        );
+        let unloaded_commands = commands.lock().unwrap().clone();
+        assert_eq!(unloaded_commands.len(), 2);
+        let scope = &unloaded_commands[1];
+        assert_eq!(scope.get_str("find").unwrap(), CONVERSATIONS);
+        assert_eq!(
+            scope.get_document("filter").unwrap(),
+            &doc! {"_id": &row.id, "user_id": &row.user_id}
+        );
+        assert_eq!(
+            scope.get_document("projection").unwrap(),
+            &doc! {"_id": 0, "voice_parent_conversation_id": 1}
+        );
+        assert!(
+            unloaded_commands
+                .iter()
+                .all(|command| command.get_str("find").unwrap() != MESSAGES)
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_scope_lookup_error_redacts_without_failing_or_scanning_messages() {
+    let db = connect_transaction_test_database("checkpoint_scope_error").await;
+    let row = stale_test_row(Utc::now());
+    db.collection::<bson::Document>("checkpoint_scope_source")
+        .insert_one(doc! {"_id": &row.id, "user_id": &row.user_id, "invalid_scope": "not-a-number"})
+        .await
+        .unwrap();
+    db.run_command(doc! {
+        "create": CONVERSATIONS, "viewOn": "checkpoint_scope_source",
+        "pipeline": [{"$set": {"voice_parent_conversation_id": {"$toInt": "$invalid_scope"}}}],
+    })
+    .await
+    .unwrap();
+    let original = token_checkpoint(&row);
+    db.collection::<AssistantCheckpoint>(CHECKPOINTS)
+        .insert_one(&original)
+        .await
+        .unwrap();
+    assert!(
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .find_one(doc! {"_id": &row.id, "user_id": &row.user_id})
+            .projection(doc! {"_id": 0, "voice_parent_conversation_id": 1})
+            .await
+            .is_err(),
+        "the per-test view must fail the scope lookup"
+    );
+    let saved = checkpoint(&db, &row.user_id, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let context = checkpoint_line(&saved, false);
+    assert!(!context.contains("nyx_clk_") && !context.contains("nyx_bcl_"));
+    assert!(context.contains(super::super::voice::links::PLACEHOLDER));
+    assert_eq!(
+        db.collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     db.drop().await.unwrap();
 }

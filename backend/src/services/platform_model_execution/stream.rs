@@ -16,6 +16,7 @@ pub(super) struct Decoder {
     sequence: Option<(i64, Value)>,
     claude_final_usage: bool,
     gemini_final_usage: bool,
+    chat_final_usage: bool,
 }
 impl Decoder {
     pub fn new(native: Native) -> Self {
@@ -39,6 +40,7 @@ impl Decoder {
             sequence: None,
             claude_final_usage: false,
             gemini_final_usage: false,
+            chat_final_usage: false,
         }
     }
     pub fn with_contract(
@@ -65,6 +67,37 @@ impl Decoder {
     pub fn partial_evidence(&self) -> Option<crate::services::billing::model_usage::Evidence> {
         self.usage.as_ref().and_then(|u| self.evidence(u).ok())
     }
+    pub fn checkpoint(
+        &self,
+    ) -> Option<(
+        crate::models::usage_checkpoint::UsageCheckpointProtocol,
+        crate::services::billing::model_usage::Evidence,
+        bool,
+    )> {
+        use crate::models::usage_checkpoint::UsageCheckpointProtocol as Protocol;
+        let (protocol, final_report) = match self.native {
+            Native::Responses => (Protocol::Responses, self.terminal),
+            Native::Claude => (
+                Protocol::Messages,
+                self.claude_final_usage && self.body["stop_reason"].is_string(),
+            ),
+            Native::GptOss => (Protocol::ChatCompletions, self.chat_final_usage),
+            // Gemini may send its final counters after finishReason. Without
+            // EOF, a received snapshot has no established finality contract.
+            Native::Gemini => (Protocol::Gemini, false),
+        };
+        if !final_report {
+            return None;
+        }
+        let evidence = self.partial_evidence().or_else(|| {
+            crate::services::billing::usage_checkpoint::partial_evidence(
+                self.usage.as_ref()?,
+                protocol,
+            )
+        })?;
+        Some((protocol, evidence, final_report))
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> AppResult<Vec<String>> {
         let mut texts = vec![];
         let events = match self.decoder.push(bytes) {
@@ -323,6 +356,12 @@ impl Decoder {
                         self.usage = Some(u.clone());
                     }
                     let choices = data["choices"].as_array().ok_or_else(invalid_response)?;
+                    if choices.is_empty()
+                        && data.get("usage").is_some_and(Value::is_object)
+                        && !self.body["choices"][0]["finish_reason"].is_null()
+                    {
+                        self.chat_final_usage = true;
+                    }
                     if choices.len() > 1 {
                         return Err(invalid_response());
                     }
@@ -369,6 +408,7 @@ impl Decoder {
                         }
                         if let Some(reason) = c.get("finish_reason").filter(|r| !r.is_null()) {
                             self.body["choices"][0]["finish_reason"] = reason.clone();
+                            self.chat_final_usage = data.get("usage").is_some_and(Value::is_object);
                         }
                     }
                 }

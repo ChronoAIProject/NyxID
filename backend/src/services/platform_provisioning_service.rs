@@ -569,10 +569,19 @@ pub(crate) async fn claim_step(db: &Database) -> AppResult<Option<SetupStepJob>>
 
 pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
     for _ in 0..8 {
+        let Some(_work) = state.shutdown.background() else {
+            break;
+        };
         let Some(job) = claim_step(&state.db).await? else {
             break;
         };
         let claim = job.claim_id.as_deref().ok_or_else(stale)?;
+        let release = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+            db: state.db.clone(), collection: STEPS,
+            filter: doc! {"_id": &job.id, "generation": job.generation, "claim_id": claim, "phase": "running"},
+            update: doc! {"$set": {"retry_at": bson::DateTime::from_millis(0)}},
+        });
         let outcome = if job.attempts > 5 {
             Err(AppError::Conflict(
                 "Provisioning needs a fresh owner review".into(),
@@ -609,6 +618,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
             }.await;
             transaction_result(result)
         }).await.map_err(map_transaction_error)?;
+        release.completed();
     }
     Ok(())
 }

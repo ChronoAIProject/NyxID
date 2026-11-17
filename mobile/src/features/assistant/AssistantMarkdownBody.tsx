@@ -78,8 +78,12 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
   const linkHost = useContext(AssistantLinkContext);
   const anchors = useRef(new Map<string, Text>());
   const openHref = useCallback(
-    (url: string, trigger?: number) => {
-      const safe = safeAssistantLinkUrl(url);
+    (url: string, trigger?: number, bareAutolink = false) => {
+      const safe = safeAssistantLinkUrl(
+        url,
+        firstPartyFrontendUrls(),
+        bareAutolink,
+      );
       if (!safe) return false;
       if (safe.startsWith("#")) {
         const target = anchors.current.get(safe.slice(1));
@@ -95,7 +99,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
         void Linking.openURL(safe).catch(() => undefined);
         return false;
       }
-      if (linkHost?.(safe, trigger)) return false;
+      if (linkHost?.(safe, trigger, bareAutolink)) return false;
       return onLinkPress(safe);
     },
     [onLinkPress, linkHost],
@@ -202,6 +206,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
         const target = assistantLinkTarget(
           node.attributes.href,
           firstPartyFrontendUrls(),
+          node.attributes["data-nyx-bare-autolink"] === "true",
         );
         const label = node.children
           .map((child) => child.content ?? "")
@@ -231,6 +236,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
               openHref(
                 node.attributes.href,
                 Number.isFinite(handle) ? handle : undefined,
+                node.attributes["data-nyx-bare-autolink"] === "true",
               );
             }}
           >

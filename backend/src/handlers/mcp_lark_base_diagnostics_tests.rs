@@ -111,6 +111,7 @@ async fn assert_reason(u: &BaseFixture, code: &str, service_event: bool, outcome
 #[tokio::test]
 async fn lark_base_writes_four_catalogs_prior_message_pdf_uses_trusted_routes_and_real_tenant_exchange()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in ["api-lark", "api-feishu", "api-lark-bot", "api-feishu-bot"] {
         for meta in [false, true] {
             let u = setup_catalog("base_prior_pdf", slug).await;
@@ -202,6 +203,7 @@ async fn lark_base_writes_four_catalogs_prior_message_pdf_uses_trusted_routes_an
 
 #[tokio::test]
 async fn lark_base_writes_field_failures_reach_activity_model_and_both_audits() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for (case, expected, outcome, response) in [
         ("transport", "field_read_transport", "not_sent", ResponseTemplate::new(200).set_body_bytes(vec![b'x';1024*1024+1])),
         ("provider", "field_read_provider_error", "provider_refused", ResponseTemplate::new(403).set_body_json(json!({"code":1254302,"msg":"provider-private-prose"}))),
@@ -230,6 +232,7 @@ async fn lark_base_writes_field_failures_reach_activity_model_and_both_audits() 
 
 #[tokio::test]
 async fn lark_base_writes_tenant_exchange_refusal_is_not_sent_and_diagnosed() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup_catalog("base_exchange_diagnostic", "api-lark-bot").await;
     Mock::given(path("/open-apis/auth/v3/tenant_access_token/internal"))
         .respond_with(
@@ -257,6 +260,7 @@ async fn lark_base_writes_tenant_exchange_refusal_is_not_sent_and_diagnosed() {
 
 #[tokio::test]
 async fn lark_base_writes_eligibility_and_source_refusals_are_audited_before_execution() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for (variant, reason) in [
         ("flag", "eligibility:flag_off"),
         ("missing", "attachment_unreadable"),
@@ -284,6 +288,7 @@ async fn lark_base_writes_eligibility_and_source_refusals_are_audited_before_exe
 
 #[tokio::test]
 async fn lark_attachment_standalone_bot_upload_success_and_refusal_have_result_diagnostics() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in ["api-lark", "api-feishu", "api-lark-bot", "api-feishu-bot"] {
         for fail in [false, true] {
             let u = setup_catalog("base_media_diagnostic", slug).await;
@@ -322,6 +327,7 @@ async fn lark_attachment_standalone_bot_upload_success_and_refusal_have_result_d
 
 #[tokio::test]
 async fn lark_base_writes_uncertain_create_reports_both_results_and_never_resends() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup_catalog("base_uncertain_diagnostic", "api-feishu-bot").await;
     Mock::given(path("/open-apis/bitable/v1/apps/base/tables/table/records"))
         .respond_with(
@@ -375,6 +381,7 @@ async fn lark_base_writes_uncertain_create_reports_both_results_and_never_resend
 
 #[tokio::test]
 async fn lark_base_writes_successful_contract_probes_do_not_leave_a_false_refusal_diagnostic() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let u = setup_catalog("base_probe_diagnostic", "api-lark-bot").await;
     let auth = authenticate(&u.f).await;
     let service = loaded(&u, &auth).await;
@@ -403,6 +410,7 @@ async fn lark_base_writes_successful_contract_probes_do_not_leave_a_false_refusa
 
 #[tokio::test]
 async fn lark_base_writes_typed_fields_rejects_success_status_without_api_success() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in ["api-lark", "api-feishu", "api-lark-bot", "api-feishu-bot"] {
         for (reason, response) in [
             (
@@ -448,6 +456,7 @@ async fn lark_base_writes_typed_fields_rejects_success_status_without_api_succes
 
 #[tokio::test]
 async fn lark_base_writes_bot_existing_recipe_scope_survives_sync_without_owner_repair() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in ["api-lark-bot", "api-feishu-bot"] {
         let u = setup_catalog("bot_recipe_contract_stability", slug).await;
         receipt_scope(&u).await;
@@ -572,6 +581,7 @@ async fn lark_base_writes_bot_existing_recipe_scope_survives_sync_without_owner_
 
 #[tokio::test]
 async fn lark_base_writes_existing_field_scope_keeps_original_path_and_limits() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for slug in ["api-lark-bot", "api-feishu-bot"] {
         let u = setup_catalog("bot_existing_field_scope", slug).await;
         let fields =

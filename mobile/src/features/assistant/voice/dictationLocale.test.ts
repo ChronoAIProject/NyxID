@@ -45,3 +45,31 @@ test("an unsupported or missing language leaves the recognizer default", () => {
   assert.equal(dictationLocale("", IOS), undefined);
   assert.equal(dictationLocale("en-US", []), undefined);
 });
+
+test("Mandarin aliases preserve script and Cantonese does not fall back to Simplified Mandarin", () => {
+  assert.equal(dictationLocale("zh-Hans-CN", ["cmn-Hant-TW"]), undefined);
+  assert.equal(dictationLocale("zh-HK", ["cmn-Hans-CN"]), undefined);
+  assert.equal(dictationLocale("yue-Hant-HK", ["cmn-Hant-TW"]), "cmn-Hant-TW");
+});
+
+for (const [preferred, supported, expected] of [
+  ["zh-Hans-CN", ["cmn-Hans-CN"], "cmn-Hans-CN"],
+  ["cmn-Hant-TW", ["zh-TW"], "zh-TW"],
+  ["zh-Hant-HK", ["cmn-Hant-TW", "yue-Hant-HK"], "yue-Hant-HK"],
+  ["zh-MO", ["yue-MO", "zh-TW"], "yue-MO"],
+  ["zh-HK", ["zh-TW", "zh-CN"], "zh-TW"],
+  ...[
+    ["iw", "he"],
+    ["in", "id"],
+    ["ji", "yi"],
+    ["no", "nb"],
+    ["tl", "fil"],
+  ].flatMap(([old, modern]) => [
+    [old!, [modern!], modern!],
+    [modern!, [old!], old!],
+  ]),
+] as [string, string[], string][]) {
+  test(`dictation locale alias ${preferred} preserves recognizer spelling ${expected}`, () => {
+    assert.equal(dictationLocale(preferred, supported), expected);
+  });
+}

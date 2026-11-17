@@ -144,9 +144,14 @@ pub async fn dictation_stream(
     Ok(upgrade
         .max_frame_size(4096)
         .max_message_size(4096)
-        .on_upgrade(move |socket| async move {
-            let _ = serve(state, socket, user, id, human_session).await;
-        }))
+        .on_upgrade(
+            state
+                .shutdown
+                .clone()
+                .upgrade_callback(move |socket| async move {
+                    let _ = serve(state, socket, user, id, human_session).await;
+                }),
+        ))
 }
 async fn serve(
     state: AppState,
@@ -170,7 +175,7 @@ async fn serve(
     };
     let (input, receive) = tokio::sync::mpsc::channel(INPUT_CAPACITY);
     let (output, events) = tokio::sync::mpsc::channel(8);
-    let task = tokio::spawn(dictation::serve(
+    let task = crate::services::shutdown::process().spawn(dictation::serve(
         state,
         user,
         thread,

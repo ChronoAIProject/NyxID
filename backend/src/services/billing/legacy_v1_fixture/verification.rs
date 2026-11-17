@@ -72,6 +72,7 @@ async fn verify_audit_chunk(db: &mongodb::Database, key: &[u8]) -> AppResult<Cha
     };
 
     let status = ChainVerifyStatus {
+        revision: None,
         id: CHAIN_AUDIT_LOG.to_string(),
         outcome,
         cursor_seq,
@@ -123,6 +124,7 @@ async fn verify_ledger_chunk(
     };
 
     let status = ChainVerifyStatus {
+        revision: None,
         id: CHAIN_BILLING_LEDGER.to_string(),
         outcome,
         cursor_seq,

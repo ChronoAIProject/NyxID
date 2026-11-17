@@ -651,6 +651,15 @@ pub async fn find_or_create_user(
     profile: &SocialProfile,
     allow_new_users: bool,
 ) -> AppResult<FindOrCreateUserResult> {
+    find_or_create_user_with_invite(db, profile, allow_new_users, None).await
+}
+
+pub async fn find_or_create_user_with_invite(
+    db: &mongodb::Database,
+    profile: &SocialProfile,
+    allow_new_users: bool,
+    reservation: Option<&super::invite_code_service::InviteReservation>,
+) -> AppResult<FindOrCreateUserResult> {
     let users = db.collection::<User>(USERS);
 
     let existing_social = users
@@ -714,14 +723,24 @@ pub async fn find_or_create_user(
                 return Err(AppError::SocialAuthRegistrationClosed);
             }
 
-            // Gate disabled (public launch): create the new social user.
+            // A reserved invitation or public registration permits a new account.
             let default_role_ids = crate::services::role_service::get_default_role_ids(db).await?;
             new_user.role_ids = default_role_ids;
 
-            users
-                .insert_one(&new_user)
-                .await
-                .map_err(map_social_link_error)?;
+            if let Some(reservation) = reservation {
+                new_user.invite_code_id = Some(reservation.invite_code_id.clone());
+                super::invite_code_service::commit_signup(db, reservation, &new_user)
+                    .await
+                    .map_err(|error| match error {
+                        AppError::DatabaseError(error) => map_social_link_error(error),
+                        error => error,
+                    })?;
+            } else {
+                users
+                    .insert_one(&new_user)
+                    .await
+                    .map_err(map_social_link_error)?;
+            }
             tracing::info!(
                 user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
@@ -782,6 +801,7 @@ mod tests {
     ) -> AppConfig {
         AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
@@ -858,6 +878,9 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,

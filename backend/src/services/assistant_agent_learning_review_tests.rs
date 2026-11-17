@@ -846,6 +846,7 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 #[test]
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
+        voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
@@ -1592,6 +1593,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                supplemental_result_claims: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),

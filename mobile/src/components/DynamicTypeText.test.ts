@@ -105,6 +105,7 @@ test("Settings button opt-in refreshes its label while its Pressable identity, d
     assert.equal(current.key, original.key);
     assert.equal(current.props.onPress, onPress);
     assert.equal(current.props.disabled, true);
+    assert.equal(current.props.accessibilityState.disabled, true);
     assert.equal(label().type, env.DynamicTypeText);
     assert.equal(env.DynamicTypeText(label().props).key, 2.143);
     current.props.onPress();

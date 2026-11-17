@@ -27,12 +27,10 @@ impl WaitGuard {
 }
 impl Drop for WaitGuard {
     fn drop(&mut self) {
-        if self.armed.load(Ordering::Acquire)
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        if self.armed.load(Ordering::Acquire) && tokio::runtime::Handle::try_current().is_ok() {
             let db = self.db.clone();
             let id = self.id.clone();
-            runtime.spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 // A transaction cancelled at commit can resolve after its caller
                 // drops. Retry that cleanup briefly; the durable deadline and
                 // background=false fence remain fail-closed after a process crash.

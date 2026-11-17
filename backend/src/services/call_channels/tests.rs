@@ -1573,6 +1573,9 @@ async fn admitted_funded_call_settles_frozen_usage_once_after_price_and_credenti
         .await
         .unwrap();
     let wallet = BillingWallet {
+        snapshot_generation: 0,
+        tax_generation: 0,
+        tax_guard_token: None,
         id: Uuid::new_v4().to_string(),
         owner_id: owner.clone(),
         lago_customer_id: owner.clone(),
@@ -2187,6 +2190,7 @@ impl crate::services::billing::lago_client::LagoApi for FundedLago {
         c: &str,
         s: &str,
     ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(s)?;
         Ok(crate::services::billing::lago_client::LagoUsage {
             customer_id: c.into(),
             subscription_id: s.into(),
@@ -2273,6 +2277,9 @@ async fn fund_sms(f: &mut Fixture) {
         .db
         .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
         .insert_one(BillingWallet {
+            snapshot_generation: 0,
+            tax_generation: 0,
+            tax_guard_token: None,
             id: Uuid::new_v4().to_string(),
             owner_id: f.b.user_id.clone(),
             lago_customer_id: f.b.user_id.clone(),

@@ -26,6 +26,19 @@ export const startupDiagnosticSchema = z.object({
   detected_at: z.string().min(1),
 });
 
+export const securityEffectDiagnosticsSchema = z.object({
+  counts: z.array(
+    z.object({
+      kind: z.string().min(1),
+      state: z.string().min(1),
+      count: z.number().int().nonnegative(),
+      at_least: z.boolean(),
+    }),
+  ),
+  oldest_pending_at: z.string().nullable().optional(),
+  oldest_pending_age_seconds: z.number().int().nonnegative().nullable().optional(),
+});
+
 export const chainVerificationResponseSchema = z.object({
   chains: z.array(
     chainVerifyStatusSchema.extend({
@@ -37,11 +50,15 @@ export const chainVerificationResponseSchema = z.object({
     .nullable()
     .optional(),
   startup_diagnostics: z.array(startupDiagnosticSchema).default([]),
+  security_effects: securityEffectDiagnosticsSchema.optional(),
 });
 
 export type ChainVerifyOutcome = z.infer<typeof chainVerifyOutcomeSchema>;
 export type ChainVerifyStatus = z.infer<typeof chainVerifyStatusSchema>;
 export type StartupDiagnostic = z.infer<typeof startupDiagnosticSchema>;
+export type SecurityEffectDiagnostics = z.infer<
+  typeof securityEffectDiagnosticsSchema
+>;
 export type ChainVerificationResponse = z.infer<
   typeof chainVerificationResponseSchema
 >;

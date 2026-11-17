@@ -119,7 +119,7 @@ async fn limit(state: &AppState, key: &str) -> AppResult<()> {
 
 fn dispatch(state: &AppState, id: String) {
     let state = state.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) = links::dispatch(
             &state.db,
             &state.encryption_keys,
@@ -314,36 +314,39 @@ pub async fn complete(
     let actor = auth.user_id.to_string();
     limit(&state, &actor).await?;
     let claim = links::claim(&state.db, &actor, &body.token, "manual").await?;
-    tokio::spawn(async move {
-        let result = links::with_claim(&state.db, &claim, async {
-            if claim.link.bot_id.is_some() {
-                return Err(AppError::Conflict(
-                    "This bot already exists; use Retry setup to verify it".into(),
-                ));
-            }
-            bind_input(&mut body.input, &claim, &actor)?;
-            body.input
-                .insert("platform".into(), claim.link.platform.clone().into());
-            let input = serde_json::from_value(serde_json::Value::Object(body.input))
-                .map_err(|_| AppError::ValidationError("Invalid bot setup fields".into()))?;
-            let adapter =
-                channel_bots::resolve_adapter(&claim.link.platform, &state.token_exchange_cache)?;
-            channel_bots::create_bot_with_link(
-                &state,
-                auth,
-                tele,
-                input,
-                adapter.as_ref(),
-                &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
-                Some(&claim),
-            )
-            .await
+    crate::services::shutdown::process()
+        .spawn(async move {
+            let result = links::with_claim(&state.db, &claim, async {
+                if claim.link.bot_id.is_some() {
+                    return Err(AppError::Conflict(
+                        "This bot already exists; use Retry setup to verify it".into(),
+                    ));
+                }
+                bind_input(&mut body.input, &claim, &actor)?;
+                body.input
+                    .insert("platform".into(), claim.link.platform.clone().into());
+                let input = serde_json::from_value(serde_json::Value::Object(body.input))
+                    .map_err(|_| AppError::ValidationError("Invalid bot setup fields".into()))?;
+                let adapter = channel_bots::resolve_adapter(
+                    &claim.link.platform,
+                    &state.token_exchange_cache,
+                )?;
+                channel_bots::create_bot_with_link(
+                    &state,
+                    auth,
+                    tele,
+                    input,
+                    adapter.as_ref(),
+                    &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
+                    Some(&claim),
+                )
+                .await
+            })
+            .await;
+            finish(&state, &claim, result).await
         })
-        .await;
-        finish(&state, &claim, result).await
-    })
-    .await
-    .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
+        .await
+        .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
 }
 
 #[utoipa::path(post, path = "/api/v1/channel-connect-links/managed/start", request_body = TokenRequest, responses((status = 200, description = "Channel connection request result", body = serde_json::Value)), tag = "Channel Connect Links") ]
@@ -356,39 +359,42 @@ pub async fn managed_start(
     limit(&state, &actor).await?;
     managed::limit(&state, &auth).await?;
     let claim = links::claim(&state.db, &actor, &body.token, "managed").await?;
-    tokio::spawn(async move {
-        let result = links::with_claim(&state.db, &claim, async {
-            if claim.link.bot_id.is_some() {
-                return Err(AppError::Conflict("Resume the existing bot setup".into()));
-            }
-            let adapter =
-                channel_bots::resolve_adapter(&claim.link.platform, &state.token_exchange_cache)?;
-            let started = crate::services::channel_credentials::start_connection(
-                &state.db,
-                &state.encryption_keys,
-                &state.config.base_url,
-                adapter.as_ref(),
-                &actor,
-                &claim.link.user_id,
-                &claim.link.label,
-            )
-            .await?;
-            links::pin_connection(&state.db, &claim, &started.connection_id).await?;
-            Ok((
-                headers(),
-                Json(managed::StartResponse {
-                    connection_id: started.connection_id,
-                    authorization_url: started.authorization_url,
-                    attempt_nonce: started.attempt_nonce,
-                }),
-            ))
+    crate::services::shutdown::process()
+        .spawn(async move {
+            let result = links::with_claim(&state.db, &claim, async {
+                if claim.link.bot_id.is_some() {
+                    return Err(AppError::Conflict("Resume the existing bot setup".into()));
+                }
+                let adapter = channel_bots::resolve_adapter(
+                    &claim.link.platform,
+                    &state.token_exchange_cache,
+                )?;
+                let started = crate::services::channel_credentials::start_connection(
+                    &state.db,
+                    &state.encryption_keys,
+                    &state.config.base_url,
+                    adapter.as_ref(),
+                    &actor,
+                    &claim.link.user_id,
+                    &claim.link.label,
+                )
+                .await?;
+                links::pin_connection(&state.db, &claim, &started.connection_id).await?;
+                Ok((
+                    headers(),
+                    Json(managed::StartResponse {
+                        connection_id: started.connection_id,
+                        authorization_url: started.authorization_url,
+                        attempt_nonce: started.attempt_nonce,
+                    }),
+                ))
+            })
+            .await;
+            links::release(&state.db, &claim, result.is_err()).await?;
+            result
         })
-        .await;
-        links::release(&state.db, &claim, result.is_err()).await?;
-        result
-    })
-    .await
-    .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
+        .await
+        .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
 }
 
 #[utoipa::path(post, path = "/api/v1/channel-connect-links/managed/complete", request_body = CompleteRequest, responses((status = 201, description = "Channel connection request result", body = serde_json::Value)), tag = "Channel Connect Links") ]
@@ -409,7 +415,7 @@ pub async fn managed_complete(
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let progress = channel_managed::ManagedProgress(streaming.then(|| sender.clone()));
     // Complete server-side even if the browser leaves during the provider operation.
-    let task = tokio::spawn(async move {
+    let task = crate::services::shutdown::process().spawn(async move {
         let result = links::with_claim(&state.db, &claim, async {
             if claim.link.bot_id.is_some() {
                 return Err(AppError::Conflict(
@@ -444,7 +450,7 @@ pub async fn managed_complete(
         finish(&state, &claim, result).await
     });
     if streaming {
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let result = task.await.unwrap_or_else(|_| {
                 Err(AppError::Internal("Channel setup was interrupted".into()))
             });
@@ -490,49 +496,53 @@ pub async fn telegram_start(
     let actor = auth.user_id.to_string();
     limit(&state, &actor).await?;
     let claim = links::claim(&state.db, &actor, &body.token, "telegram").await?;
-    tokio::spawn(async move {
-        let result = links::with_claim(&state.db, &claim, async {
-            if claim.link.platform != "telegram-new" {
-                return Err(AppError::ValidationError(
-                    "This link is not for Telegram creation".into(),
-                ));
-            }
-            let service = telegram_new::service(&state);
-            let existing = state
-                .db
-                .collection::<crate::models::telegram_bot_request::TelegramBotRequest>(
-                    crate::models::telegram_bot_request::COLLECTION_NAME,
-                )
-                .find_one(bson::doc! {"_id": &claim.link.id, "owner_user_id": &claim.link.user_id})
-                .await?;
-            let (request, launch_url) = if let Some(request) = existing {
-                if request.actor_user_id != actor {
-                    return Err(AppError::Conflict(
-                        "Continue Telegram setup using the NyxID account that started it".into(),
+    crate::services::shutdown::process()
+        .spawn(async move {
+            let result = links::with_claim(&state.db, &claim, async {
+                if claim.link.platform != "telegram-new" {
+                    return Err(AppError::ValidationError(
+                        "This link is not for Telegram creation".into(),
                     ));
                 }
-                let url = service.launch(&actor, &request.id).await?;
-                (request, url)
-            } else {
-                service
-                    .begin_linked(&actor, &claim.link.user_id, &claim.link.label, &claim)
-                    .await?
-            };
-            Ok((
-                headers(),
-                Json(telegram_new::LaunchResponse {
-                    request: crate::handlers::telegram_new::projected_request(&state, request)
-                        .await?,
-                    launch_url,
-                }),
-            ))
+                let service = telegram_new::service(&state);
+                let existing = state
+                    .db
+                    .collection::<crate::models::telegram_bot_request::TelegramBotRequest>(
+                        crate::models::telegram_bot_request::COLLECTION_NAME,
+                    )
+                    .find_one(
+                        bson::doc! {"_id": &claim.link.id, "owner_user_id": &claim.link.user_id},
+                    )
+                    .await?;
+                let (request, launch_url) = if let Some(request) = existing {
+                    if request.actor_user_id != actor {
+                        return Err(AppError::Conflict(
+                            "Continue Telegram setup using the NyxID account that started it"
+                                .into(),
+                        ));
+                    }
+                    let url = service.launch(&actor, &request.id).await?;
+                    (request, url)
+                } else {
+                    service
+                        .begin_linked(&actor, &claim.link.user_id, &claim.link.label, &claim)
+                        .await?
+                };
+                Ok((
+                    headers(),
+                    Json(telegram_new::LaunchResponse {
+                        request: crate::handlers::telegram_new::projected_request(&state, request)
+                            .await?,
+                        launch_url,
+                    }),
+                ))
+            })
+            .await;
+            links::release(&state.db, &claim, result.is_err()).await?;
+            result
         })
-        .await;
-        links::release(&state.db, &claim, result.is_err()).await?;
-        result
-    })
-    .await
-    .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
+        .await
+        .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
 }
 
 #[utoipa::path(post, path = "/api/v1/channel-connect-links/retry", request_body = TokenRequest, responses((status = 200, description = "Channel connection request result", body = StatusResponse)), tag = "Channel Connect Links") ]
@@ -555,31 +565,32 @@ pub async fn retry(
         link.flow.as_deref().unwrap_or("manual"),
     )
     .await?;
-    tokio::spawn(async move {
-        let result = links::with_claim(&state.db, &claim, async {
-            let id = claim
-                .link
-                .bot_id
-                .as_deref()
-                .ok_or_else(|| AppError::Conflict("No bot has been created yet".into()))?;
-            let bot = crate::services::channel_bot_service::get_bot(&state.db, id).await?;
-            if bot.managed_setup.is_some() {
-                let _ = managed::repair(State(state.clone()), auth, Path(id.into())).await?;
-            } else {
-                let _ =
-                    channel_bots::verify_bot(State(state.clone()), auth, Path(id.into())).await?;
-            }
-            Ok(())
+    crate::services::shutdown::process()
+        .spawn(async move {
+            let result = links::with_claim(&state.db, &claim, async {
+                let id = claim
+                    .link
+                    .bot_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::Conflict("No bot has been created yet".into()))?;
+                let bot = crate::services::channel_bot_service::get_bot(&state.db, id).await?;
+                if bot.managed_setup.is_some() {
+                    let _ = managed::repair(State(state.clone()), auth, Path(id.into())).await?;
+                } else {
+                    let _ = channel_bots::verify_bot(State(state.clone()), auth, Path(id.into()))
+                        .await?;
+                }
+                Ok(())
+            })
+            .await;
+            finish(&state, &claim, result).await?;
+            Ok((
+                headers(),
+                Json(status(links::get(&state.db, &claim.link.id).await?, true)?),
+            ))
         })
-        .await;
-        finish(&state, &claim, result).await?;
-        Ok((
-            headers(),
-            Json(status(links::get(&state.db, &claim.link.id).await?, true)?),
-        ))
-    })
-    .await
-    .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
+        .await
+        .map_err(|_| AppError::Internal("Channel setup was interrupted".into()))?
 }
 
 #[cfg(test)]

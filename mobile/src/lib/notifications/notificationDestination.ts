@@ -111,7 +111,11 @@ export function notificationDestination(
     }
     if (agent)
       return `${config.scheme}://chat?${new URLSearchParams({ agentId: agent, openLatest: "true" })}`;
-    if (row.type === "channel_bot_failed")
+    if (
+      row.type === "channel_bot_failed" ||
+      row.type === "channel_bot_restored" ||
+      row.type === "channel_bot_guest_defaults"
+    )
       return `${config.scheme}://plugins?tab=connectors`;
     if (row.type === "machine_lifecycle" || row.type === "machine_control")
       return `${config.scheme}://assistant/machines${string(row.machine_id) ? `?${new URLSearchParams({ machine: string(row.machine_id)! })}` : ""}`;

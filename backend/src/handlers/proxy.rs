@@ -1872,7 +1872,7 @@ async fn proxy_request_through_pool(
                 );
             }
         }
-        let attempt_result = until_client_disconnect(
+        let attempt = until_client_disconnect(
             &pool_cancellation,
             pool_attempt::attempt_timeout(
                 &accounting,
@@ -1922,8 +1922,9 @@ async fn proxy_request_through_pool(
                     Ok::<_, AppError>((ticket.clone(), gated))
                 }),
             ),
-        )
-        .await;
+        );
+        let (attempt_result, diagnostic_service) =
+            crate::services::shutdown::diagnostics::candidate(attempt).await;
         let attempt_result = match attempt_result {
             Ok(result) => result,
             Err(_) => {
@@ -2103,6 +2104,7 @@ async fn proxy_request_through_pool(
                     &candidate.service.slug,
                 )?;
                 accounting.audit.commit();
+                diagnostic_service.publish();
                 return Ok(response);
             }
             Err(error) => {
@@ -2250,6 +2252,7 @@ async fn proxy_request_through_pool(
         }
         attach_pool_response_headers(&mut response, attempt_number, &candidate.service.slug)?;
         accounting.audit.commit();
+        diagnostic_service.publish();
         return Ok(response);
     }
 
@@ -3270,6 +3273,7 @@ async fn execute_proxy_inner(
             extra_outbound_headers,
         )
         .await?;
+        crate::services::shutdown::diagnostics::resolved_proxy(&resolved.target);
         super::invocation_diagnostics::Target::record_request(
             &request,
             resolved.resolved_user_service_id.as_deref(),
@@ -5068,12 +5072,9 @@ async fn execute_resolved_proxy_inner<'a>(
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
             request_audit.model_approval_required();
-            crate::services::assistant_model_observer::before_approval_request(
-                &state.config.frontend_url,
-                false,
-            )
-            .await
-            .inspect_err(|error| request_audit.model_approval_error(error))?;
+            crate::services::assistant_model_observer::before_approval_request(None)
+                .await
+                .inspect_err(|error| request_audit.model_approval_error(error))?;
             let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
                 &approval_owner_user_id,
@@ -6286,7 +6287,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             // Record success metrics (fire-and-forget)
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ =
                                     node_metrics_service::record_success(db_clone, nid, latency_ms)
                                         .await;
@@ -6475,11 +6476,25 @@ async fn execute_resolved_proxy_inner<'a>(
                                     let mut response_len: i64 = 0;
                                     let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
                                     let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
+                                    let mut checkpoints = stream_billing.stream_checkpoints(
+                                        &stream_metered,
+                                        node_is_sse && (200..300).contains(&status)
+                                            && crate::services::billing::usage_checkpoint::supports_path(&usage_path),
+                                    );
                                     loop {
                                         match tokio::time::timeout(idle_timeout, rx.recv()).await {
                                             Ok(Some(StreamChunk::Data(bytes))) => {
                                                 response_len += bytes.len() as i64;
-                                                if capture_usage && node_is_sse { usage_events.push(&bytes); }
+                                                if checkpoints.is_enabled() {
+                                                    for event in usage_events.push_observed(&bytes, capture_usage) {
+                                                        match event {
+                                                            Ok((kind, value)) => {
+                                                                checkpoints.observe_value(kind.as_deref(), &value).await;
+                                                            }
+                                                            Err(_) => checkpoints.invalidate().await,
+                                                        }
+                                                    }
+                                                } else if capture_usage && node_is_sse { usage_events.push(&bytes); }
                                                 if let Some(buffer) = captured.as_mut() {
                                                     if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
                                                     else { captured = None; }
@@ -6645,7 +6660,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
                             let err_msg = "Node credential missing".to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
                                     .await;
                             });
@@ -6697,7 +6712,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let db_clone = state.db.clone();
                             let nid = node_id.to_string();
                             let err_msg = "Node offline or timeout".to_string();
-                            tokio::spawn(async move {
+                            crate::services::shutdown::process().spawn(async move {
                                 let _ = node_metrics_service::record_error(db_clone, nid, err_msg)
                                     .await;
                             });
@@ -8363,8 +8378,37 @@ fn audit_ws_frame_auth_injected(
     );
 }
 
-/// Maximum duration for a single WS passthrough session (seconds).
-const WS_PASSTHROUGH_MAX_DURATION_SECS: u64 = 3600;
+async fn observe_realtime_boundary(
+    collector: &mut llm_usage_service::RealtimeLlmUsageCollector,
+    session: &mut Option<crate::services::billing::realtime_usage::Session>,
+    text: &str,
+    bytes: i64,
+) {
+    if collector.observe_downstream_text(text)
+        && let Some(session) = session.as_mut().filter(|s| s.observing())
+    {
+        session.observe(&collector.completed_prefix(), bytes).await;
+    }
+}
+
+async fn settle_realtime_session(
+    billing: std::sync::Arc<crate::services::billing::BillingService>,
+    metered: crate::services::billing::MeteredProxyContext,
+    stats: &ConnectionUsageStats,
+    session: Option<crate::services::billing::realtime_usage::Session>,
+) {
+    let usage = websocket_platform_usage(stats);
+    if let Some(session) = session {
+        if session.finish(usage).await.is_err() {
+            tracing::warn!(billing_request_id= ?metered.route.as_ref().map(|r| &r.billing_request_id),
+                "Failed to persist Realtime settlement intent; session recovery remains pending");
+        }
+    } else {
+        let resale = websocket_resale_usage(&metered, stats);
+        settle_meter_async(billing, metered, usage, resale, None).await;
+    }
+}
+
 /// Idle timeout: close the bridge if no frames pass in either direction (seconds).
 const WS_PASSTHROUGH_IDLE_TIMEOUT_SECS: u64 = 300;
 
@@ -8394,19 +8438,16 @@ async fn bridge_websockets(
     user_agent: Option<String>,
     slot_cancel: tokio_util::sync::CancellationToken,
     shared: Option<crate::models::assistant_sharing::SharedExecution>,
+    session: &mut Option<crate::services::billing::realtime_usage::Session>,
 ) -> ConnectionUsageStats {
     let start = std::time::Instant::now();
     let mut stats = ConnectionUsageStats::default();
     let (mut client_sink, mut client_stream) = client_ws.split();
     let (mut downstream_sink, mut downstream_stream) = downstream_ws.split();
     let mut injector_state = ws_frame_injector::InjectorState::default();
-    let mut realtime_llm_usage =
-        llm_usage_service::RealtimeLlmUsageCollector::new(collect_realtime_llm_usage);
-
-    let max_duration = tokio::time::sleep(std::time::Duration::from_secs(
-        WS_PASSTHROUGH_MAX_DURATION_SECS,
-    ));
-    tokio::pin!(max_duration);
+    let mut realtime_llm_usage = llm_usage_service::RealtimeLlmUsageCollector::new(
+        collect_realtime_llm_usage || session.is_some(),
+    );
 
     let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(
         WS_PASSTHROUGH_IDLE_TIMEOUT_SECS,
@@ -8415,202 +8456,242 @@ async fn bridge_websockets(
 
     let mut shared_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     shared_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = shared_tick.tick(), if shared.is_some() => {
-                if let Some(binding) = &shared
-                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
-            }
-            () = slot_cancel.cancelled() => {
-                tracing::warn!(service_id = %service_id, "WS passthrough capacity slot was lost");
-                break;
-            }
-            _ = &mut max_duration => {
-                tracing::info!(
-                    service_id = %service_id,
-                    "WS passthrough max duration reached"
-                );
-                break;
-            }
-            _ = &mut idle_timeout => {
-                tracing::info!(
-                    service_id = %service_id,
-                    "WS passthrough idle timeout reached"
-                );
-                break;
-            }
-            msg = client_stream.next() => {
-                match msg {
-                    Some(Ok(axum_msg)) => {
+    let shutdown = crate::services::shutdown::process();
+    let deadline = session
+        .as_ref()
+        .map(|s| s.deadline.clone())
+        .unwrap_or_else(|| {
+            crate::services::billing::realtime_usage::BridgeDeadline::new(
+                crate::services::billing::realtime_usage::MAX_DURATION,
+            )
+        });
+    let completed = deadline
+        .run(async {
+            loop {
+                if deadline.expired() {
+                    break;
+                }
+                tokio::select! {
+                    () = shutdown.stopped() => break,
+                    _ = shared_tick.tick(), if shared.is_some() => {
                         if let Some(binding) = &shared
                             && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
-                        match &axum_msg {
-                            axum::extract::ws::Message::Text(text) => {
-                                stats.frames_in += 1;
-                                stats.bytes_in += text.len() as i64;
-                                realtime_llm_usage.observe_client_text(text.as_str());
-                            }
-                            axum::extract::ws::Message::Binary(bytes) => {
-                                stats.frames_in += 1;
-                                stats.bytes_in += bytes.len() as i64;
-                                realtime_llm_usage.observe_client_binary(bytes.len());
-                            }
-                            _ => {}
-                        }
-                        idle_timeout
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
-                        if let Some((kind, payload)) = axum_msg_payload_for_injection(&axum_msg) {
-                            let frame = ws_frame_injector::IncomingFrame {
-                                direction: crate::models::ws_frame_injection::WsFrameDirection::Upstream,
-                                kind,
-                                payload,
-                            };
-                            if let Some(action) = ws_frame_injector::evaluate(
-                                &ws_frame_injections,
-                                &mut injector_state,
-                                &frame,
-                                &credential,
-                            ) {
-                                tracing::info!(
-                                    service_id = %service_id,
-                                    trigger_kind = action.trigger_kind,
-                                    frame_index_in = action.frame_index_in,
-                                    credential_sha256_prefix = %action.credential_sha256_prefix,
-                                    "Injected WebSocket auth frame"
-                                );
-                                audit_ws_frame_auth_injected(
-                                    &db,
-                                    &user_id,
-                                    &service_id,
-                                    &action,
-                                    None,
-                                    api_key_id.clone(),
-                                    api_key_name.clone(),
-                                    ip_address.clone(),
-                                    user_agent.clone(),
-                                );
-                                // NOTE: `direction` is the trigger direction. The injected
-                                // frame is sent to the opposite side so a downstream
-                                // auth challenge can produce an upstream auth response.
-                                if client_sink
-                                    .send(injection_frame_to_axum(action.send_frame))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                if !action.forward_original {
-                                    continue;
-                                }
-                            }
-                        }
-                        let is_close = matches!(axum_msg, axum::extract::ws::Message::Close(_));
-                        if let Some(binding) = &shared
-                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
-                        let _ = downstream_sink.send(axum_msg_to_tungstenite(axum_msg)).await;
-                        if is_close {
-                            break;
-                        }
                     }
-                    Some(Err(e)) => {
-                        tracing::debug!(service_id = %service_id, error = %e, "Client WS recv error");
+                    () = slot_cancel.cancelled() => {
+                        tracing::warn!(service_id = %service_id, "WS passthrough capacity slot was lost");
                         break;
                     }
-                    None => break,
-                }
-            }
-            msg = downstream_stream.next() => {
-                match msg {
-                    Some(Ok(tung_msg)) => {
-                        // A downstream auth challenge can trigger an upstream effect.
-                        if let Some(binding) = &shared
-                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
-                        match &tung_msg {
-                            tokio_tungstenite::tungstenite::Message::Text(text) => {
-                                stats.frames_out += 1;
-                                stats.bytes_out += text.len() as i64;
-                                realtime_llm_usage.observe_downstream_text(text.as_str());
-                            }
-                            tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
-                                stats.frames_out += 1;
-                                stats.bytes_out += bytes.len() as i64;
-                                realtime_llm_usage.observe_downstream_binary(bytes.len());
-                            }
-                            _ => {}
-                        }
-                        idle_timeout
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
-                        if let Some((kind, payload)) = tungstenite_msg_payload_for_injection(&tung_msg) {
-                            let frame = ws_frame_injector::IncomingFrame {
-                                direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
-                                kind,
-                                payload,
-                            };
-                            if let Some(action) = ws_frame_injector::evaluate(
-                                &ws_frame_injections,
-                                &mut injector_state,
-                                &frame,
-                                &credential,
-                            ) {
-                                tracing::info!(
-                                    service_id = %service_id,
-                                    trigger_kind = action.trigger_kind,
-                                    frame_index_in = action.frame_index_in,
-                                    credential_sha256_prefix = %action.credential_sha256_prefix,
-                                    "Injected WebSocket auth frame"
-                                );
-                                audit_ws_frame_auth_injected(
-                                    &db,
-                                    &user_id,
-                                    &service_id,
-                                    &action,
-                                    None,
-                                    api_key_id.clone(),
-                                    api_key_name.clone(),
-                                    ip_address.clone(),
-                                    user_agent.clone(),
-                                );
-                                // NOTE: `direction` is the trigger direction. For the HA
-                                // preset this sends the auth frame back upstream to the
-                                // downstream socket and consumes the auth_required frame.
-                                if downstream_sink
-                                    .send(injection_frame_to_tungstenite(action.send_frame))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                                if !action.forward_original {
-                                    continue;
-                                }
-                            }
-                        }
-                        let is_close = matches!(tung_msg, tokio_tungstenite::tungstenite::Message::Close(_));
-                        if let Some(binding) = &shared
-                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
-                        let _ = client_sink.send(tungstenite_msg_to_axum(tung_msg)).await;
-                        if is_close {
-                            break;
-                        }
-                    }
-                    Some(Err(e)) => {
-                        tracing::debug!(service_id = %service_id, error = %e, "Downstream WS recv error");
+                    _ = &mut idle_timeout => {
+                        tracing::info!(
+                            service_id = %service_id,
+                            "WS passthrough idle timeout reached"
+                        );
                         break;
                     }
-                    None => break,
+                    msg = client_stream.next() => {
+                        match msg {
+                            Some(Ok(axum_msg)) => {
+                                if let Some(binding) = &shared
+                                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
+                                match &axum_msg {
+                                    axum::extract::ws::Message::Text(text) => {
+                                        stats.frames_in += 1;
+                                        stats.bytes_in += text.len() as i64;
+                                        realtime_llm_usage.observe_client_text(text.as_str());
+                                    }
+                                    axum::extract::ws::Message::Binary(bytes) => {
+                                        stats.frames_in += 1;
+                                        stats.bytes_in += bytes.len() as i64;
+                                        realtime_llm_usage.observe_client_binary(bytes.len());
+                                    }
+                                    _ => {}
+                                }
+                                idle_timeout
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
+                                if let Some((kind, payload)) = axum_msg_payload_for_injection(&axum_msg) {
+                                    let frame = ws_frame_injector::IncomingFrame {
+                                        direction: crate::models::ws_frame_injection::WsFrameDirection::Upstream,
+                                        kind,
+                                        payload,
+                                    };
+                                    if let Some(action) = ws_frame_injector::evaluate(
+                                        &ws_frame_injections,
+                                        &mut injector_state,
+                                        &frame,
+                                        &credential,
+                                    ) {
+                                        tracing::info!(
+                                            service_id = %service_id,
+                                            trigger_kind = action.trigger_kind,
+                                            frame_index_in = action.frame_index_in,
+                                            credential_sha256_prefix = %action.credential_sha256_prefix,
+                                            "Injected WebSocket auth frame"
+                                        );
+                                        audit_ws_frame_auth_injected(
+                                            &db,
+                                            &user_id,
+                                            &service_id,
+                                            &action,
+                                            None,
+                                            api_key_id.clone(),
+                                            api_key_name.clone(),
+                                            ip_address.clone(),
+                                            user_agent.clone(),
+                                        );
+                                        // NOTE: `direction` is the trigger direction. The injected
+                                        // frame is sent to the opposite side so a downstream
+                                        // auth challenge can produce an upstream auth response.
+                                        if deadline.expired() {
+                                            break;
+                                        }
+                                        if client_sink
+                                            .send(injection_frame_to_axum(action.send_frame))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                        if !action.forward_original {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                let is_close = matches!(axum_msg, axum::extract::ws::Message::Close(_));
+                                if let Some(binding) = &shared
+                                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
+                                if deadline.expired() {
+                                    break;
+                                }
+                                let _ = downstream_sink.send(axum_msg_to_tungstenite(axum_msg)).await;
+                                if is_close {
+                                    break;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::debug!(service_id = %service_id, error = %e, "Client WS recv error");
+                                break;
+                            }
+                            None => break,
+                        }
+                    }
+                    msg = downstream_stream.next() => {
+                        match msg {
+                            Some(Ok(tung_msg)) => {
+                                // A downstream auth challenge can trigger an upstream effect.
+                                if let Some(binding) = &shared
+                                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
+                                match &tung_msg {
+                                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                                        stats.frames_out += 1;
+                                        stats.bytes_out += text.len() as i64;
+                                        observe_realtime_boundary(
+                                            &mut realtime_llm_usage,
+                                            session,
+                                            text.as_str(),
+                                            stats.total_bytes(),
+                                        ).await;
+                                    }
+                                    tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                                        stats.frames_out += 1;
+                                        stats.bytes_out += bytes.len() as i64;
+                                        realtime_llm_usage.observe_downstream_binary(bytes.len());
+                                    }
+                                    _ => {}
+                                }
+                                idle_timeout
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
+                                if let Some((kind, payload)) = tungstenite_msg_payload_for_injection(&tung_msg) {
+                                    let frame = ws_frame_injector::IncomingFrame {
+                                        direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
+                                        kind,
+                                        payload,
+                                    };
+                                    if let Some(action) = ws_frame_injector::evaluate(
+                                        &ws_frame_injections,
+                                        &mut injector_state,
+                                        &frame,
+                                        &credential,
+                                    ) {
+                                        tracing::info!(
+                                            service_id = %service_id,
+                                            trigger_kind = action.trigger_kind,
+                                            frame_index_in = action.frame_index_in,
+                                            credential_sha256_prefix = %action.credential_sha256_prefix,
+                                            "Injected WebSocket auth frame"
+                                        );
+                                        audit_ws_frame_auth_injected(
+                                            &db,
+                                            &user_id,
+                                            &service_id,
+                                            &action,
+                                            None,
+                                            api_key_id.clone(),
+                                            api_key_name.clone(),
+                                            ip_address.clone(),
+                                            user_agent.clone(),
+                                        );
+                                        // NOTE: `direction` is the trigger direction. For the HA
+                                        // preset this sends the auth frame back upstream to the
+                                        // downstream socket and consumes the auth_required frame.
+                                        if deadline.expired() {
+                                            break;
+                                        }
+                                        if downstream_sink
+                                            .send(injection_frame_to_tungstenite(action.send_frame))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                        if !action.forward_original {
+                                            continue;
+                                        }
+                                    }
+                                }
+                                let is_close = matches!(tung_msg, tokio_tungstenite::tungstenite::Message::Close(_));
+                                if let Some(binding) = &shared
+                                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
+                                if deadline.expired() {
+                                    break;
+                                }
+                                let _ = client_sink.send(tungstenite_msg_to_axum(tung_msg)).await;
+                                if is_close {
+                                    break;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::debug!(service_id = %service_id, error = %e, "Downstream WS recv error");
+                                break;
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
-        }
+        })
+        .await;
+    if completed.is_none() || deadline.expired() {
+        tracing::info!(service_id = %service_id, "WS passthrough max duration reached");
     }
 
     // Close both sides -- runs regardless of which side triggered the break.
-    let _ = downstream_sink.close().await;
-    let _ = client_sink.close().await;
+    if shutdown.is_stopped() {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let _ = tokio::join!(downstream_sink.close(), client_sink.close());
+        })
+        .await;
+    } else {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let _ = tokio::join!(downstream_sink.close(), client_sink.close());
+        })
+        .await;
+    }
 
     stats.duration = start.elapsed();
     stats.realtime_llm_usage = realtime_llm_usage.finalize();
+    stats.realtime_llm_usage.collection_enabled = collect_realtime_llm_usage;
     stats
 }
 
@@ -8718,7 +8799,14 @@ async fn handle_ws_passthrough(
         billing_egress_permit,
     )
     .await?;
-    state.billing.mark_forwarded(&metered).await?;
+    let mut realtime_session = state
+        .billing
+        .mark_realtime_forwarded(
+            &metered,
+            crate::services::billing::realtime_usage::supports_path(path),
+            collect_realtime_llm_usage,
+        )
+        .await?;
 
     let user_id_str = auth_user.user_id.to_string();
     let service_id_owned = service_id.to_string();
@@ -8760,58 +8848,53 @@ async fn handle_ws_passthrough(
     };
 
     Ok(ws_upgrade
-        .on_upgrade(move |client_ws| async move {
-            let stats = bridge_websockets(
-                client_ws,
-                downstream.stream,
-                sid.clone(),
-                collect_realtime_llm_usage,
-                ws_frame_injections,
-                credential,
-                db.clone(),
-                user_id_str.clone(),
-                ak_id.clone(),
-                ak_name.clone(),
-                req_ip.clone(),
-                req_ua.clone(),
-                slot_cancel,
-                shared.clone(),
-            )
-            .await;
-            drop(guard);
-            drop(service_lease);
-            let platform_usage = websocket_platform_usage(&stats);
-            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
-            settle_meter_async(
-                billing,
-                metered_for_settle,
-                platform_usage,
-                resale_usage,
-                None,
-            )
-            .await;
+        .on_upgrade(state.shutdown.clone().upgrade_completion_callback(
+            move |client_ws| async move {
+                let stats = bridge_websockets(
+                    client_ws,
+                    downstream.stream,
+                    sid.clone(),
+                    collect_realtime_llm_usage,
+                    ws_frame_injections,
+                    credential,
+                    db.clone(),
+                    user_id_str.clone(),
+                    ak_id.clone(),
+                    ak_name.clone(),
+                    req_ip.clone(),
+                    req_ua.clone(),
+                    slot_cancel,
+                    shared.clone(),
+                    &mut realtime_session,
+                )
+                .await;
+                drop(guard);
+                drop(service_lease);
+                settle_realtime_session(billing, metered_for_settle, &stats, realtime_session)
+                    .await;
 
-            let mut disconnect_event = serde_json::json!({
-                "service_id": sid,
-                "duration_secs": stats.duration.as_secs(),
-                "acting_client_id": &acting_client_id,
-            });
-            crate::services::shared_agent_transport::annotate(
-                &mut disconnect_event,
-                shared.as_ref(),
-            );
-            add_websocket_usage_provenance(&mut disconnect_event, &stats);
-            audit_service::log_async(
-                db,
-                Some(user_id_str),
-                "proxy_ws_disconnect".to_string(),
-                Some(disconnect_event),
-                req_ip,
-                req_ua,
-                ak_id,
-                ak_name,
-            );
-        })
+                let mut disconnect_event = serde_json::json!({
+                    "service_id": sid,
+                    "duration_secs": stats.duration.as_secs(),
+                    "acting_client_id": &acting_client_id,
+                });
+                crate::services::shared_agent_transport::annotate(
+                    &mut disconnect_event,
+                    shared.as_ref(),
+                );
+                add_websocket_usage_provenance(&mut disconnect_event, &stats);
+                audit_service::log_async(
+                    db,
+                    Some(user_id_str),
+                    "proxy_ws_disconnect".to_string(),
+                    Some(disconnect_event),
+                    req_ip,
+                    req_ua,
+                    ak_id,
+                    ak_name,
+                );
+            },
+        ))
         .into_response())
 }
 
@@ -9070,65 +9153,71 @@ async fn handle_ws_passthrough_via_node(
     } else {
         ws_upgrade
     };
-    state.billing.mark_forwarded(&metered).await?;
+    let mut realtime_session = state
+        .billing
+        .mark_realtime_forwarded(
+            &metered,
+            crate::services::billing::realtime_usage::supports_path(path),
+            collect_realtime_llm_usage,
+        )
+        .await?;
 
     Ok(ws_upgrade
-        .on_upgrade(move |client_ws| async move {
-            let stats = bridge_websockets_via_node(
-                client_ws,
-                ws_proxy_session.frames,
-                &node_dispatch,
-                &node_id_owned,
-                &sess_id,
-                sid.clone(),
-                collect_realtime_llm_usage,
-                db.clone(),
-                user_id_str.clone(),
-                ak_id.clone(),
-                ak_name.clone(),
-                owner_for_audit.clone(),
-                actor_for_audit.clone(),
-                req_ip.clone(),
-                req_ua.clone(),
-                slot_cancel,
-            )
-            .await;
+        .on_upgrade(state.shutdown.clone().upgrade_completion_callback(
+            move |client_ws| async move {
+                let stats = bridge_websockets_via_node(
+                    client_ws,
+                    ws_proxy_session.frames,
+                    &node_dispatch,
+                    &node_id_owned,
+                    &sess_id,
+                    sid.clone(),
+                    collect_realtime_llm_usage,
+                    db.clone(),
+                    user_id_str.clone(),
+                    ak_id.clone(),
+                    ak_name.clone(),
+                    owner_for_audit.clone(),
+                    actor_for_audit.clone(),
+                    req_ip.clone(),
+                    req_ua.clone(),
+                    slot_cancel,
+                    &mut realtime_session,
+                )
+                .await;
 
-            // Best-effort close the node-side session.
-            let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
-            drop(guard);
-            drop(service_lease);
-            let platform_usage = websocket_platform_usage(&stats);
-            let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
-            settle_meter_async(
-                billing,
-                metered_for_settle,
-                platform_usage,
-                resale_usage,
-                None,
-            )
-            .await;
+                // Best-effort close the node-side session.
+                let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
+                drop(guard);
+                drop(service_lease);
+                settle_realtime_session(billing, metered_for_settle, &stats, realtime_session)
+                    .await;
 
-            let mut disconnect_event = serde_json::json!({
-                "service_id": sid,
-                "duration_secs": stats.duration.as_secs(),
-                "acting_client_id": &acting_client_id,
-                "routed_via": "node",
-                "node_id": node_id_owned,
-            });
-            add_websocket_usage_provenance(&mut disconnect_event, &stats);
-            add_owner_user_id_if_shared(&mut disconnect_event, &owner_for_audit, &actor_for_audit);
-            audit_service::log_async(
-                db,
-                Some(user_id_str),
-                "proxy_ws_disconnect".to_string(),
-                Some(disconnect_event),
-                req_ip,
-                req_ua,
-                ak_id,
-                ak_name,
-            );
-        })
+                let mut disconnect_event = serde_json::json!({
+                    "service_id": sid,
+                    "duration_secs": stats.duration.as_secs(),
+                    "acting_client_id": &acting_client_id,
+                    "routed_via": "node",
+                    "node_id": node_id_owned,
+                });
+                add_websocket_usage_provenance(&mut disconnect_event, &stats);
+                add_owner_user_id_if_shared(
+                    &mut disconnect_event,
+                    &owner_for_audit,
+                    &actor_for_audit,
+                );
+                audit_service::log_async(
+                    db,
+                    Some(user_id_str),
+                    "proxy_ws_disconnect".to_string(),
+                    Some(disconnect_event),
+                    req_ip,
+                    req_ua,
+                    ak_id,
+                    ak_name,
+                );
+            },
+        ))
         .into_response())
 }
 
@@ -9151,184 +9240,223 @@ async fn bridge_websockets_via_node(
     ip_address: Option<String>,
     user_agent: Option<String>,
     slot_cancel: tokio_util::sync::CancellationToken,
+    session: &mut Option<crate::services::billing::realtime_usage::Session>,
 ) -> ConnectionUsageStats {
     use crate::services::node_ws_manager::WsProxyFrame;
 
     let start = std::time::Instant::now();
     let mut stats = ConnectionUsageStats::default();
     let (mut client_sink, mut client_stream) = client_ws.split();
-    let mut realtime_llm_usage =
-        llm_usage_service::RealtimeLlmUsageCollector::new(collect_realtime_llm_usage);
-
-    let max_duration = tokio::time::sleep(std::time::Duration::from_secs(
-        WS_PASSTHROUGH_MAX_DURATION_SECS,
-    ));
-    tokio::pin!(max_duration);
+    let mut realtime_llm_usage = llm_usage_service::RealtimeLlmUsageCollector::new(
+        collect_realtime_llm_usage || session.is_some(),
+    );
 
     let idle_timeout = tokio::time::sleep(std::time::Duration::from_secs(
         WS_PASSTHROUGH_IDLE_TIMEOUT_SECS,
     ));
     tokio::pin!(idle_timeout);
 
-    loop {
-        tokio::select! {
-            () = slot_cancel.cancelled() => {
-                tracing::warn!(service_id = %service_id, "Node WS passthrough capacity slot was lost");
-                break;
-            }
-            _ = &mut max_duration => {
-                tracing::info!(service_id = %service_id, "Node WS passthrough max duration reached");
-                break;
-            }
-            _ = &mut idle_timeout => {
-                tracing::info!(service_id = %service_id, "Node WS passthrough idle timeout reached");
-                break;
-            }
-            // Client -> Node
-            msg = client_stream.next() => {
-                match msg {
-                    Some(Ok(axum::extract::ws::Message::Text(t))) => {
-                        stats.frames_in += 1;
-                        stats.bytes_in += t.len() as i64;
-                        realtime_llm_usage.observe_client_text(t.as_str());
-                        idle_timeout.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
-                        );
-                        if node_dispatch.send_ws_proxy_text(node_id, session_id, &t).is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(axum::extract::ws::Message::Binary(b))) => {
-                        stats.frames_in += 1;
-                        stats.bytes_in += b.len() as i64;
-                        realtime_llm_usage.observe_client_binary(b.len());
-                        idle_timeout.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
-                        );
-                        if node_dispatch.send_ws_proxy_binary(node_id, session_id, &b).is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(axum::extract::ws::Message::Close(frame))) => {
-                        let (code, reason) = frame
-                            .map(|f| (Some(f.code), Some(f.reason.to_string())))
-                            .unwrap_or((None, None));
-                        let _ = node_dispatch.send_ws_proxy_close(node_id, session_id, code, reason);
+    let shutdown = crate::services::shutdown::process();
+    let deadline = session
+        .as_ref()
+        .map(|s| s.deadline.clone())
+        .unwrap_or_else(|| {
+            crate::services::billing::realtime_usage::BridgeDeadline::new(
+                crate::services::billing::realtime_usage::MAX_DURATION,
+            )
+        });
+    let completed = deadline
+        .run(async {
+            loop {
+                if deadline.expired() {
+                    break;
+                }
+                tokio::select! {
+                    () = shutdown.stopped() => break,
+                    () = slot_cancel.cancelled() => {
+                        tracing::warn!(service_id = %service_id, "Node WS passthrough capacity slot was lost");
                         break;
                     }
-                    Some(Ok(axum::extract::ws::Message::Ping(p))) => {
-                        let _ = client_sink.send(axum::extract::ws::Message::Pong(p)).await;
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        tracing::debug!(service_id = %service_id, error = %e, "Client WS error in node bridge");
+                    _ = &mut idle_timeout => {
+                        tracing::info!(service_id = %service_id, "Node WS passthrough idle timeout reached");
                         break;
                     }
-                    None => break,
+                    // Client -> Node
+                    msg = client_stream.next() => {
+                        match msg {
+                            Some(Ok(axum::extract::ws::Message::Text(t))) => {
+                                stats.frames_in += 1;
+                                stats.bytes_in += t.len() as i64;
+                                realtime_llm_usage.observe_client_text(t.as_str());
+                                idle_timeout.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
+                                );
+                                if deadline.expired() {
+                                    break;
+                                }
+                                if node_dispatch.send_ws_proxy_text(node_id, session_id, &t).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Ok(axum::extract::ws::Message::Binary(b))) => {
+                                stats.frames_in += 1;
+                                stats.bytes_in += b.len() as i64;
+                                realtime_llm_usage.observe_client_binary(b.len());
+                                idle_timeout.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
+                                );
+                                if deadline.expired() {
+                                    break;
+                                }
+                                if node_dispatch.send_ws_proxy_binary(node_id, session_id, &b).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Ok(axum::extract::ws::Message::Close(frame))) => {
+                                let (code, reason) = frame
+                                    .map(|f| (Some(f.code), Some(f.reason.to_string())))
+                                    .unwrap_or((None, None));
+                                let _ = node_dispatch.send_ws_proxy_close(node_id, session_id, code, reason);
+                                break;
+                            }
+                            Some(Ok(axum::extract::ws::Message::Ping(p))) => {
+                                if deadline.expired() {
+                                    break;
+                                }
+                                let _ = client_sink.send(axum::extract::ws::Message::Pong(p)).await;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(e)) => {
+                                tracing::debug!(service_id = %service_id, error = %e, "Client WS error in node bridge");
+                                break;
+                            }
+                            None => break,
+                        }
+                    }
+                    // Node -> Client
+                    frame = ws_proxy_rx.recv() => {
+                        match frame {
+                            Some(WsProxyFrame::Text(t)) => {
+                                stats.frames_out += 1;
+                                stats.bytes_out += t.len() as i64;
+                                observe_realtime_boundary(
+                                    &mut realtime_llm_usage,
+                                    session,
+                                    &t,
+                                    stats.total_bytes(),
+                                ).await;
+                                idle_timeout.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
+                                );
+                                if deadline.expired() {
+                                    break;
+                                }
+                                if client_sink
+                                    .send(axum::extract::ws::Message::Text(t.into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Some(WsProxyFrame::Binary(b)) => {
+                                stats.frames_out += 1;
+                                stats.bytes_out += b.len() as i64;
+                                realtime_llm_usage.observe_downstream_binary(b.len());
+                                idle_timeout.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
+                                );
+                                if deadline.expired() {
+                                    break;
+                                }
+                                if client_sink
+                                    .send(axum::extract::ws::Message::Binary(b.into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Some(WsProxyFrame::Injected { trigger_kind, frame_index }) => {
+                                let mut event_data = serde_json::json!({
+                                    "service_id": service_id,
+                                    "trigger_kind": trigger_kind,
+                                    "frame_index_in": frame_index,
+                                    "routed_via": "node",
+                                    "node_id": node_id,
+                                });
+                                add_owner_user_id_if_shared(
+                                    &mut event_data,
+                                    &service_owner_user_id,
+                                    &proxy_actor_user_id,
+                                );
+                                audit_service::log_async(
+                                    db.clone(),
+                                    Some(user_id.clone()),
+                                    "ws_frame_auth_injected".to_string(),
+                                    Some(event_data),
+                                    ip_address.clone(),
+                                    user_agent.clone(),
+                                    api_key_id.clone(),
+                                    api_key_name.clone(),
+                                );
+                            }
+                            Some(WsProxyFrame::Closed { code, reason }) => {
+                                let close_frame = code.map(|c| axum::extract::ws::CloseFrame {
+                                    code: c,
+                                    reason: reason.unwrap_or_default().into(),
+                                });
+                                let _ = client_sink
+                                    .send(axum::extract::ws::Message::Close(close_frame))
+                                    .await;
+                                break;
+                            }
+                            Some(WsProxyFrame::Error(e)) => {
+                                let _ = client_sink
+                                    .send(axum::extract::ws::Message::Close(Some(
+                                        axum::extract::ws::CloseFrame {
+                                            code: 1011,
+                                            reason: e.into(),
+                                        },
+                                    )))
+                                    .await;
+                                break;
+                            }
+                            None => {
+                                // Node disconnected
+                                let _ = client_sink
+                                    .send(axum::extract::ws::Message::Close(Some(
+                                        axum::extract::ws::CloseFrame {
+                                            code: 1001,
+                                            reason: "Node disconnected".into(),
+                                        },
+                                    )))
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-            // Node -> Client
-            frame = ws_proxy_rx.recv() => {
-                match frame {
-                    Some(WsProxyFrame::Text(t)) => {
-                        stats.frames_out += 1;
-                        stats.bytes_out += t.len() as i64;
-                        realtime_llm_usage.observe_downstream_text(&t);
-                        idle_timeout.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
-                        );
-                        if client_sink
-                            .send(axum::extract::ws::Message::Text(t.into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some(WsProxyFrame::Binary(b)) => {
-                        stats.frames_out += 1;
-                        stats.bytes_out += b.len() as i64;
-                        realtime_llm_usage.observe_downstream_binary(b.len());
-                        idle_timeout.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
-                        );
-                        if client_sink
-                            .send(axum::extract::ws::Message::Binary(b.into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Some(WsProxyFrame::Injected { trigger_kind, frame_index }) => {
-                        let mut event_data = serde_json::json!({
-                            "service_id": service_id,
-                            "trigger_kind": trigger_kind,
-                            "frame_index_in": frame_index,
-                            "routed_via": "node",
-                            "node_id": node_id,
-                        });
-                        add_owner_user_id_if_shared(
-                            &mut event_data,
-                            &service_owner_user_id,
-                            &proxy_actor_user_id,
-                        );
-                        audit_service::log_async(
-                            db.clone(),
-                            Some(user_id.clone()),
-                            "ws_frame_auth_injected".to_string(),
-                            Some(event_data),
-                            ip_address.clone(),
-                            user_agent.clone(),
-                            api_key_id.clone(),
-                            api_key_name.clone(),
-                        );
-                    }
-                    Some(WsProxyFrame::Closed { code, reason }) => {
-                        let close_frame = code.map(|c| axum::extract::ws::CloseFrame {
-                            code: c,
-                            reason: reason.unwrap_or_default().into(),
-                        });
-                        let _ = client_sink
-                            .send(axum::extract::ws::Message::Close(close_frame))
-                            .await;
-                        break;
-                    }
-                    Some(WsProxyFrame::Error(e)) => {
-                        let _ = client_sink
-                            .send(axum::extract::ws::Message::Close(Some(
-                                axum::extract::ws::CloseFrame {
-                                    code: 1011,
-                                    reason: e.into(),
-                                },
-                            )))
-                            .await;
-                        break;
-                    }
-                    None => {
-                        // Node disconnected
-                        let _ = client_sink
-                            .send(axum::extract::ws::Message::Close(Some(
-                                axum::extract::ws::CloseFrame {
-                                    code: 1001,
-                                    reason: "Node disconnected".into(),
-                                },
-                            )))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        }
+        })
+        .await;
+    if completed.is_none() || deadline.expired() {
+        tracing::info!(service_id = %service_id, "Node WS passthrough max duration reached");
     }
 
-    let _ = client_sink.close().await;
+    if shutdown.is_stopped() {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(100), client_sink.close()).await;
+    } else {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), client_sink.close()).await;
+    }
     stats.duration = start.elapsed();
     stats.realtime_llm_usage = realtime_llm_usage.finalize();
+    stats.realtime_llm_usage.collection_enabled = collect_realtime_llm_usage;
     stats
 }
 
@@ -9820,6 +9948,7 @@ mod tests {
         };
 
         MeteredProxyContext {
+            funded: false,
             route: Some(BillingRouteContext::new(
                 crate::services::billing::BillingIngress::Proxy,
                 "request-1".to_string(),
@@ -10335,6 +10464,7 @@ mod tests {
                 None,
                 tokio_util::sync::CancellationToken::new(),
                 None,
+                &mut None,
             )
             .await;
         })
@@ -10433,6 +10563,7 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -11983,6 +12114,7 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
     use super::{
@@ -16530,8 +16662,8 @@ mod nyxbot_readiness_tests {
         let f = crate::services::org_agent_tests::Fixture::new("nyxbot_model_call_readiness").await;
         let db = f.state.db.clone();
         let owner = f.admin.clone();
-        // Mirror prod: readiness-gated flags are globally on while the fleet
-        // readiness roster was never declared (security_replicas empty of this process).
+        // Readiness-gated flags are globally on while the executing process
+        // has no live security_replicas observation.
         for flag in [
             "assistant:live-turn-gate",
             "assistant:operation-scopes",
@@ -16734,3 +16866,7 @@ mod nyxbot_readiness_tests {
 #[cfg(test)]
 #[path = "proxy_real_work_tests.rs"]
 mod real_work_tests;
+
+#[cfg(test)]
+#[path = "proxy/realtime_usage_tests.rs"]
+mod realtime_usage_tests;

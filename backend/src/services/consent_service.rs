@@ -3,6 +3,8 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
+use super::audit_service::required::{self, TextField};
+
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
@@ -781,88 +783,111 @@ pub async fn check_consent(
 }
 
 /// Revoke consent for a specific client.
-pub async fn revoke_consent(
+pub async fn revoke_consent_as(
     db: &mongodb::Database,
-    user_id: &str,
+    actor: &super::audit_service::AuditActor,
     client_id: &str,
 ) -> AppResult<ConsentRevocationResult> {
-    let mut session = db.client().start_session().await?;
-    let db = db.clone();
-    let user_id = user_id.to_owned();
-    let client_id = client_id.to_owned();
-    session
-        .start_transaction()
-        .write_concern(mongodb::options::WriteConcern::majority())
-        .and_run2(async move |session| {
-            let result: AppResult<ConsentRevocationResult> = async {
-                // Conflict with Machine consent preparation on the same live
-                // owner source row, then remove every unconsumed request. This
-                // prevents absent->approved->deleted consent ABA from making a
-                // formerly pending initial request authoritative again.
-                db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-                    .update_one(
-                        doc! {"_id":&user_id},
-                        // Keep in-flight Machine selections stale even across
-                        // absent -> approved -> revoked -> absent consent ABA.
-                        // This is not a grant security epoch: other live grants
-                        // retain their authority and ordinary fence writes do
-                        // not invalidate the preparation's consent baseline.
-                        doc! {"$inc":{"machine_external_fence":1_i64,"machine_consent_revocation_revision":1_i64}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                db.collection::<bson::Document>(
-                    crate::models::machine_oauth_consent_request::COLLECTION_NAME,
-                )
-                .delete_many(
-                    doc! {"user_id":&user_id,"client_id":&client_id,"consumed_at":bson::Bson::Null},
-                )
-                .session(&mut *session)
-                .await?;
-                // Retain the revocation generation after deleting consent so
-                // older browser decisions cannot resurrect the revoked grant.
-                // Explicit ownership also allows personal-account erasure.
-                db.collection::<bson::Document>(REVOCATION_FENCES)
-                    .update_one(
-                        doc! {"_id": format!("{user_id}:{client_id}")},
-                        doc! {"$set": {"user_id":&user_id,"client_id":&client_id,"revoked_at": bson::DateTime::now(), "version":Uuid::new_v4().to_string()}},
-                    )
-                    .upsert(true)
-                    .session(&mut *session)
-                    .await?;
-                let deleted = db
-                    .collection::<Consent>(CONSENTS)
-                    .delete_one(doc! { "user_id": &user_id, "client_id": &client_id })
-                    .session(&mut *session)
-                    .await?;
-                if deleted.deleted_count == 0 {
-                    return Err(AppError::ConsentNotFound);
-                }
-                super::machine_external_grant_service::invalidate_oauth_in_session(
-                    &db,
-                    &user_id,
-                    &client_id,
-                    "consent_revoked",
-                    session,
-                )
-                .await?;
-                let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
-                    0
-                } else {
-                    db.collection::<RefreshToken>(REFRESH_TOKENS).update_many(
-                    doc! { "user_id": &user_id, "client_id": &client_id, "revoked": false },
-                    doc! { "$set": { "revoked": true, "revoked_at": bson::DateTime::now() } },
-                ).session(&mut *session).await?.modified_count
-                };
-                Ok(ConsentRevocationResult {
-                    revoked_refresh_tokens,
-                })
-            }
-            .await;
-            super::api_key_mutation_service::transaction_result(result)
-        })
-        .await
-        .map_err(super::api_key_mutation_service::map_transaction_error)
+    super::transaction_service::run_db_only(db, &(db, actor, client_id), |session, context| {
+        Box::pin(revoke_consent_in_session(session, context))
+    })
+    .await
+}
+
+async fn revoke_consent_in_session(
+    session: &mut mongodb::ClientSession,
+    context: &(&mongodb::Database, &super::audit_service::AuditActor, &str),
+) -> AppResult<ConsentRevocationResult> {
+    let (db, actor, client_id) = *context;
+    let user_id = actor.user_id.as_str();
+    // Conflict with Machine consent preparation on the same live
+    // owner source row, then remove every unconsumed request. This
+    // prevents absent->approved->deleted consent ABA from making a
+    // formerly pending initial request authoritative again.
+    // Keep in-flight Machine selections stale across consent ABA. Other live
+    // grants retain authority: this is not a grant security epoch.
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": user_id},
+            doc! {"$inc": {
+                "machine_external_fence": 1_i64,
+                "machine_consent_revocation_revision": 1_i64,
+            }},
+        )
+        .session(&mut *session)
+        .await?;
+    db.collection::<bson::Document>(crate::models::machine_oauth_consent_request::COLLECTION_NAME)
+        .delete_many(
+            doc! {"user_id":&user_id,"client_id":&client_id,"consumed_at":bson::Bson::Null},
+        )
+        .session(&mut *session)
+        .await?;
+    // Retain the revocation generation after deleting consent so
+    // older browser decisions cannot resurrect the revoked grant.
+    // Explicit ownership also allows personal-account erasure.
+    db.collection::<bson::Document>(REVOCATION_FENCES)
+        .update_one(
+            doc! {"_id": format!("{user_id}:{client_id}")},
+            doc! {"$set": {
+                "user_id": user_id,
+                "client_id": client_id,
+                "revoked_at": bson::DateTime::now(),
+                "version": Uuid::new_v4().to_string(),
+            }},
+        )
+        .upsert(true)
+        .session(&mut *session)
+        .await?;
+    let deleted = db
+        .collection::<Consent>(CONSENTS)
+        .delete_one(doc! { "user_id": &user_id, "client_id": &client_id })
+        .session(&mut *session)
+        .await?;
+    if deleted.deleted_count == 0 {
+        return Err(AppError::ConsentNotFound);
+    }
+    super::machine_external_grant_service::invalidate_oauth_in_session(
+        db,
+        user_id,
+        client_id,
+        "consent_revoked",
+        session,
+    )
+    .await?;
+    let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
+        0
+    } else {
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_many(
+                doc! { "user_id": &user_id, "client_id": &client_id, "revoked": false },
+                doc! { "$set": { "revoked": true, "revoked_at": bson::DateTime::now() } },
+            )
+            .session(&mut *session)
+            .await?
+            .modified_count
+    };
+    let (revoked_broker_bindings, mut intents) =
+        super::oauth_broker_service::revoke_user_client_in_session(
+            db,
+            session,
+            client_id,
+            user_id,
+            "user_revoked",
+        )
+        .await?;
+    intents.push(required::intent(
+        Some(actor),
+        "oauth_consent_revoked",
+        Some(serde_json::json!({
+            "client_id": required::text(TextField::Identifier, client_id),
+            "revoked_refresh_tokens": revoked_refresh_tokens,
+            "revoked_broker_bindings": revoked_broker_bindings,
+        })),
+    )?);
+    super::security_effect_service::enqueue_in_session(db, session, &intents).await?;
+    Ok(ConsentRevocationResult {
+        revoked_refresh_tokens,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -895,6 +920,26 @@ pub async fn list_client_consents(
         .await?;
 
     Ok(consents)
+}
+
+#[cfg(test)]
+pub async fn revoke_consent(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+) -> AppResult<ConsentRevocationResult> {
+    revoke_consent_as(
+        db,
+        &super::audit_service::AuditActor {
+            user_id: user_id.into(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        client_id,
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -30,7 +30,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
-    apiBaseUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    associatedUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    androidHttpsAppLinks: r.androidHttpsAppLinks,
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,
     scheme: ident.scheme,
@@ -53,6 +54,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       buildNumber: r.iosBuildNumber,
       associatedDomains,
       infoPlist: {
+        UIBackgroundModes: ["audio", "fetch", "remote-notification"],
         ITSAppUsesNonExemptEncryption: false,
         UISupportedInterfaceOrientations: [
           "UIInterfaceOrientationPortrait",
@@ -72,6 +74,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
         NSMicrophoneUsageDescription:
           "Allow NyxID to use your microphone for dictation and voice conversations.",
+        NSPhotoLibraryAddUsageDescription:
+          "Allow NyxID to save images you choose from chats to your photo library.",
       },
     },
     android: {

@@ -1,6 +1,7 @@
 //! Real turn -> local NyxAgent stand-in -> authenticated proxy -> local model.
 use super::*;
 use crate::models::{approval_request::ApprovalRequest, audit_log::AuditLog};
+use crate::services::execution_permission_dispatch::proposals::{self, ModelApprovalHook};
 use axum::{
     Extension,
     body::Body,
@@ -11,21 +12,117 @@ use mongodb::bson;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProposalCase {
+    New,
+    NextTurn,
+    Existing,
+    ExistingDecided,
+    Limit,
+    TaskFence,
+}
+
+impl ProposalCase {
+    fn hook(self) -> ModelApprovalHook {
+        let prepared = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Arc::new(move |db, request| {
+            let prepared = prepared.clone();
+            Box::pin(async move {
+                if prepared.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                match self {
+                    Self::New | Self::NextTurn => {}
+                    Self::Existing | Self::ExistingDecided => {
+                        let mut request = request;
+                        if self == Self::ExistingDecided {
+                            request.status = "denied".into();
+                            request.decided_at = Some(Utc::now());
+                            let envelope = request.execution_proposal.as_mut().unwrap();
+                            envelope
+                                .v1
+                                .as_mut()
+                                .or(envelope.v3.as_mut())
+                                .or(envelope.v4.as_mut())
+                                .unwrap()
+                                .state = "denied".into();
+                        }
+                        db.collection::<ApprovalRequest>("approval_requests")
+                            .insert_one(&request)
+                            .await
+                            .unwrap();
+                        crate::services::audit_service::log_system_event(
+                            db.clone(),
+                            "execution_permission_requested",
+                            Some(json!({"request_id":request.id})),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Self::Limit => {
+                        let mut rows = Vec::new();
+                        for index in 0..32 {
+                            let mut row = bson::to_document(&request).unwrap();
+                            row.insert("_id", format!("existing-{index}"));
+                            row.insert("idempotency_key", format!("existing-{index}"));
+                            let version = format!(
+                                "v{}",
+                                request.execution_proposal.as_ref().unwrap().version
+                            );
+                            row.get_document_mut("execution_proposal")
+                                .unwrap()
+                                .get_document_mut(&version)
+                                .unwrap()
+                                .insert("gap_key", format!("existing-{index}"));
+                            rows.push(row);
+                        }
+                        db.collection::<bson::Document>("approval_requests")
+                            .insert_many(rows)
+                            .await
+                            .unwrap();
+                    }
+                    Self::TaskFence => {
+                        let task = &proposals::proposal(&request).unwrap().task;
+                        let changed = db
+                            .collection::<bson::Document>("assistant_messages")
+                            .update_one(
+                                doc! {"_id":&task.task.root_id},
+                                doc! {"$inc":{"execution_task.epoch":1_i64}},
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(changed.matched_count, 1);
+                    }
+                }
+            })
+        })
+    }
+}
+
 async fn callback_proxy(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((slug, path)): Path<(String, String)>,
+    Extension(hook): Extension<ModelApprovalHook>,
     request: Request<Body>,
 ) -> AppResult<axum::response::Response> {
-    Box::pin(crate::handlers::proxy::proxy_request_by_slug_inner(
-        &state,
-        &auth,
-        &slug,
-        &path,
-        request,
-        &mut String::new(),
-    ))
-    .await
+    // Keep the proposal write slower than several 250 ms turn-stop polls.
+    proposals::MODEL_APPROVAL_PREPARE
+        .scope(
+            hook,
+            proposals::MODEL_APPROVAL_DELAY.scope(Duration::from_millis(750), async {
+                Box::pin(crate::handlers::proxy::proxy_request_by_slug_inner(
+                    &state,
+                    &auth,
+                    &slug,
+                    &path,
+                    request,
+                    &mut String::new(),
+                ))
+                .await
+            }),
+        )
+        .await
 }
 async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -37,6 +134,21 @@ async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 async fn model_approval_pipeline(origin: &'static str, policy: &'static str, permissions: bool) {
+    Box::pin(model_approval_pipeline_case(
+        origin,
+        policy,
+        permissions,
+        ProposalCase::New,
+    ))
+    .await;
+}
+
+async fn model_approval_pipeline_case(
+    origin: &'static str,
+    policy: &'static str,
+    permissions: bool,
+    case: ProposalCase,
+) {
     let (state, _, original) = setup("model_approval_pipeline").await;
     original.abort();
     let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
@@ -157,6 +269,7 @@ async fn model_approval_pipeline(origin: &'static str, policy: &'static str, per
         .layer(Extension(
             crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY,
         ))
+        .layer(Extension(case.hook()))
         .with_state(state.clone());
     let callback_calls = Arc::new(AtomicUsize::new(0));
     let observed_calls = callback_calls.clone();
@@ -368,7 +481,16 @@ async fn model_approval_pipeline(origin: &'static str, policy: &'static str, per
         .count_documents(doc! {})
         .await
         .unwrap();
-    assert!(approvals <= 1);
+    assert!(approvals <= if case == ProposalCase::Limit { 32 } else { 1 });
+    if case != ProposalCase::New {
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == "assistant")
+                .count(),
+            1
+        );
+    }
     assert_eq!(
         callback_calls.load(Ordering::SeqCst),
         1,
@@ -383,7 +505,11 @@ async fn model_approval_pipeline(origin: &'static str, policy: &'static str, per
     } else {
         assert_eq!(
             approvals,
-            u64::from(permissions && origin == "user" && policy == "write")
+            match case {
+                ProposalCase::Limit => 32,
+                ProposalCase::TaskFence => 0,
+                _ => u64::from(permissions && origin == "user" && policy == "write"),
+            }
         );
         assert_eq!(
             state
@@ -392,7 +518,12 @@ async fn model_approval_pipeline(origin: &'static str, policy: &'static str, per
                 .count_documents(doc! {"event_type":"execution_permission_requested"})
                 .await
                 .unwrap(),
-            u64::from(permissions && origin == "user" && policy == "write")
+            u64::from(
+                permissions
+                    && origin == "user"
+                    && policy == "write"
+                    && !matches!(case, ProposalCase::Limit | ProposalCase::TaskFence)
+            )
         );
         let code = if policy == "deny" {
             "model_policy_denied"
@@ -479,6 +610,127 @@ async fn model_approval_pipeline(origin: &'static str, policy: &'static str, per
     }
     assert!(!event.to_string().contains("CREW TEST OK"));
     assert!(!event.to_string().contains("test-only-master"));
+    if case == ProposalCase::NextTurn {
+        let first = state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        let prior = proposals::proposal(&first).unwrap();
+        assert_eq!(first.status, "pending");
+        callback_calls.store(0, Ordering::SeqCst);
+        let input: engine::TurnRequest = serde_json::from_value(json!({
+            "text":"Reply with only CREW TEST OK", "agent_id":nyxbot.id, "conversation_id":conversation.id, "retry_of":prior.source_turn_id
+        })).unwrap();
+        let mut input = TurnStart::from(&input);
+        input.execution_enrollment = true;
+        let retry = Box::pin(start_server_turn(
+            &state,
+            OWNER,
+            input.clone(),
+            Pool::Team {
+                owner: OWNER,
+                limit: 2,
+            },
+        ))
+        .await;
+        match retry {
+            Err(AppError::Conflict(message)) => {
+                assert!(
+                    message.starts_with("Retry unavailable (activity_"),
+                    "{message}"
+                );
+                eprintln!("pending model proposal retry: {message}");
+            }
+            _ => panic!("pending proposal must retain the existing recovery-evidence fence"),
+        }
+        assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            engine::get(&state.db, OWNER, &conversation.id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        // A fresh owner message is a new turn and task, not a replay of the
+        // unresolved effect. Preserve the base's occurrence-scoped gap key.
+        input.retry_of = None;
+        input.agent_id = None;
+        let start = std::time::Instant::now();
+        let Started::Turn {
+            conversation: second,
+            ..
+        } = Box::pin(start_server_turn(
+            &state,
+            OWNER,
+            input,
+            Pool::Team {
+                owner: OWNER,
+                limit: 2,
+            },
+        ))
+        .await
+        .unwrap()
+        else {
+            panic!("not started");
+        };
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while engine::get(&state.db, OWNER, &second.id)
+                .await
+                .unwrap()
+                .active_turn
+                .is_some()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(15));
+        let messages = engine::messages(&state.db, OWNER, &second.id, 20, None)
+            .await
+            .unwrap();
+        let replies: Vec<_> = messages.iter().filter(|m| m.role == "assistant").collect();
+        assert_eq!(replies.len(), 2);
+        assert!(
+            replies
+                .iter()
+                .all(|m| m.error_code.as_deref() == Some("model_approval_required"))
+        );
+        assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model_calls.load(Ordering::SeqCst), 0);
+        let approvals = state.db.collection::<ApprovalRequest>("approval_requests");
+        assert_eq!(approvals.count_documents(doc! {}).await.unwrap(), 2);
+        let next = approvals
+            .find_one(doc! {"_id":{"$ne":&first.id}})
+            .await
+            .unwrap()
+            .unwrap();
+        let next = proposals::proposal(&next).unwrap();
+        assert_ne!(next.task.task, prior.task.task);
+        assert_ne!(next.source_turn_id, prior.source_turn_id);
+        assert_ne!(next.gap_key, prior.gap_key);
+        assert_eq!(
+            approvals
+                .find_one(doc! {"_id":&first.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending"
+        );
+    }
     agent_task.abort();
     model_task.abort();
     state.db.drop().await.unwrap();
@@ -543,4 +795,59 @@ async fn model_approval_org_policy_is_not_exempt_and_fails_promptly() {
         Box::pin(model_approval_pipeline(origin, "org", false)).await;
     }
     Box::pin(model_approval_pipeline("crew", "org", true)).await;
+}
+
+#[tokio::test]
+async fn model_approval_existing_proposal_still_settles_once() {
+    Box::pin(model_approval_pipeline_case(
+        "user",
+        "write",
+        true,
+        ProposalCase::Existing,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn model_approval_proposal_limit_still_settles_once() {
+    Box::pin(model_approval_pipeline_case(
+        "user",
+        "write",
+        true,
+        ProposalCase::Limit,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn model_approval_task_fence_failure_still_settles_once() {
+    Box::pin(model_approval_pipeline_case(
+        "user",
+        "write",
+        true,
+        ProposalCase::TaskFence,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn model_approval_decided_proposal_still_settles_once() {
+    Box::pin(model_approval_pipeline_case(
+        "user",
+        "write",
+        true,
+        ProposalCase::ExistingDecided,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn model_approval_pending_retry_and_new_turn_keep_gap_identity() {
+    Box::pin(model_approval_pipeline_case(
+        "user",
+        "write",
+        true,
+        ProposalCase::NextTurn,
+    ))
+    .await;
 }

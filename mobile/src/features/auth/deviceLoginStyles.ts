@@ -183,6 +183,12 @@ export function createDeviceLoginStyles(c: ThemeColors) {
       padding: spacing.huge,
       gap: spacing.xxxl,
     },
+    terminalBody: {
+      ...typeScale.description,
+      color: c.textSecondary,
+      textAlign: "center" as const,
+      maxWidth: 360,
+    },
     terminalTitle: {
       ...typeScale.pageHeader,
       color: c.textPrimary,

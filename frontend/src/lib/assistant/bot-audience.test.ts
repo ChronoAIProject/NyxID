@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { appI18n } from "@/i18n/instance";
-import cn from "@/i18n/locales/zh-CN.json";
-import tw from "@/i18n/locales/zh-TW.json";
+import cn from "@/i18n/locales/app/zh-CN";
+import tw from "@/i18n/locales/app/zh-TW";
 import { nyxAgentChannelAgentSchema } from "@/schemas/assistant-nyxagent";
 import { botAudienceDescription } from "./bot-audience";
 const channel = nyxAgentChannelAgentSchema.parse({

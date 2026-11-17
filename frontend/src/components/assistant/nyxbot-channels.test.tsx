@@ -1,4 +1,7 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { formatDateTime } from "@/lib/utils";
+import { appI18n } from "@/i18n/instance";
+import zh from "@/i18n/locales/app/zh-CN";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { assistantAgentSchema, nyxAgentChannelAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
@@ -11,6 +14,7 @@ const data = vi.hoisted(() => ({
   orgs: [] as unknown[],
   orgChannels: false,
   connect: vi.fn(),
+  preview: vi.fn(),
   link: vi.fn(),
   retryGateway: vi.fn(),
   pending: false,
@@ -18,6 +22,7 @@ const data = vi.hoisted(() => ({
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   nyxBotOf: (agents: AssistantAgent[]) => agents.find((agent) => agent.kind === "nyxbot"),
   useNyxBotChannels: () => ({ data: data.channels }),
+  usePreviewOrgChannel: () => ({ isPending: false, mutateAsync: data.preview }),
   useConnectNyxBotChannel: () => ({ isPending: data.pending, mutateAsync: data.connect }),
   useDisconnectNyxBotChannel: () => ({ isPending: false }),
   useLinkNyxBotChannel: () => ({ isPending: false, mutateAsync: data.link }),
@@ -43,8 +48,8 @@ vi.mock("./org-specialist-channel-settings", () => ({
   OrgSpecialistChannelSettings: () => <section data-member-verification="" tabIndex={-1} aria-label="Verify my chat account">Member verification</section>,
 }));
 vi.mock("./nyxbot-channel-chats", () => ({
-  ChannelChats: ({ agents }: { agents: readonly AssistantAgent[] }) => (
-    <div data-testid="channel-chat-agents">
+  ChannelChats: ({ agents, readOnly }: { agents: readonly AssistantAgent[]; readOnly?: boolean }) => (
+    <div data-testid="channel-chat-agents" data-read-only={readOnly}>
       {agents.map((agent) => <span key={agent.id}>{agent.name}</span>)}
     </div>
   ),
@@ -64,6 +69,12 @@ beforeEach(() => {
     },
   });
   data.link.mockResolvedValue(undefined);
+  data.preview.mockResolvedValue({
+    bot_id:"owned",agent_id:"org-specialist",org_id:"team",guest_enabled:true,private_chats:"everyone",guest_policy_mode:"grants",
+    description:"Guests can talk privately and in groups. The organization pays for guest messages and tool use.",
+    effective_guest_services:[{id:"calendar",label:"Calendar",access:"use",limited_operations:true}],
+    audience_readiness:{guest_readiness:{status:"ready"},configuration:{instructions_present:true,persona_present:false,memory_notes:0,skills:0,service_grants:1,account_read:true},note:"Configuration facts"},health:null,
+  });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -306,6 +317,22 @@ it.each([
     "org_access_lost",
     "You no longer administer the organization that owns this bot, so NyxBot stopped answering through it.",
   ],
+  [
+    "org_access_restoration_pending",
+    "This organization channel is being restored automatically; it normally returns in under a minute. Members must verify their chat account again.",
+  ],
+  [
+    "org_access_restoration_waiting_readiness",
+    "This organization channel is waiting for required safety checks to become available. NyxID will retry automatically; no administrator rights were lost.",
+  ],
+  [
+    "org_access_restoration_retrying_gateway",
+    "The channel connection is retrying restoration. The retry schedule can take hours; no administrator rights were lost.",
+  ],
+  [
+    "org_access_restored",
+    "This organization channel was restored. Members must verify their chat account again. Guest access is preserved as before.",
+  ],
   ["future_code", "This connection failed."],
   ["__proto__", "This connection failed."],
 ])(
@@ -379,7 +406,7 @@ it("keeps member verification available on an existing binding without giving ma
   expect(
     screen.queryByRole("button", { name: /Link account|Link another account/ }),
   ).not.toBeInTheDocument();
-  expect(screen.queryByTestId("channel-chat-agents")).not.toBeInTheDocument();
+  expect(screen.getByTestId("channel-chat-agents")).toHaveAttribute("data-read-only", "true");
   expect(
     screen.getByRole("combobox", { name: "Agent for Receipts" }),
   ).toBeDisabled();
@@ -445,7 +472,14 @@ it("explains individual verification after connecting an organization specialist
   render(<ChannelBotsManager agents={[specialist]} agent={specialist} />);
   await userEvent.click(screen.getByRole("button", { name: "Connect another bot" }));
   await userEvent.click(screen.getByRole("button", { name: "Connect Team bot to org-specialist" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("Each member, including admins, must verify their own chat account");
+  const disclosure = await screen.findByRole("dialog", {name:"Connect organization bot"});
+  expect(disclosure).toHaveTextContent("organization pays");
+  expect(disclosure).toHaveTextContent("Calendar: Use, but not change or delete");
+  expect(disclosure).toHaveTextContent("Selected operations only");
+  expect(disclosure).toHaveTextContent("Guests cannot use account tools");
+  expect(data.connect).not.toHaveBeenCalled();
+  await userEvent.click(within(disclosure).getByRole("button", {name:"Confirm connection"}));
+  expect(await screen.findByText(/Each member, including admins, must verify their own chat account/)).toBeVisible();
   expect(screen.queryByText("LINK123")).not.toBeInTheDocument();
 });
 
@@ -486,4 +520,39 @@ it.each(["unknown", "unconfirmed"])("does not call legacy relay status %s workin
   expect(screen.queryByText("Working on NyxID relay.")).not.toBeInTheDocument();
   if (status === "unconfirmed") expect(screen.getByText(/Intake not confirmed: No authenticated inbound has been confirmed/)).toBeVisible();
   expect(screen.queryByText(/delivery failed/)).not.toBeInTheDocument();
+});
+
+
+it.each(["gateway_native_draining", "relay_draining"])("preserves intake evidence and the correct retry action for %s", (code) => {
+  for (const intake of [undefined, { receiving_side: "nyxid_relay", state: "stopped", code: "discord_relay_blocked", block_reason: "auth_refused", handed_over_at: at, last_inbound_at: at }]) {
+    data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", gateway_native_activation: code, discord_intake: intake })];
+    render(<ChannelBotsManager agents={[]} />);
+    if (code === "gateway_native_draining") {
+      expect(screen.getByText(/Discord intake is paused while/)).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Retry native gateway now" })).not.toBeInTheDocument();
+    } else {
+      expect(screen.queryByText(/Discord intake is paused while/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Retry native gateway now" })).toBeVisible();
+      if (!intake) expect(screen.getByText("Waiting for the native gateway to release Discord before the relay can resume.")).toBeVisible();
+    }
+    if (intake) {
+      expect(screen.getByText("Receiving side: NyxID relay. Intake: stopped.")).toBeVisible();
+      expect(screen.getByText(/^Last confirmed inbound:/)).toHaveTextContent(formatDateTime(at));
+      expect(screen.getByText(/^Handed over:/)).toHaveTextContent(formatDateTime(at));
+      expect(screen.getByText("Intake blocked by: auth_refused.")).toBeVisible();
+    }
+    expect(screen.queryByText(/activation did not complete|Working on NyxID relay/)).not.toBeInTheDocument();
+    cleanup();
+  }
+});
+
+it("renders the Discord release safety explanation in Chinese without a retry button", async () => {
+  appI18n.addResourceBundle("zh-CN", "app", zh, true, true);
+  await act(() => appI18n.changeLanguage("zh-CN"));
+  try {
+    data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", gateway_native_activation: "gateway_native_draining" })];
+    render(<ChannelBotsManager agents={[]} />);
+    expect(screen.getByText(zh["Discord intake is paused while the retained gateway release and safety drain are checked. NyxID keeps checking; retrying activation cannot bypass this safety check."]!)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /重试|Retry native/ })).not.toBeInTheDocument();
+  } finally { await act(() => appI18n.changeLanguage("en")); }
 });

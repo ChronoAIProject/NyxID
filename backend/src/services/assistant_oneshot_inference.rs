@@ -940,7 +940,7 @@ impl Drop for MeterGuard {
             model: self.model.clone(),
             armed: false,
         };
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             let _ = Box::pin(guard.finish()).await;
         });
     }

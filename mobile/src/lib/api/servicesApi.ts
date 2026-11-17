@@ -5,6 +5,8 @@ import {
   serviceConnectionSchema,
 } from "../../features/services/serviceContracts";
 
+import { serviceOAuthReturnUri } from "../../features/services/serviceOAuthModel";
+
 const keyPath = (id: string) => `/keys/${encodeURIComponent(id)}`;
 
 export const servicesApi = {
@@ -85,8 +87,15 @@ export const servicesApi = {
     connectionId: string,
     orgId?: string,
     scopeOverride?: readonly string[],
+    options?: { appReturnUri?: string | null },
   ) {
-    const query = new URLSearchParams({ key_id: connectionId });
+    const query = new URLSearchParams({
+      key_id: connectionId,
+    });
+    const appReturnUri = options
+      ? options.appReturnUri
+      : serviceOAuthReturnUri();
+    if (appReturnUri) query.set("app_return_uri", appReturnUri);
     if (orgId) query.set("target_org_id", orgId);
     // Like Web, defined (including empty) replaces the provider's defaults.
     if (scopeOverride !== undefined)

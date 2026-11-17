@@ -69,10 +69,9 @@ async fn activated_model_dispatch_serves_same_name_overlap_and_rejects_unsupport
         .unwrap();
     assert!(report.activated && report.serving_ready && report.serving_with_roster_warnings);
     assert!(!report.ready);
-    assert!(matches!(
-        registry::require_activation_ready(&state.db).await,
-        Err(AppError::SecurityReadinessUnavailable)
-    ));
+    readiness::require_flag_enable(&state.db, registry::FLAG)
+        .await
+        .unwrap();
     registry::require_execution_ready(&state.db).await.unwrap();
     let server = MockServer::start().await;
     Mock::given(method("POST"))

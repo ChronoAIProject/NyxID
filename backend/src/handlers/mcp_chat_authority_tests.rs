@@ -8301,3 +8301,400 @@ async fn approval_gated_native_activity_keeps_tool_bytes_and_reconciles_after_al
 
 #[path = "mcp_chat_large_result_tests.rs"]
 mod large_results;
+
+#[tokio::test]
+async fn voice_parent_mcp_results_publish_once_without_channel_delivery_and_nonvoice_is_unchanged()
+{
+    use crate::models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME as THREADS,
+    };
+    use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES};
+    let f = orchestrator_fixture("voice_parent_mcp_links").await;
+    let ordinary = authenticate(&f).await;
+    let args = json!({"platform":"discord","label":"Voice setup"});
+    let output = direct_call(&f, &ordinary, "nyxid__channel_bot_setup_link", args.clone()).await;
+    let bytes = axum::body::to_bytes(output.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("nyx_bcl_"),
+        "ordinary chat keys keep their existing result"
+    );
+    let mut parent = f.row.clone();
+    parent.id = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    parent.credential_api_key_id = uuid::Uuid::new_v4().to_string();
+    parent.active_turn = None;
+    parent.reply_channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
+        native_event_id: None,
+        thread: None,
+        nyxbot_channel_id: uuid::Uuid::new_v4().to_string(),
+        partition: "owner-private-chat".into(),
+        platform: "telegram".into(),
+    });
+    f.state
+        .db
+        .collection::<AssistantConversation>(THREADS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"voice_parent_conversation_id":&parent.id}},
+        )
+        .await
+        .unwrap();
+    let voice = authenticate(&f).await;
+    assert_eq!(
+        voice
+            .chat
+            .as_ref()
+            .unwrap()
+            .voice_parent_conversation_id
+            .as_deref(),
+        Some(parent.id.as_str())
+    );
+    for _ in 0..2 {
+        let response = call(&f, &voice, "nyxid__channel_bot_setup_link", args.clone()).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!text.contains("nyx_bcl_") && !text.contains("nyx_clk_"));
+        assert!(!text.contains(&f.state.config.frontend_url));
+        let envelope: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(envelope["result"]["links_in_chat"], 1);
+    }
+    let rows: Vec<AssistantMessage> = f
+        .state
+        .db
+        .collection(MESSAGES)
+        .find(doc! {"conversation_id":&parent.id})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "two executions mint two distinct link lists");
+    assert!(rows[0].text != rows[1].text, "fresh links must be distinct");
+    for row in &rows {
+        assert!(row.text.starts_with('<') && row.text.ends_with('>'));
+        assert!(row.voice.is_none());
+        assert!(crate::services::voice::links::publication_row(row));
+    }
+    for collection in [
+        "channel_text_deliveries",
+        "channel_reply_deliveries",
+        "nyxbot_events",
+        "channel_messages",
+    ] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "{collection}"
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn voice_result_presentation_preserves_json_sse_and_inline_list_changed() {
+    let f = orchestrator_fixture("voice_result_wire_shapes").await;
+    let auth = authenticate(&f).await;
+    let mut chat = auth.chat.unwrap();
+    chat.voice_parent_conversation_id = Some(f.row.id.clone());
+    // No live turn: presentation must fail closed without changing transport.
+    chat.turn_id = None;
+    let url = format!("{}/connect/bot/nyx_bcl_wire", f.state.config.frontend_url);
+    for sse in [false, true] {
+        let content = vec![json!({"type":"text","text":url})];
+        let response = if sse {
+            content_result_with_notifications(
+                Some(json!(1)),
+                content,
+                false,
+                vec![tools_list_changed_notification()],
+            )
+        } else {
+            content_result(Some(json!(1)), content, false)
+        };
+        let response = present_voice_tool_response(
+            &f.state,
+            &chat,
+            &JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(json!(1)),
+                method: "tools/call".into(),
+                params: None,
+            },
+            response,
+        )
+        .await;
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream"),
+            sse
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let wire = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!wire.contains("nyx_bcl_") && !wire.contains(&url));
+        let envelopes: Vec<Value> = if sse {
+            wire.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        } else {
+            vec![serde_json::from_str(&wire).unwrap()]
+        };
+        let result = envelopes.iter().find_map(|v| v.get("result")).unwrap();
+        assert_eq!(result["links_in_chat"], 0);
+        assert_eq!(result["link_publication"], "failed");
+        if sse {
+            assert!(
+                envelopes
+                    .iter()
+                    .any(|v| v["method"] == "notifications/tools/list_changed")
+            );
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn voice_idless_tool_results_publish_independently_without_a_replay_identity() {
+    use crate::models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME as THREADS,
+    };
+    let f = orchestrator_fixture("voice_idless_calls").await;
+    let mut parent = f.row.clone();
+    parent.id = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    parent.active_turn = None;
+    parent.credential_api_key_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<AssistantConversation>(THREADS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"voice_parent_conversation_id":&parent.id}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    for (index, id) in [None, Some(Value::Null)].into_iter().enumerate() {
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id,
+            method: "tools/call".into(),
+            params: Some(
+                json!({"name":"nyxid__channel_bot_setup_link","arguments":{"platform":"discord","label":format!("Idless {index}")}}),
+            ),
+        };
+        let response = Box::pin(handle_tools_call(
+            &f.state,
+            &auth,
+            None,
+            &request,
+            false,
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+        ))
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["result"]["links_in_chat"], 1, "{envelope}");
+        assert!(!envelope.to_string().contains("nyx_bcl_"));
+    }
+    assert_eq!(f.state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME).count_documents(doc!{"conversation_id":&parent.id,"turn_metadata.voice_link_publication":{"$exists":true}}).await.unwrap(),2);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn voice_unchecked_output_withholds_content_without_changing_execution_outcome_or_digest() {
+    let f = orchestrator_fixture("voice_unchecked_output").await;
+    let mut chat = authenticate(&f).await.chat.unwrap();
+    chat.voice_parent_conversation_id = Some(f.row.id.clone());
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id: Some(json!(7)),
+        method: "tools/call".into(),
+        params: None,
+    };
+    for (sse, wire) in [
+        (
+            false,
+            format!(
+                "{{\"result\":{{\"content\":\"{}nyx_bcl_secret\"}}}}",
+                "x".repeat(8 * 1024 * 1024)
+            ),
+        ),
+        (false, "{not json nyx_clk_secret".into()),
+        (true, "data: {not json nyx_bcl_secret\n\n".into()),
+    ] {
+        for outcome in [
+            ToolOutcome::Completed,
+            ToolOutcome::PolicyRefusal,
+            ToolOutcome::DecisionRequired,
+            ToolOutcome::Error,
+        ] {
+            let mut response = Response::new(axum::body::Body::from(wire.clone()));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                if sse {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                }
+                .parse()
+                .unwrap(),
+            );
+            response.extensions_mut().insert(outcome);
+            response
+                .extensions_mut()
+                .insert(ToolResultDigest("original-effect-digest".into()));
+            let response = present_voice_tool_response(&f.state, &chat, &request, response).await;
+            assert_eq!(response.extensions().get::<ToolOutcome>(), Some(&outcome));
+            assert_eq!(
+                response.extensions().get::<ToolResultDigest>().unwrap().0,
+                "original-effect-digest"
+            );
+            assert_eq!(tool_succeeded(&response), outcome == ToolOutcome::Completed);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(!text.contains("nyx_bcl_") && !text.contains("nyx_clk_"));
+            let json = if sse {
+                text.strip_prefix("data: ").unwrap().trim()
+            } else {
+                text
+            };
+            let envelope: Value = serde_json::from_str(json).unwrap();
+            assert!(envelope.get("error").is_none());
+            assert_eq!(envelope["id"], 7);
+            assert_eq!(envelope["result"]["isError"], outcome == ToolOutcome::Error);
+            assert_eq!(envelope["result"]["links_in_chat"], 0);
+            assert!(
+                envelope["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Do not repeat the action")
+            );
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn voice_rpc_error_envelopes_redact_links_in_json_and_sse_without_changing_failure() {
+    use crate::models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME as THREADS,
+    };
+    let f = orchestrator_fixture("voice_error_envelopes").await;
+    let mut parent = f.row.clone();
+    parent.id = format!("nyxa-{}", uuid::Uuid::new_v4().simple());
+    parent.active_turn = None;
+    parent.credential_api_key_id = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<AssistantConversation>(THREADS)
+        .insert_one(&parent)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"voice_parent_conversation_id": &parent.id}},
+        )
+        .await
+        .unwrap();
+    let chat = authenticate(&f).await.chat.unwrap();
+    let url = format!(
+        "{}/login/device?user_code=ABCD",
+        f.state.config.frontend_url
+    );
+    for sse in [false, true] {
+        let mut response = rpc_error(
+            Some(json!(9)),
+            -32602,
+            &format!("Review {url} nyx_clk_secret"),
+        );
+        if sse {
+            let (mut parts, body) = response.into_parts();
+            let bytes = axum::body::to_bytes(body, 4096).await.unwrap();
+            parts.headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                "text/event-stream".parse().unwrap(),
+            );
+            response = Response::from_parts(
+                parts,
+                axum::body::Body::from(format!(
+                    "data: {}\n\n",
+                    std::str::from_utf8(&bytes).unwrap()
+                )),
+            );
+        }
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(9)),
+            method: "tools/call".into(),
+            params: None,
+        };
+        let response = present_voice_tool_response(&f.state, &chat, &request, response).await;
+        assert_eq!(
+            response.extensions().get::<ToolOutcome>(),
+            Some(&ToolOutcome::Error)
+        );
+        assert_eq!(
+            response.extensions().get::<RpcFailureCode>().unwrap().0,
+            -32602
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let wire = std::str::from_utf8(&bytes).unwrap();
+        assert!(!wire.contains(&url) && !wire.contains("nyx_clk_"));
+        let envelope: Value = serde_json::from_str(if sse {
+            wire.strip_prefix("data: ").unwrap().trim()
+        } else {
+            wire
+        })
+        .unwrap();
+        assert!(envelope.get("result").is_none());
+        assert_eq!(envelope["error"]["code"], -32602);
+        assert_eq!(envelope["error"]["links_in_chat"], 1);
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .count_documents(doc! {"conversation_id": &parent.id})
+            .await
+            .unwrap(),
+        1
+    );
+    f.state.db.drop().await.unwrap();
+}

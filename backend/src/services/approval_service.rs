@@ -1286,7 +1286,7 @@ pub(crate) async fn process_decision_with_access(
     let db_clone = db.clone();
     let fcm_auth_clone = fcm_auth.clone();
     let apns_auth_clone = apns_auth.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _ = notification_service::notify_decision(
             &config_clone,
             &http_clone,
@@ -1411,7 +1411,7 @@ pub async fn expire_pending_requests(
             let http = http_client.clone();
             let token = bot_token.to_string();
             let svc_name = req.service_name.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 let _ = crate::services::telegram_service::edit_message_after_decision(
                     &http,
                     &token,

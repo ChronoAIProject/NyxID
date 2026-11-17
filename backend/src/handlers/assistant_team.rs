@@ -38,7 +38,6 @@ use crate::{
         assistant_settings_service as settings,
         assistant_team_service::{self as team, TeamRefusal},
         assistant_team_tools,
-        coordination_service::RateWindowStore,
     },
 };
 
@@ -211,6 +210,9 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 /// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
+    let Some(_claim) = state.shutdown.background() else {
+        return;
+    };
     let result: AppResult<()> = async {
         let (row, org_access) = match Box::pin(engine::get_authorized(&state.db, owner, id)).await {
             Ok(authorized) => authorized,
@@ -222,6 +224,21 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
+        let automation =
+            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
+                .await?;
+        if !automation
+            && crate::services::coordination_service::RateWindowStore::is_exhausted(
+                &state.db,
+                "assistant_event_turns",
+                owner,
+                team::EVENT_TURNS_PER_HOUR,
+                Duration::from_secs(3600),
+            )
+            .await?
+        {
+            return Ok(());
+        }
         if Box::pin(crate::services::channel_thread_follow_service::prune_queue(
             &state.db, owner, id,
         ))
@@ -241,9 +258,6 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         }) {
             return Ok(());
         }
-        let automation =
-            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
-                .await?;
         if !automation && !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
             return Ok(());
         }
@@ -255,9 +269,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         {
             return team::drop_events(&state.db, owner, id).await;
         }
-        // Take a pool slot before spending the hourly budget, so a full pool
-        // never uses it up. NyxBot's event turns share the pool with working
-        // specialists.
+        // NyxBot's event turns share the pool with working specialists.
+        // The engine spends the hourly budget in the turn admission transaction.
         let limit = team_pool_limit(state, owner).await + 1;
         let pool = if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
             Pool::Channel { owner }
@@ -267,19 +280,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         let Some(permit) = acquire(state, pool).await? else {
             return Ok(());
         };
-        if !automation
-            && !RateWindowStore::admit(
-                &state.db,
-                "assistant_event_turns",
-                owner,
-                team::EVENT_TURNS_PER_HOUR,
-                Duration::from_secs(3600),
-            )
-            .await?
-            .allowed
-        {
-            return Ok(());
-        }
+        #[cfg(test)]
+        tests::wait_for_wake_barrier(&state.db).await;
         let mut start = event_turn(id);
         start.org_access = org_access;
         let mut group_seen = None;
@@ -582,12 +584,13 @@ pub(crate) async fn after_turn(
     if error.is_some() {
         // They were told an answer would come: say it did not.
         for origin in &also {
-            super::nyxbot::deliver_to(
+            super::nyxbot::deliver_to_for(
                 state,
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
                 None,
+                super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
             )
             .await;
         }
@@ -620,7 +623,15 @@ pub(crate) async fn after_turn(
         | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
+        super::nyxbot::deliver_to_for(
+            state,
+            row,
+            origin,
+            text,
+            Some(&plan),
+            super::nyxbot::supplemental::Purpose::TeamAdditionalResult,
+        )
+        .await;
     }
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }
@@ -1132,6 +1143,54 @@ async fn preflight_channel_target(
     Ok(())
 }
 
+async fn channel_connect_preview(
+    state: &AppState,
+    owner: &str,
+    name: &str,
+    args: &Value,
+) -> AppResult<Option<crate::services::org_channel_service::preview::Preview>> {
+    if !matches!(name, "connect_channel_bot" | "link_channel_bot") {
+        return Ok(None);
+    }
+    let agent = channel_target_agent(state, owner, args["agent"].as_str()).await?;
+    if agent.user_id == owner {
+        return Ok(None);
+    }
+    let bot_id = if name == "connect_channel_bot" {
+        let reference = args["bot"]
+            .as_str()
+            .or_else(|| args["bot_id"].as_str())
+            .ok_or_else(|| AppError::ValidationError("bot is required".into()))?;
+        super::nyxbot::resolve_bot_ref(state, owner, reference)
+            .await?
+            .id
+    } else {
+        crate::services::org_channel_service::management::load(
+            &state.db,
+            owner,
+            text_arg(args, "channel_agent_id"),
+            true,
+        )
+        .await?
+        .channel_bot_id
+    };
+    Ok(Some(
+        Box::pin(crate::services::org_channel_service::preview::load(
+            &state.db,
+            &state.encryption_keys,
+            owner,
+            &bot_id,
+            &agent.id,
+            if name == "link_channel_bot" {
+                Some(text_arg(args, "channel_agent_id"))
+            } else {
+                None
+            },
+        ))
+        .await?,
+    ))
+}
+
 /// The owner-facing description of a native team tool call for its action
 /// card: what it does and the identifiers it names, bounded and free of
 /// message text, instructions or other model-written prose.
@@ -1429,6 +1488,7 @@ async fn execute_authorized_tool_impl(
         // widening they make (operations, skills, machine capabilities and
         // updates, permission decisions) or are specialists' own permission
         // requests; never consume a second digest for them.
+        let channel_preview = Box::pin(channel_connect_preview(state, &chat.user_id, name, args)).await?;
         let mut auto_allowed = None;
         let mut delegation_approved = false;
         let sharing_preview = if name == "set_agent_sharing" {
@@ -1480,6 +1540,7 @@ async fn execute_authorized_tool_impl(
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
                 .unwrap_or_else(|| if group_delegation { format!("Enable guest access for agent {} in group {}. Current and future participants without use rights may use the owner’s guest service policy; the owner pays. Membership revision {}, guest revision {}.",text_arg(&args["change"],"agent_id"),text_arg(args,"group"),args["expected_revision"],args["change"]["guest_revision"]) } else {action_summary(name,args)});
+            if let Some(preview) = &channel_preview { summary.push('\n'); summary.push_str(&preview.summary()); }
             let audience_readiness = if name == "update_channel_access" && args["private_chats"] == "everyone" {
                 let facts = super::nyxbot::chats::audience_readiness(state, &chat.user_id, text_arg(args, "channel_agent_id")).await?;
                 summary.push('\n');
@@ -1506,6 +1567,7 @@ async fn execute_authorized_tool_impl(
                         acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary)
                             .await?
                 {
+                    if let Some(preview) = &channel_preview { refusal["channel_preview"] = json!(preview); }
                     if let Some(facts) = &audience_readiness {
                         refusal["audience_readiness"] = json!(facts);
                     }
@@ -1514,7 +1576,8 @@ async fn execute_authorized_tool_impl(
             }
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        let outcome = dispatch(state, chat, name, args, delegation_approved).await?;
+        let mut outcome = dispatch(state, chat, name, args, delegation_approved).await?;
+        if let Some(preview) = &channel_preview { outcome.0["channel_preview"] = json!(preview); }
         if !outcome.1
             && let Some(auto) = auto_allowed
         {
@@ -1524,7 +1587,7 @@ async fn execute_authorized_tool_impl(
                 tool_name,
                 args,
                 &auto,
-                &action_summary(name, args),
+                &channel_preview.as_ref().map(|p| format!("{}\n{}", action_summary(name,args), p.summary())).unwrap_or_else(|| action_summary(name,args)),
             )
             .await;
         }
@@ -3262,6 +3325,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
 
 #[derive(Serialize)]
 pub struct ChannelLinkResponse {
+    gateway_native_activation: Option<String>,
     id: String,
     platform: String,
     bot_label: String,
@@ -3303,6 +3367,7 @@ async fn agent_responses(
                 channel.agent_id.as_deref().unwrap_or(nyxbot.id.as_str()) == summary.id
             })
             .map(|channel| ChannelLinkResponse {
+                gateway_native_activation: channel.gateway_native_activation.clone(),
                 id: channel.id.clone(),
                 platform: channel.platform.clone(),
                 bot_label: channel.bot_label.clone(),
@@ -4116,16 +4181,31 @@ pub fn spawn_sweeps(state: AppState) {
     super::nyxbot::execution_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
+        let mut guest_defaults = crate::services::org_channel_service::defaults::Sweep::default();
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
+            if state.shutdown.is_draining() {
+                break;
+            }
+            if let Err(error) = guest_defaults.run(&state.db).await {
+                tracing::warn!(%error, "Organization guest defaults deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::nyxbot::guest_setup_queue::sweep(&state)
                 .await
                 .is_err()
             {
                 tracing::warn!("Guest model queue deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::assistant_guest_model_setup::sweep(&state)
                 .await
@@ -4133,11 +4213,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::warn!("Guest model recovery deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::nyxbot::guest_model_notices::sweep(&state)
                 .await
                 .is_err()
             {
                 tracing::warn!("Guest model setup notices deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::lark_base_writes::sweep(&state.db)
                 .await
@@ -4145,11 +4231,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Lark Base write maintenance deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::assistant_channel_media::queue::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel media finalization deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await
@@ -4157,11 +4249,17 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Channel media sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::channel_thread_follow_service::sweep(&state.db)
                 .await
                 .is_err()
             {
                 tracing::debug!("Channel thread sweep deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if crate::services::assistant_invocation_service::reconcile_cancellations(&state)
                 .await
@@ -4169,8 +4267,14 @@ pub fn spawn_sweeps(state: AppState) {
             {
                 tracing::debug!("Invocation cancellation sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
                 Ok(rows) => {
@@ -4186,6 +4290,9 @@ pub fn spawn_sweeps(state: AppState) {
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if crate::services::execution_permission_dispatch::proposals::sweep(&state)
                 .await
                 .is_err()
@@ -4193,32 +4300,57 @@ pub fn spawn_sweeps(state: AppState) {
                 tracing::debug!("Execution permission recovery deferred");
             }
             // Things the owner finished outside the chat queue events first.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::process_watches(&state).await {
                 tracing::debug!(%error, "NyxBot watch sweep deferred");
             }
             // Linked chat apps whose messages stopped reaching their agent.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::check_deliveries(&state).await {
                 tracing::debug!(%error, "NyxBot delivery sweep deferred");
             }
             // Reconcile personal and org bot transports against their linking person's flags.
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Err(error) = super::nyxbot::switch_to_gateway(&state).await {
                 tracing::debug!(%error, "NyxBot gateway switch-over deferred");
+            }
+            if state.shutdown.is_draining() {
+                break;
             }
             if deliver_pending_skill_notifications(&state).await.is_err() {
                 tracing::debug!("Skill attachment outbox sweep deferred");
             }
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
                     wake(&state, &row.user_id, &row.id).await;
                 }
             }
             super::collaboration_group::sweep(&state).await;
             // Group members addressed while busy (or while the pool was full).
+            if state.shutdown.is_draining() {
+                break;
+            }
             if let Ok(rows) =
                 crate::services::assistant_group_service::with_pending(&state.db).await
             {
                 for group in rows {
-                    super::assistant_group::advance(&state, &group.user_id, &group.id).await;
+                    let Some(_claim) = state.shutdown.background() else {
+                        break;
+                    };
+                    super::assistant_group::advance_background(&state, &group.user_id, &group.id)
+                        .await;
                 }
             }
         }

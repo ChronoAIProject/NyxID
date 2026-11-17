@@ -1,3 +1,4 @@
+import { Pager } from "../../components/settings/Pager";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { useEffect, useRef, useState } from "react";
@@ -829,16 +830,18 @@ function AgentSkillsManager({
                 </SettingsGroup>
               ) : null}
               {versions.data && versions.data.total_pages > 1 && (
-                <Pagination
-                  page={versionPage}
-                  total={versions.data.total_pages}
-                  disabled={busy || !canFetch || versions.isFetching}
-                  onChange={(value) => {
-                    if (!currentCanFetch.current) return;
-                    setVersionPage(value);
-                    setSelectedVersion(undefined);
-                  }}
-                />
+                <SettingsGroup inset={false}>
+                  <Pager
+                    page={versionPage}
+                    total={versions.data.total_pages}
+                    disabled={busy || !canFetch || versions.isFetching}
+                    onChange={(value) => {
+                      if (!currentCanFetch.current) return;
+                      setVersionPage(value);
+                      setSelectedVersion(undefined);
+                    }}
+                  />
+                </SettingsGroup>
               )}
               {isConnected && selectedVersion && preview.isFetching && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
@@ -1020,34 +1023,6 @@ function confirmRemoval(skill: string, agent: string, onConfirm: () => void) {
   );
 }
 
-function Pagination({
-  page,
-  total,
-  disabled,
-  onChange,
-}: {
-  page: number;
-  total: number;
-  disabled?: boolean;
-  onChange: (page: number) => void;
-}) {
-  return (
-    <SettingsGroup title={`Page ${page} / ${total}`} inset={false}>
-      <SettingsRow
-        label="Previous"
-        tone="action"
-        disabled={disabled || page <= 1}
-        onPress={() => onChange(page - 1)}
-      />
-      <SettingsRow
-        label="Next"
-        tone="action"
-        disabled={disabled || page >= total}
-        onPress={() => onChange(page + 1)}
-      />
-    </SettingsGroup>
-  );
-}
 const styles = StyleSheet.create({
   grouped: {
     paddingHorizontal: spacing.xxl,

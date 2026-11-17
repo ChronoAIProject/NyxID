@@ -568,7 +568,7 @@ impl Drop for TurnGuard {
         let db = self.db.clone();
         let id = self.id.clone();
         let forwarded = self.forwarded;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             let _ = release(&db, &id, forwarded).await;
         });
     }

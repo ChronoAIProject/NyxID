@@ -96,6 +96,9 @@ pub async fn sync_service_price(
 ) -> AppResult<bool> {
     let mut changed = false;
     for tariff in super::model_tariffs::load_for(db, std::slice::from_ref(service)).await? {
+        if !super::reconcile::continue_reconcile() {
+            return Ok(changed);
+        }
         changed |= super::model_tariffs::sync(db, lago, plan_code, &tariff).await?;
     }
     if service.platform_key.as_ref().is_some_and(|p| {
@@ -103,12 +106,36 @@ pub async fn sync_service_price(
     }) {
         return Ok(changed);
     }
-    changed |= cleanup_components(db, lago, plan_code, service).await?;
-    changed |= sync_legacy_price(db, lago, plan_code, service).await?;
-    for field in ["byok_pricing", "platform_key_pricing"] {
-        changed |= sync_lane_price(db, lago, plan_code, service, field).await?;
+    let Some(billing) = &service.billing else {
+        return Ok(changed);
+    };
+    if billing.platform_pricing.is_none()
+        && billing.byok_pricing.is_none()
+        && billing.platform_key_pricing.is_none()
+        && billing.platform_pricing_cleanup_metric_code.is_none()
+        && billing.byok_pricing_cleanup_metric_code.is_none()
+        && billing.platform_key_pricing_cleanup_metric_code.is_none()
+        && billing.component_cleanup_metric_codes.is_empty()
+    {
+        return Ok(changed);
     }
-    Ok(changed)
+    super::plan_sync::run(
+        db,
+        plan_code,
+        Some(&service.id),
+        super::plan_sync::CacheWrite::Rate,
+        async {
+            let mut synced = changed;
+            synced |= cleanup_components(db, lago, plan_code, service).await?;
+            synced |= sync_legacy_price(db, lago, plan_code, service).await?;
+            for field in ["byok_pricing", "platform_key_pricing"] {
+                synced |= sync_lane_price(db, lago, plan_code, service, field).await?;
+            }
+            Ok(synced)
+        },
+    )
+    .await
+    .map(|result| result.unwrap_or(changed))
 }
 
 pub fn normalize_lane_pricing(
@@ -390,6 +417,16 @@ pub fn operation_metric_code(slug: &str, suffix: &str, operation: &str) -> AppRe
     Ok(code)
 }
 
+// Preserve the existing pending/failed status even when maintenance annotates
+// a provider readback wait. The annotation itself is made at the provider result.
+pub(super) fn pending_readback(error: &AppError) -> bool {
+    match error {
+        AppError::Conflict(_) => true,
+        AppError::BillingRecoveryWaiting { source } => matches!(**source, AppError::Conflict(_)),
+        _ => false,
+    }
+}
+
 async fn sync_lane_price(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
@@ -397,6 +434,9 @@ async fn sync_lane_price(
     service: &DownstreamService,
     field: &str,
 ) -> AppResult<bool> {
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
+    }
     let Some(billing) = &service.billing else {
         return Ok(false);
     };
@@ -417,11 +457,8 @@ async fn sync_lane_price(
         let Some(code) = cleanup.as_deref().filter(|c| !c.is_empty()) else {
             return Ok(false);
         };
-        if super::taxes::remove_charge(db, lago, plan_code, code)
-            .await
-            .is_err()
-        {
-            return Ok(false);
+        if let Err(error) = super::taxes::remove_charge(db, lago, plan_code, code).await {
+            return super::recovery_batch::retry_outcome(false, error);
         }
         retire_rate(db, code).await?;
         // A concurrent re-add must be synchronized again after this removal.
@@ -505,6 +542,9 @@ async fn sync_lane_component(
     lane: &LanePriceComponent,
     label: &str,
 ) -> AppResult<bool> {
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
+    }
     let collection = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
     let operation = path.contains(".operations.");
     let input = ServicePriceSync {
@@ -513,9 +553,15 @@ async fn sync_lane_component(
         metric_description: format!("NyxID {field} usage for {}", service.slug),
         credits_per_unit: lane.credits_per_unit.clone(),
     };
-    let synced = super::taxes::sync_charge(db, lago, plan_code, &input)
-        .await
-        .is_ok();
+    let provider_result = super::taxes::sync_charge(db, lago, plan_code, &input).await;
+    let synced = provider_result.is_ok();
+    let pending = provider_result.as_ref().is_err_and(pending_readback);
+    if !synced && super::plan_sync::lost() {
+        return super::recovery_batch::retry_outcome(
+            false,
+            provider_result.expect_err("unsuccessful provider result"),
+        );
+    }
     // Include the unit: identical prices in a different unit are different charges.
     let mut filter = doc! { "_id": &service.id,
         format!("{path}.lago_metric_code"): &lane.lago_metric_code,
@@ -531,24 +577,22 @@ async fn sync_lane_component(
     if synced {
         let pico = decimal_to_pico(&lane.credits_per_unit)
             .ok_or_else(|| AppError::Internal("stored lane price is invalid".to_string()))?;
-        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .replace_one(
-                doc! { "_id": BillingRateCache::cache_id(&lane.lago_metric_code, None) },
-                BillingRateCache {
-                    id: BillingRateCache::cache_id(&lane.lago_metric_code, None),
-                    lago_metric_code: lane.lago_metric_code.clone(),
-                    model: None,
-                    credits_per_unit_micros: pico / 1_000_000,
-                    credits_per_unit_pico: Some(pico),
-                    synced_at: Utc::now(),
-                    retired_at: None,
-                },
-            )
-            .upsert(true)
-            .await?;
+        super::rate_cache::replace(
+            db,
+            &BillingRateCache {
+                id: BillingRateCache::cache_id(&lane.lago_metric_code, None),
+                lago_metric_code: lane.lago_metric_code.clone(),
+                model: None,
+                credits_per_unit_micros: pico / 1_000_000,
+                credits_per_unit_pico: Some(pico),
+                synced_at: Utc::now(),
+                retired_at: None,
+            },
+        )
+        .await?;
     }
     let result = collection.update_one(filter, doc! { "$set": {
-        format!("{path}.sync_status"): if synced { "synced" } else { "failed" },
+        format!("{path}.sync_status"): if synced { "synced" } else if pending { "pending" } else { "failed" },
         format!("{path}.sync_error"): if synced { bson::Bson::Null } else { bson::Bson::String("Lago price synchronization failed; reconciliation will retry".to_string()) },
     } }).await?;
     if result.matched_count == 0 {
@@ -566,7 +610,13 @@ async fn sync_lane_component(
                 doc! { "$set": { format!("{path}_cleanup_metric_code"): &lane.lago_metric_code } }).await?;
         }
         mark_live_price_pending(db, &service.id, &lane.lago_metric_code).await?;
-        return Ok(false);
+        return match provider_result {
+            Err(error) => super::recovery_batch::retry_outcome(false, error),
+            Ok(()) => Ok(false),
+        };
+    }
+    if let Err(error) = provider_result {
+        return super::recovery_batch::retry_outcome(false, error);
     }
     Ok(synced)
 }
@@ -604,10 +654,11 @@ async fn cleanup_components(
     };
     let mut changed = false;
     for code in &billing.component_cleanup_metric_codes {
-        if super::taxes::remove_charge(db, lago, plan_code, code)
-            .await
-            .is_err()
-        {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        if let Err(error) = super::taxes::remove_charge(db, lago, plan_code, code).await {
+            super::recovery_batch::retry_outcome((), error)?;
             continue;
         }
         retire_rate(db, code).await?;
@@ -629,6 +680,9 @@ async fn sync_legacy_price(
     plan_code: &str,
     service: &DownstreamService,
 ) -> AppResult<bool> {
+    if !super::reconcile::continue_reconcile() {
+        return Ok(false);
+    }
     let Some(billing) = service.billing.as_ref() else {
         return Ok(false);
     };
@@ -653,7 +707,7 @@ async fn sync_legacy_price(
                     error = %error,
                     "Service price removal failed; reconciliation will retry"
                 );
-                return Ok(false);
+                return super::recovery_batch::retry_outcome(false, error);
             }
         }
     };
@@ -699,31 +753,36 @@ async fn sync_legacy_price(
                     .await?;
                 return Ok(false);
             }
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .replace_one(
-                    doc! { "_id": BillingRateCache::cache_id(&pricing.lago_metric_code, None) },
-                    BillingRateCache {
-                        id: BillingRateCache::cache_id(&pricing.lago_metric_code, None),
-                        lago_metric_code: pricing.lago_metric_code.clone(),
-                        model: None,
-                        credits_per_unit_micros: pico / 1_000_000,
-                        credits_per_unit_pico: Some(pico),
-                        synced_at: Utc::now(),
-                        retired_at: None,
-                    },
-                )
-                .upsert(true)
-                .await?;
+            super::rate_cache::replace(
+                db,
+                &BillingRateCache {
+                    id: BillingRateCache::cache_id(&pricing.lago_metric_code, None),
+                    lago_metric_code: pricing.lago_metric_code.clone(),
+                    model: None,
+                    credits_per_unit_micros: pico / 1_000_000,
+                    credits_per_unit_pico: Some(pico),
+                    synced_at: Utc::now(),
+                    retired_at: None,
+                },
+            )
+            .await?;
             Ok(true)
         }
         Err(error) => {
+            if super::plan_sync::lost() {
+                return super::recovery_batch::retry_outcome(false, error);
+            }
             let public_error = "Lago price synchronization failed; the reconcile sweep will retry";
             set_sync_state(
                 db,
                 &service.id,
                 &pricing.lago_metric_code,
                 &pricing.credits_per_unit,
-                PricingSyncStatus::Failed,
+                if pending_readback(&error) {
+                    PricingSyncStatus::Pending
+                } else {
+                    PricingSyncStatus::Failed
+                },
                 Some(public_error),
             )
             .await?;
@@ -734,7 +793,7 @@ async fn sync_legacy_price(
                 error = %error,
                 "Service price synchronization failed"
             );
-            Ok(false)
+            super::recovery_batch::retry_outcome(false, error)
         }
     }
 }
@@ -766,13 +825,7 @@ async fn complete_price_removal(
 /// `retired_at` makes new reservations refuse it. A later sync of the same code
 /// replaces the whole row, which clears the mark.
 async fn retire_rate(db: &mongodb::Database, code: &str) -> AppResult<()> {
-    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-        .update_many(
-            doc! { "lago_metric_code": code },
-            doc! { "$set": { "retired_at": bson::DateTime::from_chrono(Utc::now()) } },
-        )
-        .await?;
-    Ok(())
+    super::rate_cache::retire(db, code).await
 }
 
 pub async fn retry_pending_service_prices(
@@ -780,8 +833,19 @@ pub async fn retry_pending_service_prices(
     lago: &dyn LagoApi,
     plan_code: &str,
 ) -> AppResult<u64> {
-    let services: Vec<DownstreamService> = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+    let mut failures = super::recovery_batch::Failures::default();
+    if let Err(error) =
+        super::recovery_batch::work(super::plan_sync::repair(db, lago, plan_code, plan_code)).await
+    {
+        tracing::warn!(
+            plan_code,
+            error_code = error.error_code(),
+            "Plan repair will retry"
+        );
+        failures.note(error);
+    }
+    let services: Vec<bson::Document> = db
+        .collection::<bson::Document>(DOWNSTREAM_SERVICES)
         .find(doc! {
             "platform_key.purpose": {"$ne":"model_offering"},
             "$or": [
@@ -811,12 +875,22 @@ pub async fn retry_pending_service_prices(
         .try_collect()
         .await?;
     let mut synced = 0;
-    for service in services {
-        if sync_service_price(db, lago, plan_code, &service).await? {
+    for raw in services {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        if failures
+            .unit(async {
+                let service = super::recovery_batch::decode(&raw)?;
+                sync_service_price(db, lago, plan_code, &service).await
+            })
+            .await
+            == Some(true)
+        {
             synced += 1;
         }
     }
-    Ok(synced)
+    failures.finish(synced)
 }
 
 pub(crate) async fn set_sync_state(

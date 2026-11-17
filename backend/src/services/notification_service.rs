@@ -216,7 +216,7 @@ pub async fn send_device_notification(
         if !successful_device_ids.is_empty() {
             let db_clone = db.clone();
             let channel_id = channel.id.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 update_device_last_used(&db_clone, &channel_id, &successful_device_ids).await;
             });
         }
@@ -225,7 +225,7 @@ pub async fn send_device_notification(
     if !tokens_to_remove.is_empty() {
         let db = db.clone();
         let channel_id = channel.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
         });
     }
@@ -280,6 +280,20 @@ pub struct ChannelBotFailedNotificationContext {
     /// Stable recovery action (`reconnect`, `resubscribe`, ...).
     pub recommended_action: String,
     pub recommended_action_text: String,
+    /// Typed transition so a restoration never appears as a failure in the
+    /// mobile badge, notification history, or health list.
+    pub notice_kind: ChannelBotNoticeKind,
+    /// Optional transition copy used by the channel-health notifier for a
+    /// successful restoration. Failure notices leave these fields absent.
+    pub notice_title: Option<String>,
+    pub notice_body: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelBotNoticeKind {
+    Failure,
+    Restored,
+    GuestDefaults,
 }
 
 /// Send a channel-bot failure notice through the recipient's enabled
@@ -488,7 +502,7 @@ async fn deliver_best_effort(
         if !successful_device_ids.is_empty() {
             let db = db.clone();
             let channel_id = channel.id.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 update_device_last_used(&db, &channel_id, &successful_device_ids).await;
             });
         }
@@ -497,7 +511,7 @@ async fn deliver_best_effort(
     if !tokens_to_remove.is_empty() {
         let db = db.clone();
         let channel_id = channel.id;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
         });
     }
@@ -842,7 +856,7 @@ pub async fn send_approval_notification(
         if !successful_device_ids.is_empty() {
             let db_clone = db.clone();
             let channel_id = channel.id.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn(async move {
                 update_device_last_used(&db_clone, &channel_id, &successful_device_ids).await;
             });
         }
@@ -852,7 +866,7 @@ pub async fn send_approval_notification(
     if !tokens_to_remove.is_empty() {
         let db = db.clone();
         let channel_id = channel.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
         });
     }
@@ -1117,7 +1131,15 @@ fn render_channel_bot_failed_notification(
         context.bot_id
     );
     let mut data = HashMap::new();
-    data.insert("type".to_string(), "channel_bot_failed".to_string());
+    data.insert(
+        "type".to_string(),
+        match context.notice_kind {
+            ChannelBotNoticeKind::Failure => "channel_bot_failed",
+            ChannelBotNoticeKind::Restored => "channel_bot_restored",
+            ChannelBotNoticeKind::GuestDefaults => "channel_bot_guest_defaults",
+        }
+        .to_string(),
+    );
     data.insert("bot_id".to_string(), context.bot_id.clone());
     data.insert(
         "recommended_action".to_string(),
@@ -1125,11 +1147,16 @@ fn render_channel_bot_failed_notification(
     );
     data.insert("url".to_string(), bots_url.clone());
     RenderedConnectionExpiredNotification {
-        title: format!("{} channel needs attention", context.platform_name),
-        body: format!(
-            "{} stopped working. {} Open {}.",
-            context.bot_label, context.recommended_action_text, bots_url
-        ),
+        title: context
+            .notice_title
+            .clone()
+            .unwrap_or_else(|| format!("{} channel needs attention", context.platform_name)),
+        body: context.notice_body.clone().unwrap_or_else(|| {
+            format!(
+                "{} stopped working. {} Open {}.",
+                context.bot_label, context.recommended_action_text, bots_url
+            )
+        }),
         data,
     }
 }
@@ -1501,6 +1528,38 @@ mod tests {
             failed_poll_count: Some(3),
             locked_until: Some(Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap()),
         }
+    }
+
+    #[test]
+    fn restored_channel_notice_is_typed_and_uses_connector_deep_link() {
+        let config = crate::test_utils::test_app_config();
+        let rendered = render_channel_bot_failed_notification(
+            &config,
+            &ChannelBotFailedNotificationContext {
+                bot_id: "bot".into(),
+                bot_label: "Support".into(),
+                platform_name: "Telegram".into(),
+                recommended_action: "none".into(),
+                recommended_action_text: "Connected again".into(),
+                notice_kind: ChannelBotNoticeKind::Restored,
+                notice_title: Some("Connected again".into()),
+                notice_body: Some(
+                    "Members must verify their chat account again. Guest access is on.".into(),
+                ),
+            },
+        );
+        assert_eq!(
+            rendered.data.get("type").map(String::as_str),
+            Some("channel_bot_restored")
+        );
+        assert_eq!(
+            rendered.data.get("url").map(String::as_str),
+            Some("http://localhost:3000/channel-bots/bot")
+        );
+        assert_eq!(
+            rendered.body,
+            "Members must verify their chat account again. Guest access is on."
+        );
     }
 
     #[test]
@@ -2030,6 +2089,27 @@ mod tests {
             rendered.data.get("locked_until").map(String::as_str),
             Some("2026-05-14T12:00:00+00:00")
         );
+    }
+
+    #[test]
+    fn org_guest_defaults_notice_explains_exposure_and_off_action() {
+        let context = ChannelBotFailedNotificationContext {
+            notice_kind: ChannelBotNoticeKind::GuestDefaults,
+            notice_title: Some("Organization bot guest access".into()),
+            notice_body: Some("Support: Guest access is now on by default for this bot. Turn Allow guests off in Who can talk to this bot.".into()),
+            bot_id:"bot".into(),bot_label:"Support".into(),platform_name:"Lark".into(),
+            recommended_action:"review_guest_access".into(),
+            recommended_action_text:"Guest access is now on by default for this bot. Turn Allow guests off in Who can talk to this bot.".into(),
+        };
+        let rendered =
+            render_channel_bot_failed_notification(&crate::test_utils::test_app_config(), &context);
+        assert_eq!(rendered.title, "Organization bot guest access");
+        assert!(rendered.body.contains("Support"));
+        assert!(rendered.body.contains("Guest access is now on by default"));
+        assert!(rendered.body.contains("Turn Allow guests off"));
+        assert!(!rendered.body.contains("stopped working"));
+        assert_eq!(rendered.data["type"], "channel_bot_guest_defaults");
+        assert!(rendered.data["url"].contains("bot"));
     }
 
     #[test]
