@@ -413,15 +413,10 @@ pub async fn register_observed_reference(
     use super::assistant_cma_gateway::CmaGateway;
     use mongodb::bson::doc;
     let db = &state.db;
-    let service_id=if let Some(service)=db.collection::<crate::models::user_service::UserService>(crate::models::user_service::COLLECTION_NAME)
-        .find_one(doc! {"_id":&watch.service_id,"user_id":&watch.user_id,"is_active":true,"deleted_at":null}).await? {
-        service.catalog_service_id.ok_or_else(||crate::errors::AppError::Forbidden("CMA catalog identity unavailable".into()))?
-    } else { watch.service_id.clone() };
-    let gateway = super::assistant_cma_gateway::CatalogCmaGateway::for_service(state, &service_id)
-        .with_watch_authority(watch, state.node_ws_manager.clone());
-    if gateway.service_id(&watch.user_id).await? != service_id {
-        return Ok(false);
-    }
+    let gateway =
+        super::assistant_cma_gateway::CatalogCmaGateway::for_user_service(state, &watch.service_id)
+            .with_watch_authority(watch, state.node_ws_manager.clone());
+    let service_id = gateway.service_id(&watch.user_id).await?;
     let Some(agent) = cma.agent_id.as_deref() else {
         return Ok(false);
     };
@@ -683,7 +678,7 @@ async fn observe_approval(
     state: &crate::AppState,
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
     cma: &CmaOperation,
-    gateway: &super::assistant_cma_gateway::CatalogCmaGateway,
+    gateway: &super::assistant_cma_gateway::CatalogCmaGateway<'_>,
     agent: &str,
     response: &str,
 ) -> crate::errors::AppResult<bool> {

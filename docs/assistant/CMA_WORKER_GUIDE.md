@@ -1,6 +1,15 @@
 # CMA Worker Guide
 
-Contract version: 1. This guide explains operation; current authorization and backend admission remain authoritative.
+Contract version: 1.
+
+CMA requests use the selected NyxID service connection and its effective endpoint.
+Creation, confirmation, management, events and Desktop stay on that original
+connection. Keep its service identity with the original body and Idempotency-Key.
+If the connection is removed, disabled, loses access or points somewhere else,
+stop recovery and report the change; do not switch to a default connection.
+Historical creations without a saved original connection cannot be recovered
+through this management flow. Do not guess a connection or rotate their keys.
+This guide explains operation; current authorization and backend admission remain authoritative.
 
 Use CMA when it helps the task. Decide whether to reuse an existing CMA Agent,
 create a new Agent, or use other tools. Each account may have at most one

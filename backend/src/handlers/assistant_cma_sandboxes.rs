@@ -98,7 +98,11 @@ pub async fn detail(
 ) -> AppResult<Json<sandboxes::SandboxDto>> {
     let owner = owner(&state, &auth).await?;
     let row = sandboxes::get_owned(&state.db, &owner, &id).await?;
-    let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(&state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     Ok(Json(
         sandboxes::detail_live(&state.db, &gateway, &owner, &id).await?,
     ))
@@ -123,7 +127,11 @@ pub async fn commands(
 ) -> AppResult<(StatusCode, Json<sandboxes::SandboxCommandDto>)> {
     let owner = owner(&state, &auth).await?;
     let row = sandboxes::get_owned(&state.db, &owner, &id).await?;
-    let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(&state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     let (command, action) = match body.command {
         Command::Pause => (Some(sandboxes::SandboxCommand::Pause), "pause"),
         Command::Revive => (Some(sandboxes::SandboxCommand::Revive), "revive"),
@@ -170,7 +178,11 @@ pub async fn retire(
 ) -> AppResult<(StatusCode, Json<sandboxes::SandboxCommandDto>)> {
     let owner = owner(&state, &auth).await?;
     let row = sandboxes::get_owned(&state.db, &owner, &id).await?;
-    let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(&state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     let result = sandboxes::retire(
         &state.db,
         &gateway,
@@ -198,7 +210,11 @@ pub async fn events(
 ) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaEventSnapshot>> {
     let owner = owner(&state, &auth).await?;
     let row = sandboxes::get_owned(&state.db, &owner, &id).await?;
-    let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
+    let gateway = CatalogCmaGateway::for_user_service(&state, &row.user_service_id).for_binding(
+        &row.user_service_id,
+        &row.cma_service_id,
+        &row.execution_base_url,
+    );
     Ok(Json(
         sandboxes::events(&state.db, &gateway, &owner, &id, query.cursor.as_deref()).await?,
     ))

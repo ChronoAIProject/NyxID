@@ -52,7 +52,7 @@ fn occupied() -> AppError {
 }
 
 pub(super) fn created_filter(owner_id: &str) -> Document {
-    doc! {"user_id": owner_id, "source": NYXID_CREATED_SOURCE}
+    doc! {"user_id": owner_id, "source": NYXID_CREATED_SOURCE, "user_service_id":{"$type":"string"}, "execution_base_url":{"$type":"string"}}
 }
 
 /// Previous versions let discovery occupy the account slot. Release only
@@ -63,6 +63,8 @@ async fn release_external_slots(db: &Database, owner_id: &str) -> AppResult<()> 
         .update_many(
             doc! {
                 "user_id": owner_id,
+                "user_service_id": {"$type": "string"},
+                "execution_base_url": {"$type": "string"},
                 "source": {"$in": ["discovered", "conflict", "claimed"]},
                 "occupies_account_slot": true,
                 "idempotency_key": null, "request_hash": null,
@@ -200,11 +202,11 @@ pub fn indexes() -> Vec<IndexModel> {
             )
             .build(),
         IndexModel::builder()
-            .keys(doc! {"user_id": 1, "cma_service_id": 1, "cma_sandbox_id": 1})
+            .keys(doc! {"user_id": 1, "user_service_id": 1, "execution_base_url": 1, "cma_service_id": 1, "cma_sandbox_id": 1})
             .options(
                 IndexOptions::builder()
                     .unique(true)
-                    .partial_filter_expression(doc! {"cma_sandbox_id": {"$type": "string"}})
+                    .partial_filter_expression(doc! {"cma_sandbox_id": {"$type": "string"}, "user_service_id":{"$type":"string"}, "execution_base_url":{"$type":"string"}})
                     .build(),
             )
             .build(),
@@ -234,16 +236,20 @@ async fn creation_by_key(
 ) -> AppResult<Option<AssistantCmaSandbox>> {
     Ok(db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
-        .find_one(doc! {"user_id": owner_id, "idempotency_key": key})
+        .find_one(doc! {"user_id": owner_id, "idempotency_key": key, "user_service_id":{"$type":"string"}, "execution_base_url":{"$type":"string"}})
         .await?)
 }
 
 fn same_creation(
     row: AssistantCmaSandbox,
-    service_id: &str,
+    connection: &super::assistant_cma_gateway::CmaConnection,
     hash: &str,
 ) -> AppResult<AssistantCmaSandbox> {
-    if row.cma_service_id != service_id || row.request_hash.as_deref() != Some(hash) {
+    if row.user_service_id != connection.user_service_id
+        || row.cma_service_id != connection.cma_service_id
+        || row.execution_base_url != connection.execution_base_url
+        || row.request_hash.as_deref() != Some(hash)
+    {
         return Err(AppError::Conflict(
             "cma_creation_idempotency_conflict".into(),
         ));
@@ -266,13 +272,13 @@ pub async fn begin_creation(
     validate_idempotency_key(idempotency_key)?;
     let normalized = prepare_creation_request(request)?;
     let parsed: Value = serde_json::from_slice(request).map_err(|_| invalid_request())?;
-    let service_id = gateway.service_id(owner_id).await?;
+    let connection = gateway.connection(owner_id).await?;
     let db = super::transaction_service::durable_database(db);
     ensure_indexes(&db).await?;
     release_external_slots(&db, owner_id).await?;
     let retry = match creation_by_key(&db, owner_id, idempotency_key).await? {
         Some(row) => {
-            let row = same_creation(row, &service_id, &normalized.hash)?;
+            let row = same_creation(row, &connection, &normalized.hash)?;
             if row.submission_state == "confirmed_not_created"
                 && !row.occupies_account_slot
                 && row.cma_sandbox_id.is_none()
@@ -286,21 +292,26 @@ pub async fn begin_creation(
     };
     if let Some(row) = db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
-        .find_one(doc! {"user_id": owner_id, "occupies_account_slot": true})
+        .find_one(doc! {"user_id": owner_id, "occupies_account_slot": true, "user_service_id":{"$type":"string"}, "execution_base_url":{"$type":"string"}})
         .await?
     {
         if row.idempotency_key.as_deref() == Some(idempotency_key) {
-            return same_creation(row, &service_id, &normalized.hash);
+            return same_creation(row, &connection, &normalized.hash);
         }
         return Err(occupied());
     }
     let previous = db
-        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
-        .find_one(doc! {"user_id": owner_id})
+        .collection::<Document>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":owner_id})
         .sort(doc! {"generation": -1})
+        .projection(doc! {"generation":1})
         .await?;
     let generation = previous
-        .map_or(Some(1), |row| row.generation.checked_add(1))
+        .map_or(Some(1), |row| {
+            row.get_i64("generation")
+                .ok()
+                .and_then(|n| n.checked_add(1))
+        })
         .ok_or_else(stale)?;
     let id = retry
         .as_ref()
@@ -318,7 +329,9 @@ pub async fn begin_creation(
     let row = AssistantCmaSandbox {
         id,
         user_id: owner_id.to_owned(),
-        cma_service_id: service_id.clone(),
+        user_service_id: connection.user_service_id.clone(),
+        cma_service_id: connection.cma_service_id.clone(),
+        execution_base_url: connection.execution_base_url.clone(),
         label: retry
             .as_ref()
             .map(|row| row.label.clone())
@@ -383,7 +396,7 @@ pub async fn begin_creation(
                     creation_by_key(&db, owner_id, idempotency_key)
                         .await?
                         .ok_or_else(stale)?,
-                    &service_id,
+                    &connection,
                     &normalized.hash,
                 );
             }
@@ -395,7 +408,7 @@ pub async fn begin_creation(
         Ok(_) => Ok(row),
         Err(error) if duplicate_app_key(&error) => {
             if let Some(row) = creation_by_key(&db, owner_id, idempotency_key).await? {
-                same_creation(row, &service_id, &normalized.hash)
+                same_creation(row, &connection, &normalized.hash)
             } else {
                 Err(occupied())
             }
@@ -476,7 +489,11 @@ fn verify_remote_owner(sandbox: &CmaSandbox, owner_id: &str) -> AppResult<()> {
 }
 
 async fn verify_deployment(gateway: &dyn CmaGateway, row: &AssistantCmaSandbox) -> AppResult<()> {
-    if gateway.service_id(&row.user_id).await? != row.cma_service_id {
+    let connection = gateway.connection(&row.user_id).await?;
+    if connection.user_service_id != row.user_service_id
+        || connection.cma_service_id != row.cma_service_id
+        || connection.execution_base_url != row.execution_base_url
+    {
         return Err(AppError::Conflict("cma_deployment_changed".into()));
     }
     Ok(())
@@ -552,7 +569,7 @@ fn apply_observation(
 }
 
 fn binding_filter(row: &AssistantCmaSandbox) -> Document {
-    doc! {"_id": &row.id, "user_id": &row.user_id, "cma_service_id": &row.cma_service_id,
+    doc! {"_id": &row.id, "user_id": &row.user_id, "user_service_id":&row.user_service_id, "execution_base_url":&row.execution_base_url,"cma_service_id": &row.cma_service_id,
     "source": &row.source, "creation_ref": &row.creation_ref, "generation": row.generation,
     "cma_sandbox_id": &row.cma_sandbox_id}
 }
@@ -730,7 +747,7 @@ pub async fn associate_created(
             }
             let duplicate = collection.find_one(doc! {
                 "_id":{"$ne":&current.id},"user_id":&current.user_id,
-                "cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,
+                "user_service_id":&current.user_service_id,"execution_base_url":&current.execution_base_url,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,
             }).session(&mut *tx).await?;
             let mut changed = current.clone();
             if let Some(duplicate) = duplicate {
@@ -750,7 +767,7 @@ pub async fn associate_created(
                 // Agent refs use the remote parent identity, so only its local
                 // generation changes when the provisional reference is folded.
                 db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
-                    .update_many(doc! {"user_id":&current.user_id,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
+                    .update_many(doc! {"user_id":&current.user_id,"user_service_id":&current.user_service_id,"execution_base_url":&current.execution_base_url,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
                     .session(&mut *tx).await?;
             }
             apply_observation(&mut changed, observation, current.generation, Utc::now())?;
@@ -977,7 +994,7 @@ pub async fn list(
 fn observation_unavailable(error: &AppError) -> bool {
     matches!(error, AppError::NotFound(_))
         || matches!(error, AppError::Conflict(message) if matches!(message.as_str(),
-            "cma_observation_unavailable" | "cma_inventory_incomplete" | "cma_configuration_required"))
+            "cma_observation_unavailable" | "cma_inventory_incomplete"))
 }
 
 fn unknown_projection(mut sandbox: SandboxDto) -> SandboxDto {
@@ -1005,6 +1022,12 @@ pub async fn refresh_owner(
     let mut observed = HashSet::new();
     for row in active_created(&db, owner_id).await? {
         if row.cma_sandbox_id.is_some() {
+            let scoped = gateway.for_connection(&super::assistant_cma_gateway::CmaConnection {
+                user_service_id: row.user_service_id.clone(),
+                cma_service_id: row.cma_service_id.clone(),
+                execution_base_url: row.execution_base_url.clone(),
+            });
+            let gateway = scoped.as_deref().unwrap_or(gateway);
             observe(&db, gateway, owner_id, &row.id, row.generation).await?;
             observed.insert(row.id);
         }
@@ -1100,9 +1123,11 @@ pub async fn resolve_created(
     remote_id: &str,
 ) -> AppResult<AssistantCmaSandbox> {
     validate_remote_id(remote_id)?;
-    let service_id = gateway.service_id(owner_id).await?;
+    let connection = gateway.connection(owner_id).await?;
     let mut filter = created_filter(owner_id);
-    filter.insert("cma_service_id", service_id);
+    filter.insert("user_service_id", connection.user_service_id);
+    filter.insert("execution_base_url", connection.execution_base_url);
+    filter.insert("cma_service_id", connection.cma_service_id);
     filter.insert("cma_sandbox_id", remote_id);
     let row = db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
@@ -1337,6 +1362,17 @@ mod tests {
         async fn service_id(&self, _: &str) -> CmaResult<String> {
             Ok("cma-service".into())
         }
+        async fn connection(
+            &self,
+            owner: &str,
+        ) -> CmaResult<super::super::assistant_cma_gateway::CmaConnection> {
+            Ok(super::super::assistant_cma_gateway::CmaConnection {
+                user_service_id: "user-service".into(),
+                cma_service_id: self.service_id(owner).await?,
+                execution_base_url: "https://cma.example/".into(),
+            })
+        }
+
         async fn get_sandbox(&self, _: &str, id: &str) -> CmaResult<CmaSandbox> {
             self.calls.lock().unwrap().push(format!("get:{id}"));
             if self.timeout.load(Ordering::Relaxed) {
@@ -1419,10 +1455,16 @@ mod tests {
     #[test]
     fn same_key_returns_original_identity_and_changed_payload_conflicts() {
         let row = fixture_row();
-        let replay = same_creation(row.clone(), "cma-service", "request-hash").unwrap();
+        let mut connection = super::super::assistant_cma_gateway::CmaConnection {
+            user_service_id: row.user_service_id.clone(),
+            cma_service_id: row.cma_service_id.clone(),
+            execution_base_url: row.execution_base_url.clone(),
+        };
+        let replay = same_creation(row.clone(), &connection, "request-hash").unwrap();
         assert_eq!(replay.id, row.id);
-        assert!(same_creation(row.clone(), "cma-service", "different-hash").is_err());
-        assert!(same_creation(row, "other-deployment", "request-hash").is_err());
+        assert!(same_creation(row.clone(), &connection, "different-hash").is_err());
+        connection.user_service_id = "another-connection".into();
+        assert!(same_creation(row, &connection, "request-hash").is_err());
     }
 
     #[tokio::test]
@@ -1802,7 +1844,7 @@ mod tests {
         db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
             .insert_one(doc! {
                 "_id": &external_agent_id, "user_id": "owner",
-                "cma_service_id": "cma-service", "cma_agent_id": "external-agent",
+                "user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id": "cma-service", "cma_agent_id": "external-agent",
                 "cma_sandbox_id": "remote-sandbox",
                 "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
             })
@@ -1950,7 +1992,7 @@ mod tests {
             .unwrap();
         let agent: crate::models::assistant_cma_agent::AssistantCmaAgent =
             bson::from_document(doc! {
-                "_id":Uuid::new_v4().to_string(), "user_id":"owner", "cma_service_id":"cma-service",
+                "_id":Uuid::new_v4().to_string(), "user_id":"owner", "user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"cma-service",
                 "cma_agent_id":"managed-agent", "cma_sandbox_id":"remote-sandbox",
                 "sandbox_generation":parent.generation,
                 "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
@@ -2379,7 +2421,7 @@ mod tests {
         for change in [
             doc! {"generation": 2_i64},
             doc! {"cma_sandbox_id": "another-sandbox"},
-            doc! {"cma_service_id": "another-service"},
+            doc! {"user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id": "another-service"},
         ] {
             collection.insert_one(&before).await.unwrap();
             collection
@@ -2564,7 +2606,7 @@ mod tests {
         db.collection::<bson::Document>(COLLECTION_NAME)
             .update_one(
                 doc! {"_id":&row.id},
-                doc! {"$set":{"cma_service_id":"other-deployment"}},
+                doc! {"$set":{"user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"other-deployment"}},
             )
             .await
             .unwrap();
@@ -2602,6 +2644,8 @@ mod tests {
         AssistantCmaSandbox {
             id: Uuid::new_v4().to_string(),
             user_id: "owner".into(),
+            user_service_id: "user-service".into(),
+            execution_base_url: "https://cma.example/".into(),
             cma_service_id: "cma-service".into(),
             label: "Sandbox".into(),
             cma_sandbox_id: Some("remote-sandbox".into()),

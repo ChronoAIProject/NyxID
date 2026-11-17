@@ -239,9 +239,9 @@ async fn gateway_provider_and_shared_endpoint_are_never_repaired() {
 }
 
 #[tokio::test]
-async fn concurrent_replicas_repair_once_and_do_not_change_catalog_fingerprint() {
+async fn concurrent_replicas_repair_once_and_preserve_catalog_configuration() {
     let f = Fixture::new("cma").await;
-    let before = crate::services::assistant_cma_gateway::catalog_execution_fingerprint(&f.catalog);
+    let before = bson::to_document(&f.catalog).unwrap();
     let (a, b) = tokio::join!(reconcile(&f.db, None, None), reconcile(&f.db, None, None));
     assert_eq!(a.unwrap() + b.unwrap(), 1);
     let catalog =
@@ -250,18 +250,16 @@ async fn concurrent_replicas_repair_once_and_do_not_change_catalog_fingerprint()
             .await
             .unwrap()
             .unwrap();
-    assert_eq!(
-        crate::services::assistant_cma_gateway::catalog_execution_fingerprint(&catalog),
-        before
-    );
+    assert_eq!(bson::to_document(&catalog).unwrap(), before);
     assert_eq!(f.endpoint().await.url, f.catalog.base_url);
     f.db.drop().await.unwrap();
 }
 
 #[tokio::test]
-async fn repaired_auto_cma_passes_admission_before_send_and_mock_proxy_200() {
+async fn repaired_auto_and_custom_cma_use_their_own_targets_before_send() {
     use crate::services::service_dispatch_registry as registry;
     let f = Fixture::new("cma").await;
+    let keys = test_encryption_keys();
     let server = MockServer::start().await;
     f.db.collection::<Document>(CATALOG)
         .update_one(
@@ -284,7 +282,7 @@ async fn repaired_auto_cma_passes_admission_before_send_and_mock_proxy_200() {
     };
     let admission = registry::admit(
         &f.db,
-        &test_encryption_keys(),
+        &keys,
         &cached_test_jwt_keys(),
         &test_app_config(),
         &caller,
@@ -318,7 +316,14 @@ async fn repaired_auto_cma_passes_admission_before_send_and_mock_proxy_200() {
     );
     assert_eq!(reconcile(&f.db, Some(&f.owner), None).await.unwrap(), 1);
     assert_eq!(f.endpoint().await.id, f.endpoint.id);
-    // An explicit/custom connection must still refuse and identify itself.
+    // Explicit connections keep their own target without catalog admission.
+    let custom_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/agents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"items":[]})))
+        .expect(1)
+        .mount(&custom_server)
+        .await;
     f.db.collection::<Document>(CONNECTIONS)
         .update_one(doc! {"_id":&f.connection.id}, doc! {"$set":{"source":null}})
         .await
@@ -326,15 +331,16 @@ async fn repaired_auto_cma_passes_admission_before_send_and_mock_proxy_200() {
     f.db.collection::<Document>(ENDPOINTS)
         .update_one(
             doc! {"_id":&f.endpoint.id},
-            doc! {"$set":{"url":"https://custom.example"}},
+            doc! {"$set":{"url":custom_server.uri()}},
         )
         .await
         .unwrap();
     let custom = f.resolve().await.target;
-    assert_eq!(custom.base_url, "https://custom.example");
-    let error = registry::admit(
+    assert_eq!(custom.base_url, custom_server.uri());
+    assert!(registry::verify(Some(&admission), &custom, Some(&caller)).is_err());
+    let custom_admission = registry::admit(
         &f.db,
-        &test_encryption_keys(),
+        &keys,
         &cached_test_jwt_keys(),
         &test_app_config(),
         &caller,
@@ -348,12 +354,28 @@ async fn repaired_auto_cma_passes_admission_before_send_and_mock_proxy_200() {
         false,
     )
     .await
-    .err()
     .unwrap();
-    assert!(
-        matches!(&error,AppError::Conflict(message) if message.starts_with("cma_configuration_required:") && message.contains(&f.connection.id))
+    let custom_guard = registry::verify(Some(&custom_admission), &custom, Some(&caller))
+        .unwrap()
+        .unwrap();
+    let request = client
+        .get(format!("{}/api/v1/agents", custom.base_url))
+        .build()
+        .unwrap();
+    custom_guard.before_send(&request).await.unwrap();
+    assert_eq!(
+        custom_guard
+            .observe_response(client.execute(request).await.unwrap())
+            .await
+            .unwrap()
+            .status(),
+        200
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(custom_server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(reconcile(&f.db, Some(&f.owner), None).await.unwrap(), 0);
+    assert_eq!(f.endpoint().await.url, custom_server.uri());
+    assert_eq!(f.endpoint().await.id, f.endpoint.id);
     f.db.drop().await.unwrap();
 }
 

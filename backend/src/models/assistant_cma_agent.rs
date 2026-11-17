@@ -45,7 +45,11 @@ pub struct AssistantCmaAgent {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    /// Exact UserService connection that owns this remote resource.
+    pub user_service_id: String,
     pub cma_service_id: String,
+    /// Effective endpoint resolved when the resource was registered.
+    pub execution_base_url: String,
     pub cma_agent_id: String,
     #[serde(default)]
     pub cma_sandbox_id: Option<String>,
@@ -103,6 +107,7 @@ impl std::fmt::Debug for AssistantCmaAgent {
         f.debug_struct("AssistantCmaAgent")
             .field("id", &self.id)
             .field("user_id", &self.user_id)
+            .field("user_service_id", &self.user_service_id)
             .field("cma_service_id", &self.cma_service_id)
             .field("cma_agent_id", &self.cma_agent_id)
             .field("cma_sandbox_id", &self.cma_sandbox_id)
@@ -126,7 +131,9 @@ mod tests {
         let row = AssistantCmaAgent {
             id: "agent-row".into(),
             user_id: "user".into(),
+            user_service_id: "user-service".into(),
             cma_service_id: "service".into(),
+            execution_base_url: "https://cma.example".into(),
             cma_agent_id: "remote-agent".into(),
             cma_sandbox_id: Some("remote-sandbox".into()),
             cma_workspace_id: Some("remote-workspace".into()),
@@ -154,6 +161,7 @@ mod tests {
             updated_at: now,
         };
 
+        assert!(!format!("{row:?}").contains("https://cma.example"));
         let document = bson::to_document(&row).expect("serialize agent");
         for field in [
             "created_at",

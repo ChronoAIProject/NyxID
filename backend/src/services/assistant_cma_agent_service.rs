@@ -24,11 +24,11 @@ use crate::{
 pub fn indexes() -> Vec<IndexModel> {
     vec![
         IndexModel::builder()
-            .keys(doc! {"user_id":1,"cma_service_id":1,"cma_agent_id":1})
+            .keys(doc! {"user_id":1,"user_service_id":1,"execution_base_url":1,"cma_service_id":1,"cma_agent_id":1})
             .options(
                 IndexOptions::builder()
                     .unique(true)
-                    .partial_filter_expression(doc! {"cma_agent_id":{"$type":"string"}})
+                    .partial_filter_expression(doc! {"cma_agent_id":{"$type":"string"},"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"}})
                     .build(),
             )
             .build(),
@@ -160,7 +160,6 @@ fn unavailable(error: &CmaGatewayError) -> Option<&'static str> {
         | CmaGatewayError::Unavailable
         | CmaGatewayError::InvalidResponse
         | CmaGatewayError::UpstreamAuthorizationUnavailable => Some("cma_observation_unavailable"),
-        CmaGatewayError::ConfigurationRequired => Some("cma_configuration_required"),
         _ => None,
     }
 }
@@ -171,16 +170,13 @@ fn unavailable_parent(error: &AppError) -> Option<&'static str> {
         AppError::Conflict(message) if message == "cma_observation_unavailable" => {
             Some("cma_observation_unavailable")
         }
-        AppError::Conflict(message) if message == "cma_configuration_required" => {
-            Some("cma_configuration_required")
-        }
         _ => None,
     }
 }
 
 pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<AssistantCmaAgent> {
     db.collection::<AssistantCmaAgent>(COLLECTION_NAME)
-        .find_one(doc! {"_id":id,"user_id":owner})
+        .find_one(doc! {"_id":id,"user_id":owner,"user_service_id":{"$type":"string"},"execution_base_url":{"$type":"string"}})
         .await?
         .ok_or_else(|| AppError::NotFound("CMA Agent not found".into()))
 }
@@ -193,7 +189,7 @@ async fn parent_ref(
         return Err(AppError::NotFound("CMA Agent parent not found".into()));
     };
     let parent = db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
-        .find_one(doc! {"user_id":&row.user_id,"cma_service_id":&row.cma_service_id,"cma_sandbox_id":remote,"source":NYXID_CREATED_SOURCE}).await?
+        .find_one(doc! {"user_id":&row.user_id,"user_service_id":&row.user_service_id,"execution_base_url":&row.execution_base_url,"cma_service_id":&row.cma_service_id,"cma_sandbox_id":remote,"source":NYXID_CREATED_SOURCE}).await?
         .ok_or_else(|| AppError::NotFound("CMA Agent parent not found".into()))?;
     if row.sandbox_generation != Some(parent.generation) {
         return Err(AppError::Conflict("cma_sandbox_generation_changed".into()));
@@ -230,11 +226,14 @@ pub async fn require_bound(
     id: &str,
 ) -> AppResult<(AssistantCmaAgent, Option<AssistantCmaSandbox>)> {
     let row = get_owned(db, owner, id).await?;
-    let (service_id, parent) = tokio::try_join!(
-        async { gateway.service_id(owner).await.map_err(AppError::from) },
+    let (connection, parent) = tokio::try_join!(
+        async { gateway.connection(owner).await.map_err(AppError::from) },
         parent_ref(db, &row),
     )?;
-    if service_id != row.cma_service_id {
+    if connection.user_service_id != row.user_service_id
+        || connection.cma_service_id != row.cma_service_id
+        || connection.execution_base_url != row.execution_base_url
+    {
         return Err(AppError::Conflict("cma_deployment_changed".into()));
     }
     Ok((row, parent))
@@ -306,7 +305,8 @@ pub async fn register_live(
     source: Option<&AgentSource>,
 ) -> AppResult<AssistantCmaAgent> {
     validate_remote_id(remote_id)?;
-    let service_id = gateway.service_id(owner).await?;
+    let connection = gateway.connection(owner).await?;
+    let service_id = connection.cma_service_id.clone();
     let remote = gateway.get_agent(owner, remote_id).await?;
     if remote.id != remote_id
         || remote
@@ -324,7 +324,7 @@ pub async fn register_live(
     let db = super::transaction_service::durable_database(db);
     ensure_indexes(&db).await?;
     db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
-        .find_one(doc! {"user_id":owner,"cma_service_id":&service_id,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE})
+        .find_one(doc! {"user_id":owner,"user_service_id":&connection.user_service_id,"execution_base_url":&connection.execution_base_url,"cma_service_id":&service_id,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE})
         .await?
         .ok_or_else(|| AppError::NotFound("Sandbox was not created through NyxID".into()))?;
     let now = Utc::now();
@@ -352,29 +352,30 @@ pub async fn register_live(
     let context = (
         db.clone(),
         owner.to_owned(),
-        service_id,
+        connection,
         remote,
         set,
         Uuid::new_v4().to_string(),
         now,
     );
-    super::transaction_service::run_db_only(&db,&context,|tx,(db,owner,service,remote,set,local_id,now)| {
+    super::transaction_service::run_db_only(&db,&context,|tx,(db,owner,connection,remote,set,local_id,now)| {
         Box::pin(async move {
             super::erasure_admission::fence_in_session(db,owner,tx).await?;
+            let service=&connection.cma_service_id;
             let parent_id=remote.sandbox_id.as_deref().ok_or_else(||AppError::Conflict("cma_agent_parent_unavailable".into()))?;
             // A real parent write serializes this insert with receipt folding,
             // so a late registration cannot recreate a discarded generation.
             let parent=db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
-                .find_one_and_update(doc! {"user_id":owner,"cma_service_id":service,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE},doc! {"$inc":{"agent_reference_version":1}})
+                .find_one_and_update(doc! {"user_id":owner,"user_service_id":&connection.user_service_id,"execution_base_url":&connection.execution_base_url,"cma_service_id":service,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE},doc! {"$inc":{"agent_reference_version":1}})
                 .return_document(ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::Conflict("cma_agent_parent_unavailable".into()))?;
-            let identity=doc! {"user_id":owner,"cma_service_id":service,"cma_agent_id":&remote.id};
+            let identity=doc! {"user_id":owner,"user_service_id":&connection.user_service_id,"execution_base_url":&connection.execution_base_url,"cma_service_id":service,"cma_agent_id":&remote.id};
             if let Some(existing)=db.collection::<AssistantCmaAgent>(COLLECTION_NAME).find_one(identity.clone()).session(&mut *tx).await? {
                 verify_observation(&existing,remote)?;
                 if existing.sandbox_generation!=Some(parent.generation) {return Err(AppError::Conflict("cma_sandbox_generation_changed".into()));}
             }
             let mut filter=identity;filter.insert("cma_sandbox_id",parent_id);filter.insert("sandbox_generation",parent.generation);
-            let insert=doc! {"_id":local_id,"user_id":owner,"cma_service_id":service,
+            let insert=doc! {"_id":local_id,"user_id":owner,"user_service_id":&connection.user_service_id,"execution_base_url":&connection.execution_base_url,"cma_service_id":service,
                 "cma_agent_id":&remote.id,"cma_sandbox_id":parent_id,"sandbox_generation":parent.generation,
                 "cma_workspace_id":&remote.workspace_id,"cma_worktree_id":&remote.worktree_id,
                 "created_at":bson::DateTime::from_chrono(*now)};
@@ -393,8 +394,12 @@ pub async fn detail(
 ) -> AppResult<AgentDto> {
     let row = get_owned(db, owner, id).await?;
     let parent = parent_ref(db, &row).await?;
-    let remote = match gateway.service_id(owner).await {
-        Ok(service_id) if service_id == row.cma_service_id => {
+    let remote = match gateway.connection(owner).await {
+        Ok(connection)
+            if connection.user_service_id == row.user_service_id
+                && connection.cma_service_id == row.cma_service_id
+                && connection.execution_base_url == row.execution_base_url =>
+        {
             gateway.get_agent(owner, &row.cma_agent_id).await
         }
         Ok(_) => return Err(AppError::Conflict("cma_deployment_changed".into())),
@@ -417,7 +422,7 @@ pub async fn detail(
         };
     }
     let updated = db.collection::<AssistantCmaAgent>(COLLECTION_NAME).find_one_and_update(
-        doc! {"_id":&row.id,"user_id":owner,"cma_agent_id":&row.cma_agent_id,"cma_service_id":&row.cma_service_id,"sandbox_generation":row.sandbox_generation},
+        doc! {"_id":&row.id,"user_id":owner,"user_service_id":&row.user_service_id,"execution_base_url":&row.execution_base_url,"cma_agent_id":&row.cma_agent_id,"cma_service_id":&row.cma_service_id,"sandbox_generation":row.sandbox_generation},
         doc! {"$set":observation_fields(&remote,Utc::now())}).return_document(ReturnDocument::After).await?
         .ok_or_else(||AppError::NotFound("CMA Agent not found".into()))?;
     Ok(dto(&updated, parent.as_ref(), None))
@@ -511,6 +516,8 @@ fn verify_reference(current: &AssistantCmaAgent, original: &AssistantCmaAgent) -
     if current.id != original.id
         || current.user_id != original.user_id
         || current.cma_agent_id != original.cma_agent_id
+        || current.user_service_id != original.user_service_id
+        || current.execution_base_url != original.execution_base_url
         || current.cma_service_id != original.cma_service_id
         || current.cma_sandbox_id != original.cma_sandbox_id
         || current.cma_workspace_id != original.cma_workspace_id
@@ -658,7 +665,7 @@ mod tests {
     ) -> (AssistantCmaAgent, Document) {
         let now = Utc::now();
         let mut stored = doc! {
-            "_id":"internal-agent","user_id":"owner","cma_service_id":"catalog-service",
+            "_id":"internal-agent","user_id":"owner","user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"catalog-service",
             "cma_agent_id":"agent","cma_sandbox_id":"sandbox",
             "cma_workspace_id":"workspace","cma_worktree_id":"worktree","sandbox_generation":3,
             "created_at":bson::DateTime::from_chrono(now),"updated_at":bson::DateTime::from_chrono(now),
@@ -748,7 +755,7 @@ mod tests {
     #[test]
     fn public_agent_projection_omits_private_source_and_untrusted_profile_fields() {
         let mut row:AssistantCmaAgent=bson::from_document(doc! {
-            "_id":"internal-agent","user_id":"owner","cma_service_id":"catalog-service","cma_agent_id":"agent",
+            "_id":"internal-agent","user_id":"owner","user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"catalog-service","cma_agent_id":"agent",
             "cma_sandbox_id":"sandbox","cma_workspace_id":"workspace","cma_worktree_id":"worktree",
             "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
             "source_conversation_id":"private-chat","source_watch_id":"watch","callback_url":"https://untrusted.example",
@@ -868,6 +875,17 @@ mod stream_authority_tests {
         async fn service_id(&self, _: &str) -> CmaResult<String> {
             Ok("service".into())
         }
+        async fn connection(
+            &self,
+            owner: &str,
+        ) -> CmaResult<super::super::assistant_cma_gateway::CmaConnection> {
+            Ok(super::super::assistant_cma_gateway::CmaConnection {
+                user_service_id: "user-service".into(),
+                cma_service_id: self.service_id(owner).await?,
+                execution_base_url: "https://cma.example/".into(),
+            })
+        }
+
         async fn get_agent(&self, _: &str, id: &str) -> CmaResult<CmaAgent> {
             assert_eq!(id, "agent");
             self.read("agent").await?;
@@ -929,7 +947,7 @@ mod stream_authority_tests {
 
     fn reference() -> AssistantCmaAgent {
         bson::from_document(doc! {
-            "_id":"local-agent", "user_id":"owner", "cma_service_id":"service",
+            "_id":"local-agent", "user_id":"owner", "user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"service",
             "cma_agent_id":"agent", "cma_sandbox_id":"sandbox",
             "cma_workspace_id":"workspace", "cma_worktree_id":"worktree",
             "sandbox_generation":3, "last_observed_revision":7,
@@ -940,7 +958,7 @@ mod stream_authority_tests {
 
     fn parent_reference() -> AssistantCmaSandbox {
         bson::from_document(doc! {
-            "_id":"local-sandbox", "user_id":"owner", "cma_service_id":"service",
+            "_id":"local-sandbox", "user_id":"owner", "user_service_id":"user-service","execution_base_url":"https://cma.example/","cma_service_id":"service",
             "label":"Sandbox", "cma_sandbox_id":"sandbox", "occupies_account_slot":true,
             "admission_state":"associated", "creation_ref":"creation", "generation":3,
             "source":NYXID_CREATED_SOURCE,

@@ -440,6 +440,90 @@ async fn trust_stranded_slot_recovers_before_changed_same_key_or_new_key_both_fo
 }
 
 #[tokio::test]
+async fn trust_automatic_recovery_never_transfers_authority_to_another_connection() {
+    let f = Fixture::with_management(false).await;
+    mock_cma(&f).await;
+    let row = unknown_refusal(&f, true).await;
+    let before = bson::to_document(&row).unwrap();
+    let connection = uuid::Uuid::new_v4().to_string();
+    let endpoint = uuid::Uuid::new_v4().to_string();
+    let server = MockServer::start().await;
+    f.db.collection::<crate::models::user_endpoint::UserEndpoint>("user_endpoints")
+        .insert_one(crate::test_utils::test_user_endpoint(
+            &endpoint,
+            &f.owner,
+            "New CMA connection",
+            &server.uri(),
+            None,
+            Some(&f.catalog.id),
+        ))
+        .await
+        .unwrap();
+    f.db.collection::<crate::models::user_service::UserService>("user_services")
+        .insert_one(crate::test_utils::test_user_service(
+            &connection,
+            &f.owner,
+            "cma-second",
+            &endpoint,
+            Some(&f.catalog.id),
+            None,
+        ))
+        .await
+        .unwrap();
+    let target = crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+        &f.db,
+        &f.keys,
+        &f.owner,
+        &connection,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .target;
+    let result = admit(
+        &f.db,
+        &f.keys,
+        &f.jwt,
+        &f.config,
+        &f.owner,
+        &connection,
+        true,
+        &target,
+        "POST",
+        SANDBOX_ROUTE,
+        None,
+        &confirmed_body(),
+        &[("Idempotency-Key".into(), "new-connection-key".into())],
+        false,
+    )
+    .await;
+    assert!(matches!(result, Err(AppError::Conflict(ref message))
+        if message.starts_with("cma_sandbox_account_slot_occupied:")));
+    assert_eq!(bson::to_document(&f.saved(&row.id).await).unwrap(), before);
+    f.assert_single_intent().await;
+    let posts = f.server.received_requests().await.unwrap();
+    assert_eq!(
+        posts.len(),
+        1,
+        "neither connection receives a recovery send"
+    );
+    for request in posts {
+        assert_eq!(request.body, UNCONFIRMED);
+        assert_eq!(request.headers["idempotency-key"], "original-key");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(
+        f.catalog_server
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn trust_explicit_recovery_is_terminal_and_idempotent_both_formats() {
     for contextual in [false, true] {
         let mut f = Fixture::new().await;
@@ -507,7 +591,7 @@ async fn trust_spoof_with_any_resource_id_keeps_unknown_intent_and_slot() {
 }
 
 #[tokio::test]
-async fn trust_automatic_recovery_refuses_expired_or_changed_deployment_before_replay() {
+async fn trust_automatic_recovery_refuses_expired_or_changed_connection_target_before_replay() {
     for expired in [false, true] {
         let f = Fixture::new().await;
         mock_cma(&f).await;
@@ -517,10 +601,10 @@ async fn trust_automatic_recovery_refuses_expired_or_changed_deployment_before_r
                 doc! {"_id":&row.id}, doc! {"$set":{"first_dispatched_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::hours(24))}}
             ).await.unwrap();
         } else {
-            f.db.collection::<AssistantCmaCreation>(COLLECTION_NAME)
+            f.db.collection::<bson::Document>("user_endpoints")
                 .update_one(
-                    doc! {"_id":&row.id},
-                    doc! {"$set":{"deployment_fingerprint":"another-deployment"}},
+                    doc! {"_id":&f.endpoint_id},
+                    doc! {"$set":{"url":format!("{}/retargeted", f.server.uri())}},
                 )
                 .await
                 .unwrap();
@@ -539,7 +623,7 @@ async fn trust_automatic_recovery_refuses_expired_or_changed_deployment_before_r
         let expected = if expired {
             "cma_creation_replay_expired"
         } else {
-            "cma_configuration_required"
+            "CMA resource state changed"
         };
         assert!(
             matches!(core_error, AppError::Conflict(ref message) if message.starts_with(expected))
