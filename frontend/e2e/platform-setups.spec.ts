@@ -161,6 +161,39 @@ test("one reviewed adoption request stays disabled while pending and moves the d
   expect(fixture.pageErrors).toEqual([]);
 });
 
+for (const key of ["Enter", "Space"] as const) {
+  test(`rapid ${key} activation adopts the reviewed draft once`, async ({
+    page,
+  }) => {
+    const fixture = await installSetupFixture(page);
+    let release!: () => void;
+    fixture.adoptionGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.goto("/onboarding/setups");
+    await selectChat(page);
+    await page.getByRole("checkbox", { name: reviewText }).check();
+    try {
+      await adopt(page).focus();
+      await page.keyboard.press(key);
+      await page.keyboard.press(key);
+      await expect.poll(() => fixture.writes.length).toBe(1);
+      await expect(adopt(page)).toBeDisabled();
+    } finally {
+      release();
+    }
+    await expect(
+      page.getByText("No unowned drafts remain for this chat.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await singleModule(page, 0);
+    expect(fixture.writes).toHaveLength(1);
+    expect(fixture.unexpected).toEqual([]);
+    expect(fixture.pageErrors).toEqual([]);
+  });
+}
+
 for (const failure of ["invalidDraft", "draftError", "adoptError"] as const) {
   test(`${failure} preserves one module and the existing error boundary`, async ({
     page,
@@ -172,7 +205,7 @@ for (const failure of ["invalidDraft", "draftError", "adoptError"] as const) {
     if (failure === "adoptError") {
       await singleModule(page, 1);
       await page.getByRole("checkbox", { name: reviewText }).check();
-      await adopt(page).click();
+      await adopt(page).dblclick();
       await expect(
         page.getByText("Draft changed. Review it again.", { exact: true }),
       ).toBeVisible();

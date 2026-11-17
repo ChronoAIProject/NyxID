@@ -497,13 +497,17 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               review.revision !== draft.revision ||
               mutation.isPending
             }
-            onClick={() => {
+            onClick={(event) => {
               // Block a second click before the mutation's pending render.
-              if (!review || adoptionPending.current) return;
+              // A fast failure can settle between the clicks of a double-click;
+              // its second click must not silently retry the reviewed request.
+              if (event.detail > 1 || !review || adoptionPending.current) return;
               adoptionPending.current = true;
               mutation.mutate(review, {
                 onSuccess: () => setReview(null),
-                onSettled: () => { adoptionPending.current = false; },
+                onSettled: () => {
+                  adoptionPending.current = false;
+                },
               });
             }}
           >{translateUi("Adopt reviewed draft")}</Button>

@@ -374,10 +374,24 @@ token/import form. The regression reproduced the duplicate module on `e0c349a43`
 These fixtures verify browser behavior, not production or live-provider delivery.
 
 The `Frontend` CI job runs the router/adoption regressions through `npm run test`.
-The six browser cases are a separate acceptance command shown above; they are not
+The eight browser cases are a separate acceptance command shown above; they are not
 currently run by CI. They are excluded from the default Playwright suite because
 that suite boots Vite in `test` mode with the assistant's in-app fixtures. This
 suite needs its dedicated configuration to exercise the real HTTP client.
+
+The router tests also fail on any unexpected `console.error`, including React's
+duplicate-key warning, across delayed empty-state insertion, navigation and
+account changes. Adoption tests cover fast-failure double-clicks, native Enter
+and Space activation, success, explicit retry, rejected query invalidation and
+in-flight review remounts under StrictMode. The synchronous guard belongs to the
+review instance: changing the account, binding generation or selected chat clears
+consent. A new instance can submit only after a fresh review and explicit action.
+The server remains the authority for concurrent requests: adoption fences the live
+binding generation and exact anonymous revision, and replays an already adopted
+draft only for the same owner, binding and generation. No client lock carries
+consent or authority across those boundaries. TanStack Query's hook-level
+invalidation still runs after unmount; per-call success/settled callbacks do not
+run without an observer, so an old reply cannot clear a new instance's review.
 
 ### External acceptance
 

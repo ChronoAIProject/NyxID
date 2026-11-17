@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AnonymousDraftReview } from "./platform-onboarding";
 import {
@@ -51,4 +51,19 @@ it("submits rapid clicks once and allows a retry after the request settles", () 
   fireEvent.click(adopt);
   expect(state.mutate).toHaveBeenCalledTimes(2);
   expect(state.mutate.mock.calls[1]![0]).toEqual(draft);
+});
+it("clears consent on success and releases the guard for a newly reviewed draft", () => {
+  render(<AnonymousDraftReview binding={binding} />);
+  fireEvent.click(screen.getByRole("checkbox"));
+  const adopt = screen.getByRole("button", { name: "Adopt reviewed draft" });
+  fireEvent.click(adopt);
+  act(() => {
+    state.mutate.mock.calls[0]![1].onSuccess();
+    state.mutate.mock.calls[0]![1].onSettled();
+  });
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(adopt).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(adopt);
+  expect(state.mutate).toHaveBeenCalledTimes(2);
 });
