@@ -7,7 +7,7 @@ session routes and authentication.
 
 ## Binding and authorization
 
-The owner publishes one connection for a personal Bot through **Agent details →
+The owner publishes one connection for a Bot through **Agent details →
 Access → Device voice**. Its existing `UserService.source = nyxbot_voice` and
 `source_id = Bot UUID` fix the selected Bot. Publication grants no Key access.
 The owner then grants that exact connection to the board Key through ordinary
@@ -27,8 +27,18 @@ access to that service; Viewer access is insufficient. Discovery, call startup
 and ongoing call authorization recheck membership, role and effective service
 scope. The call and conversation belong to that acting person, while the Bot
 retains its organization identity and tool grants. Members never share each
-other's private calls or conversation history. Organization-owned Keys are still
-outside device voice; no organization is impersonated as a personal caller.
+other's private calls or conversation history.
+
+Organization-owned Keys use the same authentication and service scope checks:
+their `user_id` is the organization, so calls, history, settings, provider access
+and billing belong to that organization. They do not act as the person who
+created the Key, and that person's later membership changes do not revoke the
+organization's Key. Keys with the same owner reuse the Bot's home conversation
+and the existing single live call slot per account. Key and child credential
+checks still prevent another credential from taking over a live call. Revoke
+the organization Key or its service grant to withdraw device access; disabling
+the organization also invalidates its calls. No additional Key type, device
+identity, membership role or conversation isolation scheme is introduced.
 
 The two grant directions are independent:
 

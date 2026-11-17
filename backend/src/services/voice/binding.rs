@@ -33,7 +33,7 @@ pub struct Publication {
 /// Project the same live publication authority for the UI and the write path.
 /// A visible Bot does not grant access to its voice connection metadata.
 pub async fn publication(db: &Database, actor: &str, agent_id: &str) -> AppResult<Publication> {
-    super::access::personal_owner(db, actor).await?;
+    super::access::active_owner(db, actor).await?;
     let agent = team::agent(db, actor, agent_id).await?;
     let access = crate::services::org_agent_service::access(db, actor, &agent.user_id).await?;
     let mut service = None;

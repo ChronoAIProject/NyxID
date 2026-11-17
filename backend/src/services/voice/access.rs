@@ -17,23 +17,21 @@ pub const SERVICE_SLUG: &str = "nyxbot-voice";
 /// Server-owned source identity. A generic catalog connection grants no Bot access.
 pub const BOUND_SOURCE: &str = "nyxbot_voice";
 
-pub(super) async fn personal_owner(db: &Database, owner: &str) -> AppResult<()> {
+pub(super) async fn active_owner(db: &Database, owner: &str) -> AppResult<()> {
     let user = db
         .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
         .find_one(doc! {"_id":owner})
         .await?;
-    if !user.is_some_and(|user| {
-        user.is_active && user.user_type == crate::models::user::UserType::Person
-    }) {
+    if !user.is_some_and(|user| user.is_active) {
         return Err(AppError::ApiKeyScopeForbidden(
-            "Device voice requires a personal owner".into(),
+            "Voice owner is unavailable".into(),
         ));
     }
     Ok(())
 }
 
-/// A device still acts as its personal Key owner. Organization Bots and
-/// connections retain their organization ownership and live membership ACL.
+/// A device acts as its Key owner, including an organization principal.
+/// Cross-owner Bots retain their existing live organization membership ACL.
 pub(super) async fn agent_access(
     db: &Database,
     actor: &str,
@@ -71,7 +69,7 @@ async fn service_access(db: &Database, auth: &AuthUser, service: &UserService) -
 }
 
 pub async fn services(db: &Database, auth: &AuthUser) -> AppResult<Vec<UserService>> {
-    personal_owner(db, &auth.user_id.to_string()).await?;
+    active_owner(db, &auth.user_id.to_string()).await?;
     let denied = || AppError::ApiKeyScopeForbidden("This Key cannot use NyxBot Voice".into());
     let catalog = db
         .collection::<DownstreamService>(CATALOG)
@@ -103,7 +101,7 @@ pub async fn authorize(
     auth: &AuthUser,
     agent: &AssistantAgent,
 ) -> AppResult<UserService> {
-    personal_owner(db, &auth.user_id.to_string()).await?;
+    active_owner(db, &auth.user_id.to_string()).await?;
     agent_access(db, &auth.user_id.to_string(), agent).await?;
     let catalog = db
         .collection::<DownstreamService>(CATALOG)
@@ -129,7 +127,7 @@ pub async fn authorize(
 
 /// Resolve a selected connection directly; discovery alone scans the set.
 pub(crate) async fn connection(db: &Database, auth: &AuthUser, id: &str) -> AppResult<UserService> {
-    personal_owner(db, &auth.user_id.to_string()).await?;
+    active_owner(db, &auth.user_id.to_string()).await?;
     key_service::ensure_api_key_service_scope(auth.api_key_service_scope(), &[id.to_owned()])?;
     let service = db
         .collection::<UserService>(SERVICES)

@@ -413,7 +413,7 @@ pub async fn fence_call(
         (KEYS, key_filter),
         (
             crate::models::user::COLLECTION_NAME,
-            doc! {"_id":user,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
+            doc! {"_id":user,"is_active":true},
         ),
         (
             crate::models::assistant_agent::COLLECTION_NAME,
