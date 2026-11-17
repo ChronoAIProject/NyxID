@@ -546,7 +546,8 @@ async fn org_device_voice_org_keys_reuse_owner_identity_history_and_call_contrac
             "sdp_offer":"invalid"
         })).await;
         assert_eq!(status, 400, "{body}");
-        assert!(body.to_string().contains("Invalid voice offer"), "{body}");
+        assert_eq!(body["error"], "validation_error", "{body}");
+        assert_eq!(body["details"]["stage"], "transport", "{body}");
         let proof = client_key::authorize(&f.state.db, &auth, &home.id).await.unwrap();
         let call = session::admit_for_client_key(
             &f.state.db, &f.org, &home.id, &Uuid::new_v4().to_string(),
