@@ -212,6 +212,8 @@ interface ChatComposerProps {
   readonly onLongText?: (text: string) => string | undefined;
   /** The text a saved draft keeps, when it differs from what is on screen. */
   readonly draftText?: (content: string) => string;
+  /** Refuse before clearing the editor, persisted draft or pending uploads. */
+  readonly beforeSend?: () => boolean;
   readonly onSend: (content: string) => Promise<void>;
   readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
@@ -257,6 +259,7 @@ function DraftedChatComposer({
   attachmentMentions,
   onLongText,
   draftText,
+  beforeSend,
   onSend,
   onContentChange,
   onStop,
@@ -882,6 +885,7 @@ function DraftedChatComposer({
       dictation.active
     )
       return;
+    if (beforeSend && !beforeSend()) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;

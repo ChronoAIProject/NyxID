@@ -104,6 +104,22 @@ describe("ChatComposer drafts", () => {
     expect(screen.getByRole("textbox")).toHaveValue("Draft two");
   });
 
+  it("refuses click and Enter before clearing editor or persisted draft", () => {
+    const beforeSend = vi.fn(() => false);
+    useAssistantDraftStore.getState().saveDraft("user-1", "conv:one", "Keep this draft");
+    const clear = vi.spyOn(useAssistantDraftStore.getState(), "clearDraft");
+    render(<ChatComposer {...baseProps} draftKey="conv:one" beforeSend={beforeSend} />);
+    const input = screen.getByRole("textbox");
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    expect(beforeSend).toHaveBeenCalledTimes(2);
+    expect(clear).not.toHaveBeenCalled();
+    expect(baseProps.onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue("Keep this draft");
+    expect(useAssistantDraftStore.getState().getDraft("conv:one")).toBe("Keep this draft");
+    clear.mockRestore();
+  });
+
   it("clears the draft at dispatch and does not restore it after stop", async () => {
     useAssistantDraftStore
       .getState()
@@ -117,6 +133,24 @@ describe("ChatComposer drafts", () => {
     expect(baseProps.onSend).toHaveBeenCalledWith("Send this");
     expect(useAssistantDraftStore.getState().getDraft("conv:one")).toBe("");
     expect(screen.getByRole("textbox")).toHaveValue("");
+  });
+
+  it.each(["click", "Enter"])("refuses %s before clearing editor or persisted draft", async (method) => {
+    useAssistantDraftStore.getState().saveDraft("user-1", "guarded", "Keep this draft");
+    const beforeSend = vi.fn(() => false);
+    const changes: string[] = [];
+    const unsubscribe = useAssistantDraftStore.subscribe((state) => changes.push(state.getDraft("guarded")));
+    const { unmount } = render(<ChatComposer {...baseProps} draftKey="guarded" beforeSend={beforeSend} />);
+    if (method === "click") fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    else fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", code: "Enter" });
+    expect(beforeSend).toHaveBeenCalledOnce();
+    expect(baseProps.onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox")).toHaveValue("Keep this draft");
+    expect(useAssistantDraftStore.getState().getDraft("guarded")).toBe("Keep this draft");
+    expect(changes).not.toContain("");
+    unmount();
+    expect(useAssistantDraftStore.getState().getDraft("guarded")).toBe("Keep this draft");
+    unsubscribe();
   });
 
   it("keeps the composer writable for an active typed task and sends steering", async () => {
