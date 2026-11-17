@@ -10,6 +10,12 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/triggers", (route) =>
     route.fulfill({ json: { triggers: [] } }),
   );
+  await page.route("**/api/v1/providers", (route) =>
+    route.fulfill({ json: { providers: [] } }),
+  );
+  await page.route("**/api/v1/llm/status", (route) =>
+    route.fulfill({ json: {} }),
+  );
 });
 
 for (const { path, title, heading } of [
@@ -65,4 +71,26 @@ test("the legacy onboarding URL uses the destination title after redirect", asyn
   await expect(page).toHaveURL(/\/devices\/onboard$/);
   await expect(page.getByRole("heading", { name: "Onboard device", exact: true })).toBeVisible();
   await expect(page).toHaveTitle("nyxid - device onboard");
+});
+
+test("every dashboard route section keeps a specific title, including detail and callback routes", async ({ page }) => {
+  const routes = [
+    ["/models", "nyxid - platform models"],
+    ["/onboarding/setups", "nyxid - bot setups"],
+    ["/onboarding/setups/setup-1", "nyxid - bot setups"],
+    ["/services", "nyxid - services"],
+    ["/services/service-1", "nyxid - services"],
+    ["/services/service-1/edit", "nyxid - services"],
+    ["/providers", "nyxid - providers"],
+    ["/providers/callback", "nyxid - providers"],
+    ["/providers/manage", "nyxid - providers"],
+    ["/providers/provider-1", "nyxid - providers"],
+    ["/providers/provider-1/edit", "nyxid - providers"],
+  ] as const;
+
+  for (const [path, title] of routes) {
+    await page.goto(path);
+    await expect(page).toHaveURL(new RegExp(`${path.replaceAll("$", "\\$")}$`));
+    await expect(page).toHaveTitle(title);
+  }
 });
