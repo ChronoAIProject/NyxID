@@ -5,6 +5,15 @@ import { agentKeyLoginError } from "../../features/auth/agentKeyLoginModel";
 import { ApiError } from "./ApiError";
 import { resolveErrorMessage, resolveAuthDeviceErrorMessage } from "./errorMessages";
 
+test("N10 cancellation handling preserves specific messages", () => {
+  for (const message of ["auth_session_changed", "cancelled"]) {
+    const error = Object.assign(new Error(message), { name: "AbortError" });
+    assert.equal(resolveErrorMessage(error), "Request cancelled");
+  }
+  const upload = Object.assign(new Error("Upload cancelled."), { name: "AbortError" });
+  assert.equal(resolveErrorMessage(upload), "Upload cancelled.");
+});
+
 test("step-up without an available mobile prompt directs both approval and code mint to the website", () => {
   const error = new ApiError({ statusCode: 403, errorCode: 2003,
     errorKey: "mfa_step_up_required", message: "Server verification instruction" });
