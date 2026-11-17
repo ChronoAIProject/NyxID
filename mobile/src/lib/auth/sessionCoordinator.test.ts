@@ -108,10 +108,8 @@ test(
       refreshToken: 'rotated-a',
       accessTokenExpiresAt: 1,
     };
-    await assert.rejects(
-      coordinator.commitRefresh(loaded, rotated),
-      /interrupted/,
-    );
+    assert.equal(await coordinator.commitRefresh(loaded, rotated), true);
+    assert.equal(JSON.parse(values.get(SESSION_RECORD_KEY)!).session.refreshToken, a.refreshToken);
     storage.setItemAsync = originalSet;
     assert.deepEqual(
       deletes.filter(
@@ -122,14 +120,14 @@ test(
       [],
     );
     const after = await coordinator.load();
-    assert.equal(after?.accessToken, a.accessToken);
-    assert.equal(after?.refreshToken, a.refreshToken);
-    assert.equal(JSON.parse(values.get(SESSION_RECORD_KEY)!).session.refreshToken, a.refreshToken);
+    assert.equal(after?.accessToken, rotated.accessToken);
+    assert.equal(after?.refreshToken, rotated.refreshToken);
+    assert.equal(JSON.parse(values.get(SESSION_RECORD_KEY)!).session.refreshToken, rotated.refreshToken);
   },
 );
 
 test(
-  'a failed rotation write keeps the previous refresh token',
+  'a failed rotation write keeps the successor in memory until a later load persists it',
   { timeout: 10000 },
   async () => {
     const { coordinator, storage } = setup();
@@ -139,17 +137,14 @@ test(
     storage.setItemAsync = async () => {
       throw new Error('keychain_unavailable');
     };
-    await assert.rejects(
-      coordinator.commitRefresh(loaded, {
-        accessToken: token('a', 'rotated'),
-        refreshToken: 'rotated-a',
-      }),
-      /keychain_unavailable/,
-    );
+    assert.equal(await coordinator.commitRefresh(loaded, {
+      accessToken: token('a', 'rotated'), refreshToken: 'rotated-a',
+    }), true);
+    assert.equal((await coordinator.load())?.refreshToken, 'rotated-a');
     storage.setItemAsync = originalSet;
     const after = await coordinator.load();
-    assert.equal(after?.accessToken, a.accessToken);
-    assert.equal(after?.refreshToken, a.refreshToken);
+    assert.equal(after?.accessToken, token('a', 'rotated'));
+    assert.equal(after?.refreshToken, 'rotated-a');
   },
 );
 

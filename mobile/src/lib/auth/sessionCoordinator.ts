@@ -11,6 +11,19 @@ type RecordValue = { version: 2; session: Omit<StoredAuthSession, 'sessionGenera
 export function createSessionCoordinator(storage: SessionStorage, bind: (actor: string | null) => void) {
   let generation = 0;
   let legacyCleanupComplete = false;
+  let pendingSuccessor: { generation: number; session: StoredAuthSession } | null = null;
+  async function persistSuccessor(candidate: NonNullable<typeof pendingSuccessor>) {
+    // The server has already retired the predecessor. Publish memory first and
+    // bound native retries; later loads keep trying the durable write.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (generation !== candidate.generation || pendingSuccessor !== candidate) return;
+      try {
+        await write(candidate.session);
+        if (pendingSuccessor === candidate) pendingSuccessor = null;
+        return;
+      } catch { /* Keep the successor, never reuse the retired token. */ }
+    }
+  }
   let queue: Promise<unknown> = Promise.resolve();
   function serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = queue.catch(() => {}).then(operation);
@@ -38,6 +51,11 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
     legacyCleanupComplete = true;
   }
   async function read(expectedGeneration = generation): Promise<StoredAuthSession | null> {
+    const candidate = pendingSuccessor;
+    if (candidate?.generation === expectedGeneration && generation === expectedGeneration) {
+      await persistSuccessor(candidate);
+      return { ...candidate.session, sessionGeneration: expectedGeneration };
+    }
     const record = await storage.getItemAsync(SESSION_RECORD_KEY);
     if (record !== null) {
       const value = JSON.parse(record) as RecordValue;
@@ -72,7 +90,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       });
     },
     persist(session: StoredAuthSession) {
-      const expected = ++generation; bind(null);
+      const expected = ++generation; pendingSuccessor = null; bind(null);
       return serial(async () => {
         if (generation !== expected) throw new Error('auth_session_changed');
         await write(session);
@@ -83,7 +101,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       });
     },
     clear() {
-      const expected = ++generation; bind(null);
+      const expected = ++generation; pendingSuccessor = null; bind(null);
       return serial(async () => {
         if (generation !== expected) return;
         // Tombstone first prevents interrupted cleanup resurrecting legacy auth.
@@ -99,7 +117,9 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
         const current = await read(expected.sessionGeneration);
         if (generation !== expected.sessionGeneration || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
           || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return false;
-        await write(next);
+        const candidate = { generation, session: normalize(next) };
+        pendingSuccessor = candidate;
+        await persistSuccessor(candidate);
         if (generation !== expected.sessionGeneration) return false;
         bind(decodeJwtSub(next.accessToken) ?? null);
         return true;
