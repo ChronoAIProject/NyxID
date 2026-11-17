@@ -50,6 +50,11 @@ pub enum NyxbotCommands {
     },
     /// Discover available model IDs
     Models(AuthArgs),
+    /// NyxID-managed phone lines: quotes, claims, renewal, voice and release
+    Line {
+        #[command(subcommand)]
+        command: super::managed_line::LineCommands,
+    },
 }
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("input").required(true).args(["text","file"])))]
@@ -580,6 +585,7 @@ async fn discovery(auth: AuthArgs, path: String) -> Result<()> {
 }
 pub async fn run(command: NyxbotCommands) -> Result<()> {
     match command {
+        NyxbotCommands::Line { command } => super::managed_line::run(command).await,
         NyxbotCommands::Run(args) => {
             let text = input(args.text, args.file)?;
             let key = args

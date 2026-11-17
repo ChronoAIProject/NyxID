@@ -20,6 +20,8 @@ import type {
 } from "@/schemas/admin-chain-verification";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
+import { Link } from "@tanstack/react-router";
+import type { ChainVerificationResponse } from "@/schemas/admin-chain-verification";
 
 const CHAIN_LABELS: Record<ChainVerifyStatus["chain"], string> = {
   get audit_log() { return translateUi("Audit Log Chain"); },
@@ -223,6 +225,37 @@ function SecurityEffectQueue({
   );
 }
 
+/** Managed phone lines cost capture; the full margin report has its own page. */
+function ManagedLinesCard({
+  summary,
+}: {
+  readonly summary: NonNullable<ChainVerificationResponse["managed_comms"]>;
+}) {
+  useUiTranslation();
+  const attention = summary.pending_cost_effects > 0 || summary.unknown_inventory_lines > 0;
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-15">{translateUi("Managed phone lines")}</CardTitle>
+        <Badge variant={attention ? "warning" : "success"}>
+          {attention ? translateUi("Reconciliation pending") : translateUi("Reconciled")}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-2 text-14">
+        <p className="text-muted-foreground">
+          {translateUi("{{effects}} effects await supplier cost capture; {{lines}} lines have no supplier rental policy.", {
+            effects: summary.pending_cost_effects,
+            lines: summary.unknown_inventory_lines,
+          })}
+        </p>
+        <Link to="/admin/managed-lines/report" className="underline">
+          {translateUi("Open the managed lines margin report")}
+        </Link>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AdminIntegrityPage() {
   useUiTranslation();
   const { data, isLoading, error } = useChainVerification();
@@ -275,6 +308,8 @@ export function AdminIntegrityPage() {
         <StartupDiagnostics diagnostics={data.startup_diagnostics} />
       ) : null}
       {data ? <SecurityEffectQueue diagnostics={data.security_effects} /> : null}
+
+      {data?.managed_comms ? <ManagedLinesCard summary={data.managed_comms} /> : null}
 
       {error ? (
         <Card>

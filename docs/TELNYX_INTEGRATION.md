@@ -14,6 +14,18 @@ voice and SMS, plus allocated platform SMS. Shared-platform Telnyx voice remains
 unavailable because the inbound provider APIs do not enforce the required call
 duration bound.
 
+The only exception is a [NyxID-managed phone line](MANAGED_PHONE_LINES.md):
+Telnyx voice on a managed line is an **underwritten exception, not reserved
+liability**. It requires a per-account underwriting policy with paid-account
+evidence of the maximum inbound leg, verified detail-record fields, supplier
+tariff and FX revisions and a rolling 30-day budget that covers every registered
+channel limit. Managed Telnyx calls hang up by the funded deadline, take
+quantities only from the call-status API, authenticated answered/hangup
+occurrences or a validated `call-control` detail record, and debit a per-call
+character allowance before synthesis. Premium ElevenLabs voices use a Telnyx
+integration secret that NyxID references but never reads. Manual platform
+allocations of Telnyx voice stay refused.
+
 Choose the setup that matches who owns the key and how users will call Telnyx:
 
 | Setup | Where to configure it | Current behavior |

@@ -37,6 +37,7 @@ pub struct RuntimeFundingCandidates {
     periods: Vec<UsageAllowancePeriod>,
     metric: BillingMetric,
     maximum_quantity: i64,
+    managed_lifecycle: bool,
 }
 
 pub type MachineFundingCandidates = RuntimeFundingCandidates;
@@ -84,6 +85,92 @@ pub async fn prepare_sandbox_window_funding(
         now,
     )
     .await
+}
+
+/// A separate contract for prepaid managed number rental. Runtime producers
+/// cannot acquire this authority or reinterpret VoiceSeconds as an allocation.
+pub struct ManagedLifecycleFundingCandidates(RuntimeFundingCandidates);
+pub async fn prepare_managed_rental_funding(
+    db: &mongodb::Database,
+    owner: &str,
+    service_id: &str,
+    slug: &str,
+    now: DateTime<Utc>,
+) -> AppResult<ManagedLifecycleFundingCandidates> {
+    let mut candidates = prepare_runtime_window_funding(
+        db,
+        owner,
+        Some(service_id),
+        slug,
+        BillingMetric::PhoneNumberDays,
+        30,
+        now,
+    )
+    .await?;
+    candidates.managed_lifecycle = true;
+    Ok(ManagedLifecycleFundingCandidates(candidates))
+}
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_managed_rental_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    owner: &str,
+    wallet: &str,
+    candidates: &ManagedLifecycleFundingCandidates,
+    layer: LayerReservation,
+    now: DateTime<Utc>,
+) -> AppResult<BillingReservation> {
+    super::super::managed_lifecycle::require_ready(db).await?;
+    if layer.metric != BillingMetric::PhoneNumberDays || layer.estimated_quantity != 30 {
+        return Err(AppError::ValidationError(
+            "Managed rental requires thirty number-days".into(),
+        ));
+    }
+    reserve_finite_in_session(db, session, owner, wallet, &candidates.0, layer, now).await
+}
+
+/// Closed contract for managed voice and incurred SMS; never runtime authority.
+pub struct ManagedEffectFundingCandidates(RuntimeFundingCandidates);
+pub async fn prepare_managed_effect_funding(
+    db: &mongodb::Database,
+    owner: &str,
+    service: &str,
+    slug: &str,
+    metric: BillingMetric,
+    quantity: i64,
+    now: DateTime<Utc>,
+) -> AppResult<ManagedEffectFundingCandidates> {
+    if !matches!(
+        (metric, quantity),
+        (BillingMetric::VoiceSeconds, 1800) | (BillingMetric::Requests, 1)
+    ) {
+        return Err(AppError::ValidationError(
+            "Invalid managed effect funding contract".into(),
+        ));
+    }
+    let mut c =
+        prepare_runtime_window_funding(db, owner, Some(service), slug, metric, quantity, now)
+            .await?;
+    c.managed_lifecycle = true;
+    Ok(ManagedEffectFundingCandidates(c))
+}
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_managed_effect_in_session(
+    db: &mongodb::Database,
+    tx: &mut mongodb::ClientSession,
+    owner: &str,
+    wallet: &str,
+    c: &ManagedEffectFundingCandidates,
+    layer: LayerReservation,
+    now: DateTime<Utc>,
+) -> AppResult<BillingReservation> {
+    super::super::managed_lifecycle::require_ready(db).await?;
+    if layer.metric != c.0.metric || layer.estimated_quantity != c.0.maximum_quantity {
+        return Err(AppError::ValidationError(
+            "Managed effect funding changed".into(),
+        ));
+    }
+    reserve_finite_in_session(db, tx, owner, wallet, &c.0, layer, now).await
 }
 
 fn sandbox_window_quantity(
@@ -167,6 +254,7 @@ async fn prepare_runtime_window_funding(
         periods,
         metric,
         maximum_quantity,
+        managed_lifecycle: false,
     })
 }
 
@@ -239,6 +327,23 @@ pub async fn reserve_machine_window_in_session(
 /// Caller must atomically persist every returned hold with its usage/evidence row.
 #[allow(clippy::too_many_arguments)]
 pub async fn reserve_runtime_window_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    owner_id: &str,
+    wallet_id: &str,
+    candidates: &RuntimeFundingCandidates,
+    layer: LayerReservation,
+    now: DateTime<Utc>,
+) -> AppResult<BillingReservation> {
+    if candidates.managed_lifecycle || !layer.metric.is_runtime_allocation() {
+        return Err(AppError::ValidationError(
+            "Runtime funding requires its own allocation metric".into(),
+        ));
+    }
+    reserve_finite_in_session(db, session, owner_id, wallet_id, candidates, layer, now).await
+}
+#[allow(clippy::too_many_arguments)]
+async fn reserve_finite_in_session(
     db: &mongodb::Database,
     session: &mut mongodb::ClientSession,
     owner_id: &str,
@@ -507,7 +612,14 @@ fn validate_layer(
     if owner_id != candidates.owner_id
         || layer.layer != BillingLayer::Platform
         || layer.metric != candidates.metric
-        || !layer.metric.is_runtime_allocation()
+        || !(layer.metric.is_runtime_allocation()
+            || (candidates.managed_lifecycle
+                && matches!(
+                    (layer.metric, layer.estimated_quantity),
+                    (BillingMetric::PhoneNumberDays, 30)
+                        | (BillingMetric::VoiceSeconds, 1800)
+                        | (BillingMetric::Requests, 1)
+                )))
         || layer.estimated_quantity <= 0
         || layer.estimated_quantity > candidates.maximum_quantity
         || layer.lago_metric_code.is_empty()

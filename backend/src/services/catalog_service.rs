@@ -361,6 +361,7 @@ async fn provider_platform_secret_nonempty(
 pub(crate) fn visibility_filter(user_id: &str, owner_ids: &[&str]) -> mongodb::bson::Document {
     doc! {
         "platform_key.purpose": {"$nin":["model_route","model_offering"]},
+        "managed_comms_role": bson::Bson::Null,
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
@@ -637,7 +638,7 @@ pub(crate) async fn enforce_catalog_read_access(
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
-    if super::platform_key_service::model_only(svc) {
+    if super::platform_key_service::require_ordinary_use(svc).is_err() {
         // The dedicated first-party admin surface owns private model records.
         // Ordinary catalog readers carry no such authenticated purpose.
         return Err(AppError::NotFound("Catalog entry not found".into()));

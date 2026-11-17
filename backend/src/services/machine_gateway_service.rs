@@ -31,6 +31,7 @@ fn catalog_projection() -> mongodb::bson::Document {
         "inference": 1,
         "git_http": 1,
         "platform_key": 1,
+        "managed_comms_role": 1,
         "is_active": 1,
         "service_type": 1,
         "visibility": 1,

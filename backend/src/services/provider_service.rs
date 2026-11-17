@@ -6718,6 +6718,7 @@ pub async fn seed_default_services(
             auth_method: service_auth_method,
             auth_key_name: service_auth_key_name,
             credential_encrypted: empty_credential,
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,

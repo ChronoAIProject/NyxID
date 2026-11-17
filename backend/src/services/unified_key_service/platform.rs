@@ -31,6 +31,7 @@ pub async fn create_platform_key(
             "Service is no longer available".to_string(),
         ));
     }
+    platform_key_service::require_ordinary_use(&catalog)?;
     let (auth_method, auth_key_name) = platform_key_service::effective_auth(db, &catalog).await?;
     let slug = resolve_unique_slug(
         db,
@@ -113,6 +114,7 @@ pub async fn switch_credential_binding(
         .find_one(doc! { "_id": catalog_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Service is no longer available".to_string()))?;
+    platform_key_service::require_ordinary_use(&catalog)?;
     let (auth_method, auth_key_name) = platform_key_service::effective_auth(db, &catalog).await?;
     if use_platform_key {
         if credential.is_some()

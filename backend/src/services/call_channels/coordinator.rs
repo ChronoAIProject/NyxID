@@ -109,26 +109,57 @@ async fn ingress_correlated_inner(
     send: Option<&str>,
 ) -> AppResult<String> {
     let b = binding::load(&state, id).await?;
-    let authentication = binding::resolve(&state, &b.user_id, &b.credential, b.profile).await;
+    let adapter = channel_adapters::resolve_nyxbot_profile(
+        profiles::id(b.profile),
+        &state.token_exchange_cache,
+    )?;
+    let parse = || match &adapter {
+        Adapter::Messaging(a) => a.receive(&b, body),
+        Adapter::Conversation(a) => a.receive(&b, body),
+        _ => Err(AppError::ChannelPlatformSendUnsupported),
+    };
+    // Only managed callbacks need a parsed identity to locate retained authority.
+    // Ordinary BYOK keeps signature verification before typed event parsing.
+    let managed_event = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        Some(parse()?)
+    } else {
+        None
+    };
+    let existing = if let Some(event) = &managed_event {
+        super::managed::resolver::callback_authentication(&state, &b, event, send).await?
+    } else {
+        None
+    };
+    let (key, public_key) = if let Some(authentication) = existing {
+        (authentication.key, authentication.webhook_public_key)
+    } else if profiles::provider(b.profile) == "telnyx" {
+        // BYOK verification keys remain independent of current execution rights.
+        // New effects still pass binding::live before dispatch.
+        (
+            zeroize::Zeroizing::new(String::new()),
+            Some(binding::verification_key(&state, &b).await?),
+        )
+    } else {
+        let authentication = binding::resolve(&state, &b.user_id, &b.credential, b.profile)
+            .await
+            .map_err(|_| {
+                AppError::ChannelWebhookVerificationFailed(
+                    "Provider authentication unavailable".into(),
+                )
+            })?;
+        (authentication.key, None)
+    };
     match profiles::provider(b.profile) {
         "telnyx" => protocol::verify_telnyx(
             headers,
             body,
-            binding::verification_key(&state, &b).await?.as_str(),
+            public_key
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
             Utc::now().timestamp(),
         )?,
         "twilio" => {
-            let (_, secret) = protocol::twilio_key(
-                &authentication
-                    .as_ref()
-                    .map_err(|_| {
-                        AppError::ChannelWebhookVerificationFailed(
-                            "Provider authentication unavailable".into(),
-                        )
-                    })?
-                    .key,
-                &b.account_id,
-            )?;
+            let (_, secret) = protocol::twilio_key(&key, &b.account_id)?;
             protocol::verify_twilio_configured(
                 &state.config,
                 headers,
@@ -141,20 +172,64 @@ async fn ingress_correlated_inner(
         }
         _ => return Err(AppError::ChannelPlatformSendUnsupported),
     }
-    let adapter = channel_adapters::resolve_nyxbot_profile(
-        profiles::id(b.profile),
-        &state.token_exchange_cache,
-    )?;
-    let event = match &adapter {
-        Adapter::Messaging(a) => a.receive(&b, body)?,
-        Adapter::Conversation(a) => a.receive(&b, body)?,
-        _ => return Err(AppError::ChannelPlatformSendUnsupported),
+    let event = match managed_event {
+        Some(event) => event,
+        None => parse()?,
     };
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. })
+        && matches!(&event, Ingress::Call { .. } | Ingress::Sms { .. })
+    {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "New managed effects require the stable line webhook".into(),
+        ));
+    }
     if send.is_some() && !matches!(&event, Ingress::Receipt { .. }) {
         return Err(AppError::ChannelWebhookVerificationFailed(
             "Receipt event required".into(),
         ));
     }
+    // Persist carrier identity after the original verify-then-parse boundary.
+    // Owner-authored times remain transport metadata and never become quantities.
+    let identity = if b.profile == Profile::TelnyxRelay {
+        let raw: Value =
+            serde_json::from_slice(body).map_err(|_| AppError::AssistantTurnRequired)?;
+        let handle = |field: &str| {
+            raw.pointer(&format!("/data/payload/{field}"))
+                .and_then(Value::as_str)
+                .filter(|s| protocol::handle(s))
+                .map(str::to_owned)
+        };
+        Some(super::managed::ingress::EventIdentity {
+            occurred_at: Utc::now(),
+            occurrence_verified: false,
+            deliverable: false,
+            call_leg_id: handle("call_leg_id"),
+            call_session_id: handle("call_session_id"),
+        })
+    } else {
+        None
+    };
+    dispatch_inner(state, b, event, identity, send).await
+}
+pub(super) fn dispatch_verified(
+    state: AppState,
+    b: Binding,
+    event: Ingress,
+    identity: Option<super::managed::ingress::EventIdentity>,
+) -> BoxFuture<'static, AppResult<String>> {
+    Box::pin(async move { dispatch_inner(state, b, event, identity, None).await })
+}
+async fn dispatch_inner(
+    state: AppState,
+    b: Binding,
+    event: Ingress,
+    identity: Option<super::managed::ingress::EventIdentity>,
+    send: Option<&str>,
+) -> AppResult<String> {
+    let adapter = channel_adapters::resolve_nyxbot_profile(
+        profiles::id(b.profile),
+        &state.token_exchange_cache,
+    )?;
     match event {
         Ingress::Call {
             event_id,
@@ -165,7 +240,24 @@ async fn ingress_correlated_inner(
             let r = binding::live(&state, &b).await?;
             billing::validate(&state, &b, &r).await?;
             let active = carrier::prove_call(&state, &b, &r, &call_id, &from, &to).await?;
-            let (s, fresh) = session::prepare(&state, &b, &call_id, &from, &to).await?;
+            let managed = matches!(b.credential, CredentialBinding::ManagedLine { .. });
+            let (s, fresh) = if managed {
+                super::managed::calls::prepare(&state, &b, &call_id, &from, &to, identity.as_ref())
+                    .await?
+            } else {
+                session::prepare(&state, &b, &call_id, &from, &to).await?
+            };
+            if !managed && let Some(identity) = &identity {
+                state
+                    .db
+                    .collection::<CallSession>(SESSIONS)
+                    .update_one(
+                        doc! {"_id":&s.id,"provider_call_leg_id":bson::Bson::Null},
+                        doc! {"$set":{"provider_call_leg_id":&identity.call_leg_id,
+                        "provider_call_session_id":&identity.call_session_id}},
+                    )
+                    .await?;
+            }
             session::receipt(&state, &b, &event_id, "call_started").await?;
             if !fresh && b.profile == Profile::TwilioRelay && s.cap_confirmed {
                 session::fence(&state, &s).await?;
@@ -180,7 +272,15 @@ async fn ingress_correlated_inner(
                 && s.bootstrap_dispatched
                 && !s.cap_dispatched
                 && active;
-            if !(fresh || resume_bootstrap) {
+            // A committed managed receipt can outlive a lost commit acknowledgement
+            // or a crash before the first command marker. Its command CAS still
+            // selects one dispatcher, without opening another financial identity.
+            let resume_admission = managed
+                && s.state == SessionState::Prepared
+                && !s.answer_dispatched
+                && !s.bootstrap_dispatched
+                && !s.cap_dispatched;
+            if !(fresh || resume_bootstrap || resume_admission) {
                 if b.profile == Profile::TwilioRelay {
                     return Err(AppError::Conflict(
                         "Call admission is already in progress; no command was replayed".into(),
@@ -188,7 +288,7 @@ async fn ingress_correlated_inner(
                 }
                 return Ok(String::new());
             }
-            let meter = if fresh {
+            let meter = if fresh && !managed {
                 Some(billing::reserve(&state, &b, &r, &s.billing_request_id).await?)
             } else {
                 None
@@ -218,7 +318,13 @@ async fn ingress_correlated_inner(
                 // Redirect reaches admission only once the call is active.
                 return Ok(format!(
                     "<Response><Pause length=\"1\"/><Redirect method=\"POST\">{}#rc=0&amp;rt=5000&amp;tt=5000</Redirect><Hangup/></Response>",
-                    protocol::xml(&webhook_url(&state, &b))
+                    protocol::xml(&if let CredentialBinding::ManagedLine { line_id, .. } =
+                        &b.credential
+                    {
+                        super::managed::ingress::url(&state, line_id, false)
+                    } else {
+                        webhook_url(&state, &b)
+                    })
                 ));
             }
             if let Adapter::Conversation(a) = adapter {
@@ -274,16 +380,55 @@ async fn ingress_correlated_inner(
             call_id,
             at,
         } => {
-            let r = binding::live(&state, &b).await?;
             let s = session::by_call(&state, &b, &call_id).await?;
             if session::receipt(&state, &b, &event_id, "answered").await? {
                 state.db.collection::<CallSession>(SESSIONS).update_one(doc!{"_id":&s.id,"answered":false},doc!{"$set":{"answered":true,"connected_at":bson::DateTime::from_chrono(at.unwrap_or_else(Utc::now))}}).await?;
             }
             let s = session::load(&state, &s.id).await?;
+            // The authenticated observation is evidence for an admitted effect.
+            // Starting a relay is a separate new effect and needs live admission.
+            let r = match binding::live(&state, &b).await {
+                Ok(r) => r,
+                Err(_) if matches!(b.credential, CredentialBinding::ManagedLine { .. }) => {
+                    let _ = close(&state, &b, &s, false).await;
+                    return Ok(String::new());
+                }
+                Err(error) => return Err(error),
+            };
+            if b.profile == Profile::TelnyxRelay {
+                let a = super::managed::synthesis::allowance(&state.db, &s.id).await?;
+                if a.premium.is_some()
+                    && !a.premium_fallback
+                    && !s.relay_dispatched
+                    && !super::managed::synthesis::enabled(&state.db).await?
+                {
+                    super::managed::synthesis::fallback_before_dispatch(&state, &s).await?;
+                }
+            }
             if session::command(&state, &s, "relay_dispatched").await? {
                 let raw = ticket(&state, &s).await?;
                 if let Adapter::Conversation(a) = adapter {
-                    let payload = json!({"url":websocket_url(&state,&b,&s,&raw)?,"voice":b.voice,"tts_provider":"telnyx","voice_settings":{"type":"telnyx"},"language":b.language,"dtmf_detection":false,"interruptible":"any","transcription_engine":"Deepgram","transcription_engine_config":{"transcription_model":"deepgram/nova-3"}});
+                    let mut payload = json!({"url":websocket_url(&state,&b,&s,&raw)?,"voice":b.voice,"tts_provider":"telnyx","voice_settings":{"type":"telnyx"},"language":b.language,"dtmf_detection":false,"interruptible":"any","transcription_engine":"Deepgram","transcription_engine_config":{"transcription_model":"deepgram/nova-3"}});
+                    let allowance = super::managed::synthesis::allowance(&state.db, &s.id).await?;
+                    if let Some(p) = allowance
+                        .premium
+                        .as_ref()
+                        .filter(|_| !allowance.premium_fallback)
+                    {
+                        payload["voice_settings"] =
+                            json!({"type":"elevenlabs","api_key_ref":p.api_key_ref});
+                        payload
+                            .as_object_mut()
+                            .ok_or(AppError::AssistantTurnRequired)?
+                            .remove("tts_provider");
+                    }
+                    if allowance.premium_fallback {
+                        payload["voice"] =
+                            json!(super::managed::voice::default_option("telnyx").voice);
+                    }
+                    // There is no provider-authored greeting. The first greeting is
+                    // sent by our fenced socket writer, exactly like every reply.
+                    payload["welcome_greeting"] = json!("");
                     if a.command(&state, &b, &r, &s, "conversation_relay_start", payload)
                         .await
                         .is_err()
@@ -313,7 +458,16 @@ async fn ingress_correlated_inner(
             {
                 let _ = engine::request_stop(&state.db, &s.user_id, &s.conversation_id).await;
                 let r = binding::resolve(&state, &b.user_id, &b.credential, b.profile).await?;
-                let Some((at, seconds)) = carrier::terminal_status(&state, &b, &r, &s).await?
+                let pending = session::terminal(
+                    &state,
+                    &s,
+                    at.unwrap_or_else(Utc::now),
+                    None,
+                    "owner_transport_terminal_quantity_pending",
+                )
+                .await?;
+                let Some((at, seconds)) =
+                    carrier::terminal_status(&state, &b, &r, &pending).await?
                 else {
                     return Err(AppError::VoiceProviderUnavailable);
                 };
@@ -602,7 +756,7 @@ pub(crate) async fn turn_with_history(
     });
     Ok((output, worker))
 }
-async fn sms_turn(
+pub(super) async fn sms_turn(
     state: AppState,
     b: Binding,
     s: CallSession,
@@ -639,27 +793,28 @@ async fn sms_turn(
         format!("/2010-04-01/Accounts/{}/Messages.json", b.account_id)
     };
     binding::authorize(&state, &b, &r, "POST", &path, Some(&payload)).await?;
+    // Managed-line sends carry their own durable request identity: their part
+    // outcomes are fixed on the send receipt, so stuck-request recovery never
+    // waives them. Owner-funded sends keep the ordinary carrier identity.
+    let request_prefix = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        "managed-sms-out"
+    } else {
+        "adapter-sms-out"
+    };
     let mut meters = Vec::new();
     for part in 0..reserved_parts {
-        match billing::reserve(&state, &b, &r, &format!("adapter-sms-out:{}:{part}", s.id)).await {
+        match billing::reserve(&state, &b, &r, &format!("{request_prefix}:{}:{part}", s.id)).await {
             Ok(meter) => meters.push(meter),
             Err(error) => {
-                for meter in &meters {
-                    state
-                        .billing
-                        .settle(
-                            meter,
-                            crate::models::service_billing::PlatformUsage::default(),
-                            None,
-                            None,
-                        )
-                        .await?;
-                }
+                billing::cancel(&state, &meters, "sms_reservation_failed").await;
                 return Err(error);
             }
         }
     }
-    let row = EventReceipt {
+    let mut row = EventReceipt {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
         id: send_id,
         identity_key: session::identity(&[&s.id, "sms_send"]),
         user_id: b.user_id.clone(),
@@ -670,7 +825,7 @@ async fn sms_turn(
         status: "dispatching".into(),
         provider_message_id: None,
         delivery: "unknown".into(),
-        billing_request_id: Some(format!("adapter-sms-out:{}:0", s.id)),
+        billing_request_id: Some(format!("{request_prefix}:{}:0", s.id)),
         observed_parts: None,
         reserved_parts: Some(reserved_parts),
         billing_finalized: false,
@@ -678,19 +833,25 @@ async fn sms_turn(
         to: Some(s.from.clone()),
         created_at: Utc::now(),
     };
+    if s.managed_claim_id.is_some() {
+        row.managed_claim_id = s.managed_claim_id.clone();
+        row.managed_claim_generation = s.managed_claim_generation;
+        let mut reference = s
+            .admitted_reference
+            .clone()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        reference.provider_call_id = None;
+        reference.provider_message_id = None;
+        reference.call_leg_id = None;
+        reference.call_session_id = None;
+        row.admitted_reference = Some(reference);
+        // Managed sends hold a dispatch barrier like caller confirmations: a
+        // prepared receipt is provably unsent, so recovery can release it.
+        row.status = "prepared".into();
+    }
     if let Err(error) = session::insert_sms_send(&state, &b, &current, &row).await {
         // No provider dispatch occurred. Release every opened part reservation.
-        for meter in &meters {
-            state
-                .billing
-                .settle(
-                    meter,
-                    crate::models::service_billing::PlatformUsage::default(),
-                    None,
-                    None,
-                )
-                .await?;
-        }
+        billing::cancel(&state, &meters, "sms_not_admitted").await;
         return Err(error);
     }
     let Adapter::Messaging(a) = channel_adapters::resolve_nyxbot_profile(
@@ -702,18 +863,11 @@ async fn sms_turn(
     };
     for meter in &meters {
         if let Err(error) = state.billing.mark_forwarded(meter).await {
-            for meter in &meters {
-                state
-                    .billing
-                    .settle(
-                        meter,
-                        crate::models::service_billing::PlatformUsage::default(),
-                        None,
-                        None,
-                    )
-                    .await?;
-            }
+            billing::cancel(&state, &meters, "sms_failed_before_dispatch").await;
             state.db.collection::<EventReceipt>(EVENTS).update_one(doc!{"_id":&row.id},doc!{"$set":{"status":"rejected_before_dispatch","billing_finalized":true,"delivery":"failed"}}).await?;
+            if row.admitted_reference.is_some() {
+                super::sms_delivery::reconcile(&state, &row.id).await?;
+            }
             return Err(error);
         }
     }
@@ -723,21 +877,33 @@ async fn sms_turn(
     let live = match dispatch {
         Ok(live) => live,
         Err(error) => {
-            for meter in &meters {
-                state
-                    .billing
-                    .settle(
-                        meter,
-                        crate::models::service_billing::PlatformUsage::default(),
-                        None,
-                        None,
-                    )
-                    .await?;
-            }
+            billing::cancel(&state, &meters, "sms_failed_before_dispatch").await;
             state.db.collection::<EventReceipt>(EVENTS).update_one(doc!{"_id":&row.id},doc!{"$set":{"status":"rejected_before_dispatch","billing_finalized":true,"delivery":"failed"}}).await?;
+            if row.admitted_reference.is_some() {
+                super::sms_delivery::reconcile(&state, &row.id).await?;
+            }
             return Err(error);
         }
     };
+    // Persist the managed dispatch barrier before a byte may leave NyxID. The
+    // reservation sweep can only finish a receipt still prepared.
+    if row.admitted_reference.is_some()
+        && state
+            .db
+            .collection::<EventReceipt>(EVENTS)
+            .update_one(
+                doc! {"_id":&row.id,"status":"prepared"},
+                doc! {"$set":{"status":"dispatching","dispatched_at":bson::DateTime::now()}},
+            )
+            .await?
+            .matched_count
+            != 1
+    {
+        billing::cancel(&state, &meters, "sms_failed_before_dispatch").await;
+        return Err(AppError::Conflict(
+            "SMS dispatch authority changed before sending".into(),
+        ));
+    }
     match a
         .send(
             crate::services::proxy_service::no_redirect_http_client(),
@@ -750,7 +916,7 @@ async fn sms_turn(
         .await
     {
         Ok(accepted) => {
-            state.db.collection::<EventReceipt>(EVENTS).update_one(doc!{"_id":&row.id,"status":"dispatching"},doc!{"$set":{"status":"accepted","delivery":"accepted","provider_message_id":accepted.id,"observed_parts":accepted.parts}}).await?;
+            state.db.collection::<EventReceipt>(EVENTS).update_one(doc!{"_id":&row.id,"status":"dispatching"},doc!{"$set":{"status":"accepted","delivery":"accepted","provider_message_id":&accepted.id,"observed_parts":accepted.parts}}).await?;
             super::sms_delivery::reconcile(&state, &row.id).await?;
         }
         Err(profiles::SmsFailure::Rejected(error)) => {
@@ -821,17 +987,40 @@ pub async fn authenticate_socket(
             "Socket verification failed".into(),
         ));
     }
-    let r = binding::live(state, b).await?;
-    if b.profile == Profile::TwilioRelay {
-        let (_, secret) = protocol::twilio_key(&r.key, &b.account_id)?;
-        protocol::verify_twilio_upgrade_configured(
-            &state.config,
-            headers,
-            &websocket_url(state, b, s, raw)?,
-            secret,
-        )?;
+    if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        let authentication = super::managed::resolver::session_authentication(state, b, s).await?;
+        if b.profile == Profile::TwilioRelay {
+            let (_, secret) = protocol::twilio_key(&authentication.key, &b.account_id)?;
+            protocol::verify_twilio_upgrade_configured(
+                &state.config,
+                headers,
+                &websocket_url(state, b, s, raw)?,
+                secret,
+            )?;
+        }
+        let reference = super::managed::resolver::session_reference(state, b, s).await?;
+        let call = super::managed::resolver::request_existing(
+            state,
+            b,
+            &reference,
+            super::managed::resolver::CleanupOperation::ReadCall,
+            Some(&profiles::binding_origin(b)?),
+        )
+        .await?;
+        carrier::validate_managed_socket_call(b, s, &call)?;
+    } else {
+        let r = binding::live(state, b).await?;
+        if b.profile == Profile::TwilioRelay {
+            let (_, secret) = protocol::twilio_key(&r.key, &b.account_id)?;
+            protocol::verify_twilio_upgrade_configured(
+                &state.config,
+                headers,
+                &websocket_url(state, b, s, raw)?,
+                secret,
+            )?;
+        }
+        carrier::prove_call(state, b, &r, &s.provider_call_id, &s.from, &s.to).await?;
     }
-    carrier::prove_call(state, b, &r, &s.provider_call_id, &s.from, &s.to).await?;
     Ok(())
 }
 pub async fn socket(state: AppState, b: Binding, s: CallSession, mut socket: WebSocket) {
@@ -852,7 +1041,11 @@ pub async fn socket(state: AppState, b: Binding, s: CallSession, mut socket: Web
     let Ok(owned) = session::load(&state, &s.id).await else {
         return;
     };
-    let result = socket_inner(&state, &b, &owned, &mut socket).await;
+    let mut synthesis = super::managed::synthesis::Writer::default();
+    let result = socket_inner(&state, &b, &owned, &mut socket, &mut synthesis).await;
+    // Normal end, fence failures and interruption can prove unused capacity.
+    // A cancelled task never reaches here, and uncertain writes erase the cursor.
+    let _ = synthesis.finish(&state.db).await;
     let end = channel_adapters::resolve_nyxbot_profile(
         profiles::id(b.profile),
         &state.token_exchange_cache,
@@ -884,6 +1077,7 @@ async fn socket_inner(
     b: &Binding,
     initial: &CallSession,
     socket: &mut WebSocket,
+    synthesis: &mut super::managed::synthesis::Writer,
 ) -> AppResult<()> {
     let claim = initial
         .claim_id
@@ -926,6 +1120,17 @@ async fn socket_inner(
         ));
     }
     state.db.collection::<CallSession>(SESSIONS).update_one(doc!{"_id":&s.id,"claim_id":&claim},doc!{"$set":{"provider_session_id":session_id,"lease_expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(30))}}).await?;
+    if b.profile == Profile::TelnyxRelay {
+        let allowance = super::managed::synthesis::allowance(&state.db, &s.id).await?;
+        synthesis.wrapup =
+            super::managed::synthesis::wrapup(&b.language, allowance.wrapup.as_deref()).into();
+        if let Some(greeting) = allowance.greeting {
+            session::fence(state, &s).await?;
+            if !write_synthesis(state, &s, socket, &adapter, synthesis, &greeting, true).await? {
+                return Ok(());
+            }
+        }
+    }
     let mut output: Option<mpsc::Receiver<Output>> = None;
     let mut worker: Option<tokio::task::JoinHandle<Option<runtime::OwnerTurnSettlement>>> = None;
     let mut playback = Playback::default();
@@ -956,7 +1161,10 @@ async fn socket_inner(
                     session::fence(state,&s).await?;
                     if item.generation==s.generation {
                         if playback.bytes()+item.text.len()>262144{return Err(AppError::RequestBodyTooLarge{max_bytes:262144,context:"Relay playback window".into()});}
-                        tokio::time::timeout(std::time::Duration::from_secs(5),socket.send(Message::Text(adapter.text(&item.text,item.last).to_string().into()))).await.map_err(|_|AppError::AssistantTurnRequired)?.map_err(|_|AppError::AssistantTurnRequired)?;
+                        if !write_synthesis(state,&s,socket,&adapter,synthesis,&item.text,item.last).await? {
+                            let _=engine::request_stop(&state.db,&s.user_id,&s.conversation_id).await;
+                            return Ok(());
+                        }
                         playback.append(&item.turn_id,&item.text)?;
                     }
                     if item.last{output=None;}
@@ -978,6 +1186,7 @@ async fn socket_inner(
                     RelayFrame::Interrupt{heard_prefix,duration_ms}=>{
                         let reply=playback.correlate(&heard_prefix);
                         session::record_interruption(state,&s,&heard_prefix,reply.map(|(_,text)|text).unwrap_or(""),duration_ms,reply.map(|(turn,_)|turn)).await?;
+                        synthesis.finish(&state.db).await?;
                         s=session::load(state,&s.id).await?;s=session::interrupt(state,&s).await?;output=None;
                         if let Some(task)=worker.take(){tokio::time::timeout(std::time::Duration::from_secs(10),task).await.map_err(|_|AppError::AssistantTurnRequired)?.map_err(|_|AppError::AssistantTurnRequired)?;}
                     }
@@ -993,9 +1202,85 @@ async fn socket_inner(
     }
     Ok(())
 }
+/// Single writer; a durable debit is never replayed, even if socket send times out.
+async fn write_synthesis(
+    state: &AppState,
+    s: &CallSession,
+    socket: &mut WebSocket,
+    adapter: &profiles::RelayAdapter,
+    writer: &mut super::managed::synthesis::Writer,
+    text: &str,
+    last: bool,
+) -> AppResult<bool> {
+    if s.profile != Profile::TelnyxRelay || text.is_empty() {
+        send_synthesis(socket, adapter, text, last).await?;
+        if last {
+            writer.finish(&state.db).await?;
+        }
+        return Ok(true);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut offset = 0;
+    while offset < chars.len() {
+        let capacity = match writer.capacity(state, s).await {
+            Ok(n) => n,
+            Err(AppError::ManagedBudgetExhausted) => {
+                let wrap = &writer.wrapup;
+                let block = super::managed::synthesis::debit(state, s, wrap, true).await?;
+                if let Err(error) = session::fence(state, s).await {
+                    super::managed::synthesis::unwritten(&state.db, &block).await?;
+                    return Err(error);
+                }
+                // An invoked or timed-out send remains consumed.
+                send_synthesis(socket, adapter, wrap, true).await?;
+                super::managed::synthesis::written(&state.db, &block).await?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let end = (offset + capacity).min(chars.len());
+        let token: String = chars[offset..end].iter().collect();
+        session::fence(state, s).await?;
+        writer.attempting(end - offset)?;
+        if let Err(error) =
+            send_synthesis(socket, adapter, &token, last && end == chars.len()).await
+        {
+            writer.uncertain();
+            return Err(error);
+        }
+        offset = end;
+    }
+    if last {
+        writer.finish(&state.db).await?;
+    }
+    Ok(true)
+}
+async fn send_synthesis(
+    socket: &mut WebSocket,
+    adapter: &profiles::RelayAdapter,
+    text: &str,
+    last: bool,
+) -> AppResult<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.send(Message::Text(adapter.text(text, last).to_string().into())),
+    )
+    .await
+    .map_err(|_| AppError::AssistantTurnRequired)?
+    .map_err(|_| AppError::AssistantTurnRequired)
+}
 pub async fn finalize_call(state: &AppState, s: &CallSession) -> AppResult<()> {
+    if s.ended_at.is_some() {
+        super::managed::synthesis::release_reserve(&state.db, &s.id).await?;
+    }
     if s.billing_finalized || s.ended_at.is_none() {
         return Ok(());
+    }
+    if s.managed_claim_id.is_some() {
+        return super::managed::calls::finalize(state, s).await;
+    }
+    if s.terminated_quantity_pending {
+        return Err(AppError::VoiceProviderUnavailable);
     }
     billing::settle_admitted(
         state,
@@ -1031,9 +1316,46 @@ async fn close_inner(
     s: &CallSession,
     authoritative: bool,
 ) -> AppResult<()> {
-    let current = session::load(state, &s.id).await?;
+    let mut current = session::load(state, &s.id).await?;
+    // Repair already-recorded termination from older writers through the same
+    // atomic slot transition. Missing quantity must not keep a known-dead slot.
+    if (current.hangup_confirmed && current.ended_at.is_none())
+        || (current.managed_claim_id.is_some() && current.ended_at.is_some())
+    {
+        current = session::terminal(
+            state,
+            &current,
+            current.ended_at.unwrap_or_else(Utc::now),
+            None,
+            "retained_terminal_observation",
+        )
+        .await?;
+    }
     let _ = engine::request_stop(&state.db, &s.user_id, &s.conversation_id).await;
     if current.ended_at.is_some() {
+        if current.terminated_quantity_pending {
+            if current.managed_claim_id.is_some() {
+                return super::managed::calls::refresh_evidence(state, &current).await;
+            }
+            let observation = async {
+                let r = binding::resolve(state, &b.user_id, &b.credential, b.profile).await?;
+                carrier::terminal_status(state, b, &r, &current).await
+            }
+            .await;
+            if let Ok(Some((at, seconds))) = observation {
+                let frozen = session::terminal(
+                    state,
+                    &current,
+                    at,
+                    Some(seconds),
+                    "authenticated_provider_status",
+                )
+                .await?;
+                return finalize_call(state, &frozen).await;
+            }
+            let recovered = session::waive_unavailable_byok_evidence(state, &current.id).await?;
+            return finalize_call(state, &recovered).await;
+        }
         return finalize_call(state, &current).await;
     }
     if authoritative {
@@ -1057,20 +1379,66 @@ async fn close_inner(
         .await?;
     // Revocation stops new turns. Cleanup may only address the recorded admitted call.
     // A missing credential cannot prevent settlement of already-frozen evidence.
-    let Ok(r) = binding::resolve(state, &b.user_id, &b.credential, b.profile).await else {
-        return Ok(());
-    };
-    if session::command(state, &current, "hangup_dispatched").await? {
-        if s.profile == Profile::TelnyxRelay {
-            let _ = carrier::telnyx_command(state, b, &r, &current, "hangup", json!({})).await;
-        } else if s.profile == Profile::TwilioRelay {
-            let _ =
-                carrier::twilio_update(state, b, &r, &current, &[("Status", "completed")]).await;
+    // Attempt counters precede I/O; uncertain outcomes remain replayable.
+    if !current.hangup_confirmed {
+        state
+            .db
+            .collection::<CallSession>(SESSIONS)
+            .update_one(
+                doc! {"_id":&current.id,"hangup_confirmed":{"$ne":true}},
+                doc! {"$inc":{"hangup_attempts":1_i64}},
+            )
+            .await?;
+        let result = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+            let reference = super::managed::resolver::session_reference(state, b, &current).await?;
+            super::managed::resolver::request_existing(
+                state,
+                b,
+                &reference,
+                super::managed::resolver::CleanupOperation::Hangup,
+                Some(&profiles::binding_origin(b)?),
+            )
+            .await
+            .and_then(|v| {
+                if b.profile == Profile::TwilioRelay
+                    && (v["sid"] != current.provider_call_id
+                        || v["account_sid"] != b.account_id
+                        || v["status"] != "completed")
+                {
+                    return Err(AppError::VoiceProviderUnavailable);
+                }
+                Ok(())
+            })
+        } else {
+            let r = binding::resolve(state, &b.user_id, &b.credential, b.profile).await?;
+            if b.profile == Profile::TelnyxRelay {
+                carrier::telnyx_command(state, b, &r, &current, "hangup", json!({})).await
+            } else {
+                carrier::twilio_update(state, b, &r, &current, &[("Status", "completed")]).await
+            }
+        };
+        if result.is_ok() {
+            session::terminal(state, &current, Utc::now(), None, "hangup_confirmed").await?;
+        } else {
+            if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+                super::management::audit(
+                    state,
+                    "system",
+                    "managed_hangup_failed",
+                    json!({"session_id":current.id}),
+                );
+            }
+            // Evidence may prove termination even if the command response was lost.
+            tracing::warn!(session_id=%current.id,"Carrier hangup retry pending");
         }
     }
-    // Command acceptance is not terminal evidence. Only a provider read or signed
-    // terminal callback may freeze duration; an ambiguous command is never replayed.
-    if let Ok(Some((at, seconds))) = carrier::terminal_status(state, b, &r, &current).await {
+    let observation = if matches!(b.credential, CredentialBinding::ManagedLine { .. }) {
+        carrier::managed_terminal_status(state, b, &current).await
+    } else {
+        let r = binding::resolve(state, &b.user_id, &b.credential, b.profile).await?;
+        carrier::terminal_status(state, b, &r, &current).await
+    };
+    if let Ok(Some((at, seconds))) = observation {
         let frozen = session::terminal(
             state,
             &current,
@@ -1079,41 +1447,74 @@ async fn close_inner(
             "authenticated_provider_status",
         )
         .await?;
-        finalize_call(state, &frozen).await?;
+        return finalize_call(state, &frozen).await;
+    }
+    Ok(())
+}
+/// One bounded pass, shared by the periodic worker and recovery tests. Each
+/// session is claimed separately, so a drain stops between sessions.
+pub(super) async fn recover_once(state: &AppState) -> AppResult<()> {
+    let rows = session::expired(state).await?;
+    for s in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
+        let _ = state
+            .db
+            .collection::<bson::Document>(SESSIONS)
+            .update_one(
+                doc! {"_id":&s.id},
+                doc! {"$set":{"recovery_checked_at":bson::DateTime::now()}},
+            )
+            .await;
+        // Managed calls without trusted terminal quantity wait for evidence.
+        if s.ended_at.is_some() && !s.terminated_quantity_pending {
+            let _ = finalize_call(state, &s).await;
+        } else if !profiles::relay(s.profile) {
+            let _ = session::finish_noncall(state, &s.id, "expired").await;
+        } else if let Ok(b) = binding::load(state, &s.binding_id).await {
+            let _ = close(state, &b, &s, false).await;
+        }
     }
     Ok(())
 }
 pub fn spawn_sweep(state: AppState) {
+    let cost_state = state.clone();
+    cost_state.shutdown.clone().spawn_worker(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(
+            cost_state.config.billing_reconcile_interval_secs.max(1),
+        ));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let Some(_work) = cost_state.shutdown.tick(&mut tick).await else {
+                break;
+            };
+            if super::managed::costs::sweep(&cost_state).await.is_err() {
+                tracing::warn!("Managed cost capture sweep pending");
+            }
+        }
+    });
     state.shutdown.clone().spawn_worker(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
             let Some(_work) = state.shutdown.tick(&mut tick).await else {
                 break;
             };
-            if let Ok(rows) = session::expired(&state).await {
-                for s in rows {
-                    let Some(_claim) = state.shutdown.background() else {
-                        break;
-                    };
-                    let _ = state
-                        .db
-                        .collection::<bson::Document>(SESSIONS)
-                        .update_one(
-                            doc! {"_id":&s.id},
-                            doc! {"$set":{"recovery_checked_at":bson::DateTime::now()}},
-                        )
-                        .await;
-                    if s.ended_at.is_some() {
-                        let _ = finalize_call(&state, &s).await;
-                    } else if !profiles::relay(s.profile) {
-                        let _ = session::finish_noncall(&state, &s.id, "expired").await;
-                    } else if let Ok(b) = binding::load(&state, &s.binding_id).await {
-                        let _ = close(&state, &b, &s, false).await;
-                    }
-                }
-            }
+            let _ = recover_once(&state).await;
             if let Some(_claim) = state.shutdown.background() {
                 let _ = super::sms_delivery::sweep(&state).await;
+            }
+            if let Some(_claim) = state.shutdown.background() {
+                let _ = super::managed::calls::sweep(&state).await;
+            }
+            if let Some(_claim) = state.shutdown.background() {
+                let _ = super::managed::sms::sweep(&state).await;
+            }
+            if let Some(_claim) = state.shutdown.background() {
+                let _ = super::managed::confirmations::sweep(&state).await;
+            }
+            if let Some(_claim) = state.shutdown.background() {
+                let _ = super::managed::reservations::sweep(&state).await;
             }
         }
     });

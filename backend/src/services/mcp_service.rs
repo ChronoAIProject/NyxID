@@ -1450,7 +1450,7 @@ async fn load_user_tools_with_grants(
     for svc in &connected_services {
         if svc.service_type != "http"
             || svc.service_category == "provider"
-            || crate::services::platform_key_service::model_only(svc)
+            || crate::services::platform_key_service::require_ordinary_use(svc).is_err()
             || crate::services::retired_service_service::is_retired(svc)
         {
             continue;
@@ -1478,7 +1478,9 @@ async fn load_user_tools_with_grants(
     }
 
     for svc in &auto_services {
-        if seen_ids.contains(&svc.id) || crate::services::platform_key_service::model_only(svc) {
+        if seen_ids.contains(&svc.id)
+            || crate::services::platform_key_service::require_ordinary_use(svc).is_err()
+        {
             continue;
         }
         if !authorizable_platform(svc) {
@@ -1737,7 +1739,9 @@ async fn load_user_tools_with_grants(
             .and_then(|id| catalog_policy_by_id.get(id).copied());
         // Hidden model infrastructure must not leak through ordinary tools or
         // unavailable-connection diagnostics, even for stale own-key bindings.
-        if catalog_policy.is_some_and(crate::services::platform_key_service::model_only) {
+        if catalog_policy.is_some_and(|s| {
+            crate::services::platform_key_service::require_ordinary_use(s).is_err()
+        }) {
             continue;
         }
         let retired_catalog =
@@ -3072,6 +3076,7 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
+        "call_channel__text_current_caller" => (false, false, true),
         "nyxid__task_status" | "nyxid__list_notifications" | "nyxid__read_tool_result" => {
             (true, false, false)
         }
@@ -3124,6 +3129,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "call_channel__text_current_caller" => "Text the current caller",
         "nyxid__task_status" => "Read task execution status",
         "nyxid__list_notifications" => "Read NyxBot notifications",
         "nyxid__read_tool_result" => "Read a retained tool result",
@@ -3195,7 +3201,9 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
 
     let mut public_services = Vec::new();
     for svc in services {
-        if anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&svc).is_err() {
+        if super::platform_key_service::require_ordinary_use(&svc).is_err()
+            || anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&svc).is_err()
+        {
             continue;
         }
 
@@ -16275,6 +16283,7 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                managed_comms_role: None,
                 platform_key: None,
                 auth_type: None,
                 auth_scheme: None,

@@ -6,6 +6,7 @@ import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
 import { useAuthStore } from "@/stores/auth-store";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { ChannelAdapterBindings } from "./channel-adapter-bindings";
+import { ManagedPhoneLines } from "./managed-phone-lines";
 import { AutomationPreferences } from "./automation-preferences";
 import { NotificationPreferences } from "./notification-preferences";
 import { PlatformPersonalBindings } from "./platform-personal-bindings";
@@ -75,6 +76,8 @@ export function NyxBotSettingsContent() {
   useUiTranslation();
   const settings = useNyxBotSettings();
   const adaptersEnabled = useAuthStore(s=>userHasFeature(s.user,FEATURE_FLAG.NYXBOT_ADAPTERS));
+  // Additive to service adapters: managed numbers stay hidden unless both flags are on.
+  const managedLinesEnabled = useAuthStore(s=>userHasFeature(s.user,FEATURE_FLAG.NYXBOT_ADAPTERS)&&userHasFeature(s.user,FEATURE_FLAG.MANAGED_LINES));
   return (
     <GroupedFormScope viewport>
       <section aria-label={translateUi("NyxBot settings")} className="flex min-h-0 flex-1 flex-col">
@@ -101,6 +104,7 @@ export function NyxBotSettingsContent() {
         <div className="@container/channel-bots">
           <ChannelBotsSection />
         </div>
+        {managedLinesEnabled && <ManagedPhoneLines />}
         {adaptersEnabled && <ChannelAdapterBindings />}
         <PlatformPersonalBindings />
         </CompactScroll></FormViewport>

@@ -713,7 +713,7 @@ fn substitute(value: &mut Value, values: &BTreeMap<String, Value>) -> Result<()>
     Ok(())
 }
 
-fn read_document(path: &Path) -> Result<Value> {
+pub(crate) fn read_document(path: &Path) -> Result<Value> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     parse_document(&raw).with_context(|| format!("Failed to parse {}", path.display()))

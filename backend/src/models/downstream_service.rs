@@ -367,6 +367,9 @@ pub struct DownstreamService {
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_key: Option<PlatformKeyConfig>,
+    /// Server-controlled managed communications custody; generic ingress is denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_comms_role: Option<crate::models::managed_comms::ManagedCommsRole>,
     /// Original auth type as selected by the admin (e.g., "api_key", "oauth2", "oidc", "basic", "bearer").
     /// Preserves the user's intent, while `auth_method` is the resolved injection method.
     #[serde(default)]
@@ -658,6 +661,7 @@ pub mod test_helpers {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,
@@ -778,6 +782,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
+            managed_comms_role: None,
             platform_key: None,
             auth_type: Some("bearer".to_string()),
             auth_scheme: None,
@@ -882,6 +887,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
+            managed_comms_role: None,
             platform_key: None,
             auth_type: None,
             auth_scheme: None,

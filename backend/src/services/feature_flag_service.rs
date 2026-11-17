@@ -182,6 +182,12 @@ const NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG: FeatureFlagDef = FeatureFlagDef {
     description: "Staged durable response recovery for relay-sourced NyxBot gateway channels. Requires fleet readiness and gateway support; enable for one owner before widening.",
     default_enabled: false,
 };
+pub const MANAGED_LINES_FLAG_KEY: &str = "nyxbot:managed-lines";
+const MANAGED_LINES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MANAGED_LINES_FLAG_KEY,
+    description: "Operator-approved, prepaid managed phone lines for personal specialists",
+    default_enabled: false,
+};
 pub const NYXBOT_ADAPTERS_FLAG_KEY: &str = "nyxbot:service-adapters";
 const NYXBOT_ADAPTERS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXBOT_ADAPTERS_FLAG_KEY,
@@ -479,6 +485,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
+    MANAGED_LINES_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
@@ -542,6 +549,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
+    MANAGED_LINES_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
@@ -3324,6 +3332,7 @@ mod tests {
                 "nyxbot:relay-response-recovery",
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
+                "nyxbot:managed-lines",
                 "assistant:operation-scopes",
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",

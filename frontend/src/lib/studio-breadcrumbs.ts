@@ -255,6 +255,10 @@ export function buildStudioBreadcrumbs(
   }
   if (PAGE_LABELS[path]) return [{ label: PAGE_LABELS[path] }];
 
+  // Linked from the Integrity page, which operators can also read.
+  if (path === "/admin/managed-lines/report") {
+    return finish([page("/admin/integrity"), { get label() { return translateUi("Managed lines report"); } }]);
+  }
   if (/^\/admin\/platform-models\/[^/]+$/.test(path)) {
     return finish([page("/admin/platform-models"), named(path, "Model")]);
   }

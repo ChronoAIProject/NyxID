@@ -12,3 +12,11 @@ describe("model tariff units", () => {
     expect(SERVICE_BILLING_METRICS).not.toContain(metric);
   });
 });
+
+it("keeps number-day rental in the authoring and reporting registries", () => {
+  expect(billingMetricSchema.parse("phone_number_days")).toBe("phone_number_days");
+  expect(SERVICE_BILLING_METRICS).toContain("phone_number_days");
+  expect(BILLING_UNITS.phone_number_days.tokenFamily).toBe(false);
+  expect(metricLabel("phone_number_days", 1)).toBe("phone number day");
+  expect(metricLabel("phone_number_days", 30)).toBe("phone number days");
+});

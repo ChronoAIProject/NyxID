@@ -752,11 +752,21 @@ impl BillingReconciler {
             failures
                 .unit(async {
                     let row: UsageMeterRow = super::recovery_batch::decode(&raw)?;
+                    // A rental without its funded coverage receipt is deferred
+                    // (diagnostic and later retry slot); it is never pushed or acked.
+                    if row.metric == crate::models::service_billing::BillingMetric::PhoneNumberDays
+                        && super::managed_lifecycle::coverage_receipt(&self.db, &row)
+                            .await?
+                            .is_none()
+                    {
+                        return Ok(());
+                    }
                     if row.funding.as_ref().is_some_and(|funding| {
                         funding.settled
                             && funding.lago_billable_quantity_micros.unwrap_or_default() <= 0
                     }) {
-                        mark_lago_acked(&self.db, &row.id).await?;
+                        // Settled benefit-only rows have nothing to emit.
+                        ack_usage_row(&self.db, &row, None).await?;
                         return Ok(());
                     }
                     // Runtime contracts keep their accepted rate even after retirement.
@@ -877,7 +887,7 @@ impl BillingReconciler {
                     });
                     match decide_lago_push(result) {
                         LagoPushDecision::Ack => {
-                            mark_delivered(&self.db, &row.id, Some((receipt, duplicate))).await?;
+                            ack_usage_row(&self.db, &row, Some((receipt, duplicate))).await?;
                             stats.pushed += 1;
                         }
                         LagoPushDecision::Retry => {
@@ -981,6 +991,67 @@ async fn mark_delivered(
         })
         .await
         .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+/// A rental (`phone_number_days`) meter is acknowledged only with its funded
+/// coverage receipt; a missing receipt defers the ack. An early paid renewal
+/// can outlive the ordinary meter TTL, so the same transaction extends
+/// retention through paid coverage and never discards its funding evidence.
+async fn mark_rental_acked(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    receipt: Option<(
+        crate::models::billing_usage_delivery::BillingUsageDelivery,
+        bool,
+    )>,
+) -> AppResult<()> {
+    let Some(period) = super::managed_lifecycle::coverage_receipt(db, row).await? else {
+        return Ok(());
+    };
+    let retained =
+        bson::DateTime::from_chrono(period.covered_until + Duration::days(ACKED_RETENTION_DAYS));
+    let mut session = db.client().start_session().await?;
+    let database = db.clone();
+    let row_id = row.id.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                ack_in_session(&database, session, &row_id, receipt.as_ref()).await?;
+                database
+                    .collection::<UsageMeterRow>(USAGE_METER)
+                    .update_one(
+                        doc! { "_id": &row_id, "metric": "phone_number_days", "lago_acked": true },
+                        doc! { "$max": { "expires_at": retained } },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+/// Rental meters use [`mark_rental_acked`]; every other row keeps the ordinary
+/// acknowledgement, with its delivery receipt when the provider confirmed one.
+async fn ack_usage_row(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    receipt: Option<(
+        crate::models::billing_usage_delivery::BillingUsageDelivery,
+        bool,
+    )>,
+) -> AppResult<()> {
+    if row.metric == crate::models::service_billing::BillingMetric::PhoneNumberDays {
+        mark_rental_acked(db, row, receipt).await
+    } else if let Some(receipt) = receipt {
+        mark_delivered(db, &row.id, Some(receipt)).await
+    } else {
+        mark_lago_acked(db, &row.id).await
+    }
 }
 
 async fn ack_in_session(
@@ -1102,7 +1173,7 @@ mod usage_capture_tests;
 mod tests {
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
-    use mongodb::bson::doc;
+    use mongodb::bson::{Document, doc};
     use reqwest::StatusCode;
     use serde_json::json;
     use uuid::Uuid;
@@ -2257,6 +2328,289 @@ mod tests {
             diagnostic.get_array("rejected_metrics").unwrap(),
             &[Bson::String("platform_tokens".into())]
         );
+    }
+    async fn rental_receipt(db: &mongodb::Database, row: &UsageMeterRow) {
+        use crate::models::managed_comms::{ManagedLinePeriod, RateSnapshot};
+        let now = Utc::now();
+        db.collection::<ManagedLinePeriod>(ManagedLinePeriod::COLLECTION_NAME)
+            .insert_one(ManagedLinePeriod {
+                id: Uuid::new_v4().to_string(),
+                claim_id: Uuid::new_v4().to_string(),
+                managed_claim_generation: 1,
+                period_index: 0,
+                covered_from: now,
+                covered_until: now + Duration::days(30),
+                quantity: 30,
+                rate: RateSnapshot {
+                    service_id: "service-1".into(),
+                    service_slug: "rental".into(),
+                    metric: BillingMetric::PhoneNumberDays,
+                    rate: crate::models::credits::Credits::from_whole(1),
+                    lago_metric_code: "rental".into(),
+                    revision: "one".into(),
+                },
+                billing_request_id: row.billing_request_id.clone(),
+                usage_row_ids: vec![row.id.clone()],
+                funded: true,
+                spend_hold_id: None,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn mixed_lago_batch_skips_missing_rental_receipt_without_readiness_or_head_blocking() {
+        use crate::models::managed_comms::ManagedRentalDiagnostic;
+        let db = crate::test_utils::connect_transaction_test_database("managed_mixed_push").await;
+        assert!(
+            crate::services::call_channels::managed::require_ready(&db)
+                .await
+                .is_err()
+        );
+        let mut missing = finalized_row("missing-rental");
+        missing.metric = BillingMetric::PhoneNumberDays;
+        missing.updated_at = Utc::now() - Duration::days(1);
+        let ordinary = [
+            finalized_row("ordinary-one"),
+            finalized_row("ordinary-two"),
+            finalized_row("ordinary-three"),
+        ];
+        let rows = db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        rows.insert_one(&missing).await.unwrap();
+        rows.insert_many(&ordinary).await.unwrap();
+        let lago = StaticLago {
+            result: Ok(LagoAck {
+                transaction_id: "fixture".into(),
+            }),
+        };
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+        let mut stats = super::ReconcileStats::default();
+        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert_eq!(stats.pushed, 3);
+        for row in &ordinary {
+            assert!(
+                rows.find_one(doc! {"_id":&row.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lago_acked
+            );
+        }
+        let saved = rows
+            .find_one(doc! {"_id":&missing.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.lago_acked);
+        assert_eq!(saved.attempt, 0);
+        assert!(saved.updated_at > missing.updated_at);
+        let diagnostic = db
+            .collection::<Document>(ManagedRentalDiagnostic::COLLECTION_NAME)
+            .find_one(doc! {"usage_row_id":&missing.id,"active":true})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            diagnostic.get_str("code"),
+            Ok("managed_rental_receipt_missing")
+        );
+        assert!(!diagnostic.contains_key("user_id"));
+        // The anomalous oldest row moved out of the eligible head; fresh work
+        // still progresses on the next bounded pass.
+        let next = finalized_row("ordinary-next");
+        rows.insert_one(&next).await.unwrap();
+        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert_eq!(stats.pushed, 4);
+        rental_receipt(&db, &missing).await;
+        rows.update_one(doc!{"_id":&missing.id},doc!{"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1))}}).await.unwrap();
+        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert_eq!(stats.pushed, 5);
+        assert!(
+            rows.find_one(doc! {"_id":&missing.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .lago_acked
+        );
+        assert_eq!(
+            db.collection::<Document>(ManagedRentalDiagnostic::COLLECTION_NAME)
+                .count_documents(doc! {"active":true})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    #[tokio::test]
+    async fn mixed_settlement_defers_missing_receipt_and_recovers_rental_without_readiness() {
+        use crate::models::managed_comms::ManagedRentalDiagnostic;
+        let db =
+            crate::test_utils::connect_transaction_test_database("managed_mixed_settlement").await;
+        assert!(
+            crate::services::call_channels::managed::require_ready(&db)
+                .await
+                .is_err()
+        );
+        let mut missing = finalized_row("missing-settlement-receipt");
+        missing.metric = BillingMetric::PhoneNumberDays;
+        let mut batch = vec![
+            missing.clone(),
+            finalized_row("ordinary-settle-one"),
+            finalized_row("ordinary-settle-two"),
+        ];
+        for row in &mut batch {
+            row.wallet_id = None;
+            row.released = false;
+        }
+        missing = batch[0].clone();
+        let rows = db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        rows.insert_many(&batch).await.unwrap();
+        super::super::meter::settle_persisted(&db, batch.clone())
+            .await
+            .unwrap();
+        for row in &batch[1..] {
+            assert!(
+                rows.find_one(doc! {"_id":&row.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .released
+            );
+        }
+        let deferred = rows
+            .find_one(doc! {"_id":&missing.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!deferred.released);
+        assert_eq!(deferred.settlement_attempts, 0);
+        assert!(deferred.settlement_next_retry_at.unwrap() > Utc::now());
+        assert_eq!(
+            db.collection::<Document>(ManagedRentalDiagnostic::COLLECTION_NAME)
+                .count_documents(doc! {"active":true})
+                .await
+                .unwrap(),
+            1
+        );
+        let mut next = finalized_row("ordinary-recovery");
+        next.wallet_id = None;
+        next.released = false;
+        rows.insert_one(&next).await.unwrap();
+        assert_eq!(
+            super::reservation::recover_retryable_settlements(&db)
+                .await
+                .unwrap()
+                .recovered,
+            1
+        );
+        rental_receipt(&db, &missing).await;
+        rows.update_one(doc!{"_id":&missing.id},doc!{"$set":{"settlement_next_retry_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1))}}).await.unwrap();
+        assert_eq!(
+            super::reservation::recover_retryable_settlements(&db)
+                .await
+                .unwrap()
+                .recovered,
+            1
+        );
+        assert!(
+            rows.find_one(doc! {"_id":&missing.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .released
+        );
+        assert_eq!(
+            db.collection::<Document>(ManagedRentalDiagnostic::COLLECTION_NAME)
+                .count_documents(doc! {"active":true})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn prepaid_rental_meter_retention_outlives_coverage_and_refuses_missing_receipt() {
+        use super::{USAGE_METER, ack_usage_row};
+        use crate::models::{
+            credits::Credits,
+            managed_comms::{ManagedLinePeriod, RateSnapshot},
+            service_billing::BillingMetric,
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("managed_rental_retention").await;
+        crate::services::security_readiness_service::ready_test_replica(&db).await;
+        let mut rental = finalized_row("rental-retention");
+        rental.metric = BillingMetric::PhoneNumberDays;
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(&rental)
+            .await
+            .unwrap();
+        // The push path's ack routes a rental to the receipt-checked ack, which
+        // defers without its funded coverage receipt.
+        ack_usage_row(&db, &rental, None).await.unwrap();
+        assert!(
+            !db.collection::<UsageMeterRow>(USAGE_METER)
+                .find_one(doc! {"_id":&rental.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .lago_acked
+        );
+        let now = Utc::now();
+        let until = now + Duration::days(33);
+        let p = ManagedLinePeriod {
+            id: Uuid::new_v4().to_string(),
+            claim_id: Uuid::new_v4().to_string(),
+            managed_claim_generation: 1,
+            period_index: 1,
+            covered_from: until - Duration::days(30),
+            covered_until: until,
+            quantity: 30,
+            rate: RateSnapshot {
+                service_id: "service-1".into(),
+                service_slug: "service-one".into(),
+                metric: BillingMetric::PhoneNumberDays,
+                rate: Credits::from_whole(1),
+                lago_metric_code: "rental-days".into(),
+                revision: "one".into(),
+            },
+            billing_request_id: rental.billing_request_id.clone(),
+            usage_row_ids: vec![rental.id.clone()],
+            funded: true,
+            spend_hold_id: None,
+            created_at: now,
+        };
+        db.collection::<ManagedLinePeriod>(ManagedLinePeriod::COLLECTION_NAME)
+            .insert_one(p)
+            .await
+            .unwrap();
+        ack_usage_row(&db, &rental, None).await.unwrap();
+        let saved = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {"_id":&rental.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.lago_acked);
+        assert!(
+            saved.expires_at.unwrap() >= until + Duration::days(30) - Duration::milliseconds(1)
+        );
+        let ordinary = finalized_row("ordinary-retention");
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(&ordinary)
+            .await
+            .unwrap();
+        ack_usage_row(&db, &ordinary, None).await.unwrap();
+        let saved = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {"_id":&ordinary.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.expires_at.unwrap() < now + Duration::days(31));
     }
 }
 

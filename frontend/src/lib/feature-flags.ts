@@ -63,6 +63,7 @@ export const FEATURE_FLAG = {
   // NYX skill template outlines; off by default, piloted per person.
   SKILL_RUNS: "assistant:skill-runs",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",
+  MANAGED_LINES: "nyxbot:managed-lines",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
   DISCORD_GATEWAY: "channel:discord-gateway",

@@ -1873,6 +1873,9 @@ async fn receipt_recovers_response_lost_send_without_replay_and_rejects_second_j
     let id = Uuid::new_v4().to_string();
     let message = "SM33333333333333333333333333333333";
     let sent = EventReceipt {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
         id: id.clone(),
         identity_key: session::identity(&[&s.id, "sms_send"]),
         user_id: f.b.user_id.clone(),
@@ -2347,6 +2350,9 @@ async fn configured_funded_sms_multipart_releases_remainder_after_revocation_and
         Credits::from_whole(6)
     );
     let send = EventReceipt {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
         id: Uuid::new_v4().to_string(),
         identity_key: session::identity(&[&s.id, "sms_send"]),
         user_id: f.b.user_id.clone(),
@@ -3348,6 +3354,8 @@ async fn platform_binding(f: &mut Fixture) -> ProviderAccount {
     let signer = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
     let key = base64::engine::general_purpose::STANDARD.encode(signer.verifying_key().to_bytes());
     let account = ProviderAccount {
+        underwriting: None,
+        fence: 0,
         id: Uuid::new_v4().to_string(),
         catalog_service_id: catalog.id.clone(),
         provider: profiles::provider(f.b.profile).into(),
@@ -3465,6 +3473,9 @@ async fn trusted_platform_key_rotation_and_forged_ingress_never_control_another_
 
 fn pending_sms_send(b: &Binding, s: &CallSession) -> EventReceipt {
     EventReceipt {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
         id: Uuid::new_v4().to_string(),
         identity_key: session::identity(&[&s.id, "sms_send"]),
         user_id: b.user_id.clone(),
@@ -4211,4 +4222,423 @@ async fn guest_1995_sms_refusal_is_sent_to_the_inbound_sender() {
         0
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn byok_owner_fabricated_signed_timestamps_with_no_api_evidence_never_settle_or_release() {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+    let mut f = fixture(Profile::TelnyxRelay, false).await;
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
+    f.b.webhook_public_key =
+        Some(base64::engine::general_purpose::STANDARD.encode(signer.verifying_key().to_bytes()));
+    f.state
+        .db
+        .collection::<Binding>(BINDINGS)
+        .replace_one(doc! {"_id":&f.b.id}, &f.b)
+        .await
+        .unwrap();
+    let s = active_session(&f, "v2:byok-quantity-pending==").await;
+    // A real persisted forwarded reservation is left untouched by transport-only
+    // timestamps. The unavailable carrier has no status or validated detail data.
+    let r = binding::live(&f.state, &f.b).await.unwrap();
+    let ctx = super::billing::context(&f.state, &f.b, &r, &s.billing_request_id)
+        .await
+        .unwrap();
+    let mut row = crate::services::billing::meter::test_reserved_row(
+        &ctx,
+        crate::models::usage_meter::BillingLayer::Platform,
+        crate::models::service_billing::BillingMetric::VoiceSeconds,
+        "byok_fixture".into(),
+        None,
+        None,
+    );
+    row.forwarded = true;
+    row.status = crate::models::usage_meter::UsageStatus::Forwarded;
+    row.reserved_credits = crate::models::credits::Credits::from_whole(1800);
+    row.funding = Some(crate::models::usage_meter::UsageFunding {
+        credits_per_unit_pico: Some(1_000_000_000_000),
+        ..Default::default()
+    });
+    let id = row.id.clone();
+    f.state
+        .db
+        .collection::<crate::models::usage_meter::UsageMeterRow>(
+            crate::models::usage_meter::COLLECTION_NAME,
+        )
+        .insert_one(row)
+        .await
+        .unwrap();
+    let server = wiremock::MockServer::start().await;
+    profiles::FIXTURE_ORIGINS
+        .lock()
+        .unwrap()
+        .insert(f.b.account_id.clone(), server.uri());
+    f.state.db.collection::<bson::Document>(SESSIONS).update_one(doc!{"_id":&s.id},doc!{"$set":{"answered":true,"connected_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1799))}}).await.unwrap();
+    let body=json!({"data":{"id":Uuid::new_v4().to_string(),"event_type":"call.hangup","occurred_at":Utc::now().to_rfc3339(),"payload":{"call_control_id":s.provider_call_id,"connection_id":f.b.application_id,"end_time":Utc::now().to_rfc3339()}}}).to_string();
+    let timestamp = Utc::now().timestamp().to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert("telnyx-timestamp", timestamp.parse().unwrap());
+    headers.insert(
+        "telnyx-signature-ed25519",
+        base64::engine::general_purpose::STANDARD
+            .encode(
+                signer
+                    .sign(format!("{timestamp}|{body}").as_bytes())
+                    .to_bytes(),
+            )
+            .parse()
+            .unwrap(),
+    );
+    assert!(
+        coordinator::ingress(f.state.clone(), &f.b.id, &headers, body.as_bytes())
+            .await
+            .is_err()
+    );
+    let saved = session::load(&f.state, &s.id).await.unwrap();
+    assert!(saved.terminated_quantity_pending);
+    assert!(saved.ended_at.is_some());
+    assert_eq!(saved.provider_seconds, None);
+    assert!(!saved.billing_finalized);
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::usage_meter::UsageMeterRow>(
+            crate::models::usage_meter::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!row.released);
+    assert_eq!(row.quantity, None);
+    assert_eq!(
+        row.reserved_credits,
+        crate::models::credits::Credits::from_whole(1800)
+    );
+}
+
+#[tokio::test]
+async fn byok_validated_detail_record_requires_account_leg_connection_and_fixture() {
+    use crate::models::managed_comms::ManagedUnderwriting;
+    let f = fixture(Profile::TelnyxRelay, false).await;
+    let s = active_session(&f, "v2:byok-cdr==").await;
+    f.state.db.collection::<bson::Document>(SESSIONS).update_one(doc! {"_id":&s.id},doc! {"$set":{"provider_call_leg_id":"fixture-leg","provider_call_session_id":"fixture-session"}}).await.unwrap();
+    let s = session::load(&f.state, &s.id).await.unwrap();
+    let r = binding::live(&f.state, &f.b).await.unwrap();
+    let server = wiremock::MockServer::start().await;
+    profiles::FIXTURE_ORIGINS
+        .lock()
+        .unwrap()
+        .insert(f.b.account_id.clone(), server.uri());
+    let at = Utc::now() - Duration::seconds(3);
+    let evidence = json!({"data":[{"record_type":"call-control","account_id":f.b.account_id,"call_leg_id":"fixture-leg","call_session_id":"fixture-session","connection_id":f.b.application_id,"answered_at":at.to_rfc3339(),"finished_at":(at+Duration::milliseconds(1501)).to_rfc3339()}]});
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v2/detail_records"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(evidence.clone()))
+        .mount(&server)
+        .await;
+    assert!(
+        super::carrier::terminal_status(&f.state, &f.b, &r, &s)
+            .await
+            .is_err()
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() != "/v2/detail_records")
+    );
+    let policy = ManagedUnderwriting {
+        enabled: false,
+        accepted_by: Uuid::new_v4().to_string(),
+        accepted_at: Utc::now(),
+        acceptance_text: "fixture".into(),
+        acceptance_version: "v1".into(),
+        paid_tier_evidence_reference: "fixture".into(),
+        max_leg_seconds: 1800,
+        max_leg_evidence_reference: "fixture".into(),
+        timestamp_fixture_reference: None,
+        detail_record_options_reference: Some("verified options fixture".into()),
+        detail_record_fixture_reference: Some("verified call-control fixture".into()),
+        detail_record_fields: ["call_leg_id", "connection_id", "answered_at", "finished_at"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        supplier_tariff_revision: 1,
+        fx_policy_revision: "fixture".into(),
+        character_tariff_reference: "fixture".into(),
+        components: vec![],
+        rolling_budget: crate::models::credits::Credits::ZERO,
+        revision: 1,
+    };
+    f.state
+        .db
+        .collection::<ProviderAccount>(ACCOUNTS)
+        .insert_one(ProviderAccount {
+            id: Uuid::new_v4().to_string(),
+            catalog_service_id: r.service.id.clone(),
+            provider: "telnyx".into(),
+            account_id: f.b.account_id.clone(),
+            webhook_public_key: None,
+            revision: 1,
+            configured_by: Uuid::new_v4().to_string(),
+            underwriting: Some(policy),
+            fence: 0,
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    for field in [
+        "account_id",
+        "call_leg_id",
+        "call_session_id",
+        "connection_id",
+    ] {
+        server.reset().await;
+        let mut wrong = evidence.clone();
+        wrong["data"][0][field] = json!("foreign");
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v2/detail_records"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wrong))
+            .mount(&server)
+            .await;
+        assert!(
+            super::carrier::terminal_status(&f.state, &f.b, &r, &s)
+                .await
+                .is_err(),
+            "{field}"
+        );
+    }
+    server.reset().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v2/detail_records"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(evidence))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        super::carrier::terminal_status(&f.state, &f.b, &r, &s)
+            .await
+            .unwrap()
+            .unwrap()
+            .1,
+        2
+    );
+}
+
+#[path = "review_tests.rs"]
+mod review_tests;
+
+#[tokio::test]
+async fn byok_caller_confirmation_association_requires_same_owner_and_provider_proof() {
+    use super::managed::{confirmations, indexes};
+    use crate::services::audit_service::AuditActor;
+    let f = fixture(Profile::TwilioRelay, false).await;
+    indexes::ensure_indexes(&f.state.db).await.unwrap();
+    let mut sms = f.b.clone();
+    sms.id = Uuid::new_v4().to_string();
+    sms.profile = Profile::TwilioSms;
+    f.state
+        .db
+        .collection::<Binding>(BINDINGS)
+        .insert_one(&sms)
+        .await
+        .unwrap();
+    let b = f.b.clone();
+    let proof = Arc::new(AtomicBool::new(false));
+    let p = proof.clone();
+    let (origin,task)=serve(Router::new().fallback(any(move |request:Request<Body>|{
+        let b=b.clone();let p=p.clone();async move {
+            let account=if p.load(Ordering::SeqCst){"AC00000000000000000000000000000000".to_string()}else{b.account_id.clone()};
+            if request.uri().path().contains("/IncomingPhoneNumbers/"){Json(json!({"sid":b.resource_id,"account_sid":account,"phone_number":b.phone_number,"voice_application_sid":b.application_id,"sms_application_sid":b.application_id,"voice_fallback_url":""}))}else{Json(json!({"sid":b.application_id,"account_sid":account,"voice_fallback_url":""}))}
+        }
+    }))).await;
+    profiles::FIXTURE_ORIGINS
+        .lock()
+        .unwrap()
+        .insert(f.b.account_id.clone(), origin);
+    let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&f.b.user_id));
+    confirmations::configure(
+        &f.state,
+        &actor,
+        &f.b.id,
+        confirmations::ToggleInput {
+            enabled: true,
+            sms_binding_id: Some(sms.id.clone()),
+            voice_revision: f.b.revision,
+        },
+    )
+    .await
+    .unwrap();
+    let rows = f
+        .state
+        .db
+        .collection::<crate::models::managed_comms::CallerConfirmationBinding>(
+            crate::models::managed_comms::CallerConfirmationBinding::COLLECTION_NAME,
+        );
+    assert!(
+        rows.find_one(doc! {"voice_binding_id":&f.b.id,"enabled":true})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    proof.store(true, Ordering::SeqCst);
+    assert!(
+        confirmations::configure(
+            &f.state,
+            &actor,
+            &f.b.id,
+            confirmations::ToggleInput {
+                enabled: true,
+                sms_binding_id: Some(sms.id.clone()),
+                voice_revision: f.b.revision
+            }
+        )
+        .await
+        .is_err()
+    );
+    // Disabling needs owner authority, even while the provider proof is down.
+    confirmations::configure(
+        &f.state,
+        &actor,
+        &f.b.id,
+        confirmations::ToggleInput {
+            enabled: false,
+            sms_binding_id: None,
+            voice_revision: f.b.revision,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        rows.find_one(doc! {"voice_binding_id":&f.b.id,"enabled":true})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let foreign = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(
+        &Uuid::new_v4().to_string(),
+    ));
+    assert!(
+        confirmations::configure(
+            &f.state,
+            &foreign,
+            &f.b.id,
+            confirmations::ToggleInput {
+                enabled: true,
+                sms_binding_id: Some(sms.id),
+                voice_revision: f.b.revision
+            }
+        )
+        .await
+        .is_err()
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn owner_funded_confirmation_part_without_provider_evidence_settles_at_zero_after_72_hours() {
+    use crate::models::{billing_wallet::BillingWallet, credits::Credits};
+    use futures::TryStreamExt;
+    let mut f = fixture(Profile::TwilioSms, false).await;
+    fund_sms(&mut f).await;
+    let s = active_session(&f, "owner-funded-confirmation").await;
+    let wallets = f
+        .state
+        .db
+        .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME);
+    let wallet = || wallets.find_one(doc! {"owner_id":&f.b.user_id});
+    let r = binding::live(&f.state, &f.b).await.unwrap();
+    let operation = Uuid::new_v4().to_string();
+    let request = format!("call-confirmation:{operation}:0");
+    let meter = super::billing::reserve(&f.state, &f.b, &r, &request)
+        .await
+        .unwrap();
+    f.state.billing.mark_forwarded(&meter).await.unwrap();
+    let held = Credits::from_whole(2);
+    assert_eq!(wallet().await.unwrap().unwrap().reserved_credits, held);
+    let send = EventReceipt {
+        managed_claim_id: None,
+        managed_claim_generation: None,
+        admitted_reference: None,
+        id: operation.clone(),
+        identity_key: session::identity(&["call-confirmation", &s.id, "owner-funded", "0"]),
+        user_id: f.b.user_id.clone(),
+        binding_id: f.b.id.clone(),
+        binding_revision: f.b.revision,
+        session_id: Some(s.id.clone()),
+        event_kind: "sms_send".into(),
+        status: "uncertain".into(),
+        provider_message_id: None,
+        delivery: "unknown".into(),
+        billing_request_id: Some(request.clone()),
+        observed_parts: None,
+        reserved_parts: Some(1),
+        billing_finalized: false,
+        from: Some(f.b.phone_number.clone()),
+        to: Some(s.from.clone()),
+        created_at: Utc::now(),
+    };
+    let events = f.state.db.collection::<EventReceipt>(EVENTS);
+    events.insert_one(&send).await.unwrap();
+    // Inside the evidence window the uncertain part stays held.
+    super::managed::reservations::sweep(&f.state).await.unwrap();
+    assert_eq!(wallet().await.unwrap().unwrap().reserved_credits, held);
+    f.state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id":&operation},
+            doc! {"$set":{"dispatched_at":bson::DateTime::from_chrono(Utc::now()-Duration::hours(73))}},
+        )
+        .await
+        .unwrap();
+    super::managed::reservations::sweep(&f.state).await.unwrap();
+    let saved = f
+        .state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .find_one(doc! {"_id":&operation})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.get_str("terminal_evidence"),
+        Ok("provider_evidence_unavailable")
+    );
+    assert_eq!(saved.get_bool("billing_finalized"), Ok(true));
+    let row = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::usage_meter::COLLECTION_NAME)
+        .find_one(doc! {"billing_request_id":&request})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.get_bool("released"), Ok(true));
+    assert_eq!(row.get_i64("quantity"), Ok(0));
+    assert_eq!(
+        wallet().await.unwrap().unwrap().reserved_credits,
+        Credits::ZERO
+    );
+    let audits: Vec<bson::Document> = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find(doc! {"event_type":"channel_adapter_sms_provider_evidence_unavailable"})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(
+        audits[0]
+            .get_document("event_data")
+            .unwrap()
+            .get_bool("managed"),
+        Ok(false)
+    );
 }

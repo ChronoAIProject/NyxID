@@ -85,7 +85,7 @@ async fn check_parent(
             write_fence,
         )
         .await?;
-        if super::platform_key_service::model_only(&live)
+        if (super::platform_key_service::model_only(&live) || live.managed_comms_role.is_some())
             && (!authority.first_party_human || !admin)
         {
             return Err(AppError::Forbidden(
@@ -164,6 +164,8 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "credential_encrypted",
         "secret_context_versions",
         "platform_key",
+        "managed_comms_role",
+        "proxy_operation_policy",
         "tools_credential_frozen",
         "destination_targets",
         "identity_propagation_mode",
@@ -249,6 +251,8 @@ pub(crate) async fn validate_update_fields(
     authority: &Authority,
     admin: bool,
 ) -> AppResult<()> {
+    super::call_channels::managed::custody::validate_catalog_update(db, session, live, fields)
+        .await?;
     if let Some(value) = fields.get("billing") {
         let requested: Option<crate::models::service_billing::ServiceBilling> =
             bson::from_bson(value.clone())

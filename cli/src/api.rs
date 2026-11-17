@@ -809,6 +809,52 @@ impl ApiClient {
         Self::handle_response(resp, path).await.map(Some)
     }
 
+    /// PUT a JSON body to an endpoint that answers 204 No Content.
+    pub async fn put_empty<B: Serialize>(&mut self, path: &str, body: &B) -> Result<()> {
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .client
+            .put(&url)
+            .bearer_auth(&self.access_token)
+            .headers(crate::telemetry::account_binding::device_headers(
+                self.profile.as_deref(),
+                self.base_url_root(),
+                &self.access_token,
+            ))
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {path} failed"))?;
+
+        self.reject_agent_key_unauthorized(&resp)?;
+        let resp = if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await?
+        {
+            self.client
+                .put(&url)
+                .bearer_auth(&self.access_token)
+                .headers(crate::telemetry::account_binding::device_headers(
+                    self.profile.as_deref(),
+                    self.base_url_root(),
+                    &self.access_token,
+                ))
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("PUT {path} failed (retry)"))?
+        } else {
+            resp
+        };
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(ApiError::new(format!("PUT {path}"), status, body).into())
+        }
+    }
+
     #[allow(dead_code)]
     pub async fn post_empty<B: Serialize>(&mut self, path: &str, body: &B) -> Result<()> {
         let url = format!("{}{path}", self.base_url);

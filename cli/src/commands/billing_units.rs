@@ -1,5 +1,5 @@
 //! Billing units and exact unit-price validation shared by CLI surfaces.
-pub const METRICS: [&str; 9] = [
+pub const METRICS: [&str; 10] = [
     "tokens",
     "requests",
     "bytes",
@@ -9,6 +9,7 @@ pub const METRICS: [&str; 9] = [
     "cache_write_tokens",
     "images",
     "voice_seconds",
+    "phone_number_days",
 ];
 pub const PRICE_FRACTIONAL_DIGITS: usize = 12;
 
@@ -25,6 +26,8 @@ pub fn label(metric: &str, singular: bool) -> &str {
         ("cache_read_tokens", true) => "cache-read token",
         ("cache_write_tokens", false) => "cache-write tokens",
         ("cache_write_tokens", true) => "cache-write token",
+        ("phone_number_days", true) => "phone number day",
+        ("phone_number_days", false) => "phone number days",
         ("voice_seconds", true) => "voice second",
         ("voice_seconds", false) => "voice seconds",
         ("reasoning_tokens", false) => "reasoning tokens",
@@ -99,6 +102,12 @@ mod tests {
             "voice_seconds=0.000000123456"
         );
         assert_eq!(label("voice_seconds", true), "voice second");
+        assert_eq!(
+            component("phone_number_days=0.000000000001").unwrap(),
+            "phone_number_days=0.000000000001"
+        );
+        assert_eq!(label("phone_number_days", true), "phone number day");
+        assert_eq!(label("phone_number_days", false), "phone number days");
         assert_eq!(
             component("cache_read_tokens=0.000000250001").unwrap(),
             "cache_read_tokens=0.000000250001"

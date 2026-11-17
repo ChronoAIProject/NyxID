@@ -225,6 +225,9 @@ pub enum AppError {
     #[error("Service concurrency limit reached; retry after an in-flight request completes")]
     ServiceConcurrencyLimited,
 
+    #[error("Managed communications budget exhausted")]
+    ManagedBudgetExhausted,
+
     #[error("Security rollout is not ready; inspect admin security readiness")]
     SecurityReadinessUnavailable,
 
@@ -942,6 +945,7 @@ impl AppError {
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
+            Self::ManagedBudgetExhausted => StatusCode::TOO_MANY_REQUESTS,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } | Self::MfaStepUpRequired => StatusCode::FORBIDDEN,
@@ -1185,6 +1189,7 @@ impl AppError {
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantModelAuthorityChanged => 12104,
             Self::AssistantAttachmentExpired => 12101,
+            Self::ManagedBudgetExhausted => 13400,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
@@ -1477,6 +1482,7 @@ impl AppError {
             Self::AssistantModelAuthorityChanged => "model_authority_changed",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
+            Self::ManagedBudgetExhausted => "managed_budget_exhausted",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",

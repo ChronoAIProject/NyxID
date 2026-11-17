@@ -385,6 +385,10 @@ pub async fn retire_full_access_confirmations(
 /// are classified from their catalog/HTTP effects by [`service_action_class`].
 pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> {
     use OwnerActionClass::*;
+    if tool == crate::services::call_channels::managed::confirmations::TOOL {
+        // The live binding toggle authorizes this single call-scoped effect.
+        return Some(Change);
+    }
     if let Some(operation) = crate::services::machine_tools::operation(tool) {
         // Work on a machine the owner granted is the agent's ordinary job;
         // each machine's own confirmation setting (`machine_confirm`) is the
@@ -1001,6 +1005,11 @@ mod access_mode_tests {
             ("nyxid__delete_schedule", none.clone(), Destructive),
             ("nyxid__message_subagent", none.clone(), Change),
             ("nyxid__list_schedules", none.clone(), Read),
+            (
+                crate::services::call_channels::managed::confirmations::TOOL,
+                none.clone(),
+                Change,
+            ),
         ] {
             assert_eq!(
                 known_action_class(tool, &args),

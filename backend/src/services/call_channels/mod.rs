@@ -4,6 +4,7 @@ pub mod binding;
 pub mod carrier;
 pub mod coordinator;
 pub mod custom_llm;
+pub mod managed;
 pub mod management;
 pub mod owner_admission;
 pub mod profiles;

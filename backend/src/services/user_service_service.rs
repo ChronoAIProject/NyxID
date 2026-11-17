@@ -2885,6 +2885,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            managed_comms_role: None,
             platform_key: None,
             auth_type: Some("ssh".to_string()),
             auth_scheme: None,

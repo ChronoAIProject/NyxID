@@ -1625,6 +1625,7 @@ pub struct ChainVerifyStatusItem {
 
 #[derive(Debug, Serialize)]
 pub struct ChainVerificationResponse {
+    pub managed_comms: crate::services::call_channels::managed::costs::IntegritySummary,
     pub chains: Vec<ChainVerifyStatusItem>,
     pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
@@ -1737,6 +1738,7 @@ pub async fn get_chain_verification(
         }
     }
     Ok(Json(ChainVerificationResponse {
+        managed_comms: crate::services::call_channels::managed::costs::integrity(&state.db).await?,
         chains: items,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
@@ -1768,6 +1770,7 @@ pub async fn run_chain_verification(
         crate::services::billing::account_reconciliation::run_once(&state.db).await?;
     }
     Ok(Json(ChainVerificationResponse {
+        managed_comms: crate::services::call_channels::managed::costs::integrity(&state.db).await?,
         chains,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,

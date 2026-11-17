@@ -2,6 +2,7 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { ChannelAdapterResources } from "@/components/admin/channel-adapter-resources";
+import { ManagedLinesAdmin } from "@/components/admin/managed-lines";
 import { useState } from "react";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
@@ -411,6 +412,7 @@ export function AdminPlatformCredentialsPage() {
     <div className="space-y-8">
       <PageHeader title={translateUi("Platform Credentials")} />
       <ChannelAdapterResources />
+      <ManagedLinesAdmin />
       {query.error && (
         <ErrorBanner
           message={translateUi("Unable to refresh platform credentials")}

@@ -236,7 +236,7 @@ pub async fn apply_settlement_for_row(
     // Machine runs are admitted only against finite, fully funded windows.
     // Never turn a larger measured quantity or a corrupt funding split into
     // wallet debt, including when a later top-up made funds available.
-    if row.metric.is_runtime_allocation()
+    if row.metric.requires_lifecycle_evidence()
         && (actual_credits < Credits::ZERO || actual_credits > row.reserved_credits)
     {
         return Err(AppError::Internal(
@@ -653,6 +653,15 @@ pub async fn claim_released_and_settle(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<bool> {
+    // A rental without its funded coverage receipt is deferred, never settled,
+    // released or dead-lettered.
+    if row.metric == BillingMetric::PhoneNumberDays
+        && super::managed_lifecycle::coverage_receipt(db, row)
+            .await?
+            .is_none()
+    {
+        return Ok(false);
+    }
     if super::stuck_requests::holdless::marked(row) {
         return super::stuck_requests::holdless::release(db, row).await;
     }
@@ -835,7 +844,7 @@ pub async fn abandon_stale_unforwarded(
             "status": "reserved",
             "forwarded": false,
             "released": false,
-            "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.is_runtime_allocation()).map(BillingMetric::as_str).collect::<Vec<_>>() },
+            "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.requires_lifecycle_evidence()).map(BillingMetric::as_str).collect::<Vec<_>>() },
             "updated_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
             "managed_execution_id": { "$exists": false },
         })
@@ -902,6 +911,15 @@ pub(crate) async fn recover_retryable_settlements_at(
         }
         let result: AppResult<()> = recovery_batch::work(async {
             let row: UsageMeterRow = recovery_batch::decode(&raw)?;
+            // Missing coverage receipts defer only this rental (metadata-only
+            // diagnostic and a later retry slot); it is never dead-lettered.
+            if row.metric == BillingMetric::PhoneNumberDays
+                && super::managed_lifecycle::coverage_receipt(db, &row)
+                    .await?
+                    .is_none()
+            {
+                return Ok(());
+            }
             if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
                 if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
                     stats.dead_lettered += 1;
@@ -1122,7 +1140,7 @@ pub(crate) async fn estimate_layer_reservations(
     Ok(reservations)
 }
 
-async fn fresh_rate(
+pub(crate) async fn fresh_rate(
     db: &mongodb::Database,
     lago_metric_code: &str,
     model: Option<&str>,
@@ -1177,7 +1195,7 @@ async fn release_one_unforwarded_row(
     // A stale or failed HTTP caller is not proof that a Machine stopped.
     // Its dedicated evidence path finalizes even zero-quantity windows and
     // releases their funding through ordinary settlement after that proof.
-    if row.metric.is_runtime_allocation() {
+    if row.metric.requires_lifecycle_evidence() {
         return Ok(false);
     }
     let now = Utc::now();
@@ -1236,7 +1254,7 @@ async fn release_wallet_in_session(
                 "forwarded": false,
                 "status": "reserved",
                 "released": false,
-                "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.is_runtime_allocation()).map(BillingMetric::as_str).collect::<Vec<_>>() },
+                "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.requires_lifecycle_evidence()).map(BillingMetric::as_str).collect::<Vec<_>>() },
             },
             doc! { "$set": set_doc.clone() },
         )

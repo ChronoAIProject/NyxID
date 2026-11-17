@@ -410,6 +410,44 @@ pub async fn send_machine_lifecycle_notification(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn send_managed_line_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    line_id: &str,
+    message: &str,
+) -> AppResult<NotificationResult> {
+    let url = format!(
+        "{}/nyxbot/settings?line={}",
+        config.frontend_url.trim_end_matches('/'),
+        line_id
+    );
+    let rendered = RenderedConnectionExpiredNotification {
+        title: "Phone line coverage update".into(),
+        body: format!("{message} Open {url}."),
+        data: HashMap::from([
+            ("type".into(), "managed_line_lifecycle".into()),
+            ("line_id".into(), line_id.into()),
+            ("url".into(), url),
+        ]),
+    };
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "managed line lifecycle",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn deliver_best_effort(
     db: &Database,
     config: &AppConfig,

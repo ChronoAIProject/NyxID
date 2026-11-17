@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { managedIntegritySchema } from "@/schemas/admin-managed-lines";
 
 export const chainVerifyOutcomeSchema = z.enum(["ok", "broken"]);
 
@@ -51,6 +52,7 @@ export const chainVerificationResponseSchema = z.object({
     .optional(),
   startup_diagnostics: z.array(startupDiagnosticSchema).default([]),
   security_effects: securityEffectDiagnosticsSchema.optional(),
+  managed_comms: managedIntegritySchema.nullish(),
 });
 
 export type ChainVerifyOutcome = z.infer<typeof chainVerifyOutcomeSchema>;

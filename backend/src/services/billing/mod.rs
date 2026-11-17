@@ -9,6 +9,7 @@ pub mod lago_client;
 pub mod ledger;
 pub mod machine_runtime;
 mod machine_runtime_math;
+pub mod managed_lifecycle;
 pub mod meter;
 pub mod metric_resolution;
 pub mod model_tariffs;
@@ -592,7 +593,7 @@ impl BillingService {
         }
         if ctx
             .platform_specs()
-            .any(|(metric, _)| metric.is_runtime_allocation())
+            .any(|(metric, _)| metric.requires_lifecycle_evidence())
         {
             return Err(crate::errors::AppError::BillingNotConfigured(
                 "Runtime allocation pricing requires dedicated prepaid window admission".into(),

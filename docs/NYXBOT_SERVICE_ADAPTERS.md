@@ -136,6 +136,16 @@ This profile exposes a Custom LLM endpoint. Phone-number routing into ElevenLabs
 SIP configuration and ElevenLabs speech billing remain in the external provider
 configuration.
 
+## NyxID-managed phone lines
+
+Merchants approved by NyxID can instead claim a NyxID-owned number in **NyxBot
+Settings → NyxID phone numbers** (or `nyxid nyxbot line …`) without any carrier
+account. Managed lines use the dedicated `ManagedLine` credential, prepaid
+`phone_number_days` rental, required managed prices, call slots, a monthly spend
+limit, Telnyx underwriting, premium ElevenLabs voices and caller confirmations.
+They are additive to this flag (`nyxbot:managed-lines`) and never use the
+platform allocations below. See [MANAGED_PHONE_LINES.md](MANAGED_PHONE_LINES.md).
+
 ## Platform accounts and billing
 
 Platform credentials remain encrypted in the catalog service. In **Admin →
@@ -160,6 +170,21 @@ charges, and tariff verification within 30 days. Platform execution also require
 enabled billing and Lago configuration. User-owned service costs remain on the
 provider account; an optional compatible BYOK lane charges the configured NyxID
 price. No new wallet or credential store is introduced.
+
+For user-owned (BYOK) calls, an unavailable provider duration keeps the NyxID
+reservation pending for 72 hours from the first server-observed termination.
+Recovery continues authenticated provider reads during this window; callback
+timestamps supplied by the owner never establish billable duration or shorten
+the window. If the credential is lost or the provider record remains unavailable
+afterward, NyxID settles its own BYOK fee at zero and releases that reservation.
+This is a fee waiver, not evidence of zero carrier usage: provider seconds stay
+unknown and the owner remains responsible for the carrier's bill. The immutable
+`provider_evidence_unavailable` outcome is audited without content or credentials.
+A human platform Admin can resolve a terminated BYOK call from referenced
+provider evidence before the quantity or waiver is frozen, through
+`POST /api/v1/admin/call-adapters/sessions/{id}/resolve-evidence`.
+Legacy pending calls without a server observation time start a fresh 72-hour
+window on recovery. Managed lines and platform allocations never use this waiver.
 
 To renew tariff evidence with the current management API, disable and settle the
 binding, revoke its allocation, then allocate the verified resource again with
