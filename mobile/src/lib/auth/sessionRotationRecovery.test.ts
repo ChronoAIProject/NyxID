@@ -46,3 +46,14 @@ test('P4 an auth replacement during a held persist fences the in-memory successo
   const logout=e.coordinator.clear();e.storage.setItemAsync=original;release();
   assert.equal(await rotation,false);await logout;assert.equal(await e.coordinator.load(),null);
 });
+
+test('N6 later loads make one persistence attempt while commit retains its three-attempt burst', async () => {
+  const e=fixture();await e.coordinator.persist(old);const before=(await e.coordinator.load())!;
+  e.fail(100);await e.coordinator.commitRefresh(before,next);assert.equal(e.writes(),3);
+  for(let load=1;load<=5;load++) {
+    assert.equal((await e.coordinator.load())?.refreshToken,'successor');
+    assert.equal(e.writes(),3+load,'one later native write per load');
+  }
+  e.fail(0);await e.coordinator.load();assert.equal(e.writes(),1);
+  assert.equal(JSON.parse(e.values.get(SESSION_RECORD_KEY)!).session.refreshToken,'successor');
+});

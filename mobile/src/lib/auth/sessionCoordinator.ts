@@ -12,10 +12,10 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
   let generation = 0;
   let legacyCleanupComplete = false;
   let pendingSuccessor: { generation: number; session: StoredAuthSession } | null = null;
-  async function persistSuccessor(candidate: NonNullable<typeof pendingSuccessor>) {
+  async function persistSuccessor(candidate: NonNullable<typeof pendingSuccessor>, attempts: number) {
     // The server has already retired the predecessor. Publish memory first and
     // bound native retries; later loads keep trying the durable write.
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       if (generation !== candidate.generation || pendingSuccessor !== candidate) return;
       try {
         await write(candidate.session);
@@ -53,7 +53,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
   async function read(expectedGeneration = generation): Promise<StoredAuthSession | null> {
     const candidate = pendingSuccessor;
     if (candidate?.generation === expectedGeneration && generation === expectedGeneration) {
-      await persistSuccessor(candidate);
+      await persistSuccessor(candidate, 1);
       return { ...candidate.session, sessionGeneration: expectedGeneration };
     }
     const record = await storage.getItemAsync(SESSION_RECORD_KEY);
@@ -119,7 +119,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
           || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return false;
         const candidate = { generation, session: normalize(next) };
         pendingSuccessor = candidate;
-        await persistSuccessor(candidate);
+        await persistSuccessor(candidate, 3);
         if (generation !== expected.sessionGeneration) return false;
         bind(decodeJwtSub(next.accessToken) ?? null);
         return true;
