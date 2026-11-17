@@ -126,11 +126,15 @@ impl BillingReconciler {
     }
 
     #[cfg(test)]
-    pub(crate) async fn compare_usage_for_test(&self) -> AppResult<ReconcileStats> {
+    pub(crate) async fn compare_usage_for_test(
+        &self,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         self.compare_finalized_usage(
             self.lago.as_ref().expect("test Lago client").as_ref(),
             &mut stats,
+            token,
         )
         .await?;
         Ok(stats)
@@ -211,7 +215,7 @@ impl BillingReconciler {
         let mut report = Pass::new(checkpoint);
         let result = CONTINUE_RECONCILE
             .scope(Cell::new(true), async {
-                let pass = self.run_steps(&mut report);
+                let pass = self.run_steps(&mut report, &token);
                 tokio::pin!(pass);
                 // Passing a borrow keeps the pass alive when the house renewal
                 // runner drops its operation on loss. Do not drop a multi-write
@@ -259,20 +263,27 @@ impl BillingReconciler {
     }
 
     #[cfg(test)]
-    async fn run_pass(&self) -> AppResult<ReconcileStats> {
+    async fn run_pass(
+        &self,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
         let mut report = Pass::new(None);
-        let result = self.run_steps(&mut report).await;
+        let result = self.run_steps(&mut report, token).await;
         report.result(result)
     }
 
-    async fn run_steps(&self, report: &mut Pass) -> AppResult<ReconcileStats> {
+    async fn run_steps(
+        &self,
+        report: &mut Pass,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
         if !report.observe(
             "exact_readiness",
             super::exact_migration::ready(&self.db).await,
         )? {
             return Ok(ReconcileStats::default());
         }
-        let result = self.run_billing_steps(report).await;
+        let result = self.run_billing_steps(report, token).await;
         if continue_reconcile() {
             report.record(
                 "metering_retention",
@@ -282,7 +293,11 @@ impl BillingReconciler {
         result
     }
 
-    async fn run_billing_steps(&self, report: &mut Pass) -> AppResult<ReconcileStats> {
+    async fn run_billing_steps(
+        &self,
+        report: &mut Pass,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         // Benefit-only estimates can spill into wallet funding at settlement.
         // Refresh before recovery: pending component/voice recovery may return
@@ -516,7 +531,7 @@ impl BillingReconciler {
         }
         report.record(
             "usage_comparison",
-            self.compare_finalized_usage(lago.as_ref(), &mut stats)
+            self.compare_finalized_usage(lago.as_ref(), &mut stats, token)
                 .await,
         );
         if !continue_reconcile() {
@@ -888,11 +903,11 @@ impl BillingReconciler {
 
     async fn compare_finalized_usage(
         &self,
-        _lago: &dyn LagoApi,
-        _stats: &mut ReconcileStats,
+        lago: &dyn LagoApi,
+        stats: &mut ReconcileStats,
+        token: &crate::services::coordination_service::LeaseToken,
     ) -> AppResult<()> {
-        // Capture only: no population has verified full-period coverage yet.
-        Ok(())
+        super::usage_comparison::run(&self.db, lago, token, stats).await
     }
 }
 

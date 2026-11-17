@@ -927,6 +927,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "Tracker primitive: Work registered before spawn; retained abort handle and Work Drop prove completion before ownership release.",
     ),
     (
+        "services/shutdown/signals.rs",
+        "watch_startup",
+        "tokio::spawn",
+        1,
+        "Startup signal observer owns only receivers: joined at the bind checkpoint and aborted on early return/failed startup; no database work or durable claims.",
+    ),
+    (
         "services/voice/grok_runtime.rs",
         "serve",
         "grok::Handle::spawn",

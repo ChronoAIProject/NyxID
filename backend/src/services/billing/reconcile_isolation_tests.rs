@@ -216,8 +216,8 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     );
     assert_eq!(
         commands.len(),
-        47,
-        "dormant retention adds only its state read"
+        53,
+        "comparison adds four coverage commands and two discovery reads while unactivated"
     );
     assert_eq!(
         commands.iter().filter(|c| c.as_str() == "delete").count(),
@@ -237,8 +237,8 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     assert!(error.contains("schedules:") && error.contains("grant_expiry:"));
     assert_eq!(
         seen.lock().unwrap().len(),
-        47,
-        "failure publication adds no command beyond retention maintenance"
+        53,
+        "failure publication adds no extra command beyond the holdless reads"
     );
     let count = |command: &str| {
         seen.lock()
@@ -265,7 +265,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     r.run_once().await.unwrap();
     assert_eq!(
         seen.lock().unwrap().len(),
-        47,
+        53,
         "clearing status adds no command"
     );
     assert_eq!(count("update"), 1);
@@ -275,7 +275,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         "clearing failures retains the informational warming timestamp"
     );
     println!(
-        "BILLING_PASS_STATUS failure_commands=47 clear_commands=47 failed_updates=1 clear_updates=1 added_commands=0"
+        "BILLING_PASS_STATUS failure_commands=53 clear_commands=53 failed_updates=1 clear_updates=1 added_commands=0"
     );
     db.drop().await.unwrap();
 }

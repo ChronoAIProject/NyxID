@@ -50,7 +50,7 @@ def main():
 
     for path in ["/", "/login", "/docs", "/channel-bots/?%63laim=FIXTURE", "/%63hannel-bots?%63laim=FIXTURE", "/build-version.json"]:
         check(path)
-    for path in ["/privacy", "/terms"]:
+    for path in ["/privacy", "/terms", "/data-deletion"]:
         headers, _ = check(path)
         check(path, 304, extra={"If-None-Match": headers["etag"]})
         check(path, 405, method="POST")

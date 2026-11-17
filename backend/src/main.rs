@@ -26,6 +26,9 @@ mod routes;
 mod services;
 mod shutdown_servers;
 mod ssh_cli;
+#[cfg(test)]
+#[cfg(unix)]
+mod startup_signal_tests;
 mod telemetry;
 mod telemetry_erasure_cli;
 mod turn_trace;
@@ -567,6 +570,17 @@ fn server_main(cli: Cli) {
 }
 
 async fn server_run(cli: Cli) {
+    let startup_signals = if cli.command.is_none() && cli.promote_admin.is_none() {
+        Some(
+            services::shutdown::signals::Signals::new()
+                .expect("Cannot install shutdown signal handlers")
+                .watch_startup(),
+        )
+    } else {
+        None
+    };
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("entry").await;
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
@@ -619,10 +633,26 @@ async fn server_run(cli: Cli) {
         );
     }
 
-    // Connect to database
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("configuration_ready").await
+    {
+        return;
+    }
+
+    // Connect to database without indexes, migrations or application writes.
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("database_ready").await;
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("database_ready").await
+    {
+        return;
+    }
+    db::initialize(&db)
+        .await
+        .expect("Failed to initialize database");
     // Preparation reads the unchanged legacy bytes and bounded chain evidence.
     // It neither loads a signer nor starts normal server writers, so an older
     // weak signer can be exported before the strict JWT cutover.
@@ -668,19 +698,6 @@ async fn server_run(cli: Cli) {
     services::assistant_action_receipts::init_action_fingerprint_hmac_key(action_fingerprint);
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger.clone());
     let billing_ledger_hmac_key = Arc::new(billing_ledger);
-    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
-    services::billing::account_reconciliation::spawn(
-        db.clone(),
-        config.billing_enabled,
-        config.chain_verify_interval_secs,
-    );
-    services::chain_verify_service::spawn_chain_verify_worker(
-        db.clone(),
-        audit_chain_hmac_key.clone(),
-        billing_ledger_hmac_key.clone(),
-        config.chain_verify_interval_secs,
-    );
-
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
         services::role_service::seed_system_roles(&db)
@@ -706,6 +723,22 @@ async fn server_run(cli: Cli) {
         }
         return;
     }
+
+    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
+    services::billing::account_reconciliation::spawn(
+        db.clone(),
+        config.billing_enabled,
+        config.chain_verify_interval_secs,
+    );
+    services::chain_verify_service::spawn_chain_verify_worker(
+        db.clone(),
+        audit_chain_hmac_key.clone(),
+        billing_ledger_hmac_key.clone(),
+        config.chain_verify_interval_secs,
+    );
+
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("after_workers").await;
 
     // Validate provider-specific encryption config before any seed calls that use it.
     config.validate_key_provider();
@@ -1932,6 +1965,48 @@ async fn server_run(cli: Cli) {
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("before_listeners").await;
+    let (mut signals, startup_stop) = startup_signals
+        .expect("server mode has startup signal receivers")
+        .finish()
+        .await;
+    if let Some(received) = startup_stop {
+        tracing::info!(target: "nyxid::shutdown", signal = received.signal,
+            safe_point = "before_listeners", "Stopping startup without binding listeners");
+        if let Some(drain) = services::shutdown::drain::Drain::begin_startup(
+            &shutdown_state,
+            std::time::Duration::from_secs(config.shutdown_drain_timeout_secs),
+            received,
+        ) {
+            let finish = async {
+                let end = drain
+                    .wait(&shutdown_state, drain.work_deadline(), signals.next())
+                    .await;
+                let cleanup_deadline = drain
+                    .deadline
+                    .min(tokio::time::Instant::now() + drain.cleanup_reserve());
+                finish_shutdown(
+                    &shutdown_state,
+                    &drain,
+                    end,
+                    &discord_shutdown,
+                    cleanup_deadline,
+                )
+                .await;
+            };
+            tokio::select! {
+                biased;
+                () = finish => {},
+                never = drain.progress(&shutdown_state) => match never {},
+            }
+        } else {
+            // Preserve the configured zero-budget Discord cancellation path.
+            discord_shutdown.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discord_worker).await;
+        }
+        return;
+    }
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr)
         .await
@@ -1939,6 +2014,8 @@ async fn server_run(cli: Cli) {
     let internal_listener = TcpListener::bind(&config.internal_bind_addr)
         .await
         .expect("Failed to bind internal dispatch address");
+    #[cfg(all(test, unix))]
+    startup_signal_tests::listeners_bound();
     let listeners_bound_at = chrono::Utc::now();
     let internal_body_limit =
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
@@ -1959,13 +2036,6 @@ async fn server_run(cli: Cli) {
         "Internal replica listener started"
     );
 
-    let mut signals = match services::shutdown::signals::Signals::new() {
-        Ok(signals) => signals,
-        Err(error) => {
-            tracing::error!(%error, "Cannot install shutdown signal handlers");
-            return;
-        }
-    };
     let mut servers = shutdown_servers::Servers::new(
         shutdown_state.shutdown.clone(),
         listener,
@@ -1974,6 +2044,8 @@ async fn server_run(cli: Cli) {
         internal_app,
     );
     services::shutdown::startup::listeners_bound(&shutdown_state, listeners_bound_at);
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("serving").await;
     let signal = tokio::select! {
         () = servers.failed() => None,
         signal = signals.next() => Some(signal),
