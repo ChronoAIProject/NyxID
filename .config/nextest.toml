@@ -116,3 +116,9 @@ test(=services::channel_image_delivery::tests::channel_image_claims_fail_closed_
 test(=services::audit_service::durability_tests::rejected_commit_does_not_report_success_or_publish_partial_revocation)
 """
 threads-required = "num-cpus"
+
+# A failCommand write-boundary matrix owns the server-wide failpoint until its
+# injection is cleared; other failpoint tests must not replace it concurrently.
+[[profile.ci.overrides]]
+filter = "test(db::startup_migration_tests::startup_migration_)"
+threads-required = "num-cpus"

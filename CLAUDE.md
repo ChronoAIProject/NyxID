@@ -20,6 +20,7 @@ Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.m
 - NEVER use `#[serde(skip_serializing)]` on model fields -- prevents `insert_one(&struct)` from storing them
 - ALWAYS use `#[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]` on `DateTime<Utc>` fields; for `Option<DateTime<Utc>>` use the `bson_datetime::optional` helper (`models/bson_datetime.rs`)
 - IDs are UUID v4 stored as strings in MongoDB `_id`; each model has a `COLLECTION_NAME` constant
+- Every new production collection, and removal of a collection's last production use, must be registered in `services/personal_data_registry.rs` (owner selector, erasure and export disposition); its source-scan test enforces this. Personal collections also need local-inventory and owner-index coverage; see the registry header and `docs/security/PERSONAL_ERASURE_INVENTORY.md`.
 
 ### 2. Layer Architecture
 
@@ -386,7 +387,7 @@ All API routes under `/api/v1`:
 - `/triggers` -- trigger CRUD plus human-only `POST /preview`, `GET /{id}/runs` (cursor-paged metadata) and `POST /{id}/run` for Automations; `/{id}/rotate-secret`, `/{id}/rotate-delivery-secret`, `/{id}/deliveries`, and `/{id}/deliveries/{event_id}/redeliver` cover inbound/outbound secret rotation, delivery history, and retained-envelope replay (JWT or agent API key; delegated, relay, and service-account tokens rejected)
 - `/webhooks/triggers/{trigger_id}` -- unauthenticated trigger ingress verified by token or raw-body HMAC (see Critical Rule 14)
 - `/auth/mfa` -- setup, confirm, verify (login), step-up (current session), disable (nested under `/auth` in `routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
-- `/users` -- get/update current user
+- `/users` -- get/update current user; `POST /users/me/export` downloads the bounded account data export
 - `/api-keys` -- CRUD + rotate; `ApiKey` scope + agent isolation fields per Critical Rules 8-9
 - `/api-keys/{id}/bindings` -- agent credential binding CRUD (`AgentServiceBinding`)
 - `/api-keys/{id}/credentials` and `/{credential_id}` -- list and revoke login credentials bound to a key

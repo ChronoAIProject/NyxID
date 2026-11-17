@@ -1051,15 +1051,6 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
-            super::assistant_activity_decision::bind(
-                db,
-                chat,
-                "approval",
-                &request.id,
-                false,
-                None,
-            )
-            .await?;
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
