@@ -3174,4 +3174,73 @@ mod export_http_tests {
         );
         db.drop().await.unwrap();
     }
+    #[tokio::test]
+    async fn p6_existing_preference_writers_preserve_quick_access_and_future_fields() {
+        use crate::models::user::{
+            SavedServiceView, ServiceViewPreferences, ServiceViewsPreferences,
+        };
+        use crate::services::{analytics_consent_service, user_preferences_service as preferences};
+        use mongodb::bson::{Document, doc};
+        let db = crate::test_utils::connect_test_database("quick_access_rolling_writers")
+            .await
+            .expect("Mongo required");
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let expected = doc! {"items":[{"kind":"agent","id":Uuid::new_v4().to_string()}], "future_rail_setting":"keep"};
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id": &owner},
+                doc! {"$set":{
+                    "profile_config.quick_access": &expected, "profile_config.future_setting":"keep"
+                }},
+            )
+            .await
+            .unwrap();
+        let filters: ServiceViewPreferences = serde_json::from_value(serde_json::json!({
+        "search":"$literal", "organization_ids":[], "service_group_ids":[], "source":"all", "state":"all", "service_type":"all", "show_auto_connected":false
+    })).unwrap();
+        preferences::save_service_views(
+            &db,
+            &owner,
+            ServiceViewsPreferences {
+                views: vec![SavedServiceView {
+                    id: "one".into(),
+                    name: "One".into(),
+                    filters: filters.clone(),
+                }],
+                default_id: Some("one".into()),
+            },
+        )
+        .await
+        .unwrap();
+        preferences::save_services_view(&db, &owner, filters)
+            .await
+            .unwrap();
+        analytics_consent_service::set(&db, &owner, false)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let _ = crate::handlers::users::complete_onboarding(
+            axum::extract::State(state),
+            crate::test_utils::test_auth_user(&owner),
+            axum::Json(crate::handlers::users::CompleteOnboardingRequest {
+                key: "ai_services".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let row = db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let profile = row.get_document("profile_config").unwrap();
+        assert_eq!(profile.get_document("quick_access").unwrap(), &expected);
+        assert_eq!(profile.get_str("future_setting").unwrap(), "keep");
+        db.drop().await.unwrap();
+    }
 }

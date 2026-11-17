@@ -1172,6 +1172,15 @@ person during erasure; no collection is added. These users preference routes,
 like their adjacent preference endpoints, are documented here rather than
 registered as utoipa paths.
 
+Rolling deployments are compatible: older binaries ignore this optional field.
+All current profile preference writers (service-view filters/named views,
+analytics consent, security policy and onboarding completion) update their own
+`profile_config.*` path; they do not replace the profile object. Quick-access
+save/reset likewise changes only `profile_config.quick_access`. This preserves
+sibling and unknown future settings. Older binaries cannot read the new route;
+clients must retain the default rail if that route returns 404. No migration or
+new personal-data collection is required.
+
 #### GET /api/v1/users/me
 
 Returns the profile of the currently authenticated user.
