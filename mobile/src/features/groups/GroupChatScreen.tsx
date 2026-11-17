@@ -1,5 +1,6 @@
 import { useContext } from "react";
-import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";

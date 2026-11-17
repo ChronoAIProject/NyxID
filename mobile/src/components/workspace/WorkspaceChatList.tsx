@@ -1,5 +1,6 @@
 import { useContext } from "react";
-import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";import { workspaceAgentPickerSections } from "./workspaceAgentPickerModel";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { workspaceAgentPickerSections } from "./workspaceAgentPickerModel";
 import { recentUnread, type WorkspaceRecent } from "./workspaceSidebarModel";
 import {
   workspaceCrewLabel,

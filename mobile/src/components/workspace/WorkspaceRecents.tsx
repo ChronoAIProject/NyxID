@@ -1,5 +1,6 @@
 import { useContext } from "react";
-import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";import { workspaceRecentLabel } from "./workspaceAccessibilityLabels";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { workspaceRecentLabel } from "./workspaceAccessibilityLabels";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {

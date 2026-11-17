@@ -1,5 +1,6 @@
 import { useContext } from "react";
-import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {

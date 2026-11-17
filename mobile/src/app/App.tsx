@@ -17,7 +17,7 @@ import {
   WorkspacePushShell,
 } from "../components/workspace/WorkspacePushShell";
 import { workspaceFocus } from "../lib/accessibility/workspaceFocus";
-import { getAuthAccountId, subscribeAuthAccount, } from "../lib/auth/authAccount";
+import { getAuthAccountId, subscribeAuthAccount } from "../lib/auth/authAccount";
 import { getAuthEpoch } from "../lib/auth/authEpoch";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
@@ -185,7 +185,10 @@ function getActiveRouteName(
 }
 
 export default function App() {
-  return ( <LanguageProvider><AppContent /></LanguageProvider>
+  return (
+    <LanguageProvider>
+      <AppContent />
+    </LanguageProvider>
   );
 }
 
