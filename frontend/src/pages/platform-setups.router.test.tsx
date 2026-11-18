@@ -98,11 +98,15 @@ async function openSetups(setupsGate = Promise.resolve()) {
       if (path === "/onboarding/setups") await setupsGate;
       if (path === "/onboarding/anonymous-drafts") {
         fixture.draftReads.push(input);
-        if (fixture.draftErrorStatus)
-          return Response.json(
-            { error: "unavailable", message: "Binding is unavailable" },
-            { status: fixture.draftErrorStatus },
-          );
+        if (fixture.draftErrorStatus) {
+          const status = fixture.draftErrorStatus;
+          const error = status === 403
+            ? { error: "forbidden", message: "Binding is unavailable" }
+            : status === 404
+              ? { error: "not_found", message: "Platform bot configuration not found" }
+              : { error: "unavailable", message: "Service temporarily unavailable." };
+          return Response.json(error, { status });
+        }
       }
       const draft =
         fixture.drafts.find(
@@ -130,7 +134,7 @@ async function openSetups(setupsGate = Promise.resolve()) {
           );
         if (fixture.adoptionError)
           return Response.json(
-            { error: "unavailable", message: "Draft changed. Review it again." },
+            { error: "unavailable", message: "Service temporarily unavailable." },
             { status: 503 },
           );
         const adopted = saved ?? current!;
@@ -434,7 +438,7 @@ it("keeps a transient adoption error and reviewed revision available for one exp
   fixture.adoptionError = true;
   const user = await reviewDraft();
   await user.dblClick(adoptionButton());
-  await screen.findByText("Draft changed. Review it again.");
+  await screen.findByText("Service temporarily unavailable.");
   await expectSettled();
   expect(adoptionButton()).toBeEnabled();
   expect(screen.getByRole("checkbox")).toBeChecked();

@@ -72,8 +72,15 @@ export async function installSetupFixture(page: Page) {
       if (path === "/onboarding/bindings")
         return route.fulfill({ json: state.bindings });
       if (path === "/onboarding/anonymous-drafts") {
-        if (state.draftErrorStatus)
-          return route.fulfill({ status: state.draftErrorStatus, json: { error: "unavailable", message: "Binding is unavailable" } });
+        if (state.draftErrorStatus) {
+          const status = state.draftErrorStatus;
+          const json = status === 403
+            ? { error: "forbidden", message: "Binding is unavailable" }
+            : status === 404
+              ? { error: "not_found", message: "Platform bot configuration not found" }
+              : { error: "unavailable", message: "Service temporarily unavailable." };
+          return route.fulfill({ status, json });
+        }
         const binding = state.bindings.find(
           (item) =>
             item.id === url.searchParams.get("binding_id") &&
@@ -105,7 +112,7 @@ export async function installSetupFixture(page: Page) {
       if (state.adoptError)
         return route.fulfill({
           status: 503,
-          json: { error: "unavailable", message: "Draft changed. Review it again." },
+          json: { error: "unavailable", message: "Service temporarily unavailable." },
         });
       state.saved.push(current);
       state.drafts = state.drafts.filter((item) => item.id !== current.id);

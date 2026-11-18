@@ -243,7 +243,7 @@ for (const failure of ["invalidDraft", "draftError", "adoptError"] as const) {
       await page.getByRole("checkbox", { name: reviewText }).check();
       await adopt(page).dblclick();
       await expect(
-        page.getByText("Draft changed. Review it again.", { exact: true }),
+        page.getByText("Service temporarily unavailable.", { exact: true }),
       ).toBeVisible();
       await singleModule(page, 1);
       expect(fixture.writes).toHaveLength(1);
