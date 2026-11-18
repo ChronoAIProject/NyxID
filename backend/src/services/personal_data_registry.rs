@@ -523,6 +523,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "assistant_cma_creations stores the person-owned assistant cma creations record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
+        collection: "assistant_cma_slot_audit_claims",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::FeatureRetention("assistant_cma_slot_audit one-hour expires_at TTL"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "assistant_cma_slot_audit_claims stores only the owner/reservation hourly diagnostic claim; the one-hour expires_at TTL removes it independently of account lifecycle and no request or credential is retained.",
+    },
+    Entry {
         collection: "assistant_cma_sandboxes",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,

@@ -1625,6 +1625,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::nyxbot_gateway_releases::resolve),
         )
         .route(
+            "/cma-sandbox-reservations",
+            get(handlers::admin_cma_sandbox_reservations::list),
+        )
+        .route(
+            "/cma-sandbox-reservations/{id}/inspect",
+            post(handlers::admin_cma_sandbox_reservations::inspect),
+        )
+        .route(
+            "/cma-sandbox-reservations/{id}/resolve",
+            post(handlers::admin_cma_sandbox_reservations::resolve),
+        )
+        .route(
             "/platform-credentials",
             get(handlers::admin_platform_credentials::list),
         )

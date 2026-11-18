@@ -154,6 +154,7 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod admin_cma_sandbox_reservations;
 pub mod assistant_cma_agents;
 pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
