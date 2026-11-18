@@ -1441,21 +1441,20 @@ it("pins the same save bar outside scrolling content through tabs, drill-ins and
   expect(screen.getByRole("button", { name: "Discard" })).toBeVisible();
 });
 
-it("adds named help to every rendered drawer section and keeps help text searchable", async () => {
-  const { user } = renderSheet();
-  await screen.findByLabelText("Overview", { selector: "form" });
-  for (const name of ["Overview", "Access", "Skills", "Memory", "Channels"]) {
-    const tab = screen.queryByRole("tab", { name });
-    if (!tab) continue;
-    await visitAgent(({ Overview: "overview", Access: "grants", Skills: "skills", Memory: "memory", Channels: "channels" } as Record<string, string>)[name]!);
-    const panel = screen.getByRole("tabpanel", { name });
-    for (const heading of panel.querySelectorAll("h3")) {
-      const title = heading.getAttribute("aria-label")!;
-      expect(within(heading).getByRole("button", { name: `About ${title}` })).toBeInTheDocument();
-    }
+it.each([
+  ["overview", "Overview"], ["grants", "Access"], ["skills", "Skills"], ["memory", "Memory"], ["channels", "Channels"],
+] as const)("adds named help to the rendered %s drawer sections", async (tab, name) => {
+  renderSheet({ tab });
+  const panel = await screen.findByRole("tabpanel", { name });
+  for (const heading of panel.querySelectorAll("h3")) {
+    const title = heading.getAttribute("aria-label")!;
+    expect(within(heading).getByRole("button", { name: `About ${title}` })).toBeInTheDocument();
   }
-  await visitAgent("grants/services");
-  await user.click(screen.getByRole("button", { name: "About Services" }));
+});
+
+it("opens service help and keeps its text searchable", async () => {
+  const { user } = renderSheet({ tab: "grants/services" });
+  await user.click(await screen.findByRole("button", { name: "About Services" }));
   expect(await screen.findByRole("tooltip", { name: "About Services" })).toHaveTextContent("which connected services this specialist may call");
   await user.keyboard("{Escape}");
   appendText(await openSearch(user), "connected services specialist");

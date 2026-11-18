@@ -34,7 +34,7 @@ const PASSWORD_LABELS = new Set<string>([
 /** Use the current locale and the same labels that each editor renders. */
 export function accountSettingsSearchEntries(hasPassword = true) {
   return ACCOUNT_SETTINGS_SECTIONS.flatMap(section =>
-    [ACCOUNT_SETTINGS_TITLES[section], ...(ACCOUNT_SETTINGS_LABELS[section] ?? [])]
+    [...new Set([ACCOUNT_SETTINGS_TITLES[section], ...(ACCOUNT_SETTINGS_LABELS[section] ?? [])])]
       .filter(label => hasPassword || !PASSWORD_LABELS.has(label))
       .map((label, index) => ({
         id: `${section}:${index}`,

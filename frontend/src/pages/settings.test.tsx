@@ -14,6 +14,7 @@ import {
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ACCOUNT_SETTINGS_SECTIONS } from "@/lib/account-settings-sections";
 import { SETTINGS_TABS } from "@/lib/url-tabs";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
@@ -124,16 +125,18 @@ async function saveSettings() {
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
-    it("opens on six concise rows and retains sibling groups on focused pages", async () => {
+    it("opens on six concise rows with no editor or save bar", async () => {
       await open(route, "");
       expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-      for (const section of ["profile", "security", "security/delete", "sessions", "mcp", "display", "display/layout", "display/colors", "privacy"]) {
-        await visit(section);
-        const detail = document.querySelector(`[data-grouped-detail]:not([hidden])[aria-label]`)!;
-        expect(detail.querySelector("[data-grouped-list]")).not.toBeNull();
-        expect(detail.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
-      }
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+    });
+
+    it.each(ACCOUNT_SETTINGS_SECTIONS)("keeps sibling groups without nested cards on %s", async section => {
+      await open(route, section);
+      const detail = document.querySelector(`[data-grouped-detail]:not([hidden])[aria-label]`)!;
+      expect(detail.querySelector("[data-grouped-list]")).not.toBeNull();
+      expect(detail.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
       expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
     });
 
@@ -614,19 +617,20 @@ describe.each(["/settings", "/assistant"] as const)(
       await waitFor(() => expect(confirm).toBeEnabled());
     });
 
-    it("replaces sections on the supplied route and keeps legacy tab addresses", async () => {
+    it.each(SETTINGS_TABS)("replaces the %s section on the supplied route and keeps its legacy address", async tab => {
       const { router, history } = await open(route, "");
-      for (const tab of SETTINGS_TABS) {
-        await visit(tab);
-        expect(router.state.location.pathname).toBe(route);
-        expect(router.state.location.search).toEqual(route === "/settings" ? { tab } : { c: "chat", mock: 1, panel: "settings", panelTab: tab });
-        expect(history.length).toBe(1);
-        if (tab === "sessions") expect(screen.getByRole("link", { name: "Generate terminal login code" })).toHaveAttribute("href", "/login/code");
-        if (tab === "privacy") expect(screen.getByRole("link", { name: "privacy policy" })).toHaveAttribute("href", "/privacy");
-      }
+      await visit(tab);
+      expect(router.state.location.pathname).toBe(route);
+      expect(router.state.location.search).toEqual(route === "/settings" ? { tab } : { c: "chat", mock: 1, panel: "settings", panelTab: tab });
+      expect(history.length).toBe(1);
+      if (tab === "sessions") expect(screen.getByRole("link", { name: "Generate terminal login code" })).toHaveAttribute("href", "/login/code");
+      if (tab === "privacy") expect(screen.getByRole("link", { name: "privacy policy" })).toHaveAttribute("href", "/privacy");
       if (route === "/settings") expect(screen.getByRole("heading", { name: "Account Settings" })).toHaveClass("type-compact-page-title", "sm:type-page-title");
       else expect(screen.queryByRole("heading", { name: "Account Settings" })).not.toBeInTheDocument();
-      await visit("display/colors");
+    });
+
+    it("keeps addressed Display peer views on the supplied route", async () => {
+      const { router } = await open(route, "display/colors");
       expect(screen.getByRole("heading", { name: "Display", level: 2 })).toBeVisible();
       await userEvent.click(screen.getByRole("tab", { name: "Layout" }));
       expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/layout" } : { panelTab: "display/layout" });

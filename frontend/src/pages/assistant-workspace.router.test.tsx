@@ -1,6 +1,3 @@
-import { ACCOUNT_SETTINGS_TITLES } from "@/lib/account-settings-sections";
-import { BILLING_SECTION_TITLES } from "@/lib/billing-sections";
-import { AGENT_DETAILS_TITLES } from "@/lib/assistant/agent-details-sections";
 import { assistantAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
 import { ASSISTANT_SHELL_ROUTES, withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
@@ -20,15 +17,11 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 import { router as appRouter } from "@/router";
 import { appI18n } from "@/i18n/instance";
 import { translateUi } from "@/i18n/use-ui-translation";
 import zhCN from "@/i18n/locales/app/zh-CN";
-import { SETTINGS_LABELS, AUTOMATION_BUDGET_ROWS, AUTOMATION_TIMEZONE_LABEL, SPECIALIST_ACCESS_LABELS } from "@/lib/assistant/nyxbot-settings-fields";
-import { ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
-import { NOTIFICATION_PUSH_ROWS } from "@/lib/assistant/notification-presentation";
-import { NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import {
@@ -235,6 +228,10 @@ async function open(path: string) {
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  onTestFinished(async () => {
+    await client.cancelQueries();
+    client.clear();
+  });
   await act(() => router.load());
   await act(() => vi.dynamicImportSettled());
   return router;
@@ -733,76 +730,52 @@ it("excludes unavailable push settings from assistant search", async () => {
   expect(screen.queryByRole("option", { name: /Notifications.*NyxBot settings/ })).not.toBeInTheDocument();
 });
 
-it.each(["en", "zh-CN"])("finds rendered setting labels in %s and opens their exact section", async (language) => {
+// Completeness lives in settings-search.test.ts. Keep the router contract fixed:
+// one selection per fresh workspace, regardless of how many settings are added.
+const SEARCH_JOURNEY_TIMEOUT = 15_000;
+const scout = () => assistantAgentSchema.parse({ id: "scout", name: "Scout", kind: "specialist", status: "idle", created_at: "2026-01-01T00:00:00Z", last_active_at: "2026-01-01T00:00:00Z" });
+async function searchWorkspace(language = "en") {
   appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
   await appI18n.changeLanguage(language);
-  useAuthStore.setState({ user: { ...person, capabilities: { ...person.capabilities, enabled_features: [FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS] } } });
+  state.agents = [scout()];
   const router = await open("/assistant/plugins");
-  const cases = [
-    [SETTINGS_LABELS.max_auto_continuations, "tasks"],
-    [SETTINGS_LABELS.max_live_subagents, "tasks"],
-    [SETTINGS_LABELS.max_concurrent_subagent_turns, "tasks"],
-    [SETTINGS_LABELS.max_group_handoffs, "tasks"],
-    [SETTINGS_LABELS.max_group_handoffs_per_hour, "tasks"],
-    [AUTOMATION_TIMEZONE_LABEL, "automations"],
-    ...AUTOMATION_BUDGET_ROWS.map(row => [row[1], "automations"] as const),
-    ...NOTIFICATION_PUSH_ROWS.map(row => [row.label, "notifications"] as const),
-    ...Object.values(ACCESS_MODE_LABEL).map(label => [label, "permissions"] as const),
-    ...Object.values(SPECIALIST_ACCESS_LABELS).map(label => [label, "permissions"] as const),
-  ] as const;
-  for (const [label, section] of cases) {
-    await userEvent.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
-    await userEvent.type(await screen.findByRole("combobox"), translateUi(label));
-    const name = `${translateUi(NYXBOT_SETTINGS_TITLES[section])} ${translateUi("NyxBot settings")}`;
-    await userEvent.click(await screen.findByRole("option", { name }));
-    await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: section }));
-    await userEvent.click(screen.getByRole("button", { name: translateUi("Close") }));
-  }
-}, 20_000);
+  await screen.findByRole("heading", { name: "Plugins workspace content" });
+  const user = userEvent.setup({ delay: null });
+  await user.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
+  const dialog = await screen.findByRole("dialog", { name: translateUi("Search") });
+  const input = await within(dialog).findByRole("combobox");
+  return { router, user, dialog, input };
+}
+it.each([
+  { surface: "NyxBot consolidated Tasks", label: "Specialists working at once", title: "Tasks & specialists", hint: "NyxBot settings", address: { panel: "nyxbot", panelTab: "tasks" } },
+  { surface: "Account nested Display view", label: "Maximum composer height", title: "Layout", hint: "Account Settings", address: { panel: "settings", panelTab: "display/layout" } },
+  { surface: "Billing bill", label: "Past usage invoices", title: "This period's bill", hint: "Billing & Usage", address: { panel: "billing", panelTab: "billing", panelSection: "billing/bill" } },
+  { surface: "agent consolidated Overview", label: "Channel progress reply", title: "Overview", hint: "Scout", address: { agent: "scout", details: "overview" } },
+  { surface: "agent nested Voice", label: "Voice instructions", title: "Voice", hint: "Scout", address: { agent: "scout", details: "overview/voice" } },
+])("opens $surface from its rendered search label", async ({ label, title, hint, address }) => {
+  const { router, user, dialog, input } = await searchWorkspace();
+  await user.type(input, label);
+  await user.click(await within(dialog).findByRole("option", { name: `${title} ${hint}` }));
+  await waitFor(() => expect(router.state.location.search).toEqual(address));
+  expect(screen.queryByRole("dialog", { name: "Search" })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
 
-it.each(["en", "zh-CN"])("omits disabled push settings labels from search in %s", async (language) => {
-  appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
-  await appI18n.changeLanguage(language);
-  await open("/assistant/plugins");
-  await userEvent.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
-  const search = await screen.findByRole("combobox");
-  for (const row of NOTIFICATION_PUSH_ROWS) {
-    await userEvent.clear(search);
-    await userEvent.type(search, translateUi(row.label));
-    expect(screen.queryByRole("option", { name: `${translateUi("Notifications")} ${translateUi("NyxBot settings")}` })).not.toBeInTheDocument();
-  }
-});
+it("opens the exact NyxBot section from a rendered setting label in zh-CN", async () => {
+  const { router, user, dialog, input } = await searchWorkspace("zh-CN");
+  await user.type(input, translateUi("Automatic task continuations"));
+  await user.click(await within(dialog).findByRole("option", { name: `${translateUi("Tasks & specialists")} ${translateUi("NyxBot settings")}` }));
+  await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "tasks" }));
+  expect(screen.queryByRole("dialog", { name: translateUi("Search") })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
 
-it.each(["en", "zh-CN"])("opens account, agent and billing editors by their rendered labels in %s", async language => {
-  appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
-  await appI18n.changeLanguage(language);
-  state.agents = [assistantAgentSchema.parse({ id: "scout", name: "Scout", kind: "specialist", status: "idle", created_at: "2026-01-01T00:00:00Z", last_active_at: "2026-01-01T00:00:00Z" })];
-  const router = await open("/assistant/plugins");
-  const cases = [
-    { label: "Maximum composer height", title: ACCOUNT_SETTINGS_TITLES["display/layout"], hint: "Account Settings", address: { panel: "settings", panelTab: "display/layout" } },
-    { label: "Skip MFA for NyxID app sign-ins", title: ACCOUNT_SETTINGS_TITLES["security"], hint: "Account Settings", address: { panel: "settings", panelTab: "security" } },
-    { label: "Past usage invoices", title: BILLING_SECTION_TITLES["billing/bill"], hint: "Billing & Usage", address: { panel: "billing", panelTab: "billing", panelSection: "billing/bill" } },
-    { label: "Channel progress reply", title: AGENT_DETAILS_TITLES["overview"], hint: "Scout", address: { agent: "scout", details: "overview" } },
-    { label: "Voice instructions", title: AGENT_DETAILS_TITLES["overview/voice"], hint: "Scout", address: { agent: "scout", details: "overview/voice" } },
-  ];
-  for (const item of cases) {
-    await userEvent.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
-    await userEvent.type(await screen.findByRole("combobox"), translateUi(item.label));
-    await userEvent.click(await screen.findByRole("option", { name: `${translateUi(item.title)} ${translateUi(item.hint)}` }));
-    await waitFor(() => expect(router.state.location.search).toMatchObject(item.address));
-    if (item.address.panel) await userEvent.click(screen.getByRole("button", { name: translateUi("Close") }));
-    else await act(() => router.navigate({ to: "/assistant/plugins", search: {}, replace: true }));
-  }
-}, 15_000);
+it("omits a disabled push setting from workspace search", async () => {
+  const { user, dialog, input } = await searchWorkspace();
+  await user.type(input, "Automation results");
+  expect(within(dialog).queryByRole("option", { name: "Notifications NyxBot settings" })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
 
-it("omits gated agent editors and password-only settings from workspace search", async () => {
-  state.agents = [assistantAgentSchema.parse({ id: "scout", name: "Scout", kind: "specialist", status: "idle", created_at: "2026-01-01T00:00:00Z", last_active_at: "2026-01-01T00:00:00Z" })];
-  await open("/assistant/plugins");
-  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
-  const search = await screen.findByRole("combobox");
-  for (const label of ["New Password", "Automatic learning", "Device voice"]) {
-    await userEvent.clear(search);
-    await userEvent.type(search, label);
-    expect(screen.queryByRole("option", { name: /Change password Account Settings|Learning proposals Scout|Voice service Scout/ })).not.toBeInTheDocument();
-  }
-});
+it("omits a gated agent setting from workspace search", async () => {
+  const { user, dialog, input } = await searchWorkspace();
+  await user.type(input, "Device voice");
+  expect(within(dialog).queryByRole("option", { name: "Access Scout" })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
