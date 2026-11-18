@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from urllib.parse import quote_plus, urlencode, urlsplit
@@ -25,6 +26,31 @@ REQUIRED_SAMPLES = 3
 
 class DeployError(Exception):
     pass
+
+
+class StagingNewer(Exception):
+    pass
+
+
+def already_current(app, observed, target):
+    # Match object IDs only. A hex-named ref or an ambiguous prefix cannot
+    # authorize a write. The deploy job checks out full commit history.
+    resolved = subprocess.run(["git", "rev-parse", "--disambiguate=" + observed],
+                              capture_output=True, text=True)
+    full = resolved.stdout.strip()
+    if resolved.returncode or not re.fullmatch(r"[0-9a-f]{40}", full):
+        raise DeployError(f"{app} commit {observed} cannot be resolved uniquely in the checkout")
+    if full == target:
+        return True
+    base = subprocess.run(["git", "merge-base", full, target], capture_output=True, text=True)
+    if base.returncode not in (0, 1):
+        raise DeployError(f"cannot compare {app} commit {observed} with {target[:12]}")
+    ancestor = base.stdout.strip()
+    if ancestor == full:
+        return False
+    if ancestor == target:
+        raise StagingNewer(f"{app} already runs newer commit {observed}")
+    raise DeployError(f"{app} commit {observed} and candidate {target[:12]} have diverged")
 
 
 class RequestError(DeployError):
@@ -111,7 +137,31 @@ class Rollout:
             headers["Content-Type"] = "application/json"
         return self.request(method, url, headers=headers, body=body)
 
-    def matches(self, app, commit):
+    def version(self, app):
+        try:
+            data = self.request("GET", VERSION_URL[app], headers={"Cache-Control": "no-cache"})
+        except RequestError as error:
+            # Old images and rolling replicas can temporarily lack the document.
+            detail = f"HTTP {error.status}" if error.status else "connection error"
+            raise RequestError(f"{app} version unavailable ({detail})",
+                               error.retryable or error.status in (200, 404)) from None
+        commit = data.get("commit")
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{12}", commit):
+            raise RequestError(f"{app} version lacks a 12-hex commit", True)
+        return data
+
+    def check_pair(self, sha):
+        while True:
+            try:
+                return {app: already_current(app, self.version(app)["commit"], sha)
+                        for app in (BACKEND, FRONTEND)}
+            except RequestError as error:
+                if not error.retryable:
+                    raise
+                self.last_error = str(error)
+                self.sleep(min(POLL_SECONDS, self.remaining()))
+
+    def sample(self, app, sha):
         service = "nyxid-" + COMPONENT[app]
         state = self.app_request(app, "GET")
         phase = state.get("phase")
@@ -124,41 +174,29 @@ class Rollout:
         except (TypeError, AttributeError):
             raise DeployError(f"{app} phase={phase} returned invalid pod status") from None
         self.status[app] = f"{app} phase={phase} pod reasons={', '.join(reasons) or 'none'}"
-        if phase != "ready":
-            return False
-        try:
-            version = self.request("GET", VERSION_URL[app], headers={"Cache-Control": "no-cache"})
-        except RequestError as error:
-            # The old image may not serve a version document. Allow the new image
-            # to repair the route, and keep its last probe error for the deadline.
-            if not error.retryable and error.status not in (200, 404):
-                raise
-            self.status[app] += f" version unavailable ({error})"
-            return None
-        observed = version.get("commit")
-        reported = observed if isinstance(observed, str) and re.fullmatch(r"[0-9a-f]{12}", observed) else "unknown"
-        self.status[app] += f" commit={reported}"
-        return observed == commit and (app != BACKEND or version.get("status") == "ok")
+        version = self.version(app)
+        observed = version["commit"]
+        self.status[app] += f" commit={observed}"
+        current = already_current(app, observed, sha)
+        ready = phase == "ready" and (app != BACKEND or version.get("status") == "ok")
+        return current, current and ready
 
-    def ensure(self, app, sha):
-        commit = sha[:12]
+    def ensure(self, app, sha, was_current):
         component = COMPONENT[app]
         self.status[app] = f"{app} phase=unknown pod reasons=unknown"
         patched = False
         consecutive = 0
-        unavailable = 0
         while consecutive < REQUIRED_SAMPLES:
             try:
-                current = self.matches(app, commit)
-                unavailable = unavailable + 1 if current is None else 0
-                if not patched and (current is False or unavailable >= REQUIRED_SAMPLES):
+                current, ready = self.sample(app, sha)
+                if not was_current and not patched and not current:
                     image = f"ghcr.io/chronoaiproject/nyxid/{component}:dev-{sha[:7]}"
                     body = json.dumps({"services": {"nyxid-" + component: {"image": image}}}).encode()
                     self.app_request(app, "PATCH", body=body)
                     patched = True
-                if current and app == FRONTEND:
-                    current = self.matches(BACKEND, commit)
-                consecutive = consecutive + 1 if current else 0
+                if ready and app == FRONTEND:
+                    _, ready = self.sample(BACKEND, sha)
+                consecutive = consecutive + 1 if ready else 0
                 self.last_error = ""
             except RequestError as error:
                 # A timed-out PATCH may have taken effect. Let a rerun reconcile it.
@@ -166,7 +204,6 @@ class Rollout:
                     raise
                 self.last_error = str(error)
                 consecutive = 0
-                unavailable = 0
             if consecutive < REQUIRED_SAMPLES:
                 self.sleep(min(POLL_SECONDS, self.remaining()))
         return "updated" if patched else "already current"
@@ -175,16 +212,21 @@ class Rollout:
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise DeployError("expected the full dev commit SHA")
         try:
+            current = self.check_pair(sha)
             self.login(client_id, secret)
-            backend = self.ensure(BACKEND, sha)
-            frontend = self.ensure(FRONTEND, sha)
+            backend = self.ensure(BACKEND, sha, current[BACKEND])
+            frontend = self.ensure(FRONTEND, sha, current[FRONTEND])
             self.remaining()
+        except StagingNewer as error:
+            print(f"Skipping further staging updates for {sha[:12]}: {error}.")
+            return
         except DeployError as error:
             detail = " | ".join(filter(None, [str(error), *self.status.values(), self.last_error]))
             for private in sorted(self.redactions, key=len, reverse=True):
                 detail = detail.replace(private, "***")
             raise DeployError(" ".join(detail.splitlines())) from None
-        print(f"Staging ready at {sha[:12]} (backend {backend}, frontend {frontend}).")
+        summary = "Skipping deployment, staging already ready" if all(current.values()) else "Staging ready"
+        print(f"{summary} at {sha[:12]} (backend {backend}, frontend {frontend}).")
 
 
 if __name__ == "__main__":
