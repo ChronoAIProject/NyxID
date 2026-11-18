@@ -199,6 +199,9 @@ pub fn prepare_creation_request(request: &[u8]) -> AppResult<NormalizedCreationR
 pub fn indexes() -> Vec<IndexModel> {
     vec![
         IndexModel::builder()
+            .keys(doc! {"source": 1, "occupies_account_slot": 1, "_id": 1})
+            .build(),
+        IndexModel::builder()
             .keys(doc! {"user_id": 1})
             .options(
                 IndexOptions::builder()
@@ -510,7 +513,7 @@ fn has_confirmed_capacity(row: &AssistantCmaSandbox) -> bool {
         && row.memory_mib.is_some_and(|value| value > 0)
 }
 
-fn apply_observation(
+pub(super) fn apply_observation(
     row: &mut AssistantCmaSandbox,
     observation: &CmaSandbox,
     expected_generation: i64,
