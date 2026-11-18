@@ -55,6 +55,8 @@ export interface SecurityPreferences {
 }
 
 export interface ProfileConfig {
+  /** Display state only; never enables analytics on this device. */
+  readonly analytics?: { readonly prompt_seen: boolean };
   readonly security?: SecurityPreferences;
   readonly services_view?: ServiceViewFilters | null;
   readonly service_views?: ServiceViewsPreferences | null;

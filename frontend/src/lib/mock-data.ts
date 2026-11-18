@@ -3163,7 +3163,7 @@ export function isMockMode(): boolean {
   return _mockLatched;
 }
 
-let mockAnalyticsConsent = { account_id: MOCK_USER.id, enabled: false, revision: "", changed_at: null as string | null };
+let mockAnalyticsConsent = { account_id: MOCK_USER.id, prompt_seen: false, enabled: false, revision: "", changed_at: null as string | null };
 
 export function getMockResponse(
   endpoint: string,
@@ -3178,7 +3178,7 @@ export function getMockResponse(
       const request = body as { account_id?: string; enabled?: boolean } | undefined;
       if (request?.account_id !== MOCK_USER.id || typeof request.enabled !== "boolean")
         throw new ApiError(403, { error: "forbidden", error_code: 1000, message: "Analytics account changed" });
-      mockAnalyticsConsent = { account_id: MOCK_USER.id, enabled: request.enabled, revision: crypto.randomUUID(), changed_at: new Date().toISOString() };
+      mockAnalyticsConsent = { account_id: MOCK_USER.id, prompt_seen: true, enabled: request.enabled, revision: crypto.randomUUID(), changed_at: new Date().toISOString() };
       return { ...mockAnalyticsConsent };
     }
   }
