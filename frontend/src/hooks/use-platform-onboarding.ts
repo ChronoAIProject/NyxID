@@ -487,7 +487,7 @@ export function useAdminGuideMutation() {
 // A denial is successful query data so TanStack replaces private cached facts.
 // Later transient failures retain this marker, never the discarded draft list.
 export type AnonymousDraftsResult =
-  | { status: "ready"; drafts: PlatformSetup[] }
+  | { status: "ready"; drafts: PlatformSetup[]; provisional?: true }
   | { status: "denied" };
 
 export function useAnonymousDrafts(binding?: {
@@ -558,11 +558,16 @@ export function useAdoptAnonymousDraft(binding: {
         // again. Preserve other drafts, newer revisions and a prior read denial.
         client.setQueryData<AnonymousDraftsResult>(queryKey, (current) => {
           if (current?.status !== "ready") return current;
+          const drafts = current.drafts.filter(
+            (draft) => draft.id !== submitted.id || draft.revision !== submitted.revision,
+          );
+          if (drafts.length === current.drafts.length) return current;
           return {
             ...current,
-            drafts: current.drafts.filter(
-              (draft) => draft.id !== submitted.id || draft.revision !== submitted.revision,
-            ),
+            drafts,
+            // Eviction proves this snapshot was refused, not that the chat is empty.
+            // Only a successful query read can replace this provisional list.
+            provisional: true,
           };
         });
         return client.invalidateQueries({ queryKey, exact: true }).catch(() => undefined);

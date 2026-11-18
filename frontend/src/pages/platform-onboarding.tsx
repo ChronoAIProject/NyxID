@@ -454,7 +454,8 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
   const [review, setReview] = useState<PlatformSetup | null>(null);
   const adoptionPending = useRef(false);
   const denied = query.data?.status === "denied";
-  const drafts = query.data?.status === "ready" ? query.data.drafts : undefined;
+  const ready = query.data?.status === "ready" ? query.data : undefined;
+  const drafts = ready?.drafts;
   // Drop consent before committing the denial view, including on a fast retry.
   if (denied && review) setReview(null);
   return (
@@ -536,7 +537,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
           >{translateUi("Adopt reviewed draft")}</Button>
         </div>
       ))}
-      {query.isSuccess && !query.isFetching && drafts?.length === 0 && (
+      {drafts?.length === 0 && !ready?.provisional && (
         <p>{translateUi("No unowned drafts remain for this chat.")}</p>
       )}
     </div>

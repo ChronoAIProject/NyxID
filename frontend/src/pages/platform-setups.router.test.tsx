@@ -63,6 +63,7 @@ async function openSetups(setupsGate = Promise.resolve()) {
     writes: [] as string[],
     adoptionBodies: [] as unknown[],
     draftReads: [] as string[],
+    draftGate: Promise.resolve(),
     drafts: [platformSetup()],
     saved: [] as ReturnType<typeof platformSetup>[],
     adoptionGate: Promise.resolve(),
@@ -98,6 +99,7 @@ async function openSetups(setupsGate = Promise.resolve()) {
       if (path === "/onboarding/setups") await setupsGate;
       if (path === "/onboarding/anonymous-drafts") {
         fixture.draftReads.push(input);
+        await fixture.draftGate;
         if (fixture.draftErrorStatus) {
           const status = fixture.draftErrorStatus;
           const error = status === 403
@@ -877,6 +879,93 @@ it("preserves the refusal and releases the guard if its exact-query refresh reje
   }
 });
 
+it.each([0, 503])(
+  "keeps an authoritative empty list visible during a background read returning %s",
+  async (status) => {
+    const { fixture } = await openSetups();
+    fixture.drafts = [];
+    const user = userEvent.setup();
+    await user.selectOptions(
+      screen.getByLabelText("Linked chat"),
+      setupBinding.id,
+    );
+    const empty = "No unowned drafts remain for this chat.";
+    await screen.findByText(empty);
+    const queryKey = [
+      "onboarding",
+      setupActor.id,
+      "anonymous",
+      setupBinding.id,
+      setupBinding.generation,
+    ];
+    const gate = deferred();
+    fixture.draftGate = gate.promise;
+    fixture.draftErrorStatus = status;
+    let refresh: Promise<void> | undefined;
+    try {
+      await act(async () => {
+        refresh = client.invalidateQueries({ queryKey, exact: true });
+        // Flush the observer notification while the background GET stays held.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(client.getQueryState(queryKey)?.fetchStatus).toBe("fetching");
+      expect(fixture.draftReads).toHaveLength(2);
+      expect(screen.getByText(empty)).toBeVisible();
+    } finally {
+      await act(async () => {
+        gate.resolve();
+        await refresh;
+      });
+    }
+    if (status) {
+      expect(await screen.findByRole("button", { name: "Retry" })).toBeVisible();
+    }
+    expect(screen.getByText(empty)).toBeVisible();
+    expect(client.getQueryState(queryKey)?.status).toBe(status ? "error" : "success");
+    expect(client.getQueryData(queryKey)).toEqual({ status: "ready", drafts: [] });
+    expect(fixture.writes).toHaveLength(0);
+    expectSingleModule();
+  },
+);
+
+it("shows an authoritative empty list after a provisional recovery read succeeds", async () => {
+  const { fixture } = await openSetups();
+  const user = await reviewDraft();
+  fixture.drafts = [platformSetup({ revision: 4 })];
+  const gate = deferred();
+  fixture.draftGate = gate.promise;
+  const queryKey = [
+    "onboarding",
+    setupActor.id,
+    "anonymous",
+    setupBinding.id,
+    setupBinding.generation,
+  ];
+  try {
+    await user.click(adoptionButton());
+    await waitFor(() => expect(fixture.draftReads).toHaveLength(2));
+    fixture.drafts = [];
+    expect(client.getQueryState(queryKey)?.fetchStatus).toBe("fetching");
+    expect(client.getQueryData(queryKey)).toEqual({
+      status: "ready",
+      drafts: [],
+      provisional: true,
+    });
+    expect(
+      screen.queryByText("No unowned drafts remain for this chat."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  } finally {
+    await act(() => gate.resolve());
+  }
+  await screen.findByText("No unowned drafts remain for this chat.");
+  await expectSettled();
+  expect(client.getQueryData(queryKey)).toEqual({ status: "ready", drafts: [] });
+  expect(fixture.writes).toHaveLength(1);
+  expect(fixture.saved).toHaveLength(0);
+  expectSingleModule();
+});
+
 it("removes the rejected snapshot through failed refreshes until a new read succeeds", async () => {
   const { fixture } = await openSetups();
   const user = await reviewDraft();
@@ -914,6 +1003,7 @@ it("removes the rejected snapshot through failed refreshes until a new read succ
     expect(client.getQueryData(queryKey)).toEqual({
       status: "ready",
       drafts: [],
+      provisional: true,
     });
     expect(fixture.adoptionBodies).toEqual([
       { revision: 3, binding_id: setupBinding.id, binding_generation: 7 },
@@ -999,7 +1089,7 @@ it("removes rejected A while preserving reviewed B after a failed conflict refre
   expectSingleModule();
 });
 
-it.each(["newer revision", "denied marker"] as const)(
+it.each(["newer revision", "denied marker", "authoritative empty list"] as const)(
   "preserves a cached %s when an older adoption is refused",
   async (cached) => {
     const { fixture } = await openSetups();
@@ -1015,7 +1105,9 @@ it.each(["newer revision", "denied marker"] as const)(
     const data =
       cached === "newer revision"
         ? { status: "ready", drafts: [platformSetup({ revision: 4 })] }
-        : { status: "denied" };
+        : cached === "denied marker"
+          ? { status: "denied" }
+          : { status: "ready", drafts: [] };
     fixture.adoptionGate = gate.promise;
     try {
       await user.click(adoptionButton());
@@ -1035,6 +1127,11 @@ it.each(["newer revision", "denied marker"] as const)(
       expect(screen.getByRole("checkbox")).not.toBeChecked();
     } else {
       expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+      if (cached === "authoritative empty list") {
+        expect(
+          screen.getByText("No unowned drafts remain for this chat."),
+        ).toBeVisible();
+      }
     }
   },
 );
