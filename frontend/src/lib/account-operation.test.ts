@@ -4,6 +4,7 @@ import { assistantHttp } from "./assistant/assistant-http";
 import {
   captureAccountRequest,
   AccountChangedError,
+  settleAccountEvidence,
 } from "./assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 import { installAccountSessionSync } from "./account-session-sync";
@@ -12,6 +13,9 @@ import type { User } from "@/types/api";
 let stop: (() => void) | undefined;
 afterEach(() => {
   stop?.();
+  // Disposing the production verifier deliberately cannot confirm an account.
+  // Reset this test module only after its held verifier has been stopped.
+  settleAccountEvidence();
   vi.unstubAllGlobals();
   delete globalThis.__nyxidAssistantHttpMock;
 });

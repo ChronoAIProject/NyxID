@@ -4,6 +4,7 @@ import { createElement, useEffect, useState } from "react";
 import { AccountBoundary } from "@/components/account-boundary";
 import { useAuthStore } from "@/stores/auth-store";
 import { installAccountSessionSync } from "./account-session-sync";
+import { settleAccountEvidence } from "./assistant/identity";
 import type { User } from "@/types/api";
 
 const person = (id: string) => ({ id, email: `${id}@example.test` }) as User;
@@ -35,6 +36,8 @@ afterEach(() => {
   stop();
   style.remove();
   cleanup();
+  // Held verification belongs to the preceding test, not the next fixture.
+  settleAccountEvidence();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
