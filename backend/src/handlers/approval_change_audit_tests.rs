@@ -99,6 +99,7 @@ impl Change {
                 Path(f.service.clone()),
                 Query(Default::default()),
                 Json(approvals::SetServiceApprovalConfigRequest {
+                    grant_expiry_days: None,
                     approval_required: Some(true),
                     approval_mode: Some(ApprovalMode::PerRequest),
                     rules: None,
@@ -586,6 +587,7 @@ async fn creating_policy_loser_returns_the_winner_and_runs_its_cleanup_without_a
                 Path(f.service.clone()),
                 Query(Default::default()),
                 Json(approvals::SetServiceApprovalConfigRequest {
+                    grant_expiry_days: None,
                     approval_required: Some(true),
                     approval_mode: Some(ApprovalMode::Grant),
                     rules: None,
