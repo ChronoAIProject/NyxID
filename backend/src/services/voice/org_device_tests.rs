@@ -655,6 +655,30 @@ async fn org_device_voice_org_keys_reuse_owner_identity_history_and_call_contrac
             &f.state.db, &f.org, &home.id, &Uuid::new_v4().to_string(),
             credential_tests::platform(&voice), "fixture".into(), "worker", second,
         ).await, Err(crate::errors::AppError::Conflict(_))));
+        let segment = super::transcript::Segment {
+            id: Uuid::new_v4().to_string(),
+            speaker: super::transcript::Speaker::User,
+            text: "Check the calendar".into(),
+            start_ms: 0,
+            end_ms: 1000,
+            sealed: true,
+            complete: true,
+            interrupted: false,
+            fragments: Vec::new(),
+        };
+        let db = &f.state.db;
+        super::transcript::persist(db, &call, &segment).await.unwrap();
+        let queued = super::transcript::delegate(db, &call, "org-device-task", &segment).await.unwrap();
+        let task = crate::services::assistant_voice::ensure_task_conversation(db, &f.state.encryption_keys, &queued)
+            .await.unwrap();
+        let start: crate::services::assistant_nyxagent::TurnRequest =
+            serde_json::from_value(json!({"conversation_id":task.task_conversation_id,"text":segment.text})).unwrap();
+        let running = Box::pin(crate::services::assistant_nyxagent::begin_turn_with_voice(
+            db, &f.org, &start, &f.state.encryption_keys, Some(&task.id),
+        )).await.unwrap();
+        assert_eq!(running.user_id, f.org);
+        assert_eq!(running.agent_id.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(running.active_turn.unwrap().voice_request_id.as_deref(), Some(task.id.as_str()));
         // A creator's membership is not an organization Key's authority.
         f.revoke(&f.admin).await;
         execution::resolve(&f.state.db, &auth, &service.id).await.unwrap();
