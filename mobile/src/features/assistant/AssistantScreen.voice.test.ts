@@ -2806,7 +2806,19 @@ test("on a corner-sensor phone the agent picker's header stays at the top; its f
   }
   x.setQuickRail(false);
   x.setWidth(1024);
-  assert.equal(style(sheet().panel).paddingTop, 20, "centered sheets clear it already");
+  assert.ok(
+    x.all().some((n) => n.type === "WorkspaceSheetSurface"),
+    "a wide Duo uses the same bottom-attached surface as Settings",
+  );
+  assert.equal(
+    x.all().find((n) => n.type === "Modal")!.props.transparent,
+    true,
+    "the status column stays beside the sheet",
+  );
+  // An iPad still uses its native page sheet.
+  x.setCornerSensor(0);
+  assert.equal(x.all().some((n) => n.type === "WorkspaceSheetSurface"), false);
+  assert.equal(style(sheet().panel).paddingTop, 20);
   assert.equal(style(sheet().header).marginBottom, 0);
   x.harness.unmount();
 });

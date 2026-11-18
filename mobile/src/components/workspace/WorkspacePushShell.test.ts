@@ -27,6 +27,7 @@ function setup(reduced = false, width = 402, height = 874) {
   let dimensions = { width, height };
   let insets = { top: 0, right: 0, bottom: 0, left: 0 };
   let railHidden = false;
+  let statusOffset = 0;
   const railWrites: boolean[] = [];
   const layoutAnimations: unknown[] = [];
   let props: Record<string, any>;
@@ -102,6 +103,9 @@ function setup(reduced = false, width = 402, height = 874) {
     },
     "react-native-safe-area-context": {
       useSafeAreaInsets: () => insets,
+    },
+    "./useWorkspaceStatusOffset": {
+      useWorkspaceStatusOffset: () => statusOffset,
     },
     "./workspaceQuickRailPreference": {
       useQuickRailHidden: () => [
@@ -220,6 +224,10 @@ function setup(reduced = false, width = 402, height = 874) {
     all,
     find,
     set,
+    status: (offset: number) => {
+      statusOffset = offset;
+      render();
+    },
     rotate: (width: number, height: number) => {
       dimensions = { width, height };
       render();
@@ -939,20 +947,25 @@ test("the quick rail exists on every corner-sensor window (folded and unfolded D
   omitted.harness.unmount();
 });
 
-test("the rail's column sits on the status column 8pt below the cluster, bounded by the composer's bottom edge, after the page content", () => {
+test("the rail's column clears the expanded camera status cluster, bounded by the composer's bottom edge, after the page content", () => {
   const x = railSetup();
-  x.window(466, 678, { right: 83, bottom: 20 });
+  x.window(466, 678, { right: 83, bottom: 34 });
+  const idle = Object.assign({}, ...[x.find("workspace-quick-rail").props.style].flat());
+  assert.equal(idle.top, 160, "idle keeps the original position");
+  x.status(36);
   const host = x.find("workspace-quick-rail");
   const style = Object.assign({}, ...[host.props.style].flat());
-  assert.equal(style.top, 160);
+  assert.equal(style.top, 196);
   // 56pt wide, centered 48pt from the right edge: the clock/Wi‑Fi column
   // at 418pt.
   assert.equal(style.width, 56);
   assert.equal(style.right, 20);
   assert.ok(Math.abs(466 - style.right - style.width / 2 - 418) <= 0.5);
-  // Bounded by the body's bottom edge; its sections hug the top and the
+  // Bounded by the composer's bottom edge (safe area plus 4pt page padding);
+  // its sections hug the top and the
   // empty rest passes touches through (box-none).
-  assert.equal(style.bottom, 20);
+  assert.equal(style.bottom, 38);
+  assert.equal(678 - style.bottom, 640);
   assert.equal(host.props.pointerEvents, "box-none");
   const order = x.all();
   assert.ok(order.indexOf(x.child) < order.indexOf(host), "page content reads first");
@@ -961,6 +974,8 @@ test("the rail's column sits on the status column 8pt below the cluster, bounded
   assert.equal(elements(x.find("workspace-content-slab") as Element).includes(host), false);
   assert.equal(typeof host.props.onTouchStart, "function");
   assert.equal(typeof host.props.onTouchEnd, "function");
+  x.status(0);
+  assert.equal(Object.assign({}, ...[x.find("workspace-quick-rail").props.style].flat()).top, 160);
   x.harness.unmount();
 });
 
@@ -1019,12 +1034,12 @@ test("unfolded Duo: the same rail sits on the status column under its measured c
     x.set({ sidebarCollapsed: true, sidebarRestored: true });
     const host = () => x.find("workspace-quick-rail");
     const frame = () => Object.assign({}, ...[host().props.style].flat());
-    // 8pt under the cluster (Wi‑Fi ends at 98pt), centered on the status
-    // column 48pt from the right edge, bounded by the body's bottom edge.
+    // Idle: 8pt under the cluster, centered on the status column 48pt from
+    // the right edge, bounded by the composer's baseline.
     assert.equal(frame().top, 108);
     assert.equal(frame().right, 20);
     assert.equal(frame().width, 56);
-    assert.equal(frame().bottom, 20);
+    assert.equal(frame().bottom, 24);
     assert.ok(Math.abs(951 - frame().right - frame().width / 2 - (951 - 48)) <= 0.5);
     assert.equal(host().props.pointerEvents, "box-none");
     const order = x.all();
@@ -1044,7 +1059,7 @@ test("unfolded Duo: the same rail sits on the status column under its measured c
       assert.equal(x.insetProvider().props.value, 66, "content keeps clear of the rail");
     }
     // Full screen: the same toggle, the group hidden, content to the margin,
-    // no backdrop behind the 108–152pt restore capsule.
+    // no backdrop behind the 108–152pt idle restore capsule.
     x.rails.at(-1)!.onToggle();
     x.render();
     assert.deepEqual(x.railWrites, [true], "the same saved per-device choice");

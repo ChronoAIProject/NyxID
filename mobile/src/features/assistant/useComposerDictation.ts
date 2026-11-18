@@ -15,6 +15,7 @@ import { resolveDictationLanguage } from "./voice/resolveDictationLanguage";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
 import { claimVoiceAudioSession } from "./voice/audioSessionOwnership";
+import { claimSystemStatusActivity } from "../../lib/systemStatusActivity";
 
 type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 
@@ -123,12 +124,13 @@ function deactivate(owner: AudioOwner) {
     }
   });
 }
-function release(owner: AudioOwner) {
+function release(owner: AudioOwner, endCapture: () => void) {
   const done = new Promise<void>((resolve) => {
     const finish = () => {
       subscription.remove();
       clearTimeout(timer);
       deactivate(owner);
+      endCapture();
       if (releasing === done) releasing = undefined;
       resolve();
     };
@@ -283,6 +285,11 @@ export function useComposerDictation({
     let recovering: Promise<boolean> | undefined;
     let retryWithServer: (() => void) | undefined;
     let subscriptions: { remove(): void }[] = [];
+    let releaseStatus: (() => void) | undefined;
+    const endCapture = () => {
+      releaseStatus?.();
+      releaseStatus = undefined;
+    };
     let permissionTimer: ReturnType<typeof setTimeout> | undefined;
     let startTimer: ReturnType<typeof setTimeout> | undefined;
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
@@ -309,7 +316,7 @@ export function useComposerDictation({
       detach();
       if (native) {
         native = false;
-        release(audioOwner!);
+        release(audioOwner!, endCapture);
       }
     };
     /**
@@ -318,6 +325,7 @@ export function useComposerDictation({
      */
     const settle = () => {
       detach();
+      endCapture();
       operation.current = undefined;
       const text = spoken();
       setCaption({ final: "", interim: "" });
@@ -365,7 +373,7 @@ export function useComposerDictation({
         stopTimer = setTimeout(() => {
           if (!valid()) return;
           native = false;
-          release(audioOwner!);
+          release(audioOwner!, endCapture);
           settle();
         }, STOP_TIMEOUT_MS);
       },
@@ -475,6 +483,10 @@ export function useComposerDictation({
       const show = () =>
         setCaption({ final: finalText.trim(), interim: interimText.trim() });
       subscriptions = [
+        Recognizer.addListener("audiostart", () => {
+          if (valid()) releaseStatus ??= claimSystemStatusActivity();
+        }),
+        Recognizer.addListener("audioend", endCapture),
         Recognizer.addListener("start", () => {
           if (!valid()) return;
           clearTimeout(startTimer);

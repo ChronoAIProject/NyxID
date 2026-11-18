@@ -2238,7 +2238,7 @@ function Sheet({
     workspaceStatusCluster({ width, height, rightInset: insets.right }),
     SHEET_HEADER_HEIGHT,
   );
-  // The folded Duo: the same bottom sheet as Settings, ending before the
+  // Both Duo postures: the same bottom sheet as Settings, ending before the
   // quick rail's column (a native page sheet always spans the window). The
   // surface owns its travel, scrim, drag handle and dismissal.
   const railReserve = workspaceSheetRailReserve({

@@ -972,8 +972,10 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Narrower windows use the push interaction above, with the sidebar capped
   at 360pt. Resizing changes layout without replacing the chat or its draft.
 - Drawer top is the window's safe-area top plus 10pt. On windows at least 768pt
-  wide, it becomes a centered card up to 720×860pt with 24pt plus safe-area margins
-  and rounded bottom corners. The keyboard resizes the measured available host;
+  wide without a corner status column, it becomes a centered card up to 720×860pt
+  with 24pt plus safe-area margins and rounded bottom corners. The Duo keeps a
+  bottom-attached sheet in both postures, with only its top corners rounded and
+  no bottom margin. The keyboard resizes the measured available host;
   the panel fits that space without remounting navigation. Settings content stays
   within a centered 720pt column, and row wrapping uses actual measured row width.
   Top corners are 24pt; the
@@ -1050,10 +1052,21 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   their bars. It is grouped floating controls in one glass container (Apple's
   grouped glass), centered on the measured clock/Wi‑Fi column (48pt from the
   right edge), 12pt between capsules, top to bottom:
-  1. The full-screen toggle in its own small capsule 8pt below the posture's
-     measured cluster (folded 160–204pt, unfolded 108–152pt): a
-     `FloatingButton` with the other capsules' glass, 44pt width and fully
-     rounded ends. Its icons are Lucide Maximize2/Minimize2's two bold arrows
+  1. The full-screen toggle uses a `FloatingButton` in its own small capsule
+     with the other capsules' glass, 44pt width and fully rounded ends. It sits
+     8pt below the posture's idle status cluster (folded 160–204pt, unfolded
+     108–152pt). Only native status-frame/safe-area growth or actual camera/
+     microphone capture events move it down, up to 36pt (folded 196–240pt,
+     unfolded 144–188pt). The native will-change event moves it before the
+     system finishes its transition; did-change and foreground events read the
+     current frame. Camera-ready, recognizer audio-start/end and media capture/
+     teardown events cover activity whose privacy light does not resize the
+     status frame. No polling, UI timers or route-open guesses trigger movement.
+     It returns to idle when capture ends and the system column settles.
+     The offset is capped so the default
+     folded chat rail ends at the collapsed composer's 640pt bottom edge;
+     its column includes the same 4pt page padding above the bottom safe area.
+     All five default shortcuts fit without scrolling at the cap. Its icons are Lucide Maximize2/Minimize2's two bold arrows
      turned horizontal, drawn on Lucide's 24×24 grid (stroke 2, round caps
      and joins, x 2–22, ±5 chevron heads, a gap in the centre) because Lucide
      has no such pair, at the shortcut icons' 20pt: the icon shows the
@@ -1067,7 +1080,7 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
      every device shows the same one; absent, it is the default New chat,
      Notifications (feature-gated, unread dot on the bell and count in its
      label), Scan QR, Recent chats (a sheet of the sidebar's Recents) and
-     Settings (folded 216–452pt, unfolded 164–400pt). Settings › Quick access
+     Settings. Settings › Quick access
      (shown only where the rail exists) picks and orders up to 12 entries:
      the side menu's destinations (New chat, Notifications, Scan QR, Terminal
      login code, Recent chats, Automations, Machines, Plugins, Activity,
@@ -1089,8 +1102,9 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
      avatar, or a crew's two-avatar stack; it opens the identity pill's
      picker; spoken "{name}. Choose agent", one translated phrase) and More
      (Chat options / Crew options) sit in one capsule as vertical 44pt
-     `FloatingItem`s 4pt apart below the shortcuts (with the default five,
-     folded 464–604pt, unfolded 412–552pt) in rail mode. Full screen brings back the chat's own top bar, fading in, with
+     `FloatingItem`s 4pt apart below the shortcuts in rail mode. The shortcuts
+     scroll when necessary to keep this capsule above the column's bottom.
+     Full screen brings back the chat's own top bar, fading in, with
      only the column's group (Menu, the identity pill with its chevron,
      More; New chat and Scan QR stay on the rail) in the flush 8–68pt row,
      left of the status column; its bottom edge fades 24pt into the page
@@ -1139,13 +1153,14 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   full screen: at the window edge; UIKit's automatic safe-area adjustment
   off; a structural test checks), except horizontal ones, ones that hide the
   indicator and ones in modals. Sheets (Settings, the agent picker,
-  Recent chats, a crew's recipient picker) respect the rail: on the folded
-  Duo the panel starts at the leading edge and ends 8pt before the rail's
+  Recent chats, a crew's recipient picker) respect the rail: in both Duo
+  postures the panel stays attached to the bottom, starts at the leading edge
+  and ends 8pt before the rail's
   column (466 → 382pt, `workspaceSheetRailReserve`; the chat's agent picker
   uses the shared `WorkspaceSheetSurface` in a transparent Modal instead of
   a full-window native page sheet), so the clock and the rail stay in view
-  beside it under the scrim (a tap there dismisses the sheet); the unfolded
-  Duo's centered sheet already ends well clear of it. The choice is saved per device (default shown).
+  beside it under the scrim (a tap there dismisses the sheet). The unfolded
+  Duo uses the same bottom attachment and rail clearance. The choice is saved per device (default shown).
 - Search field placeholders never clip: each field lists complete phrases,
   most descriptive first ("Search chats, agents, settings", then "Search"),
   and shows the first that fits its measured width at the current text size.

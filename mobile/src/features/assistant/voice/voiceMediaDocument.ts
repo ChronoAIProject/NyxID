@@ -275,6 +275,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     for (const reject of iceWaiters) reject(new Error('cancelled'));
     iceWaiters.clear();
     media?.getTracks().forEach((track) => track.stop());
+    if (media) emit({ type: 'capture', active: false });
     media = undefined;
     source?.disconnect();
     worklet?.disconnect();
@@ -483,6 +484,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     });
     if (!alive(id)) { localMedia.getTracks().forEach((track) => track.stop()); throw new Error('cancelled'); }
     media = localMedia;
+    emit({ type: 'capture', active: true });
     localMedia.getAudioTracks().forEach((track) => { track.enabled = false; });
     const mockCapture = localMedia.getAudioTracks().some((track) => typeof track.label === 'string' && track.label.length === 19 && /^Mock audio device [1-4]$/.test(track.label));
     diagnostic(id, 'input_source', 'ready', { mock_capture: mockCapture ? 1 : 0 });

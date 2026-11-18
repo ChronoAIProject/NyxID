@@ -267,7 +267,7 @@ function setup(
   };
 }
 
-test("folded Duo sheets end before the quick rail's column (no cluster under them), and a wider window centers them", () => {
+test("Duo sheets stay attached to the bottom and clear the rail through unfolding and keyboard resize", () => {
   const env = setup(
     false,
     { width: 466, height: 678 },
@@ -306,17 +306,46 @@ test("folded Duo sheets end before the quick rail's column (no cluster under the
     assert.equal(outer!.props.children, inner, "the rail window wraps the corner sensor");
     return outer!.props.value;
   };
+  const assertBottomSheet = (width: number, height: number) => {
+    const panel = Object.assign({}, ...[env.panel().props.style].flat());
+    const host = Object.assign({}, ...[env.all().find(
+      (node) => node.props.testID === "workspace-sheet-viewport",
+    )!.props.style].flat());
+    const provider = env.all().find((node) => node.type === "SafeAreaProvider")!;
+    const { frame, insets } = provider.props.initialMetrics;
+    assert.equal(panel.width, width - 84, "the rail has its own column");
+    assert.equal(host.justifyContent, "flex-end", "the drawer is bottom-aligned");
+    assert.equal(host.paddingBottom, 0, "no gap below the drawer");
+    assert.equal(frame.y + panel.height, height, "the surface reaches the host bottom");
+    assert.equal(frame.x, 0);
+    assert.equal(insets.bottom, 34, "body controls still clear the home indicator");
+    assert.equal(panel.borderRadius, undefined, "only the top corners are rounded");
+    assert.equal(railWindow(), true);
+    assert.ok(env.all().includes(env.child), "navigation stays mounted");
+    assert.deepEqual(band(), { paddingTop: 0, paddingBottom: 0 });
+  };
   assert.equal(railWindow(), true);
+  assertBottomSheet(466, 678);
   assert.equal(
     env.all().find((node) => node.props.onMoveShouldSetPanResponder)!.props
       .style.height,
     44,
   );
   env.rotate(951, 669, 0);
-  assert.deepEqual(band(), { paddingTop: 0, paddingBottom: 0 });
+  assertBottomSheet(951, 669);
   assert.equal(bodyHost().props.children, env.child);
   assert.ok(env.all().some((node) => node.props.value === false));
-  assert.equal(railWindow(), true, "the unfolded Duo shows the rail beside its centered sheet");
+  // A keyboard makes the host much wider than it is tall. It must not be
+  // mistaken for a non-Duo window, reverting to a floating iPad card.
+  env.layoutViewport(951, 350);
+  assertBottomSheet(951, 350);
+  env.layoutViewport(951, 669);
+  assertBottomSheet(951, 669);
+  env.rotate(466, 678, 0);
+  assertBottomSheet(466, 678);
+  env.layoutViewport(466, 300);
+  assertBottomSheet(466, 300);
+  assert.equal(env.timings.length, 2, "resize never replays entrance");
   env.harness.unmount();
   // An ordinary phone's window has no rail.
   const phone = setup(false, { width: 402, height: 874 }, 0, false, true, true, 0);

@@ -162,7 +162,7 @@ function GroupChat({
     height: windowHeight,
   } = useWindowDimensions();
   const safeInsets = useSafeAreaInsets();
-  // The folded Duo: the recipient picker ends before the quick rail's column
+  // Both Duo postures: the recipient picker ends before the quick rail's column
   // (the same reserve as every workspace bottom sheet).
   const pickerRailReserve = workspaceSheetRailReserve({
     width: windowWidth,

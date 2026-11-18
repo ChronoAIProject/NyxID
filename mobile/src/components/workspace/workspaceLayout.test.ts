@@ -185,6 +185,7 @@ test("the quick rail is on every corner-sensor window (folded and unfolded Duo) 
     "FLOATING_TRAILING_INSET",
     "QUICK_RAIL_BUTTON_GAP",
     "QUICK_RAIL_GAP",
+    "QUICK_RAIL_MAX_STATUS_OFFSET",
     "QUICK_RAIL_SECTION_GAP",
     "QUICK_RAIL_TAB_SIZE",
     "QUICK_RAIL_WIDTH",
@@ -204,13 +205,12 @@ test("the quick rail is on every corner-sensor window (folded and unfolded Duo) 
     "workspaceSheetRailReserve",
     "workspaceStatusCluster",
   ]);
-  // Bottom sheets end 8pt before the rail's column on narrow corner-sensor
-  // windows (rail 20pt from the edge, 56pt wide); centered sheets and
-  // windows without the rail reserve nothing.
+  // Bottom sheets end 8pt before the rail's column in either Duo posture
+  // (rail 20pt from the edge, 56pt wide).
   for (const [width, height, rightInset, reserve] of [
     [466, 678, 83, 84], // folded Duo
     [678, 466, 104, 84], // folded Duo, landscape
-    [951, 669, 104, 0], // unfolded Duo: centered sheet
+    [951, 669, 104, 84], // unfolded Duo: bottom sheet too
     [402, 874, 0, 0], // ordinary iPhone
     [874, 402, 62, 0], // landscape iPhone notch
   ] as const)
@@ -237,7 +237,7 @@ test("the quick rail is on every corner-sensor window (folded and unfolded Duo) 
   // A 44pt target column that fits the 83pt folded strip with clearance.
   assert.ok(layout.QUICK_RAIL_WIDTH >= 44 && layout.QUICK_RAIL_WIDTH + 12 <= 83);
   assert.equal(workspaceQuickRailFrame(0, 34).top, DUO_SENSOR_BOTTOM + 8);
-  assert.equal(workspaceQuickRailFrame(200, 34).top, 200 + 8);
+  assert.equal(workspaceQuickRailFrame(200, 34).top, 196, "system growth respects the movement cap");
 });
 
 test("the rail's capsules center on the measured status column", () => {
@@ -267,9 +267,11 @@ test("the restore capsule is fully on screen: inside the window, inside the stat
   assert.ok(
     Math.abs((left + right) / 2 - (FOLDED.width - DUO_STATUS_COLUMN_CENTER_FROM_RIGHT)) <= 0.5,
   );
-  // Below the cluster (152pt), never over the clock or Wi‑Fi.
-  assert.ok(toggle.top >= DUO_SENSOR_BOTTOM + 8, `top ${toggle.top}`);
+  // Idle keeps the original position; only activity moves it down.
   assert.deepEqual([left, toggle.top, right, toggle.bottom], [396, 160, 440, 204]);
+  assert.equal(workspaceQuickRailToggleFrame(0, undefined, 20).top, 180);
+  assert.equal(workspaceQuickRailToggleFrame(0, undefined, 36).top, 196);
+  assert.equal(workspaceQuickRailToggleFrame(0, undefined, 100).top, 196, "never below the composer-aligned maximum");
 });
 
 test("Full screen and Show quick actions are one capsule at one spot for every top inset", () => {
@@ -301,7 +303,7 @@ test("content keeps clear of the rail's capsules while backgrounds run underneat
       FOLDED.width - DUO_STATUS_COLUMN_LEFT_FROM_RIGHT,
   );
   // One grouped capsule: four 44pt targets 4pt apart; the column ends far
-  // above the composer (toggle 160–204, grouped capsule 216–404pt).
+  // above the composer (idle toggle 160–204, grouped capsule 216–404pt).
   assert.equal(layout.QUICK_RAIL_BUTTON_GAP, 4);
   const bottom =
     workspaceQuickRailToggleFrame(0).bottom +
@@ -316,12 +318,12 @@ test("unfolded Duo (951×669): the same rail under its measured cluster, the fol
   const cluster = workspaceStatusCluster(UNFOLDED)!;
   assert.equal(cluster.bottom, 100, "clock 34.0–45.7pt, Wi‑Fi and dots to 98.0pt");
   assert.equal(layout.workspaceQuickRailAvailable(UNFOLDED), true);
-  // The rail column: 8pt under the cluster, centered on the status column
+  // The idle rail column: centered on the status column
   // (48pt from the right edge, like the clock and Wi‑Fi), inside the 104pt
   // strip and the window.
   const column = UNFOLDED.width - DUO_STATUS_COLUMN_CENTER_FROM_RIGHT;
   const rail = workspaceQuickRailFrame(0, 20, cluster);
-  assert.deepEqual(rail, { top: 108, bottom: 20, right: 20, width: 56 });
+  assert.deepEqual(rail, { top: 108, bottom: 24, right: 20, width: 56 });
   const toggle = workspaceQuickRailToggleFrame(0, cluster);
   const toggleLeft = UNFOLDED.width - toggle.right - toggle.width;
   const toggleRight = UNFOLDED.width - toggle.right;
@@ -374,11 +376,11 @@ test("unfolded Duo (951×669): the same rail under its measured cluster, the fol
 
 test("the Duo's chats: in rail mode the column is the toggle, the shortcuts, then the bar's three controls; full screen brings the chat's own bar back", () => {
   for (const [metrics, toggleBottom, shortcutsBottom, headerBottom] of [
-    [FOLDED, 204, 452, 604],
-    [UNFOLDED, 152, 400, 552],
+    [FOLDED, 240, 488, 640],
+    [UNFOLDED, 188, 436, 588],
   ] as const) {
     const cluster = workspaceStatusCluster(metrics);
-    assert.equal(workspaceQuickRailToggleFrame(0, cluster).bottom, toggleBottom);
+    assert.equal(workspaceQuickRailToggleFrame(0, cluster, 36).bottom, toggleBottom);
     // 12pt between capsules; five 44pt shortcuts and three header controls,
     // each 4pt apart. The column fits inside the window, beside the composer
     // (which keeps the rail inset).
@@ -387,6 +389,16 @@ test("the Duo's chats: in rail mode the column is the toggle, the shortcuts, the
     assert.equal(toggleBottom + gap + capsule(5), shortcutsBottom);
     assert.equal(shortcutsBottom + gap + capsule(3), headerBottom);
     assert.ok(headerBottom < metrics.height, `${metrics.width}: ${headerBottom}`);
+    if (metrics === FOLDED) {
+      const rail = workspaceQuickRailFrame(0, 34, cluster, 36);
+      assert.equal(headerBottom, metrics.height - 34 - 4, "rail and composer share the 640pt baseline");
+      assert.equal(headerBottom, metrics.height - rail.bottom);
+      assert.equal(
+        layout.workspaceQuickRailShortcutsViewport(5, metrics.height - rail.bottom - rail.top, true).scrolls,
+        false,
+        "all default shortcuts fit at the maximum offset",
+      );
+    }
     // Full screen: the chat's own bar returns in the flush row (8–68pt),
     // its trailing controls left of the column, content right under it.
     assert.deepEqual(workspaceHeaderBand(0, true, cluster, 60, true), {
@@ -403,18 +415,20 @@ test("the shortcuts capsule hugs its quick-access entries, or takes the room lef
   assert.equal(layout.quickRailCapsuleHeight(0), 0);
   assert.equal(layout.quickRailCapsuleHeight(1), 44);
   assert.equal(layout.quickRailCapsuleHeight(5), 5 * 44 + 4 * 4);
-  // The folded Duo's column: 160pt (under the cluster) to 644pt (the
-  // composer's bottom) = 484pt. The toggle (44pt) and a 12pt gap come first;
+  // The folded Duo's column: 196pt to the composer's 640pt bottom = 444pt.
+  // The toggle (44pt) and a 12pt gap come first;
   // on a chat in rail mode the ☰ / agent / ⋯ capsule (140pt) and another
-  // 12pt gap come after, so 276pt are left; elsewhere 428pt.
-  const column = 484;
+  // 12pt gap come after, so 236pt are left; elsewhere 388pt.
+  const column = 444;
   for (const [count, header, height, scrolls] of [
-    [5, true, 236, false], // the default five fit beside a chat's capsule
-    [6, true, 276, true], // 284pt of entries: scroll in 276pt
-    [12, true, 276, true],
-    [9, false, 428, false], // 428pt exactly: still hugs
-    [10, false, 428, true],
-    [12, false, 428, true],
+    [4, true, 188, false], // four shortcuts still hug their contents
+    [5, true, 236, false], // the default five fit above the aligned chat controls
+    [6, true, 236, true], // 284pt of entries: scroll in 236pt
+    [12, true, 236, true],
+    [8, false, 380, false], // no chat controls: eight entries still hug
+    [9, false, 388, true],
+    [10, false, 388, true],
+    [12, false, 388, true],
   ] as const) {
     const viewport = layout.workspaceQuickRailShortcutsViewport(count, column, header);
     assert.equal(viewport.content, layout.quickRailCapsuleHeight(count));
