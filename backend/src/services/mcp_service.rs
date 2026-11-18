@@ -7087,7 +7087,10 @@ async fn execute_tool_resolved_inner(
             let mut last_error: Option<AppError> = None;
             let mut node_failure_evidence =
                 super::assistant_service_execution::NodeFailureEvidence::default();
-            for nid in &all_node_ids {
+            let mut nodes = all_node_ids.iter().peekable();
+            let mut retry = None;
+            let mut waited = false;
+            while let Some(nid) = retry.take().or_else(|| nodes.next()) {
                 let mut attempt = node_request.clone();
                 attempt.request_id = uuid::Uuid::new_v4().to_string();
 
@@ -7166,6 +7169,21 @@ async fn execute_tool_resolved_inner(
                         billing_egress_permit,
                     )
                     .await;
+                if let Err(failure) = &node_result
+                    && !failure.dispatched && !matches!(failure.error, AppError::NodeCredentialMissing(_)) {
+                    if let Some(permit) = target.execution_permission.as_ref().filter(|permit| permit.single_dispatch()) {
+                        permit.node_not_sent().await?;
+                        destination_audit.denied();
+                        billing.reject_before_send(&metered, "node_not_sent", false).await?;
+                        return Err(AppError::NodeOffline("Nothing was sent to the node".into()));
+                    }
+                    if !waited && nodes.peek().is_none() && let Some(handover) = &failure.handover
+                        && handover.wait(db, node_ws_manager, nid).await {
+                        waited = true;
+                        retry = Some(nid);
+                        continue;
+                    }
+                }
                 if let Some(permit) = &target.execution_permission { permit.complete(node_result.is_ok()).await?; }
                 match node_result {
                     Ok(ProxyResponseType::Complete(resp)) => {

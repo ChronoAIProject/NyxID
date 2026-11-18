@@ -154,6 +154,67 @@ pub fn is_connected_somewhere(node: &Node, local_connected: bool, now: DateTime<
     }
 }
 
+/// A prepared handshake fences earlier, unresolved offers before the agent
+/// discards their secrets. Preparing an offer never changes the live owner.
+pub(crate) struct RetirementOffer {
+    pub predecessor: Option<NodeOwnerFence>,
+    pub predecessor_hash: Option<String>,
+    pub connection_id: String,
+    pub auth_token_hash: String,
+}
+
+impl RetirementOffer {
+    fn predecessor_filter(&self) -> Option<bson::Document> {
+        let mut filter = self.predecessor.as_ref()?.filter();
+        filter.insert(
+            "connection_owner.retirement_hash_v1",
+            self.predecessor_hash.as_ref()?,
+        );
+        Some(filter)
+    }
+}
+
+fn claim_filter(
+    node_id: &str,
+    identity: &ReplicaIdentity,
+    predecessor: Option<bson::Document>,
+) -> bson::Document {
+    if let Some(mut exact) = predecessor {
+        exact.insert("is_active", true);
+        return exact;
+    }
+    let eligible = vec![
+        doc! { "connection_owner": null },
+        doc! { "connection_owner.expires_at": { "$lte": bson::DateTime::from_chrono(Utc::now()) } },
+        doc! {
+            "connection_owner.instance_name": &identity.instance_name,
+            "connection_owner.generation_id": &identity.generation_id,
+        },
+    ];
+    doc! { "_id": node_id, "is_active": true, "$or": eligible }
+}
+
+pub(crate) async fn prepare_offer(
+    db: &mongodb::Database,
+    node_id: &str,
+    identity: &ReplicaIdentity,
+    offer: &RetirementOffer,
+) -> AppResult<bool> {
+    let mut filter = claim_filter(node_id, identity, offer.predecessor_filter());
+    filter.insert("auth_token_hash", &offer.auth_token_hash);
+    Ok(db
+        .collection::<Node>(NODES)
+        .update_one(
+            filter,
+            doc! {
+                "$set": { "retirement_offer_v1": &offer.connection_id },
+            },
+        )
+        .await?
+        .matched_count
+        == 1)
+}
+
 pub async fn claim(
     db: &mongodb::Database,
     node_id: &str,
@@ -161,10 +222,32 @@ pub async fn claim(
     connection_id: &str,
     lease_ttl: std::time::Duration,
 ) -> AppResult<Option<NodeConnectionOwner>> {
+    claim_confirmed(db, node_id, identity, connection_id, lease_ttl, None, None).await
+}
+
+pub(crate) async fn claim_confirmed(
+    db: &mongodb::Database,
+    node_id: &str,
+    identity: &ReplicaIdentity,
+    connection_id: &str,
+    lease_ttl: std::time::Duration,
+    offer: Option<&RetirementOffer>,
+    retirement_hash: Option<String>,
+) -> AppResult<Option<NodeConnectionOwner>> {
+    let predecessor = retirement_hash
+        .as_ref()
+        .and_then(|_| offer?.predecessor_filter());
+    let mut filter = claim_filter(node_id, identity, predecessor);
+    if let Some(offer) = offer {
+        filter.insert("retirement_offer_v1", &offer.connection_id);
+        filter.insert("auth_token_hash", &offer.auth_token_hash);
+    }
     let now = Utc::now();
     let expires_at =
         now + Duration::from_std(lease_ttl).unwrap_or_else(|_| Duration::seconds(i64::MAX / 4));
     let owner = NodeConnectionOwner {
+        retirement_hash_v1: retirement_hash,
+        handover_pending: false,
         http_signature_v2: false,
         proxy_upload_v1: false,
         http_cancellation: false,
@@ -195,20 +278,9 @@ pub async fn claim(
     let claimed = db
         .collection::<Node>(NODES)
         .find_one_and_update(
+            filter,
             doc! {
-                "_id": node_id,
-                "is_active": true,
-                "$or": [
-                    { "connection_owner": { "$exists": false } },
-                    { "connection_owner": null },
-                    { "connection_owner.expires_at": { "$lte": &now_bson } },
-                    {
-                        "connection_owner.instance_name": &identity.instance_name,
-                        "connection_owner.generation_id": &identity.generation_id,
-                    },
-                ],
-            },
-            doc! {
+                "$unset": { "retirement_offer_v1": "", "handover_released_at": "" },
                 "$set": {
                     "connection_owner": owner_doc,
                     "status": NodeStatus::Online.as_str(),
@@ -297,6 +369,7 @@ pub async fn release(db: &mongodb::Database, fence: &NodeOwnerFence) -> AppResul
             doc! {
                 "$unset": { "connection_owner": "" },
                 "$set": {
+                    "handover_released_at": now,
                     "status": NodeStatus::Offline.as_str(),
                     "updated_at": now,
                 },
@@ -353,6 +426,113 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn racing_retirement_offers_displace_one_fence_and_terminate_its_tunnel() {
+        use crate::services::node_ws_manager::{NodeSshTunnelRequest, NodeWsManager};
+        let db = crate::test_utils::connect_test_database("retired_owner_race")
+            .await
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<Node>(NODES)
+            .insert_one(node(&id))
+            .await
+            .unwrap();
+        let identity = |name: &str| ReplicaIdentity::new(name.into(), "http://127.0.0.1:1".into());
+        let a = identity("a");
+        let b = identity("b");
+        let c = identity("c");
+        let ttl = std::time::Duration::from_secs(90);
+        let hash = crate::crypto::token::hash_token("test-predecessor-secret");
+        let owner = claim_confirmed(&db, &id, &a, "original", ttl, None, Some(hash.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+        let fence = NodeOwnerFence::from_owner(&id, &owner);
+        let manager = std::sync::Arc::new(NodeWsManager::new(1, 10));
+        let (sender, mut agent) = tokio::sync::mpsc::channel(16);
+        let (_, mut close) = manager.register_connection_with_id(&id, "original".into(), sender);
+        let open = manager.open_ssh_tunnel_prepared(
+            &id,
+            NodeSshTunnelRequest {
+                session_id: "session".into(),
+                service_id: "service".into(),
+                host: "host.invalid".into(),
+                port: 22,
+            },
+            None,
+            Some("original"),
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+        );
+        let acknowledge = async {
+            assert!(agent.recv().await.is_some());
+            assert!(manager.deliver_ssh_tunnel_opened(&id, "session"));
+        };
+        let (tunnel, ()) = tokio::join!(open, acknowledge);
+        let mut tunnel = tunnel.unwrap();
+        drop(agent);
+        let offer = |connection_id: &str| RetirementOffer {
+            predecessor: Some(fence.clone()),
+            predecessor_hash: Some(hash.clone()),
+            connection_id: connection_id.into(),
+            auth_token_hash: "hash".into(),
+        };
+        let ob = offer("b");
+        let oc = offer("c");
+        let (pb, pc) = tokio::join!(
+            prepare_offer(&db, &id, &b, &ob),
+            prepare_offer(&db, &id, &c, &oc)
+        );
+        assert!(pb.unwrap() && pc.unwrap());
+        let claim_offer = async |replica: &ReplicaIdentity, offered: &RetirementOffer| {
+            claim_confirmed(
+                &db,
+                &id,
+                replica,
+                &offered.connection_id,
+                ttl,
+                Some(offered),
+                Some(crate::crypto::token::hash_token(&offered.connection_id)),
+            )
+            .await
+            .unwrap()
+        };
+        let (wb, wc) = tokio::join!(claim_offer(&b, &ob), claim_offer(&c, &oc));
+        assert_eq!(usize::from(wb.is_some()) + usize::from(wc.is_some()), 1);
+        assert!(!prepare_offer(&db, &id, &b, &ob).await.unwrap());
+        assert!(!matches_live_fence(&db, &fence, Utc::now()).await.unwrap());
+        assert!(!release(&db, &fence).await.unwrap());
+        crate::handlers::node_ws::node_ws_manager_owner_lease_sweep(
+            &db,
+            &manager,
+            &a,
+            ttl.as_secs(),
+        )
+        .await;
+        close.changed().await.unwrap();
+        assert!(!manager.has_connection(&id, "original"));
+        assert!(tunnel.recv().await.is_none());
+        assert!(
+            manager
+                .send_ssh_tunnel_data(&id, "session", b"test")
+                .is_err()
+        );
+        let (fresh, mut receiver) = tokio::sync::mpsc::channel(4);
+        manager.register_connection_with_id(&id, "later-connection".into(), fresh);
+        assert!(manager.close_ssh_tunnel(&id, "session").is_err());
+        assert!(manager.close_web_terminal(&id, "session").is_err());
+        assert!(
+            manager
+                .send_web_terminal_resize(&id, "session", 80, 24)
+                .is_err()
+        );
+        assert!(
+            manager
+                .send_ws_proxy_close(&id, "session", None, None)
+                .is_err()
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

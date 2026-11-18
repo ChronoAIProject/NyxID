@@ -336,7 +336,10 @@ pub async fn ssh_exec(
         let mut last_error = None;
         let mut last_error_message = None;
 
-        for node_id in &all_node_ids {
+        let mut nodes = all_node_ids.iter().peekable();
+        let mut retry = None;
+        let mut waited = false;
+        while let Some(node_id) = retry.take().or_else(|| nodes.next()) {
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
                 if !node_routing_service::is_node_id_dispatchable(
                     &state.db,
@@ -568,12 +571,23 @@ pub async fn ssh_exec(
                     }
                     return Ok(Json(response).into_response());
                 }
-                Err(error @ AppError::RateLimited) => return Err(error),
-                Err(error) => {
-                    if auth_user.assistant_chat.is_some() {
-                        state.billing.fail(&metered, "ssh_outcome_unknown").await?;
-                        return Err(error);
+                Err(failure) => {
+                    if matches!(failure.error, AppError::RateLimited) {
+                        return Err(failure.error);
                     }
+                    let dispatched = failure.dispatched;
+                    if !waited
+                        && nodes.peek().is_none()
+                        && let Some(handover) = &failure.handover
+                        && handover
+                            .wait(&state.db, &state.node_ws_manager, node_id)
+                            .await
+                    {
+                        retry = Some(node_id);
+                        waited = true;
+                        continue;
+                    }
+                    let error = failure.into_ssh_error();
                     if auth_context.mode == SshAuthMode::NodeKey {
                         let error_message = error.to_string();
                         record_node_ssh_metric_error(
@@ -622,6 +636,10 @@ pub async fn ssh_exec(
                             None,
                             None,
                         );
+                        return Err(error);
+                    }
+                    if dispatched {
+                        state.billing.fail(&metered, "ssh_outcome_unknown").await?;
                         return Err(error);
                     }
                     tracing::warn!(

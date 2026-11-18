@@ -7243,7 +7243,10 @@ async fn execute_ssh_command_internal(
     let request_id = uuid::Uuid::new_v4().to_string();
     let mut last_error = None;
 
-    for node_id in &all_node_ids {
+    let mut nodes = all_node_ids.iter().peekable();
+    let mut retry = None;
+    let mut waited = false;
+    while let Some(node_id) = retry.take().or_else(|| nodes.next()) {
         if let Some(chat) = auth.chat.as_ref() {
             if !crate::services::node_routing_service::is_node_id_dispatchable(
                 &state.db,
@@ -7385,9 +7388,24 @@ async fn execute_ssh_command_internal(
 
                 return Ok(response);
             }
-            Err(error @ AppError::RateLimited) => return Err(error),
-            Err(error) => {
-                if auth.chat.is_some() {
+            Err(failure) => {
+                if matches!(failure.error, AppError::RateLimited) {
+                    return Err(failure.error);
+                }
+                if !waited
+                    && nodes.peek().is_none()
+                    && let Some(handover) = &failure.handover
+                    && handover
+                        .wait(&state.db, &state.node_ws_manager, node_id)
+                        .await
+                {
+                    retry = Some(node_id);
+                    waited = true;
+                    continue;
+                }
+                let dispatched = failure.dispatched;
+                let error = failure.into_ssh_error();
+                if dispatched {
                     state.billing.fail(&metered, "ssh_outcome_unknown").await?;
                     return Err(error);
                 }
