@@ -254,6 +254,7 @@ pub async fn create_request(
         false,
         approval_target.is_auto_connected,
         chat.as_ref(),
+        caller.api_key_id.as_deref(),
     )
     .await?;
     let pending = match outcome {
@@ -1697,6 +1698,7 @@ async fn approval_policy_is_live(
             &caller.requester_id,
             false,
             target.is_auto_connected,
+            caller.api_key_id.as_deref(),
         )
         .await?,
         approval_service::ApprovalOutcome::NeedsApproval(pending)
@@ -2216,6 +2218,7 @@ mod tests {
             "exact-client",
             false,
             target.is_auto_connected,
+            None,
         )
         .await
         .unwrap();
@@ -2288,6 +2291,7 @@ mod tests {
             "exact-client",
             false,
             target.is_auto_connected,
+            None,
         )
         .await
         .unwrap();

@@ -276,7 +276,8 @@ async fn migration_legacy_grant_scope_owner_expiry_and_storage_are_unchanged() {
             Some("api_key"),
             &requester,
             false,
-            false
+            false,
+            None,
         )
         .await
         .unwrap(),

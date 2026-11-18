@@ -3240,7 +3240,7 @@ async fn preflight_proxy_deny_before_resolution(
     }
 
     let operation = operation_descriptor::build_http_descriptor(method, path, None);
-    let denied = approval_service::evaluate_deny_only_for_key(
+    let denied = approval_service::evaluate_deny_only(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,

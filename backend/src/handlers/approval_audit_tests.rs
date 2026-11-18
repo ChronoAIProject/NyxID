@@ -310,6 +310,7 @@ async fn proxy_approval_lookup_commands() {
                 &f.owner,
                 false,
                 false,
+                None,
             ),
         )
         .await

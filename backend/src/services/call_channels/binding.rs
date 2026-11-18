@@ -650,6 +650,8 @@ pub async fn authorize(
         &r.service.id,
         &operation,
         false,
+        // The carrier binding is server-owned; no caller NyxID key exists.
+        None,
     )
     .await?
     {

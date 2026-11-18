@@ -142,6 +142,7 @@ pub(super) async fn load(
         approval_service_id,
         &operation,
         connection.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
+        Some(key_id),
     )
     .await?;
     if approval.required

@@ -2040,7 +2040,7 @@ pub(crate) fn approval<'a>(
 ) -> futures::future::BoxFuture<'a, AppResult<PolicyDecision>> {
     Box::pin(async move {
         let Some(context) = context.filter(|c| c.drain.get().is_some()) else {
-            return super::approval_service::evaluate_for_chat_for_key(
+            return super::approval_service::evaluate_for_chat(
                 db,
                 actor,
                 owner,
@@ -2081,7 +2081,7 @@ pub(crate) fn approval<'a>(
                 return Err(AppError::Forbidden("Mandatory organization operation review cannot be satisfied by an execution permission".into()));
             }
         }
-        let decision = super::approval_service::evaluate_for_chat_for_key(
+        let decision = super::approval_service::evaluate_for_chat(
             db,
             actor,
             owner,

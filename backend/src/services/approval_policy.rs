@@ -73,32 +73,12 @@ pub struct ApprovalPolicyDecision {
 pub const MAX_RULE_API_KEYS: usize = 20;
 const MAX_RULE_API_KEY_ID_LEN: usize = 64;
 
-/// Policy for a caller whose NyxID API key is unknown or irrelevant.
-pub fn evaluate(
-    config: &ServiceApprovalConfig,
-    descriptor: &OperationDescriptor,
-) -> ApprovalPolicyDecision {
-    evaluate_for_key(config, descriptor, None).unwrap_or(ApprovalPolicyDecision {
-        effect: ApprovalEffect::AutoAllow,
-        mode: config.approval_mode.clone(),
-        grant_scope: None,
-    })
-}
-
 /// Policy for one call, honouring rules limited to specific NyxID API keys.
 ///
-/// `None` means the config has no opinion about this caller: nothing matched,
+/// A `None` result means the config has no opinion about this caller: nothing matched,
 /// there is no explicit default, and every rule is limited to other keys. The
 /// caller then applies whatever it would have applied without this config.
-pub fn evaluate_for_key(
-    config: &ServiceApprovalConfig,
-    descriptor: &OperationDescriptor,
-    api_key_id: Option<&str>,
-) -> Option<ApprovalPolicyDecision> {
-    evaluate_rules(config, descriptor, api_key_id)
-}
-
-fn evaluate_rules(
+pub fn evaluate(
     config: &ServiceApprovalConfig,
     descriptor: &OperationDescriptor,
     api_key_id: Option<&str>,
@@ -245,14 +225,29 @@ pub fn concrete_scope(descriptor: &OperationDescriptor) -> String {
     )
 }
 
+/// Whether a rule concerns this credential, independent of the operation shape.
+/// Opaque streams and service-wide evidence must check every applicable rule.
+pub(crate) fn rule_applies_to_key(rule: &ApprovalRule, api_key_id: Option<&str>) -> bool {
+    rule.api_key_ids.is_empty()
+        || api_key_id.is_some_and(|key| rule.api_key_ids.iter().any(|id| id == key))
+}
+
+/// Whether a config can override implicit defaults for this credential.
+pub(crate) fn has_policy_for_key(config: &ServiceApprovalConfig, api_key_id: Option<&str>) -> bool {
+    config.rules.is_empty()
+        || config.default_effect.is_some()
+        || config
+            .rules
+            .iter()
+            .any(|rule| rule_applies_to_key(rule, api_key_id))
+}
+
 fn rule_matches(
     rule: &ApprovalRule,
     descriptor: &OperationDescriptor,
     api_key_id: Option<&str>,
 ) -> bool {
-    let key_matches = rule.api_key_ids.is_empty()
-        || api_key_id.is_some_and(|key| rule.api_key_ids.iter().any(|id| id == key));
-    key_matches
+    rule_applies_to_key(rule, api_key_id)
         && methods_match(&rule.methods, descriptor)
         && verbs_match(&rule.verbs, descriptor)
         && resource_pattern_matches(&rule.resource_pattern, descriptor)
@@ -612,7 +607,7 @@ mod tests {
             Some(ApprovalEffect::Deny),
         );
 
-        let decision = evaluate(&cfg, &post_descriptor());
+        let decision = evaluate(&cfg, &post_descriptor(), None).expect("policy decision");
 
         assert_eq!(decision.effect, ApprovalEffect::AutoAllow);
         assert_eq!(decision.grant_scope, None);
@@ -623,7 +618,9 @@ mod tests {
         let required = evaluate(
             &config(true, ApprovalMode::Grant, vec![], None),
             &post_descriptor(),
-        );
+            None,
+        )
+        .expect("policy decision");
         assert_eq!(required.effect, ApprovalEffect::RequireApproval);
         assert_eq!(required.mode, ApprovalMode::Grant);
         assert_eq!(required.grant_scope, None);
@@ -631,7 +628,9 @@ mod tests {
         let allowed = evaluate(
             &config(false, ApprovalMode::Grant, vec![], None),
             &post_descriptor(),
-        );
+            None,
+        )
+        .expect("policy decision");
         assert_eq!(allowed.effect, ApprovalEffect::AutoAllow);
         assert_eq!(allowed.grant_scope, None);
     }
@@ -650,7 +649,7 @@ mod tests {
             None,
         );
 
-        let decision = evaluate(&cfg, &get_descriptor());
+        let decision = evaluate(&cfg, &get_descriptor(), None).expect("policy decision");
 
         assert_eq!(decision.effect, ApprovalEffect::AutoAllow);
         assert_eq!(decision.grant_scope, None);
@@ -674,20 +673,12 @@ mod tests {
         );
         let cfg = config(false, ApprovalMode::PerRequest, vec![ask], None);
 
-        let listed = evaluate_for_key(&cfg, &post_descriptor(), Some("key-a")).expect("decision");
+        let listed = evaluate(&cfg, &post_descriptor(), Some("key-a")).expect("decision");
         assert_eq!(listed.effect, ApprovalEffect::RequireApproval);
         // Other keys and callers without a key get no opinion, so the caller's
         // ordinary default applies instead of a silent allow.
-        assert_eq!(
-            evaluate_for_key(&cfg, &post_descriptor(), Some("key-b")),
-            None
-        );
-        assert_eq!(evaluate_for_key(&cfg, &post_descriptor(), None), None);
-        // Readers that do not pass a key keep the historical fallthrough.
-        assert_eq!(
-            evaluate(&cfg, &post_descriptor()).effect,
-            ApprovalEffect::AutoAllow
-        );
+        assert_eq!(evaluate(&cfg, &post_descriptor(), Some("key-b")), None);
+        assert_eq!(evaluate(&cfg, &post_descriptor(), None), None);
     }
 
     #[test]
@@ -709,13 +700,13 @@ mod tests {
             None,
         );
         assert_eq!(
-            evaluate_for_key(&cfg, &post_descriptor(), Some("key-a"))
+            evaluate(&cfg, &post_descriptor(), Some("key-a"))
                 .unwrap()
                 .effect,
             ApprovalEffect::Deny
         );
         assert_eq!(
-            evaluate_for_key(&cfg, &post_descriptor(), Some("key-b"))
+            evaluate(&cfg, &post_descriptor(), Some("key-b"))
                 .unwrap()
                 .effect,
             ApprovalEffect::RequireApproval
@@ -728,7 +719,7 @@ mod tests {
             Some(ApprovalEffect::RequireApproval),
         );
         assert_eq!(
-            evaluate_for_key(&with_default, &post_descriptor(), Some("key-b"))
+            evaluate(&with_default, &post_descriptor(), Some("key-b"))
                 .unwrap()
                 .effect,
             ApprovalEffect::RequireApproval
@@ -810,7 +801,7 @@ mod tests {
             Some(ApprovalEffect::RequireApproval),
         );
 
-        let decision = evaluate(&cfg, &post_descriptor());
+        let decision = evaluate(&cfg, &post_descriptor(), None).expect("policy decision");
 
         assert_eq!(decision.effect, ApprovalEffect::RequireApproval);
         assert_eq!(decision.mode, ApprovalMode::Grant);
@@ -842,7 +833,7 @@ mod tests {
             None,
         );
 
-        let decision = evaluate(&cfg, &post_descriptor());
+        let decision = evaluate(&cfg, &post_descriptor(), None).expect("policy decision");
 
         assert_eq!(decision.effect, ApprovalEffect::RequireApproval);
         assert_eq!(decision.mode, ApprovalMode::Grant);
@@ -870,11 +861,15 @@ mod tests {
         let matching = evaluate(
             &cfg,
             &github_contents_descriptor("/repos/nyx/contents/src/main.rs"),
-        );
+            None,
+        )
+        .expect("policy decision");
         let non_matching = evaluate(
             &cfg,
             &github_contents_descriptor("/repos/nyx/issues/1/comments"),
-        );
+            None,
+        )
+        .expect("policy decision");
 
         assert_eq!(matching.effect, ApprovalEffect::RequireApproval);
         assert_eq!(
@@ -902,11 +897,15 @@ mod tests {
         let nested = evaluate(
             &cfg,
             &github_contents_descriptor("/repos/nyx/contents/src/main.rs"),
-        );
+            None,
+        )
+        .expect("policy decision");
         let single = evaluate(
             &cfg,
             &github_contents_descriptor("/repos/nyx/contents/main.rs"),
-        );
+            None,
+        )
+        .expect("policy decision");
 
         assert_eq!(nested.effect, ApprovalEffect::AutoAllow);
         assert_eq!(single.effect, ApprovalEffect::RequireApproval);
@@ -931,9 +930,16 @@ mod tests {
         let single =
             crate::services::operation_descriptor::build_http_descriptor("GET", "/repos/a", None);
 
-        assert_eq!(evaluate(&cfg, &nested).effect, ApprovalEffect::AutoAllow);
         assert_eq!(
-            evaluate(&cfg, &single).effect,
+            evaluate(&cfg, &nested, None)
+                .expect("policy decision")
+                .effect,
+            ApprovalEffect::AutoAllow
+        );
+        assert_eq!(
+            evaluate(&cfg, &single, None)
+                .expect("policy decision")
+                .effect,
             ApprovalEffect::RequireApproval
         );
     }
@@ -962,10 +968,15 @@ mod tests {
         );
 
         assert_eq!(
-            evaluate(&cfg, &push).effect,
+            evaluate(&cfg, &push, None).expect("policy decision").effect,
             ApprovalEffect::RequireApproval
         );
-        assert_eq!(evaluate(&cfg, &status).effect, ApprovalEffect::AutoAllow);
+        assert_eq!(
+            evaluate(&cfg, &status, None)
+                .expect("policy decision")
+                .effect,
+            ApprovalEffect::AutoAllow
+        );
     }
 
     #[test]
@@ -988,7 +999,9 @@ mod tests {
         );
 
         assert_eq!(
-            evaluate(&cfg, &descriptor).effect,
+            evaluate(&cfg, &descriptor, None)
+                .expect("policy decision")
+                .effect,
             ApprovalEffect::RequireApproval
         );
     }
@@ -1017,11 +1030,15 @@ mod tests {
         );
 
         assert_eq!(
-            evaluate(&cfg, &matching).effect,
+            evaluate(&cfg, &matching, None)
+                .expect("policy decision")
+                .effect,
             ApprovalEffect::RequireApproval
         );
         assert_eq!(
-            evaluate(&cfg, &non_matching).effect,
+            evaluate(&cfg, &non_matching, None)
+                .expect("policy decision")
+                .effect,
             ApprovalEffect::AutoAllow
         );
     }
@@ -1040,7 +1057,7 @@ mod tests {
             None,
         );
 
-        let decision = evaluate(&cfg, &post_descriptor());
+        let decision = evaluate(&cfg, &post_descriptor(), None).expect("policy decision");
 
         assert_eq!(decision.effect, ApprovalEffect::Deny);
         assert_eq!(decision.grant_scope, None);
@@ -1145,5 +1162,41 @@ mod tests {
             ApprovalMode::PerRequest,
         )];
         assert!(validate_rules(&invalid_glob).is_err());
+    }
+    #[test]
+    fn opaque_policy_key_selection_preserves_general_defaults() {
+        for effect in [
+            ApprovalEffect::Deny,
+            ApprovalEffect::RequireApproval,
+            ApprovalEffect::AutoAllow,
+        ] {
+            let limited = keyed(
+                rule(&[], vec![], effect.clone(), ApprovalMode::PerRequest),
+                &["key-a"],
+            );
+            let mut cfg = config(true, ApprovalMode::PerRequest, vec![limited], None);
+            assert!(has_policy_for_key(&cfg, Some("key-a")));
+            for other in [Some("key-b"), None] {
+                assert!(!has_policy_for_key(&cfg, other));
+                assert!(!rule_applies_to_key(&cfg.rules[0], other));
+                assert_eq!(evaluate(&cfg, &post_descriptor(), other), None);
+            }
+            cfg.default_effect = Some(ApprovalEffect::RequireApproval);
+            assert!(has_policy_for_key(&cfg, Some("key-b")));
+            assert_eq!(
+                evaluate(&cfg, &post_descriptor(), Some("key-b"))
+                    .unwrap()
+                    .effect,
+                ApprovalEffect::RequireApproval
+            );
+            cfg.rules[0].api_key_ids.clear();
+            for key in [Some("key-a"), Some("key-b"), None] {
+                assert!(has_policy_for_key(&cfg, key));
+                assert_eq!(
+                    evaluate(&cfg, &post_descriptor(), key).unwrap().effect,
+                    effect
+                );
+            }
+        }
     }
 }

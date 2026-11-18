@@ -227,6 +227,7 @@ mod tests {
                     &target.service_id,
                     &operation,
                     target.is_auto_connected,
+                    None,
                 )
                 .await
                 .unwrap(),

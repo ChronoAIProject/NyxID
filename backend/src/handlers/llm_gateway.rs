@@ -2877,7 +2877,7 @@ pub(super) async fn preflight_llm_deny_before_resolution(
     // before approvals, billing and dispatch. Checking here would use the
     // catalog-only identity and intersect sibling connections' scopes.
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    let denied = approval_service::evaluate_deny_only_for_key(
+    let denied = approval_service::evaluate_deny_only(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,

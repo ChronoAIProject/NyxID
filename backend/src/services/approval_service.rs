@@ -154,30 +154,9 @@ pub enum ApprovalOutcome {
 /// `actor_user_id` is the human/API key making the call. `service_owner_user_id`
 /// is the user_id that owns the resolved `UserService` -- the actor for
 /// personal services, the org for org-shared ones.
+/// `api_key_id` explicitly identifies the calling NyxID key, or is `None`
+/// when the caller has no key. Org policy evaluation retains its existing semantics.
 pub async fn resolve_org_aware_approval(
-    db: &Database,
-    actor_user_id: &str,
-    service_owner_user_id: &str,
-    service_id: &str,
-    descriptor: &OperationDescriptor,
-    is_auto_connected: bool,
-) -> AppResult<ApprovalResolution> {
-    resolve_org_aware_approval_for_key(
-        db,
-        actor_user_id,
-        service_owner_user_id,
-        service_id,
-        descriptor,
-        is_auto_connected,
-        None,
-    )
-    .await
-}
-
-/// As [`resolve_org_aware_approval`], for a caller identified by a NyxID API
-/// key. `api_key_id` only selects the actor's own key-limited rules; an
-/// org's policy never reads it.
-pub async fn resolve_org_aware_approval_for_key(
     db: &Database,
     actor_user_id: &str,
     service_owner_user_id: &str,
@@ -207,7 +186,15 @@ pub async fn resolve_org_aware_approval_for_key(
             })
             .await?
     {
-        let decision = approval_policy::evaluate(&org_config, descriptor);
+        // Org rules retain the keyless cascade in this phase. The caller key
+        // selects only actor rules until the separate org-policy rollout (P1b).
+        let decision = approval_policy::evaluate(&org_config, descriptor, None).unwrap_or(
+            approval_policy::ApprovalPolicyDecision {
+                effect: ApprovalEffect::AutoAllow,
+                mode: org_config.approval_mode.clone(),
+                grant_scope: None,
+            },
+        );
         return Ok(ApprovalResolution {
             required: decision.effect == ApprovalEffect::RequireApproval,
             mode: decision.mode,
@@ -226,7 +213,7 @@ pub async fn resolve_org_aware_approval_for_key(
 
     let actor_decision = actor_config
         .as_ref()
-        .and_then(|cfg| approval_policy::evaluate_for_key(cfg, descriptor, api_key_id));
+        .and_then(|cfg| approval_policy::evaluate(cfg, descriptor, api_key_id));
     let (required, mode, effect, grant_scope) = if let Some(decision) = actor_decision {
         (
             decision.effect == ApprovalEffect::RequireApproval,
@@ -274,29 +261,9 @@ pub async fn evaluate_deny_only(
     service_id: &str,
     descriptor: &OperationDescriptor,
     is_auto_connected: bool,
-) -> AppResult<bool> {
-    evaluate_deny_only_for_key(
-        db,
-        actor_user_id,
-        service_owner_user_id,
-        service_id,
-        descriptor,
-        is_auto_connected,
-        None,
-    )
-    .await
-}
-
-pub async fn evaluate_deny_only_for_key(
-    db: &Database,
-    actor_user_id: &str,
-    service_owner_user_id: &str,
-    service_id: &str,
-    descriptor: &OperationDescriptor,
-    is_auto_connected: bool,
     api_key_id: Option<&str>,
 ) -> AppResult<bool> {
-    let resolution = resolve_org_aware_approval_for_key(
+    let resolution = resolve_org_aware_approval(
         db,
         actor_user_id,
         service_owner_user_id,
@@ -320,6 +287,7 @@ pub async fn evaluate_and_check(
     requester_id: &str,
     bypass_approval_flow: bool,
     is_auto_connected: bool,
+    api_key_id: Option<&str>,
 ) -> AppResult<ApprovalOutcome> {
     evaluate_and_check_with_options(
         db,
@@ -332,6 +300,7 @@ pub async fn evaluate_and_check(
         bypass_approval_flow,
         is_auto_connected,
         ApprovalOptions::default(),
+        api_key_id,
     )
     .await
 }
@@ -348,38 +317,9 @@ pub async fn evaluate_and_check_with_options(
     bypass_approval_flow: bool,
     is_auto_connected: bool,
     options: ApprovalOptions,
-) -> AppResult<ApprovalOutcome> {
-    evaluate_and_check_for_key(
-        db,
-        actor_user_id,
-        service_owner_user_id,
-        service_id,
-        descriptor,
-        requester_type,
-        requester_id,
-        bypass_approval_flow,
-        is_auto_connected,
-        options,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn evaluate_and_check_for_key(
-    db: &Database,
-    actor_user_id: &str,
-    service_owner_user_id: &str,
-    service_id: &str,
-    descriptor: &OperationDescriptor,
-    requester_type: Option<&str>,
-    requester_id: &str,
-    bypass_approval_flow: bool,
-    is_auto_connected: bool,
-    options: ApprovalOptions,
     api_key_id: Option<&str>,
 ) -> AppResult<ApprovalOutcome> {
-    let mut resolution = resolve_org_aware_approval_for_key(
+    let mut resolution = resolve_org_aware_approval(
         db,
         actor_user_id,
         service_owner_user_id,
@@ -441,41 +381,9 @@ async fn evaluate_and_check_for_key(
 
 /// An assistant approval bypass is returned to the dispatcher so its receipt
 /// is written only after successful execution. Explicit deny rules still win.
+/// Every caller explicitly supplies its NyxID key, or `None` when none exists.
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_for_chat(
-    db: &Database,
-    actor: &str,
-    service_owner: &str,
-    service_id: &str,
-    descriptor: &OperationDescriptor,
-    requester_type: Option<&str>,
-    requester_id: &str,
-    bypass: bool,
-    auto_connected: bool,
-    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
-) -> AppResult<(
-    ApprovalOutcome,
-    Option<super::assistant_acknowledgement_service::AutoAllowed>,
-)> {
-    evaluate_for_chat_for_key(
-        db,
-        actor,
-        service_owner,
-        service_id,
-        descriptor,
-        requester_type,
-        requester_id,
-        bypass,
-        auto_connected,
-        chat,
-        None,
-    )
-    .await
-}
-
-/// As [`evaluate_for_chat`], for a caller identified by a NyxID API key.
-#[allow(clippy::too_many_arguments)]
-pub async fn evaluate_for_chat_for_key(
     db: &Database,
     actor: &str,
     service_owner: &str,
@@ -505,6 +413,7 @@ pub async fn evaluate_for_chat_for_key(
             service_id,
             descriptor,
             auto_connected,
+            api_key_id,
         )
         .await?;
         if owner_policy.required || owner_policy.effect == ApprovalEffect::Deny {
@@ -513,7 +422,7 @@ pub async fn evaluate_for_chat_for_key(
             ));
         }
     }
-    let outcome = evaluate_and_check_for_key(
+    let outcome = evaluate_and_check_with_options(
         db,
         actor,
         service_owner,
@@ -3197,6 +3106,7 @@ mod tests {
                 false,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
             .await
             .unwrap(),
@@ -3227,6 +3137,7 @@ mod tests {
                 false,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
         };
         let ApprovalOutcome::NeedsApproval(pending) = evaluate().await.unwrap() else {
@@ -3248,6 +3159,7 @@ mod tests {
                 true,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
             .await
             .unwrap(),
@@ -3287,6 +3199,7 @@ mod tests {
                 true,
                 false,
                 ApprovalOptions::NO_REQUEST,
+                None,
             )
             .await
             .unwrap(),
@@ -3466,7 +3379,8 @@ mod tests {
                         Some("api_key"),
                         "agent",
                         false,
-                        false
+                        false,
+                        None,
                     )
                     .await
                     .unwrap(),
@@ -3620,6 +3534,7 @@ mod tests {
                 "guest",
                 false,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -3742,6 +3657,7 @@ mod tests {
             "agent",
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -3750,7 +3666,7 @@ mod tests {
         );
         assert!(matches!(
             evaluate_and_check(
-                &db, &owner, &org, &service, &read, None, "session", true, false
+                &db, &owner, &org, &service, &read, None, "session", true, false, None,
             )
             .await
             .unwrap(),
@@ -3770,7 +3686,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             evaluate_and_check(
-                &db, &owner, &org, &service, &read, None, "session", true, true
+                &db, &owner, &org, &service, &read, None, "session", true, true, None,
             )
             .await
             .unwrap(),
@@ -4816,6 +4732,7 @@ mod tests {
             false,
             false,
             Some(&f.chat),
+            None,
         )
         .await
         .unwrap();
@@ -4855,6 +4772,7 @@ mod tests {
             false,
             false,
             Some(&f.chat),
+            None,
         )
         .await
         .unwrap();
@@ -4888,6 +4806,7 @@ mod tests {
             false,
             false,
             Some(&f.chat),
+            None,
         )
         .await
         .unwrap();
@@ -5165,6 +5084,7 @@ mod tests {
             "agent-1",
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -5200,6 +5120,7 @@ mod tests {
             "agent-1",
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -5891,6 +5812,7 @@ mod tests {
             requester_id,
             false,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6005,6 +5927,7 @@ mod tests {
             &service_id,
             &operation,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6043,6 +5966,7 @@ mod tests {
             &service_id,
             &operation,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -6073,10 +5997,17 @@ mod tests {
         insert_channel(&db, &channel).await;
 
         let operation = test_operation();
-        let resolution =
-            resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id, &operation, false)
-                .await
-                .unwrap();
+        let resolution = resolve_org_aware_approval(
+            &db,
+            &actor_id,
+            &actor_id,
+            &service_id,
+            &operation,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::default());
         assert_eq!(resolution.primary_owner_user_id, actor_id);
@@ -6100,6 +6031,7 @@ mod tests {
             &service_id,
             &test_operation(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -6117,6 +6049,7 @@ mod tests {
             "agent-1",
             false,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -6174,6 +6107,7 @@ mod tests {
                 &service_id,
                 &test_operation(),
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -6209,6 +6143,7 @@ mod tests {
             &service_id,
             &test_operation(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -6382,5 +6317,122 @@ mod tests {
         // Verify the second is still pending
         let still_pending = get_request(&db, &req2.id).await.unwrap();
         assert_eq!(still_pending.status, "pending");
+    }
+    #[tokio::test]
+    async fn caller_key_reaches_all_evaluation_layers_without_changing_bypass_or_fallback() {
+        let db = crate::test_utils::connect_test_database("approval_caller_key")
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        let service = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let operation = test_operation();
+        for effect in [ApprovalEffect::Deny, ApprovalEffect::RequireApproval] {
+            let mut rule: ApprovalRule = serde_json::from_value(serde_json::json!({"resource_pattern":"*","effect":effect,"mode":"per_request","api_key_ids":["key-a"]})).unwrap();
+            for limited in [true, false] {
+                if !limited {
+                    rule.api_key_ids.clear();
+                }
+                set_service_approval_config(
+                    &db,
+                    &owner,
+                    &service,
+                    "Caller key",
+                    Some(true),
+                    Some(&ApprovalMode::PerRequest),
+                    Some(&[rule.clone()]),
+                    None,
+                )
+                .await
+                .unwrap();
+                for key in [Some("key-a"), Some("key-b"), None] {
+                    let applies = !limited || key == Some("key-a");
+                    let resolution = resolve_org_aware_approval(
+                        &db, &owner, &owner, &service, &operation, false, key,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        resolution.effect,
+                        if applies {
+                            effect.clone()
+                        } else {
+                            ApprovalEffect::AutoAllow
+                        }
+                    );
+                    assert_eq!(
+                        evaluate_deny_only(&db, &owner, &owner, &service, &operation, false, key)
+                            .await
+                            .unwrap(),
+                        applies && effect == ApprovalEffect::Deny
+                    );
+                    for bypass in [false, true] {
+                        let (outcome, _) = evaluate_for_chat(
+                            &db,
+                            &owner,
+                            &owner,
+                            &service,
+                            &operation,
+                            Some("api_key"),
+                            "requester-is-independent",
+                            bypass,
+                            false,
+                            None,
+                            key,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(
+                            matches!(outcome, ApprovalOutcome::Denied),
+                            applies && effect == ApprovalEffect::Deny
+                        );
+                        assert_eq!(
+                            matches!(outcome, ApprovalOutcome::NeedsApproval(_)),
+                            applies && effect == ApprovalEffect::RequireApproval && !bypass
+                        );
+                    }
+                }
+            }
+        }
+        // A key-only policy must not suppress the existing implicit global floor.
+        let rule = serde_json::from_value(
+            serde_json::json!({"resource_pattern":"*","effect":"deny","api_key_ids":["key-a"]}),
+        )
+        .unwrap();
+        set_service_approval_config(
+            &db,
+            &owner,
+            &service,
+            "Caller key",
+            None,
+            None,
+            Some(&[rule]),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, true).await;
+        for key in [Some("key-b"), None] {
+            assert!(
+                resolve_org_aware_approval(&db, &owner, &owner, &service, &operation, false, key)
+                    .await
+                    .unwrap()
+                    .required
+            );
+            assert!(
+                !resolve_org_aware_approval(&db, &owner, &owner, &service, &operation, true, key)
+                    .await
+                    .unwrap()
+                    .required
+            );
+        }
+        crate::test_utils::drop_test_database(&db).await;
     }
 }
