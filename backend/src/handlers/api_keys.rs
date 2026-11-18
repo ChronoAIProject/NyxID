@@ -1871,7 +1871,7 @@ pub async fn reauthorize_durable_grants(
     let grants = durable_operation_grant_service::reauthorize_scheduled_key(
         &state.db,
         &state.node_ws_manager,
-        &actor,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
         &owner,
         &key_id,
         &body.selected_operations,
@@ -1880,17 +1880,6 @@ pub async fn reauthorize_durable_grants(
     .await?;
     let receipts: Vec<DurableGrantReceipt> =
         grants.into_iter().map(DurableGrantReceipt::from).collect();
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "durable_grants_reauthorized",
-        Some(serde_json::json!({
-            "api_key_id": &key_id,
-            "grant_ids": receipts.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
-            "operation_count": receipts.len(),
-            "decision": "authorized",
-        })),
-    );
     Ok(Json(DurableGrantListResponse { grants: receipts }))
 }
 

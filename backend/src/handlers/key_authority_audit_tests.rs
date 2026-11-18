@@ -98,9 +98,12 @@ impl Case {
 struct Monitor {
     commands: Vec<(String, String)>,
     stop: bool,
+    stop_source: Option<fn(&str, &str, &Document) -> bool>,
     source: Option<(i32, bool)>,
     commit: bool,
     transaction_starts: usize,
+    transaction_started_at: Option<std::time::Instant>,
+    transaction_durations: Vec<std::time::Duration>,
     transaction_write_bytes: usize,
     largest_transaction_write: usize,
 }
@@ -152,7 +155,12 @@ async fn fixture(case: Case) -> Fixture {
                         .get_str(&event.command_name)
                         .unwrap_or("")
                         .to_owned();
-                    if m.stop && case.source(&event.command_name, &collection, &event.command) {
+                    if m.stop
+                        && m.stop_source.map_or_else(
+                            || case.source(&event.command_name, &collection, &event.command),
+                            |source| source(&event.command_name, &collection, &event.command),
+                        )
+                    {
                         m.source = Some((
                             event.request_id,
                             event.command.get_bool("autocommit") == Ok(false),
@@ -160,6 +168,7 @@ async fn fixture(case: Case) -> Fixture {
                     }
                     if event.command.get_bool("startTransaction") == Ok(true) {
                         m.transaction_starts += 1;
+                        m.transaction_started_at = Some(std::time::Instant::now());
                     }
                     if event.command.get_bool("autocommit") == Ok(false)
                         && ["insert", "update", "delete", "findAndModify"]
@@ -171,7 +180,15 @@ async fn fixture(case: Case) -> Fixture {
                     }
                     m.commands.push((event.command_name, collection));
                 }
-                CommandEvent::Succeeded(event) if m.stop => {
+                CommandEvent::Succeeded(event) => {
+                    if event.command_name == "commitTransaction"
+                        && let Some(started) = m.transaction_started_at.take()
+                    {
+                        m.transaction_durations.push(started.elapsed());
+                    }
+                    if !m.stop {
+                        return;
+                    }
                     let source = m.source.filter(|(id, _)| *id == event.request_id);
                     if source.is_some_and(|(_, tx)| tx) {
                         m.commit = true;
@@ -373,6 +390,8 @@ async fn fixture(case: Case) -> Fixture {
         monitor,
     }
 }
+
+mod reauthorization;
 
 async fn request_as(f: &Fixture, auth: AuthUser) -> Response {
     let state = State(f.state.clone());

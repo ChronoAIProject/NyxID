@@ -83,13 +83,59 @@ pub(crate) fn grant_revoked(
     endpoint: &str,
     contract_digest: &str,
 ) -> AppResult<SecurityEffectIntent> {
-    required::intent_preserving_actor(
+    grant_revoked_with_reason(actor, key, grant, endpoint, contract_digest, None)
+}
+
+pub(crate) fn grant_revoked_for_reauthorization(
+    actor: &AuditActor,
+    key: &str,
+    grant: &str,
+    endpoint: &str,
+    contract_digest: &str,
+) -> AppResult<SecurityEffectIntent> {
+    grant_revoked_with_reason(
         actor,
-        "durable_grant_revoked",
-        Some(serde_json::json!({
-            "api_key_id":id(key),"grant_id":id(grant),"endpoint_id":id(endpoint),"contract_digest":contract_digest,"decision":"revoked",
-        })),
+        key,
+        grant,
+        endpoint,
+        contract_digest,
+        Some("reauthorization"),
     )
+}
+
+fn grant_revoked_with_reason(
+    actor: &AuditActor,
+    key: &str,
+    grant: &str,
+    endpoint: &str,
+    contract_digest: &str,
+    reason: Option<&'static str>,
+) -> AppResult<SecurityEffectIntent> {
+    let mut data = serde_json::json!({
+        "api_key_id": id(key), "grant_id": id(grant), "endpoint_id": id(endpoint),
+        "contract_digest": contract_digest, "decision": "revoked",
+    });
+    if let Some(reason) = reason {
+        data["reason"] = reason.into();
+    }
+    required::intent_preserving_actor(actor, "durable_grant_revoked", Some(data))
+}
+
+pub(crate) fn grants_reauthorized(
+    actor: &AuditActor,
+    key: &str,
+    grant_ids: &[String],
+) -> AppResult<SecurityEffectIntent> {
+    let mut data = required::identifier_list("grant_ids", grant_ids);
+    data.extend(
+        serde_json::json!({
+            "api_key_id": id(key), "operation_count": grant_ids.len(), "decision": "authorized",
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    required::intent_preserving_actor(actor, "durable_grants_reauthorized", Some(data.into()))
 }
 
 pub(crate) fn permission_created(
