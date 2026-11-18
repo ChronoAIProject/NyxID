@@ -18,7 +18,7 @@ function setup(initialPending?: Promise<unknown>, config?: {language: Language; 
     'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type, props})},
     'react-native': {AppState: appState},
     '@tanstack/react-query': {useQueryClient: () => client},
-    '../../lib/auth/sessionStore': {authSessionGeneration: () => generation,
+    '../../lib/auth/sessionStore': {authSessionGeneration: () => generation,peekStoredAuthSession: () => stored,
       loadStoredAuthSession: async () => { reads++; if (pending) await pending; if (failures-- > 0) throw new Error('locked'); return stored; },
       persistAuthSession: async () => {generation++;stored=session;}, clearStoredAuthSession: async () => {generation++;stored=null;}},
     '../../lib/auth/authAccount': {getAuthAccountId: () => null, setAuthAccountId: () => {}},
@@ -79,7 +79,7 @@ test('M2622-03 durable sign-out retries a failed tombstone without waiting for p
     'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type,props})},
     'react-native': {AppState: {currentState:'active',addEventListener: () => ({remove() {}})}},
     '@tanstack/react-query': {useQueryClient: () => client},
-    '../../lib/auth/sessionStore': {authSessionGeneration: coordinator.generation,loadStoredAuthSession: coordinator.load,persistAuthSession: coordinator.persist,clearStoredAuthSession: coordinator.clear},
+    '../../lib/auth/sessionStore': {authSessionGeneration: coordinator.generation,peekStoredAuthSession: coordinator.peek,loadStoredAuthSession: coordinator.load,persistAuthSession: coordinator.persist,clearStoredAuthSession: coordinator.clear},
     '../../lib/auth/authAccount': {getAuthAccountId: () => account,setAuthAccountId: (v: string | null) => {account=v;}},
     '../../lib/auth/authEpoch': {advanceAuthEpoch() {}},
     '../../lib/notifications/pushNotifications': {activatePushAfterLogin: async () => {},capturePushLogout: async () => ({accessToken:'token'}),deactivatePushOnLogout: async () => {teardowns++; await push.promise;}},
@@ -122,4 +122,53 @@ test('M2622-07 allowlist denial and profile outage remain distinct in every app 
       } finally {e.h.unmount();}
     }
   }
+});
+
+test('M2622-03 push capture faults cannot gate sign-out and teardown captures the rotated access token', {timeout: 5000}, async (t) => {
+  for (const mode of ['rotation', 'reject', 'hang'] as const) await t.test(mode, async () => {
+    const jwt = (label: string) => `e30.${Buffer.from(JSON.stringify({sub: 'a', label})).toString('base64url')}.sig`;
+    const values = new Map<string, string>();
+    const storage = {getItemAsync: async (key: string) => values.get(key) ?? null,
+      setItemAsync: async (key: string, value: string) => {values.set(key, value);},
+      deleteItemAsync: async (key: string) => {values.delete(key);}};
+    const coordinator = createSessionCoordinator(storage, () => {});
+    await coordinator.persist({accessToken: jwt('old'), refreshToken: 'old'});
+    let account: string | null = 'a';
+    let capturedAccess: string | undefined;
+    const teardowns: any[] = [];
+    const client = {clear() {}, cancelQueries: async () => {}};
+    const h = hookHarness<any>({
+      'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type, props})},
+      'react-native': {AppState: {currentState: 'active', addEventListener: () => ({remove() {}})}},
+      '@tanstack/react-query': {useQueryClient: () => client},
+      '../../lib/auth/sessionStore': {authSessionGeneration: coordinator.generation, loadStoredAuthSession: coordinator.load,
+        peekStoredAuthSession: coordinator.peek, persistAuthSession: coordinator.persist, clearStoredAuthSession: coordinator.clear},
+      '../../lib/auth/authAccount': {getAuthAccountId: () => account, setAuthAccountId: (value: string | null) => {account = value;}},
+      '../../lib/auth/authEpoch': {advanceAuthEpoch() {}},
+      '../../lib/notifications/pushNotifications': {activatePushAfterLogin: async () => {},
+        capturePushLogout: async (accessToken?: string) => {capturedAccess = accessToken;
+          if (mode === 'reject') throw Error('push storage unavailable');
+          if (mode === 'hang') return new Promise(() => {});
+          return {accessToken, registration: null};},
+        deactivatePushOnLogout: async (capture: unknown) => {teardowns.push(capture);return true;}},
+      '../../lib/notifications/approvalRefreshSignal': {clearPendingApprovalRefreshSignal() {}},
+      '../../lib/api/http': {refreshAccessTokenIfNeeded: async () => {}, setSessionInvalidationListener() {}},
+      '../../lib/env': {ALLOWED_EMAILS: [], isEmailAllowed: () => true},
+      '../../lib/telemetry': Object.fromEntries(['reset', 'identify', 'shutdownTelemetry', 'initTelemetry', 'readExpoTelemetryConfig'].map(key => [key, () => {}])),
+      '../../lib/consent': {useMobileConsent: () => ({enabled: false, isHydrated: true})},
+    }, {__DEV__: false});
+    const {AuthSessionProvider} = h.load(fileURLToPath(new URL('./AuthSessionContext.tsx', import.meta.url))) as any;
+    h.mount(() => AuthSessionProvider({children: null}));
+    try {
+      await h.settle();
+      assert.equal(h.value().props.value.isAuthenticated, true);
+      await coordinator.commitRefresh((await coordinator.load())!, {accessToken: jwt('rotated'), refreshToken: 'successor'});
+      await h.value().props.value.signOut();
+      await h.settle();
+      assert.equal(capturedAccess, jwt('rotated'));
+      assert.equal(teardowns[0]?.accessToken, jwt('rotated'));
+      assert.equal(h.value().props.value.isAuthenticated, false);
+      assert.equal(await createSessionCoordinator(storage, () => {}).load(), null);
+    } finally {h.unmount();}
+  });
 });

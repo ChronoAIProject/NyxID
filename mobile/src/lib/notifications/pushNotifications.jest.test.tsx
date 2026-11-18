@@ -686,3 +686,16 @@ test('M2622-03 post-tombstone teardown uses captured credentials and persists pe
   release(); await operation;
   expect(mockStore.has('nyxid.push.pending_unbind')).toBe(false);
 });
+
+test('M2622-03 missing capture and unreadable push storage still invalidate native delivery after durable clear', async () => {
+  const read = jest.mocked(SecureStore.getItemAsync).getMockImplementation()!;
+  setAuthAccountId(null);
+  jest.mocked(SecureStore.getItemAsync).mockImplementation(async (key) => {
+    if (key === 'nyxid.push.device_token') throw Error('push storage unavailable');
+    return read(key);
+  });
+  try {
+    await expect(deactivatePushOnLogout({accessToken: 'rotated-access', registration: null})).resolves.toBe(false);
+    expect(Notifications.unregisterForNotificationsAsync).toHaveBeenCalled();
+  } finally {jest.mocked(SecureStore.getItemAsync).mockImplementation(read);}
+});

@@ -87,6 +87,12 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
   }
   return {
     generation: () => generation,
+    // Best-effort teardown needs the latest admitted pair without native I/O.
+    peek(): StoredAuthSession | null {
+      const session = pendingSuccessor?.generation === generation ? pendingSuccessor.session
+        : known?.generation === generation ? known.session : null;
+      return session ? { ...session, sessionGeneration: generation } : null;
+    },
     load() {
       const expected = generation;
       return serial(async () => {
@@ -107,11 +113,30 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       });
     },
     clear() {
+      const previousGeneration = generation;
+      const previousKnown = known?.generation === previousGeneration ? known : undefined;
+      const previousSuccessor = pendingSuccessor?.generation === previousGeneration ? pendingSuccessor : null;
       const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
       return serial(async () => {
         if (generation !== expected) return;
         // Tombstone first prevents interrupted cleanup resurrecting legacy auth.
-        await write(null);
+        try {
+          await write(null);
+        } catch (error) {
+          // Failure leaves the admitted session usable, including a successor
+          // that exists only in memory. Rebase it into this intent's generation
+          // without admitting any older refresh flight or a replacement login.
+          if (generation === expected) {
+            if (previousKnown) remember(previousKnown.session ? { ...previousKnown.session, sessionGeneration: expected } : null, expected);
+            if (previousSuccessor) {
+              pendingSuccessor = { generation: expected, session: previousSuccessor.session };
+              remember({ ...previousSuccessor.session, sessionGeneration: expected }, expected);
+            }
+            const retained = previousSuccessor?.session ?? previousKnown?.session;
+            bind(retained ? decodeJwtSub(retained.accessToken) ?? null : null);
+          }
+          throw error;
+        }
         remember(null, expected);
         legacyCleanupComplete = false;
         // Keep the authoritative nonsecret tombstone even if native deletion

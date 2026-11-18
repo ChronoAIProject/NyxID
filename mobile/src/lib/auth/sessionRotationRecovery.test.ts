@@ -83,3 +83,41 @@ test('M2622-01 known predecessor and subject fencing rejects mismatches and repl
   assert.equal(await e.coordinator.commitRefresh(captured,next),false);
   assert.equal((await e.coordinator.load())?.refreshToken,'b');
 });
+
+test('M2622-03 failed sign-out retains the pending rotated successor and fences pre-sign-out flights', async () => {
+  const e = fixture();
+  await e.coordinator.persist(old);
+  const captured = (await e.coordinator.load())!;
+  e.fail(100);
+  await e.coordinator.commitRefresh(captured, next);
+  await assert.rejects(e.coordinator.clear(), /locked/);
+  assert.equal((await e.coordinator.load())?.refreshToken, 'successor');
+  assert.equal(await e.coordinator.commitRefresh(captured, next), false, 'failed sign-out still fences earlier generations');
+  e.fail(0);
+  const current = (await e.coordinator.load())!;
+  assert.equal(current.refreshToken, 'successor');
+  assert.equal(JSON.parse(e.values.get(SESSION_RECORD_KEY)!).session.refreshToken, 'successor');
+  assert.equal(await e.coordinator.commitRefresh(current, { accessToken: token('a', 2), refreshToken: 'next-successor' }), true);
+  await e.coordinator.clear();
+  assert.equal(await e.coordinator.load(), null);
+});
+
+test('M2622-03 a failed held tombstone cannot restore a successor into a queued replacement login', async () => {
+  const e = fixture();
+  await e.coordinator.persist(old);
+  const captured = (await e.coordinator.load())!;
+  e.fail(100);
+  await e.coordinator.commitRefresh(captured, next);
+  const original = e.storage.setItemAsync;
+  let rejectWrite!: () => void;
+  e.storage.setItemAsync = async () => new Promise<void>((_resolve, reject) => { rejectWrite = () => reject(Error('locked')); });
+  const signOut = assert.rejects(e.coordinator.clear(), /locked/);
+  while (!rejectWrite) await new Promise(resolve => setImmediate(resolve));
+  const replacement = e.coordinator.persist({ accessToken: token('b', 0), refreshToken: 'b' });
+  e.storage.setItemAsync = original;
+  e.fail(0);
+  rejectWrite();
+  await signOut;
+  await replacement;
+  assert.equal((await e.coordinator.load())?.refreshToken, 'b');
+});

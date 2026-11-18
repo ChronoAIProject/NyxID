@@ -23,6 +23,7 @@ const sessionStorage: SessionStorage = {
 const coordinator = createSessionCoordinator(
   sessionStorage, analyticsConsentState.bindAccount);
 export const loadStoredAuthSession = coordinator.load;
+export const peekStoredAuthSession = coordinator.peek;
 export function persistAuthSession(session: StoredAuthSession) {
   advanceAuthEpoch();
   return coordinator.persist(session);

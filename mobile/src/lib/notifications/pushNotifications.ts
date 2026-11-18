@@ -39,6 +39,7 @@ const PENDING_UNBIND_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PUSH_NATIVE_TOKEN_TIMEOUT_MS = 15_000;
 const PUSH_NATIVE_UNREGISTER_TIMEOUT_MS = 2_000;
 const PUSH_LOGOUT_QUEUE_TIMEOUT_MS = 10_000;
+const PUSH_LOGOUT_RECOVERY_READ_TIMEOUT_MS = 250;
 const PUSH_PENDING_SYNC_SIGNAL_KEY = "nyxid.push.pending_sync_signal";
 const BACKGROUND_NOTIFICATION_TASK = "NYXID_BACKGROUND_NOTIFICATION_TASK";
 
@@ -901,8 +902,17 @@ export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Prom
 async function failPushUnbind(
   current = pushAccountGuard(),
 ): Promise<false> {
-  const storedToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
-  const pending = await loadPendingUnbind();
+  let storedToken: string | null = null;
+  let pending: PendingPushUnbind | null = null;
+  try {
+    [storedToken, pending] = await withPushTimeout(
+      () => Promise.all([SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY), loadPendingUnbind()]),
+      PUSH_LOGOUT_RECOVERY_READ_TIMEOUT_MS,
+    );
+  } catch (error) {
+    // Missing capture or unreadable storage must still reach native invalidation.
+    if (__DEV__) console.warn("[push] logout recovery read unavailable", error);
+  }
   if (!current()) return false;
   const token = lastKnownNativeToken?.token ?? storedToken ?? pending?.token;
   const platform = lastKnownNativeToken?.platform ?? resolvePlatform();

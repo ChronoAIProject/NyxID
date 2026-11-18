@@ -10,6 +10,7 @@ import {
   clearStoredAuthSession,
   authSessionGeneration,
   loadStoredAuthSession,
+  peekStoredAuthSession,
   persistAuthSession,
   StoredAuthSession,
 } from "../../lib/auth/sessionStore";
@@ -33,6 +34,22 @@ import { useMobileConsent } from "../../lib/consent";
 
 const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const RESTORE_TIMEOUT_MS = 6000;
+const SIGN_OUT_PUSH_CAPTURE_TIMEOUT_MS = 250;
+async function captureSignOutPush(accessToken?: string): Promise<Awaited<ReturnType<typeof capturePushLogout>>> {
+  const fallback = { accessToken, registration: null };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      capturePushLogout(accessToken),
+      new Promise<typeof fallback>(resolve => { timeout = setTimeout(() => resolve(fallback), SIGN_OUT_PUSH_CAPTURE_TIMEOUT_MS); }),
+    ]);
+  } catch (error) {
+    if (__DEV__) console.warn("[push] sign-out capture unavailable; cleanup will retry", error);
+    return fallback;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 const RESTORE_RETRY_DELAY_MS = 500;
 const RESTORE_MAX_RETRY_DELAY_MS = 30_000;
 export const SESSION_STORAGE_FAILED_MESSAGE =
@@ -64,7 +81,11 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     const run = (async () => {
       // Capture credentials/registration before clearing; no queue or network
       // teardown may delay the authoritative local sign-out.
-      const push = await capturePushLogout(admittedSessionRef.current?.accessToken);
+      const session = peekStoredAuthSession() ?? admittedSessionRef.current;
+      const push = await captureSignOutPush(session?.accessToken);
+      // Rotation may finish during the bounded registration read. Use the
+      // latest coordinator-owned pair, not the restore/sign-in snapshot.
+      push.accessToken = (peekStoredAuthSession() ?? session)?.accessToken;
       if (authSessionGeneration() !== expectedGeneration)
         throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       await clearStoredAuthSession();
