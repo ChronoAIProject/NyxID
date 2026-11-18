@@ -2941,6 +2941,10 @@ mod tests {
 
         let user_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Org))
+            .await
+            .unwrap();
         db.collection::<UserService>(COLLECTION_NAME)
             .insert_one(test_user_service(
                 &service_id,

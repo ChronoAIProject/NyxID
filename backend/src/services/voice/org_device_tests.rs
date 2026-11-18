@@ -337,6 +337,96 @@ async fn org_device_voice_publishes_discovers_and_admits_actor_private_calls() {
 }
 
 #[tokio::test]
+async fn org_device_voice_serializes_inherited_role_scope_changes() {
+    use crate::{
+        errors::AppError,
+        models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole},
+        services::org_role_scope_service::{clear_scope, get_scope, set_scope},
+    };
+
+    Box::pin(async {
+        let (f, _, service, voice) = fixture("org_device_voice_scope_fence").await;
+        let db = &f.state.db;
+        let role = OrgRole::Member;
+        db.collection::<bson::Document>(MEMBERSHIPS)
+            .update_one(
+                doc! {"org_user_id": &f.org, "member_user_id": &f.member},
+                doc! {"$set": {"scope_source": "inherit"}},
+            )
+            .await
+            .unwrap();
+        let (_, key) = device(&f, &f.member, &service.id).await;
+        let rows = super::application::agents(&f.state, &key, None)
+            .await
+            .unwrap();
+        let conversation = rows["agents"][0]["conversation_id"].as_str().unwrap();
+        let proof = client_key::authorize(db, &key, conversation).await.unwrap();
+        let call = session::admit_for_client_key(
+            db,
+            &f.member,
+            conversation,
+            &Uuid::new_v4().to_string(),
+            credential_tests::platform(&voice),
+            "fixture".into(),
+            "worker",
+            proof,
+        )
+        .await
+        .unwrap();
+
+        // Cover the implicit full-access default and an existing explicit grant.
+        for existing in [false, true] {
+            if existing {
+                set_scope(db, &f.org, role, Some(vec![service.id.clone()]), &f.admin)
+                    .await
+                    .unwrap();
+            }
+            let original = get_scope(db, &f.org, role)
+                .await
+                .unwrap()
+                .map(|row| row.allowed_service_ids);
+            assert_eq!(original.is_some(), existing);
+            let mut control = db.client().start_session().await.unwrap();
+            control.start_transaction().await.unwrap();
+            client_key::fence_call(db, &call, &mut control)
+                .await
+                .unwrap();
+            assert!(matches!(
+                set_scope(db, &f.org, role, Some(vec![]), &f.admin).await,
+                Err(AppError::Conflict(_))
+            ));
+            assert!(matches!(
+                clear_scope(db, &f.org, role).await,
+                Err(AppError::Conflict(_))
+            ));
+            control.commit_transaction().await.unwrap();
+            assert_eq!(
+                get_scope(db, &f.org, role)
+                    .await
+                    .unwrap()
+                    .map(|row| row.allowed_service_ids),
+                original
+            );
+
+            set_scope(db, &f.org, role, Some(vec![]), &f.admin)
+                .await
+                .unwrap();
+            let mut control = db.client().start_session().await.unwrap();
+            control.start_transaction().await.unwrap();
+            assert!(
+                client_key::fence_call(db, &call, &mut control)
+                    .await
+                    .is_err()
+            );
+            control.abort_transaction().await.unwrap();
+            clear_scope(db, &f.org, role).await.unwrap();
+        }
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn org_device_voice_publication_and_use_obey_roles_scopes_and_lifecycle() {
     Box::pin(async {
         let (f, agent, service, _) = fixture("org_device_voice_acl").await;
