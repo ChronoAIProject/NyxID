@@ -6,6 +6,7 @@ vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { markAdmitted } from "@/lib/assistant/send-admission";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { nyxAgentConversationSchema } from "@/schemas/assistant-nyxagent";
@@ -152,4 +153,29 @@ it("still steers an active turn when its retained connection chip is unavailable
   await send("Keep steering");
   await waitFor(() => expect(nyxAgentTransport.steer).toHaveBeenCalledWith(conversation.id, "Keep steering", "turn-1", expect.any(String)));
   expect(view.props.onSend).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("A2: recovery consumes only an admitted rejection (admitted=%s)", async (admitted) => {
+  vi.mocked(nyxAgentTransport.steer).mockRejectedValue(refused(409, "no_active_turn"));
+  const view = mount();
+  await send("Recover this message");
+  await screen.findByRole("button", { name: "Send as new message" });
+  const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+  view.rerenderProps({ ...view.props, active: false, sending: false, conversation: { ...conversation, active_turn: null } });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  const failure = new Error("interrupted");
+  view.props.onSend.mockRejectedValueOnce(admitted ? markAdmitted(failure) : failure);
+  await user.click(screen.getByRole("button", { name: "Send as new message" }));
+  expect(view.props.onSend).toHaveBeenCalledExactlyOnceWith("/service work\nRecover this message");
+  if (admitted) {
+    expect(screen.queryByRole("button", { name: "Send as new message" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+  } else {
+    expect(screen.getByRole("button", { name: "Send as new message" })).toBeEnabled();
+    expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Work account");
+  }
 });

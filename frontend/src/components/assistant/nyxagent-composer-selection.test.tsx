@@ -26,6 +26,7 @@ import { appI18n } from "@/i18n/instance";
 import zhCN from "@/i18n/locales/app/zh-CN";
 import zhTW from "@/i18n/locales/app/zh-TW";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { markAdmitted } from "@/lib/assistant/send-admission";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -506,4 +507,20 @@ it.each([
     error.mockRestore();
     await act(() => appI18n.changeLanguage("en"));
   }
+});
+
+it("A2: consumes the override after an admitted interruption before the next message", async () => {
+  const admitted = markAdmitted(new Error("stream interrupted"));
+  const send = vi.fn().mockRejectedValueOnce(admitted).mockResolvedValue(undefined);
+  mount(send);
+  await choose();
+  submit("First message");
+  await waitFor(() => expect(send).toHaveBeenCalledOnce());
+  expect(screen.getByRole("textbox")).toHaveValue("");
+  expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+  submit("Different message");
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+  expect(send.mock.calls.map((call) => call[0])).toEqual([
+    "/service org-connection\nFirst message", "Different message",
+  ]);
 });

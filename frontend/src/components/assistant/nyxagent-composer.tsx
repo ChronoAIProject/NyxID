@@ -9,6 +9,7 @@ import { UploadComposer } from "./upload-composer";
 import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-client";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { autoFocusAllowed } from "@/lib/assistant/composer-focus";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
 import { useNyxAgentModels } from "@/hooks/use-nyxbot-agents";
@@ -178,7 +179,11 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
             await props.onSend(connectionId ? `/service ${connectionId}\n${notice.text!}` : notice.text!);
             setConnectionId(undefined); setNotice(undefined);
           }
-          catch { /* The ordinary send path reports its error and retains this action. */ }
+          catch (error) {
+            if (isAdmittedSendError(error)) {
+              setConnectionId(undefined); setNotice(undefined);
+            }
+          }
           finally { busy.current = false; setSubmitting(false); }
         }}>{translateUi("Send as new message")}</Button>}
     </div>}</>}
@@ -202,7 +207,12 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
           }
         }
         checkConnection();
-        await props.onSend(connectionId ? `/service ${connectionId}\n${text}` : text, uploads, draftModel);
+        try {
+          await props.onSend(connectionId ? `/service ${connectionId}\n${text}` : text, uploads, draftModel);
+        } catch (error) {
+          if (isAdmittedSendError(error)) setConnectionId(undefined);
+          throw error; // Preserve admission evidence for the editor and uploads.
+        }
         setConnectionId(undefined);
         return;
       }

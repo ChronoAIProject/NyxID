@@ -14,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { NyxAgentComposer } from "./nyxagent-composer";
+import { markAdmitted } from "@/lib/assistant/send-admission";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
@@ -260,4 +261,28 @@ it("keeps the draft store and upload attached through refused pointer and Enter 
   expect(screen.getByText("Ready")).toBeVisible();
   expect(detachments).not.toContain(false);
   expect(onSend).not.toHaveBeenCalled();
+});
+
+it("A2: propagates an admitted interruption so the original upload is consumed", async () => {
+  const key = { id: "selected", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  client.setQueryData(["keys", "list", undefined], [key]);
+  const admitted = markAdmitted(new Error("stream interrupted"));
+  onSend.mockRejectedValueOnce(admitted as never);
+  await draftWithUpload();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  // Avoid model HTTP setup; this test isolates the admitted send boundary.
+  vi.spyOn(nyxBotApi, "changeModel").mockResolvedValue({} as never);
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+  await act(async () => {});
+  expect(screen.getByRole("textbox")).toHaveValue("");
+  expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Next message" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+  expect(onSend).toHaveBeenLastCalledWith("Next message", undefined, "nyxagent/research");
 });
