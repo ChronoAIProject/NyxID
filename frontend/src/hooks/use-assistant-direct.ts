@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
   directAssistantTransport,
@@ -201,11 +202,14 @@ export function useDirectAssistantChat({
 
   const send = useCallback(
     async (content: string) => {
+      const operation = captureAccountOperation();
       let conversationId = selectedConversationId;
       if (!conversationId) {
         conversationId = (await directAssistantTransport.createConversation()).id;
+        operation.assertCurrent();
         onConversationAdopted(conversationId);
       }
+      operation.assertCurrent();
       await new Promise<void>((resolve, reject) => {
         try {
           directAssistantTransport.sendMessage(conversationId, content, (event) => {

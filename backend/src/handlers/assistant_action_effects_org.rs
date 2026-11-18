@@ -1009,7 +1009,14 @@ async fn delete_account(
                     crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
                 ),
             );
-            let _ = users::delete_me(State(state.clone()), auth_user, tele, headers).await?;
+            let _ = users::delete_me(
+                State(state.clone()),
+                auth_user,
+                tele,
+                headers,
+                Query(users::DeleteMeQuery::default()),
+            )
+            .await?;
             mark_completed(&state.db, &receipt).await?;
             false
         }

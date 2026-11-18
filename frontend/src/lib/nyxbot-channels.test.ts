@@ -262,3 +262,15 @@ describe("Nyxbot Telegram registration", () => {
     );
   });
 });
+
+it("does not provision a Telegram channel after evidence arrives during bot lookup", async () => {
+  const { AccountChangedError, invalidateAccountEvidence, settleAccountEvidence } = await import("./assistant/identity");
+  let reply!: (value: Response) => void;
+  telegram.mockImplementationOnce(() => new Promise((done) => { reply = done; }));
+  const result = registerNyxbotTelegram(token);
+  invalidateAccountEvidence(); settleAccountEvidence();
+  reply(json(identity));
+  await expect(result).rejects.toBeInstanceOf(AccountChangedError);
+  expect(authorize).not.toHaveBeenCalled();
+  expect(request).not.toHaveBeenCalled();
+});

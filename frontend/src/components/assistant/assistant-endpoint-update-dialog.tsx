@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   endpointUpdateActionParamsSchema,
@@ -181,6 +182,7 @@ export function AssistantEndpointUpdateDialog({
   }
 
   async function updateEndpoint() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -190,7 +192,7 @@ export function AssistantEndpointUpdateDialog({
       const before = await readEvidence(expected.endpointId);
       beforeUpdatedAtRef.current = before.updated_at;
       const response = assistantEndpointUpdateResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/endpoints/update", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/endpoints/update", {
           actionRequestId,
           endpointId: expected.endpointId,
           ...(expected.label !== undefined ? { label: expected.label } : {}),
@@ -200,7 +202,7 @@ export function AssistantEndpointUpdateDialog({
           ...(expected.openapiSpecUrl !== undefined
             ? { openapiSpecUrl: expected.openapiSpecUrl }
             : {}),
-        }),
+        })),
       );
       setResult(response);
       await verifyUpdate(response.resource.endpointId, !response.replayed);

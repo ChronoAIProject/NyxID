@@ -4,6 +4,7 @@
 // each file had its own copy, which risks divergence when the
 // error-handling contract evolves. Centralized here.
 
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError, api } from "@/lib/api-client";
 
 /**
@@ -31,6 +32,7 @@ export async function reservePairingAction(pairingId: string): Promise<void> {
       {},
     );
   } catch (e) {
+    if (isAccountAbort(e)) throw e;
     if (e instanceof ApiError && (e.status === 409 || e.status === 404)) {
       throw new Error(
         "This pairing was already completed or started in another tab. Close this tab and check your CLI — if the CLI didn't finish the flow, run the command again for a fresh pairing.",
@@ -88,15 +90,16 @@ export async function withRewindOnError<T>(
   pairingId: string,
   run: () => Promise<T>,
 ): Promise<T> {
+  const operation = captureAccountOperation();
   try {
-    return await run();
+    return await operation.dispatch(run);
   } catch (e) {
     // Only 4xx ApiErrors are safely retriable — they mean the
     // server rejected the input BEFORE committing. 5xx / network
     // errors are ambiguous so we keep the latch to prevent
     // duplicate-mint races.
     if (e instanceof ApiError && e.status >= 400 && e.status < 500) {
-      await rewindPairingAction(pairingId);
+      await operation.dispatch(() => rewindPairingAction(pairingId));
     }
     throw e;
   }

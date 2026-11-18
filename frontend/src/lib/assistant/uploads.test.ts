@@ -120,3 +120,18 @@ describe("production attachment upload error telemetry", () => {
     expect(capture).not.toHaveBeenCalled();
   });
 });
+
+it("refuses an upload interrupted during XHR setup without reporting a network failure", async () => {
+  const { AccountChangedError, invalidateAccountEvidence, settleAccountEvidence } = await import("./identity");
+  vi.clearAllMocks();
+  globalThis.__nyxidAssistantHttpMock = undefined;
+  class InterruptedUpload extends UploadRequest {
+    setRequestHeader = vi.fn(() => { invalidateAccountEvidence(); settleAccountEvidence(); });
+  }
+  vi.stubGlobal("XMLHttpRequest", InterruptedUpload);
+  try {
+    await expect(uploadFile(scope, file, new AbortController().signal, vi.fn())).rejects.toBeInstanceOf(AccountChangedError);
+    expect(UploadRequest.latest.send).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+  } finally { settleAccountEvidence(); vi.unstubAllGlobals(); }
+});

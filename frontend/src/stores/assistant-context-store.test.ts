@@ -25,7 +25,7 @@ describe("useAssistantContextStore", () => {
       ownerUserId: "user-1",
       lastScreen: "/keys",
     });
-    expect(localStorage.getItem("nyxid.assistant_context")).not.toContain(
+    expect(localStorage.getItem("nyxid.assistant_context:user-1")).not.toContain(
       "bindings",
     );
   });
@@ -68,7 +68,7 @@ describe("useAssistantContextStore", () => {
       lastScreen: "/keys",
     });
     expect("bindings" in state).toBe(false);
-    expect(localStorage.getItem("nyxid.assistant_context")).not.toContain(
+    expect(localStorage.getItem("nyxid.assistant_context:user-1")).not.toContain(
       "conversation-private",
     );
   });
@@ -82,6 +82,6 @@ describe("useAssistantContextStore", () => {
       ownerUserId: null,
       lastScreen: null,
     });
-    expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
+    expect(localStorage.getItem("nyxid.assistant_context:user-1")).toBeNull();
   });
 });

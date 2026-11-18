@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   keyUpdateActionParamsSchema,
@@ -202,6 +203,7 @@ export function AssistantKeyUpdateDialog({
   }
 
   async function updateKey() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultKeyId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -213,7 +215,7 @@ export function AssistantKeyUpdateDialog({
       }
       const before = await readEvidence(expected.keyId);
       const response = assistantKeyUpdateResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/keys/update", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/keys/update", {
           actionRequestId,
           keyId: expected.keyId,
           name: expected.name,
@@ -222,7 +224,7 @@ export function AssistantKeyUpdateDialog({
           allowedServiceIds: expected.allowedServiceIds,
           allowAutoConnectedServices: expected.allowAutoConnectedServices,
           expectedStateVersion: before.state_version,
-        }),
+        })),
       );
       setResultKeyId(response.resource.keyId);
       setReplayed(response.replayed);

@@ -29,6 +29,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import {
   reservePairingAction,
   withRewindOnError,
@@ -155,6 +156,7 @@ export function ApiKeyCreateConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
@@ -184,17 +186,18 @@ export function ApiKeyCreateConfirm({
         body.expires_at = new Date(Date.now() + Number(lifetime) * 86400000).toISOString();
       }
 
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<ApiKeyCreateResponse>("/api-keys", body),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "api-key-create",
         api_key_id: res.id,
         full_key: res.full_key,
         ...(res.expires_at !== undefined ? { expires_at: res.expires_at } : {}),
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -374,22 +377,24 @@ export function ApiKeyRotateConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<ApiKeyRotateResponse>(
           `/api-keys/${encodeURIComponent(prefill.resource_id)}/rotate`,
         ),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "api-key-rotate",
         resource_id: res.id,
         full_key: res.full_key,
         platform: res.platform,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -449,24 +454,26 @@ export function NodeRegisterConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
       const trimmed = name.trim();
       const effectiveName = trimmed.length > 0 ? trimmed : DEFAULT_NODE_NAME;
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<NodeRegisterTokenResponse>(
           "/nodes/register-token",
           { name: effectiveName },
         ),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "node-register-token",
         token_id: res.token_id,
         token: res.token,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -526,22 +533,24 @@ export function NodeRotateConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<NodeRotateTokenResponse>(
           `/nodes/${encodeURIComponent(prefill.resource_id)}/rotate-token`,
         ),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "node-rotate-token",
         resource_id: prefill.resource_id,
         auth_token: res.auth_token,
         signing_secret: res.signing_secret,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -615,6 +624,7 @@ export function ServiceAccountCreateConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (!(await form.trigger())) return;
     setLoading(true);
     setError(null);
@@ -634,20 +644,21 @@ export function ServiceAccountCreateConfirm({
       if (roleList.length > 0) body.role_ids = roleList;
       if (ownerId) body.target_org_id = ownerId;
 
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<ServiceAccountCreateResponse>(
           "/admin/service-accounts",
           body,
         ),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "service-account-create",
         service_account_id: res.id,
         client_id: res.client_id,
         client_secret: res.client_secret,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -756,22 +767,24 @@ export function ServiceAccountRotateSecretConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<ServiceAccountRotateSecretResponse>(
           `/admin/service-accounts/${encodeURIComponent(prefill.resource_id)}/rotate-secret`,
         ),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "service-account-rotate-secret",
         resource_id: prefill.resource_id,
         client_id: res.client_id,
         client_secret: res.client_secret,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -850,6 +863,7 @@ export function DeveloperAppCreateConfirm({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
@@ -892,13 +906,13 @@ export function DeveloperAppCreateConfirm({
       }
       if (ownerId) body.target_org_id = ownerId;
 
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<DeveloperAppCreateResponse>(
           "/developer/oauth-clients",
           body,
         ),
-      );
+      ));
       if (!res.client_secret) {
         // Defensive: the wizard is gated to confidential clients
         // upstream, so this branch only fires if the server returns
@@ -907,12 +921,13 @@ export function DeveloperAppCreateConfirm({
           "Server didn't return a client_secret — was the client_type 'public'?",
         );
       }
-      onSuccess({
+      operation.dispatch(() => onSuccess({
         kind: "developer-app-create",
         developer_app_id: res.id,
         client_secret: res.client_secret,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -1063,21 +1078,23 @@ export function DeveloperAppRotateSecretConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<DeveloperAppRotateSecretResponse>(
           `/developer/oauth-clients/${encodeURIComponent(prefill.resource_id)}/rotate-secret`,
         ),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "developer-app-rotate-secret",
         resource_id: res.id,
         client_secret: res.client_secret,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
     } finally {
       setLoading(false);
@@ -1159,11 +1176,12 @@ export function MfaSetupConfirm({
     if (startedRef.current) return;
     startedRef.current = true;
     void (async () => {
+    const operation = captureAccountOperation();
       try {
-        await reservePairingAction(pairingId);
-        const res = await withRewindOnError(pairingId, () =>
+        await operation.dispatch(() => reservePairingAction(pairingId));
+        const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
           api.post<MfaSetupResponse>("/auth/mfa/setup", {}),
-        );
+        ));
         setFactorId(res.factor_id);
         setSecret(res.secret);
         setQrUrl(res.qr_code_url);
@@ -1179,6 +1197,7 @@ export function MfaSetupConfirm({
         }
         setPhase("ready");
       } catch (e) {
+      if (isAccountAbort(e)) return;
         setError(errorMessage(e));
         // Allow the user to retry once they fix the underlying issue.
         startedRef.current = false;
@@ -1187,6 +1206,7 @@ export function MfaSetupConfirm({
   }, [pairingId]);
 
   async function submitConfirm() {
+    const operation = captureAccountOperation();
     if (!factorId || phase !== "ready") return;
     setError(null);
     setPhase("confirming");
@@ -1200,12 +1220,13 @@ export function MfaSetupConfirm({
       const res = await api.post<MfaConfirmResponse>("/auth/mfa/confirm", {
         code: trimmed,
       });
-      onSuccess({
+      operation.dispatch(() => onSuccess({
         kind: "mfa-setup",
         factor_id: factorId,
         recovery_codes: res.recovery_codes,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(errorMessage(e));
       setPhase("ready");
     }

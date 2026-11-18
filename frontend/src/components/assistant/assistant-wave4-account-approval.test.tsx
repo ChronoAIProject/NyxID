@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { invalidateAccountEvidence, settleAccountEvidence } from "@/lib/assistant/identity";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -124,6 +125,28 @@ describe("Wave 4 account journeys", () => {
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(onComplete).toHaveBeenCalledWith(IDS.user);
     expect(mockSetUser).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it("keeps accepted deletion and Continue when evidence arrives before and after result handling", async () => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence());
+    mockPost.mockImplementation(async () => {
+      invalidateAccountEvidence();
+      return { resource: { userId: IDS.user }, replayed: false,
+        erasure: { status: "accepted", accepted_at: "2026-10-19T00:00:00Z", completed_at: null, domains: [] } };
+    });
+    const onComplete = vi.fn();
+    try {
+      renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="accepted-evidence" onComplete={onComplete} />);
+      await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
+      await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+      const button = await screen.findByRole("button", { name: "Continue" });
+      expect(screen.getByRole("dialog")).toHaveAccessibleName("Account deletion accepted");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      act(() => invalidateAccountEvidence());
+      await userEvent.click(button);
+      expect(onComplete).toHaveBeenCalledExactlyOnceWith(IDS.user);
+      expect(mockSetUser).toHaveBeenCalledExactlyOnceWith(null);
+    } finally { settleAccountEvidence(); }
   });
 
   it("rejects a legacy success response without durable erasure acceptance", async () => {

@@ -728,7 +728,8 @@ export function accountIsolationCases() {
     const composer = page.locator("[data-composer-textbox]");
     await composer.fill("preserve my selection");
     await composer.focus();
-    await composer.evaluate((element) => {
+    await page.bringToFront();
+    await composer.evaluate(async (element) => {
       const text = document
         .createTreeWalker(element, NodeFilter.SHOW_TEXT)
         .nextNode()!;
@@ -738,9 +739,13 @@ export function accountIsolationCases() {
       const selection = window.getSelection()!;
       selection.removeAllRanges();
       selection.addRange(range);
+      // Let the contenteditable editor observe its selection before tab blur.
+      document.dispatchEvent(new Event("selectionchange"));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       Object.assign(window, { __focusedComposer: element });
       (window as AppWindow).__accountFixture.holdProfile = true;
     });
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe("eserve");
     const hintTab = await context.newPage();
     await hintTab.goto("/privacy", { waitUntil: "domcontentloaded" });
     await hintTab.evaluate(() => {

@@ -24,6 +24,7 @@ import {
   usePollDeviceCode,
 } from "@/hooks/use-providers";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import { copyToClipboard } from "@/lib/utils";
@@ -1342,13 +1343,14 @@ function NodeSetupStep({
   );
 }
 
-async function cleanupPendingAuthKey(
+async function cleanupPendingAuthKey(operation: ReturnType<typeof captureAccountOperation>,
   key: KeyInfo | null,
   options: { readonly protectExistingKey?: boolean } = {},
 ) {
   if (options.protectExistingKey) return;
   if (key?.status !== "pending_auth") return;
   try {
+    operation.assertCurrent();
     await api.delete<void>(
       `/keys/${encodeURIComponent(key.id)}?only_if_pending=true`,
     );
@@ -1465,6 +1467,7 @@ function OAuthStep({
   readonly onPopupViewResult?: (keyId: string) => boolean;
   readonly onPopupDismiss: () => void;
 }) {
+  const operationRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   useUiTranslation();
   const { mutateAsync: initiateOAuthAsync, isPending: oauthInitiatePending } =
     useInitiateOAuth();
@@ -1570,12 +1573,15 @@ function OAuthStep({
   }, []);
 
   const retryPopup = useCallback(async () => {
+    const operation = captureAccountOperation();
+    operationRef.current = operation;
     if (!catalogEntry.provider_config_id || !pendingKeyId || !flow) {
       throw new Error("OAuth retry is unavailable");
     }
     setError(null);
     let announcedAttemptId: string | null = null;
     try {
+      operation.assertCurrent();
       const response = await initiateOAuthAsync({
         providerId: catalogEntry.provider_config_id,
         scopeOverride: submittedScopes,
@@ -1598,6 +1604,12 @@ function OAuthStep({
       setAuthorizationUrl(response.authorization_url);
       return { nextNonce, url: response.authorization_url };
     } catch (retryError) {
+      if (isAccountAbort(retryError)) {
+        setAuthorizationUrl(null);
+        setPendingKeyId(null);
+        setError("The signed-in account may have changed. Review this connection and try again.");
+        throw retryError;
+      }
       if (announcedAttemptIdRef.current === announcedAttemptId) {
         abortAnnouncedAuthorization();
       }
@@ -1681,6 +1693,8 @@ function OAuthStep({
   }, [abortAnnouncedAuthorization]);
 
   async function handleConnect() {
+    const operation = captureAccountOperation();
+    operationRef.current = operation;
     const popup = launch === "popup" ? openOAuthPopup() : null;
     if (!catalogEntry.provider_config_id) {
       popup?.close();
@@ -1714,6 +1728,7 @@ function OAuthStep({
     // rejected by the backend allowlist for scopes the user never chose.
     let key: KeyInfo | null = null;
     try {
+      operation.assertCurrent();
       key = await ensureKey();
       if (generationRef.current !== generation) return;
       if (popup) {
@@ -1726,6 +1741,7 @@ function OAuthStep({
         onComplete(key.id);
         return;
       }
+      operation.assertCurrent();
       const response = await initiateOAuthAsync({
         providerId: catalogEntry.provider_config_id,
         ...(launch === "popup" ? {} : { redirectPath: `/keys/${key.id}` }),
@@ -1824,12 +1840,14 @@ function OAuthStep({
       setAuthorizationAttemptId(null);
       setPreviousAuthorizationAt(undefined);
       setAuthorizationUrl(null);
-      await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
+      await cleanupPendingAuthKey(operation, key, { protectExistingKey: reconnectMode });
       if (!reconnectMode) {
         onKeyCleared();
       }
       const message =
-        err instanceof ApiError ? err.message : "Failed to start OAuth flow";
+        isAccountAbort(err)
+          ? "The signed-in account may have changed. Review this connection and try again."
+          : err instanceof ApiError ? err.message : "Failed to start OAuth flow";
       setError(message);
     }
   }
@@ -1948,7 +1966,7 @@ function OAuthStep({
       )}
 
       {error && (
-        <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
+        <div role="alert" className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
           {translateUi(error)}
         </div>
       )}
@@ -2014,6 +2032,7 @@ function DeviceCodeStep({
   /** Additional normalized scopes requested by an assistant action. */
   readonly prefillScopes?: readonly string[];
 }) {
+  const operationRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   useUiTranslation();
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
@@ -2098,6 +2117,9 @@ function DeviceCodeStep({
       const orphan = reconnectMode ? null : createdKeyIdRef.current;
       if (orphan) {
         createdKeyIdRef.current = null;
+        const operation = operationRef.current;
+        if (!operation) return;
+        try { operation.assertCurrent(); } catch { return; }
         void api
           .delete<void>(
             `/keys/${encodeURIComponent(orphan)}?only_if_pending=true`,
@@ -2119,6 +2141,7 @@ function DeviceCodeStep({
   // intentionally exclude `createdKeyId` — we read the ref-mirrored value
   // first, so the callback stays stable across in-flight setState updates.
   const cleanupAndForgetKey = useCallback(async () => {
+    const operation = operationRef.current;
     const id = createdKeyIdRef.current;
     if (!id) return;
     createdKeyIdRef.current = null;
@@ -2128,8 +2151,9 @@ function DeviceCodeStep({
     if (!reconnectMode) {
       onKeyCleared();
     }
-    if (reconnectMode) return;
+    if (reconnectMode || !operation) return;
     try {
+      operation.assertCurrent();
       await api.delete<void>(
         `/keys/${encodeURIComponent(id)}?only_if_pending=true`,
       );
@@ -2180,7 +2204,24 @@ function DeviceCodeStep({
   // recursive calls through a ref that is synced to the current callback
   // after every render. This keeps the existing polling behavior identical
   // while satisfying the linter.
+  const interruptAttempt = useCallback(() => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    pollTimerRef.current = null;
+    countdownTimerRef.current = null;
+    abortAnnouncedAuthorization();
+    createdKeyIdRef.current = null;
+    setCreatedKeyId(null);
+    if (!reconnectMode) onKeyCleared();
+    setUserCode("");
+    setVerificationUri("");
+    setSecondsRemaining(0);
+    setErrorMessage("The signed-in account may have changed. Review this connection and try again.");
+    setFlowStep("error");
+  }, [abortAnnouncedAuthorization, onKeyCleared, reconnectMode]);
+
   type SchedulePoll = (
+    operation: ReturnType<typeof captureAccountOperation>,
     providerId: string,
     state: string,
     interval: number,
@@ -2188,12 +2229,15 @@ function DeviceCodeStep({
   const schedulePollRef = useRef<SchedulePoll | null>(null);
 
   const schedulePoll = useCallback<SchedulePoll>(
-    (providerId, state, interval) => {
+    (operation, providerId, state, interval) => {
       if (!isMountedRef.current) return;
 
       pollTimerRef.current = setTimeout(() => {
-        if (!isMountedRef.current) return;
-
+        if (!isMountedRef.current || operationRef.current !== operation) return;
+        try { operation.assertCurrent(); } catch (error) {
+          if (isAccountAbort(error)) { interruptAttempt(); return; }
+          throw error;
+        }
         pollMutation.mutate(
           { providerId, state },
           {
@@ -2202,14 +2246,14 @@ function DeviceCodeStep({
               switch (data.status) {
                 case "pending":
                   schedulePollRef.current?.(
-                    providerId,
+                    operation, providerId,
                     state,
                     data.interval ?? interval,
                   );
                   break;
                 case "slow_down":
                   schedulePollRef.current?.(
-                    providerId,
+                    operation, providerId,
                     state,
                     data.interval ?? interval + 5,
                   );
@@ -2236,9 +2280,10 @@ function DeviceCodeStep({
                   break;
               }
             },
-            onError: () => {
-              if (isMountedRef.current) {
-                schedulePollRef.current?.(providerId, state, interval);
+            onError: (error) => {
+              if (isMountedRef.current && operationRef.current === operation) {
+                if (isAccountAbort(error)) { interruptAttempt(); return; }
+                schedulePollRef.current?.(operation, providerId, state, interval);
               }
             },
           },
@@ -2250,7 +2295,7 @@ function DeviceCodeStep({
     // parent doesn't swap that prop. Listed here to satisfy
     // react-hooks/exhaustive-deps now that the poll-success switch invokes
     // it (NyxID#706).
-    [pollMutation, cleanupAndForgetKey],
+    [pollMutation, cleanupAndForgetKey, interruptAttempt],
   );
 
   // Keep the ref in sync with the latest `schedulePoll` identity so recursive
@@ -2260,6 +2305,8 @@ function DeviceCodeStep({
   }, [schedulePoll]);
 
   async function handleInitiate() {
+    const operation = captureAccountOperation();
+    operationRef.current = operation;
     if (!catalogEntry.provider_config_id) {
       setErrorMessage("Provider configuration not available");
       setFlowStep("error");
@@ -2269,6 +2316,7 @@ function DeviceCodeStep({
     setFlowStep("requesting");
     let key: KeyInfo | null = null;
     try {
+      operation.assertCurrent();
       key = await ensureKey();
       if (!isMountedRef.current) return;
       setCreatedKeyId(key.id);
@@ -2280,6 +2328,7 @@ function DeviceCodeStep({
         catalogEntry.supports_oauth_scopes === false
           ? undefined
           : selectedScopes;
+      operation.assertCurrent();
       const response = await initiateMutation.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         scopeOverride,
@@ -2302,12 +2351,13 @@ function DeviceCodeStep({
       setFlowStep("show_code");
 
       schedulePoll(
-        catalogEntry.provider_config_id,
+        operation, catalogEntry.provider_config_id,
         response.state,
         response.interval,
       );
     } catch (error) {
-      await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
+      if (isAccountAbort(error)) { interruptAttempt(); return; }
+      await cleanupPendingAuthKey(operation, key, { protectExistingKey: reconnectMode });
       if (!reconnectMode) {
         onKeyCleared();
       }
@@ -2464,8 +2514,8 @@ function DeviceCodeStep({
         />
         <div className="flex flex-col items-center gap-3 py-4">
           <AlertCircle className="h-8 w-8 text-destructive" />
-          <p className="text-14 text-destructive text-center">
-            {errorMessage}
+          <p role="alert" className="text-14 text-destructive text-center">
+            {translateUi(errorMessage)}
           </p>
         </div>
         <div className="flex justify-end gap-2">
@@ -2633,7 +2683,7 @@ function OAuthCredentialsStep({
       )}
 
       {error && (
-        <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
+        <div role="alert" className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
           {translateUi(error)}
         </div>
       )}
@@ -2991,13 +3041,16 @@ export function AddKeyDialog({
   ]);
 
   async function handlePlatformConnect() {
+    const operation = captureAccountOperation();
     if (!selectedEntry) return;
     try {
+      operation.assertCurrent();
       const key = await createKey.mutateAsync({ service_slug: selectedEntry.slug, label: form.label.trim() || selectedEntry.name,
         use_platform_key: true, ...(targetOrgId ? { target_org_id: targetOrgId } : {}) });
       setCreatedKey({ id: key.id, slug: key.slug, catalogSlug: selectedEntry.slug, serviceName: selectedEntry.name, completionMode: "credential" });
       setStep("verify");
-    } catch (error) { toast.error(translateErrorMessage(error instanceof Error ? error.message : "Failed to connect service")); }
+    } catch (error) {
+      if (isAccountAbort(error)) return; toast.error(translateErrorMessage(error instanceof Error ? error.message : "Failed to connect service")); }
   }
 
   function handleSelectCustom() {
@@ -3120,8 +3173,10 @@ export function AddKeyDialog({
   }
 
   async function ensureAuthKey(): Promise<KeyInfo> {
+    const operation = captureAccountOperation();
     if (reconnectKey) {
       if (reconnectKey.credential_missing) {
+        operation.assertCurrent();
         const repaired = await updateKey.mutateAsync({
           keyId: reconnectKey.id,
           auth_method:
@@ -3153,6 +3208,7 @@ export function AddKeyDialog({
       return authKey;
     }
 
+    operation.assertCurrent();
     const key = await createKey.mutateAsync(buildCatalogKeyParams());
     setAuthKey(key);
     return key;
@@ -3194,6 +3250,7 @@ export function AddKeyDialog({
   }
 
   function handleFormSubmit() {
+    const operation = captureAccountOperation();
     const specUrl = form.openapiSpecUrl.trim();
     const orgParam = targetOrgId ? { target_org_id: targetOrgId } : {};
     const accessParam =
@@ -3228,6 +3285,7 @@ export function AddKeyDialog({
           ...accessParam,
         };
 
+    operation.assertCurrent();
     createKey.mutate(params, {
       onSuccess: (key) => {
         // Wave-aha-1 A4: don't close + navigate immediately. Stash the new
@@ -3258,6 +3316,7 @@ export function AddKeyDialog({
   }
 
   function handleNodeSetupSubmit() {
+    const operation = captureAccountOperation();
     // Node routing: create the service directly. No OAuth/credentials needed --
     // the node agent handles auth locally via `nyxid node credentials setup`.
     const isSshCustom = !selectedEntry && form.serviceType === "ssh";
@@ -3302,6 +3361,7 @@ export function AddKeyDialog({
             ...accessParam,
           };
 
+    operation.assertCurrent();
     createKey.mutate(params, {
       onSuccess: (key) => {
         // Wave-aha-1 A4: stay in the dialog and run the inline verify

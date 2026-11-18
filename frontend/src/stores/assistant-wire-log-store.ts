@@ -1,8 +1,9 @@
 import { create } from "zustand";
+import { ownerPersistStorage, removeOwnerPersistedState } from "@/lib/owner-persist-storage";
+import { safePersistStorage } from "@/lib/safe-persist-storage";
 import {
   createJSONStorage,
   persist,
-  type StateStorage,
 } from "zustand/middleware";
 import {
   assistantUpstreamEnvelopeHeaderDecoderSchema,
@@ -39,6 +40,8 @@ export type AssistantWireLogResponseMeta = Omit<
 >;
 
 interface AssistantWireLogState {
+  readonly ownerUserId: string | null;
+  readonly bindAccount: (userId: string | null) => void;
   readonly featureEnabled: boolean;
   readonly captureEnabled: boolean;
   readonly showResponses: boolean;
@@ -101,6 +104,7 @@ const EMPTY_PERSISTED_WIRE_LOG: PersistedWireLogState = {
 };
 
 const EMPTY_WIRE_LOG = {
+  ownerUserId: null,
   featureEnabled: false,
   ...EMPTY_PERSISTED_WIRE_LOG,
   entries: [] as readonly AssistantWireLogExchange[],
@@ -225,10 +229,10 @@ function isQuotaExceeded(error: unknown): boolean {
   );
 }
 
-const quotaSafeStorage: StateStorage = {
-  getItem: (name) => localStorage.getItem(name),
-  removeItem: (name) => localStorage.removeItem(name),
-  setItem: (name, value) => {
+const quotaSafeStorage = {
+  getItem: safePersistStorage.getItem,
+  removeItem: safePersistStorage.removeItem,
+  setItem: (name: string, value: string) => {
     try {
       localStorage.setItem(name, value);
       return;
@@ -251,8 +255,9 @@ const quotaSafeStorage: StateStorage = {
 };
 
 function removeInvalidPersistedState(): void {
+  removeOwnerPersistedState(ASSISTANT_WIRE_LOG_STORAGE_KEY, getAssistantIdentityUserId());
   if (typeof localStorage !== "undefined") {
-    localStorage.removeItem(ASSISTANT_WIRE_LOG_STORAGE_KEY);
+    safePersistStorage.removeItem(ASSISTANT_WIRE_LOG_STORAGE_KEY);
   }
 }
 
@@ -277,6 +282,11 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
   persist(
     (set, get) => ({
       ...EMPTY_WIRE_LOG,
+      bindAccount: (userId) => {
+        if (get().ownerUserId !== userId) get().reset();
+        void useAssistantWireLogStore.persist.rehydrate();
+        if (get().ownerUserId !== userId) set({ ownerUserId: userId });
+      },
       setFeatureEnabled: (featureEnabled) => set({ featureEnabled }),
       setCaptureEnabled: (captureEnabled) => set({ captureEnabled }),
       setShowResponses: (showResponses) => set({ showResponses }),
@@ -400,17 +410,18 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
       },
       clear: () => set({ entries: [], totalBytes: 0, captureBytes: 0 }),
       reset: () => {
+        const owner = get().ownerUserId;
         set(EMPTY_WIRE_LOG);
-        removeInvalidPersistedState();
+        removeOwnerPersistedState(ASSISTANT_WIRE_LOG_STORAGE_KEY, owner);
       },
     }),
     {
       name: ASSISTANT_WIRE_LOG_STORAGE_KEY,
       version: 3,
-      storage: createJSONStorage(() => quotaSafeStorage),
+      storage: createJSONStorage(() => ownerPersistStorage("ownerUserId", quotaSafeStorage)),
       migrate: migrateWireLog,
-      partialize: ({ captureEnabled, showResponses, entries }) => ({
-        ownerUserId: getAssistantIdentityUserId(),
+      partialize: ({ ownerUserId, captureEnabled, showResponses, entries }) => ({
+        ownerUserId,
         captureEnabled,
         showResponses,
         entries: entries.map(persistedExchange),
@@ -425,6 +436,7 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
         return {
           ...current,
           ...parsed.data,
+          ownerUserId: parsed.data.ownerUserId ?? null,
           entries,
           totalBytes: persistedBytes(entries),
           captureBytes: 0,

@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   externalKeyRotateActionParamsSchema,
@@ -207,6 +208,7 @@ export function AssistantExternalKeyRotateDialog({
   }
 
   async function rotateKey() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     if (!credential.trim()) {
       setError("Enter the replacement credential.");
@@ -220,14 +222,14 @@ export function AssistantExternalKeyRotateDialog({
       const before = await readEvidence(expected.externalKeyId);
       beforeUpdatedAtRef.current = before.updated_at;
       const response = assistantExternalKeyRotateResponseSchema.parse(
-        await api.post<unknown>(
+        await operation.dispatch(() => api.post<unknown>(
           "/assistant/actions/endpoints/external-key-rotate",
           {
             actionRequestId,
             externalKeyId: expected.externalKeyId,
             credential,
           },
-        ),
+        )),
       );
       setResult(response);
       setCredential("");

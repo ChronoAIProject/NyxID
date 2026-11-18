@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { nodeCredentialActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -80,6 +81,7 @@ export function AssistantPendingCredentialCreateDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -110,7 +112,7 @@ export function AssistantPendingCredentialCreateDialog({
           ? "/assistant/actions/nodes/inject-credential"
           : "/assistant/actions/nodes/pending-credential-push";
       const response = assistantPendingCredentialEffectResponseSchema.parse(
-        await api.post<unknown>(path, {
+        await operation.dispatch(() => api.post<unknown>(path, {
           actionRequestId,
           nodeId: reviewed.nodeId,
           serviceSlug: reviewed.serviceSlug,
@@ -118,7 +120,7 @@ export function AssistantPendingCredentialCreateDialog({
           fieldName: reviewed.fieldName,
           targetUrl: reviewed.targetUrl,
           label: reviewed.label,
-        }),
+        })),
       );
       const evidence = await readPendingCredentialAuthorization(
         reviewed.nodeId,

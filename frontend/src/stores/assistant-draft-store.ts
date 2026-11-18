@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { ownerPersistStorage, removeOwnerPersistedState } from "@/lib/owner-persist-storage";
+import { createJSONStorage, persist } from "zustand/middleware";
 import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 
 const STORAGE_KEY = "nyxid.assistant_drafts";
@@ -20,6 +21,7 @@ interface AssistantDraftState {
     existingConversationIds: readonly string[],
   ) => void;
   readonly clear: () => void;
+  readonly bindAccount: (userId: string | null) => void;
 }
 
 const EMPTY_DRAFTS = {
@@ -46,7 +48,8 @@ function newestDrafts(
 
 // Drafts are plaintext localStorage with last-writer-wins cross-tab behavior,
 // matching the trust and synchronization model of existing local preferences.
-export const useAssistantDraftStore = create<AssistantDraftState>()(
+export function createAssistantDraftStore() {
+  const store = create<AssistantDraftState>()(
   persist(
     (set, get) => ({
       ...EMPTY_DRAFTS,
@@ -88,11 +91,14 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
           ),
         }));
       },
+      bindAccount: (userId) => {
+        if (get().ownerUserId !== userId) get().clear();
+        void store.persist.rehydrate();
+      },
       clear: () => {
+        const owner = get().ownerUserId;
         set(EMPTY_DRAFTS);
-        if (typeof localStorage !== "undefined") {
-          localStorage.removeItem(STORAGE_KEY);
-        }
+        removeOwnerPersistedState(STORAGE_KEY, owner);
       },
     }),
     {
@@ -102,6 +108,7 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
         if (owner && value?.ownerUserId !== owner) return current;
         return { ...current, ...value };
       },
+      storage: createJSONStorage(() => ownerPersistStorage()),
       name: STORAGE_KEY,
       version: 1,
       // Payloads written while the retired Ask/Full draft preference existed
@@ -110,3 +117,7 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
     },
   ),
 );
+  return store;
+}
+
+export const useAssistantDraftStore = createAssistantDraftStore();

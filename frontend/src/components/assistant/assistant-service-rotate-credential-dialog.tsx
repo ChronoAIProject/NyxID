@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   serviceRotateCredentialActionParamsSchema,
@@ -216,6 +217,7 @@ export function AssistantServiceRotateCredentialDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId) return;
     if (!credential.trim()) {
       setError("Enter the replacement credential.");
@@ -235,14 +237,14 @@ export function AssistantServiceRotateCredentialDialog({
       if (!before.api_key_id) {
         throw new Error("NyxID service evidence was missing the predecessor credential identity.");
       }
-      const raw = await api.post<unknown>(
+      const raw = await operation.dispatch(() => api.post<unknown>(
         "/assistant/actions/services/rotate-credential",
         {
           actionRequestId,
           userServiceId: expected.userServiceId,
           credential: credential.trim(),
         },
-      );
+      ));
       assertSecretFreeReadBack(raw);
       const response = assistantServiceRotateResponseSchema.parse(raw);
       setCredential("");

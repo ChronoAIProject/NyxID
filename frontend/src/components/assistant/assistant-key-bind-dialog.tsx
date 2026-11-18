@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   keyBindCredentialActionParamsSchema,
@@ -164,6 +165,7 @@ export function AssistantKeyBindDialog({
   }
 
   async function bindCredential() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultKeyId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -171,12 +173,12 @@ export function AssistantKeyBindDialog({
     try {
       const expected = keyBindCredentialActionParamsSchema.parse(params);
       const response = assistantKeyBindResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/keys/bind-credential", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/keys/bind-credential", {
           actionRequestId,
           keyId: expected.keyId,
           userServiceId: expected.userServiceId,
           externalKeyId: expected.externalKeyId,
-        }),
+        })),
       );
       setResultKeyId(response.resource.keyId);
       setReplayed(response.replayed);

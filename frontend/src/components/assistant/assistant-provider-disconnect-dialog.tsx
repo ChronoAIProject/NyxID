@@ -20,6 +20,7 @@ import {
   errorMessage,
 } from "@/components/assistant/assistant-action-dialog-utils";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   providerDisconnectActionParamsSchema,
@@ -123,6 +124,7 @@ export function AssistantProviderDisconnectDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -138,7 +140,7 @@ export function AssistantProviderDisconnectDialog({
         expectedVersion = before.state_version;
         expectedVersionRef.current = expectedVersion;
       }
-      const rawResponse = await api.post<unknown>(
+      const rawResponse = await operation.dispatch(() => api.post<unknown>(
         "/assistant/actions/providers/provider-disconnect",
         {
           actionRequestId,
@@ -146,7 +148,7 @@ export function AssistantProviderDisconnectDialog({
           expectedStateVersion: expectedVersion,
           confirmed,
         },
-      );
+      ));
       assertSecretFreeReadBack(rawResponse);
       const response = providerEffectSchema.parse(rawResponse);
       setResultId(response.resource.providerId);

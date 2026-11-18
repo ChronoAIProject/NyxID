@@ -1,13 +1,15 @@
 import { ApiError } from "@/lib/api-client";
+import { AccountChangedError, captureAccountOperation } from "@/lib/assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 
 /** A preparing response leaves the account usable; retry only that response. */
-export async function withErasurePreparation<T>(request: () => Promise<T>): Promise<T> {
+export async function withErasurePreparation<T>(request: () => Promise<T>, operation = captureAccountOperation()): Promise<T> {
   const owner = useAuthStore.getState().user?.id;
   for (let attempt = 0; ; attempt += 1) {
     if (useAuthStore.getState().user?.id !== owner) {
-      throw new Error("The signed-in account changed. Review account deletion again.");
+      throw new AccountChangedError("The signed-in account changed. Review account deletion again.");
     }
+    operation.assertCurrent();
     try {
       return await request();
     } catch (error) {

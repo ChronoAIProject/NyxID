@@ -1,5 +1,5 @@
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
-import { transitionAssistantIdentity } from "@/lib/assistant/identity";
+import { invalidateAccountEvidence, settleAccountEvidence, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -46,6 +46,7 @@ beforeEach(() => {
   toastSuccess.mockReset();
   toastError.mockReset();
   useAuthStore.setState({ user: { id: "owner", email: "reader@example.com", mfa_enabled: true, profile_config: { security: { skip_mfa_for_approved_sign_ins: false }, onboarding: { ai_services_completed_at: null } } } as User });
+  transitionAssistantIdentity("owner");
   unexpectedRequests.length = 0;
   transport.mockReset().mockImplementation(async (url, options) => {
     const headers = { "Content-Type": "application/json" };
@@ -55,7 +56,7 @@ beforeEach(() => {
     if (url === "/api/v1/onboarding/bindings" && options?.method === "GET") {
       return new Response("[]", { headers });
     }
-    if (url === "/api/v1/users/me" && options?.method === "DELETE") {
+    if (url === "/api/v1/users/me?expected_user_id=owner" && options?.method === "DELETE") {
       return new Response(JSON.stringify({
         error: "validation_error", error_code: 1000, message: "Fixture denial after request capture",
       }), { status: 400, headers });
@@ -580,6 +581,67 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(within(dialog).getByRole("button", { name: "Permanently Delete" })).toBeDisabled();
     });
 
+    it("reports accepted deletion when evidence arrives before the result handler", async () => {
+      const logout = vi.fn().mockResolvedValue(undefined);
+      useAuthStore.setState({ logout });
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (String(url) === "/api/v1/users/me?expected_user_id=owner" && options?.method === "DELETE") {
+          const response = Response.json({ status: "accepted" });
+          const read = response.json.bind(response);
+          response.json = async () => { const result = await read(); invalidateAccountEvidence(); return result; };
+          return response;
+        }
+        return original(url, options);
+      });
+      try {
+        await open(route, "security");
+        await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
+        const dialog = screen.getByRole("dialog", { name: "Delete Account" });
+        await userEvent.type(within(dialog).getByLabelText("Email"), "reader@example.com");
+        await userEvent.click(within(dialog).getByRole("button", { name: "Permanently Delete" }));
+        await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Account deletion accepted. Cleanup continues until verified."));
+        expect(logout).toHaveBeenCalledOnce();
+        expect(toastError).not.toHaveBeenCalled();
+        expect(screen.queryByText("The signed-in account may have changed. Review account deletion and enter your email again.")).not.toBeInTheDocument();
+      } finally { settleAccountEvidence(); }
+    });
+
+    it("requires a fresh email confirmation when evidence interrupts deletion backoff", async () => {
+      let attempts = 0;
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (String(url) === "/api/v1/users/me?expected_user_id=owner" && options?.method === "DELETE") {
+          attempts += 1;
+          return Response.json({ error: "erasure_preparing", error_code: 12801, message: "Preparing" }, { status: 409 });
+        }
+        return original(url, options);
+      });
+      await open(route, "security");
+      await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
+      const dialog = screen.getByRole("dialog", { name: "Delete Account" });
+      const email = within(dialog).getByLabelText("Email");
+      const confirm = within(dialog).getByRole("button", { name: "Permanently Delete" });
+      await userEvent.type(email, "reader@example.com");
+      await userEvent.click(confirm);
+      await waitFor(() => expect(attempts).toBe(1));
+      act(() => invalidateAccountEvidence());
+      try {
+        expect(await within(dialog).findByRole("alert")).toHaveTextContent("The signed-in account may have changed. Review account deletion and enter your email again.");
+        expect(email).toHaveValue("");
+        expect(confirm).toBeDisabled();
+        expect(attempts).toBe(1);
+        expect(toastError).not.toHaveBeenCalled();
+        // The hint was stale: A is confirmed, but only a new confirmation can retry.
+        settleAccountEvidence();
+        transport.mockImplementation(original);
+        await userEvent.type(email, "reader@example.com");
+        await userEvent.click(confirm);
+        await waitFor(() => expect(toastError).toHaveBeenCalledWith("Fixture denial after request capture"));
+        expect(transport.mock.calls.filter(([, options]) => options?.method === "DELETE")).toHaveLength(2);
+      } finally { settleAccountEvidence(); }
+    });
+
     it("binds the displayed deletion policy only after the owner types the account email", async () => {
       await open(route, "security");
       const bindingsRequest = ["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })];
@@ -599,7 +661,7 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.click(confirm);
       await waitFor(() => expect(transport.mock.calls).toEqual([
         bindingsRequest,
-        ["/api/v1/users/me", expect.objectContaining({
+        ["/api/v1/users/me?expected_user_id=owner", expect.objectContaining({
           method: "DELETE",
           credentials: "include",
           headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data-provider-revocation-v2" }),

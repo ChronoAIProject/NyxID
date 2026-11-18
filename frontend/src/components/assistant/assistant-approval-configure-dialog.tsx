@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { actionControlIdentitySchema } from "@/schemas/assistant-actions";
 import { assertSecretFreeReadBack, errorMessage, isNewerTimestamp } from "./assistant-action-dialog-utils";
 
@@ -27,13 +28,14 @@ export function AssistantApprovalConfigureDialog({ open, onOpenChange, actionReq
   const [error, setError] = useState<string | null>(null);
   function close() { submittingRef.current = false; setSubmitting(false); setResultServiceId(null); setError(null); setApprovalRequired(true); setApprovalMode("per_request"); setDefaultEffect(""); onOpenChange(false); }
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultServiceId) return;
     submittingRef.current = true; setSubmitting(true); setError(null);
     try {
       const expected = paramsSchema.parse(params);
       let before: z.infer<typeof evidenceSchema> | null = null;
       try { const value = await api.get<unknown>(`/approvals/service-configs/${encodeURIComponent(expected.serviceId)}/authorization`); assertSecretFreeReadBack(value); before = evidenceSchema.parse(value); } catch (caught) { if (!(caught instanceof Error && "status" in caught && (caught as { status?: number }).status === 404)) throw caught; }
-      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/approval/configure", { actionRequestId, serviceId: expected.serviceId, approvalRequired, approvalMode, rules: [], defaultEffect: defaultEffect || null }));
+      const response = responseSchema.parse(await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/approval/configure", { actionRequestId, serviceId: expected.serviceId, approvalRequired, approvalMode, rules: [], defaultEffect: defaultEffect || null })));
       const value = await api.get<unknown>(`/approvals/service-configs/${encodeURIComponent(expected.serviceId)}/authorization`); assertSecretFreeReadBack(value); const after = evidenceSchema.parse(value);
       if (after.service_id !== response.resource.serviceId || after.approval_required !== approvalRequired || after.approval_mode !== approvalMode || (before && !isNewerTimestamp(before.updated_at, after.updated_at))) throw new Error("NyxID could not verify the approval configuration.");
       setResultServiceId(response.resource.serviceId);

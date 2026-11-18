@@ -20,6 +20,7 @@ import {
   errorMessage,
 } from "@/components/assistant/assistant-action-dialog-utils";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   connectionRevokeActionParamsSchema,
@@ -120,6 +121,7 @@ export function AssistantConnectionRevokeDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -135,7 +137,7 @@ export function AssistantConnectionRevokeDialog({
         expectedVersion = before.state_version;
         expectedVersionRef.current = expectedVersion;
       }
-      const rawResponse = await api.post<unknown>(
+      const rawResponse = await operation.dispatch(() => api.post<unknown>(
         "/assistant/actions/providers/connection-revoke",
         {
           actionRequestId,
@@ -143,7 +145,7 @@ export function AssistantConnectionRevokeDialog({
           expectedStateVersion: expectedVersion,
           confirmed,
         },
-      );
+      ));
       assertSecretFreeReadBack(rawResponse);
       const response = connectionEffectSchema.parse(rawResponse);
       setResultId(response.resource.serviceId);

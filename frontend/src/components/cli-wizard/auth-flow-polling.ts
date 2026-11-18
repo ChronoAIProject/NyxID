@@ -1,3 +1,4 @@
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError } from "@/lib/api-client";
 
 export function isTerminalAuthFailureStatus(
@@ -64,6 +65,7 @@ export async function pollOAuthKeyUntilActive({
   maxConsecutiveErrors = MAX_CONSECUTIVE_POLL_ERRORS,
   isComplete = (key) => key.status === "active",
 }: PollOAuthKeyUntilActiveOptions): Promise<void> {
+  const operation = captureAccountOperation();
   const deadline = nowMs() + timeoutMs;
   let consecutiveErrors = 0;
   while (nowMs() < deadline) {
@@ -71,10 +73,11 @@ export async function pollOAuthKeyUntilActive({
     await sleepMs(intervalMs);
     if (isCancelled()) return;
     try {
+      operation.assertCurrent();
       const key = await getKey(keyId);
       consecutiveErrors = 0;
       if (isComplete(key)) {
-        await completeWithKey(keyId);
+        await operation.dispatch(() => completeWithKey(keyId));
         return;
       }
       // Terminal failure statuses let provider denials and callback errors
@@ -86,6 +89,7 @@ export async function pollOAuthKeyUntilActive({
         return;
       }
     } catch (e) {
+      if (isAccountAbort(e)) return;
       // 404 means the placeholder is gone (abandoned by another tab,
       // hard-deleted, or never made it past the create response). Treat
       // it as terminal immediately so the wizard exits with a clear

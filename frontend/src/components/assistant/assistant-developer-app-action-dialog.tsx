@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
@@ -112,6 +113,7 @@ export function AssistantDeveloperAppActionDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (pendingRef.current || result) return;
     if (destructive && !confirmed) {
       setError("Confirm this destructive change to continue.");
@@ -170,10 +172,10 @@ export function AssistantDeveloperAppActionDialog({
             };
         }
       })();
-      const raw = await api.post<unknown>(
+      const raw = await operation.dispatch(() => api.post<unknown>(
         `/assistant/actions/org/developer-app/${action.replaceAll("_", "-")}`,
         payload,
-      );
+      ));
       const response = responseSchema.parse(raw);
       const id = response.resource.clientId;
       const after = await readEvidence(id);

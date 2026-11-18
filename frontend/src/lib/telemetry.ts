@@ -2,6 +2,7 @@
  * No vendor SDK, replay, autocapture, anonymous identity or persistent event queue.
  */
 import { apiClient } from './api-client';
+import { captureAccountOperation } from './assistant/identity';
 import { useAuthStore } from '@/stores/auth-store';
 import type { UiEvent } from './telemetry-schema';
 import { useConsentStore } from '@/stores/consent-store';
@@ -89,10 +90,12 @@ export function capture(event: UiEvent): Promise<void> {
   if (!isTelemetryActive() || admissions >= MAX_ADMISSIONS) return Promise.resolve();
   const accountId = actorId!;
   const epoch = generation;
+  const operation = captureAccountOperation();
   const deviceRevision = useConsentStore.getState().revision;
   admissions++;
   return (async () => {
     const guard = () => {
+      operation.assertCurrent();
       if (generation !== epoch || useConsentStore.getState().revision !== deviceRevision || !isTelemetryActive() || actorId !== accountId
           || useAuthStore.getState().user?.id !== accountId) throw new Error('Analytics authority changed');
     };

@@ -19,7 +19,7 @@ it("restores only minimise preferences for the same owner", async () => {
   useCmaSessionStore.getState().setMinimised("owner", key, true);
   await useCmaSessionStore.persist.rehydrate();
   expect(useCmaSessionStore.getState().minimised[key]).toBe(true);
-  expect(JSON.parse(localStorage.getItem("nyxid.cma-session")!).state).toEqual({
+  expect(JSON.parse(localStorage.getItem("nyxid.cma-session:owner")!).state).toEqual({
     ownerId: "owner",
     minimised: { [key]: true },
     pinned: {},
@@ -71,9 +71,8 @@ it("discards legacy manual pins during migration", async () => {
     ownerId: null,
     minimised: {},
   });
-  expect(
-    JSON.parse(localStorage.getItem("nyxid.cma-session")!).state,
-  ).not.toHaveProperty("pin");
+  expect(localStorage.getItem("nyxid.cma-session")).toBeNull();
+  expect(localStorage.getItem("nyxid.cma-session:owner") ?? "").not.toContain('"pin"');
 });
 
 it("rejects malformed preferences and bounds retained session identities", async () => {

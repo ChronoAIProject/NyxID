@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { nodeTransferActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -65,6 +66,7 @@ export function AssistantNodeTransferDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -82,12 +84,12 @@ export function AssistantNodeTransferDialog({
         throw new Error("This node already belongs to the requested owner.");
       }
       const response = assistantNodeEffectResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/nodes/transfer", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/nodes/transfer", {
           actionRequestId,
           nodeId: expected.nodeId,
           newOwnerUserId: expected.newOwnerUserId,
           expectedStateVersion: before.state_version,
-        }),
+        })),
       );
       if (response.resource.nodeId !== expected.nodeId) {
         throw new Error("NyxID returned a different node identity.");

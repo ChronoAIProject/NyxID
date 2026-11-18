@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   serviceRouteActionParamsSchema,
@@ -184,6 +185,7 @@ export function AssistantServiceRouteDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -198,11 +200,11 @@ export function AssistantServiceRouteDialog({
         throw new Error("NyxID service evidence was missing its state version.");
       }
       const response = assistantServiceRouteResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/services/route", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/services/route", {
           actionRequestId,
           userServiceId: expected.userServiceId,
           ...(expected.viaNodeId ? { viaNodeId: expected.viaNodeId } : {}),
-        }),
+        })),
       );
       setResultId(response.resource.userServiceId);
       const nextVersion =

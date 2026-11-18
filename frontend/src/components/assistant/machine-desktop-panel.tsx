@@ -1,3 +1,4 @@
+import { accountResourcePreferenceKey } from "@/lib/account-resource-preferences";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
@@ -91,7 +92,7 @@ export function MachineDesktopPanel({
 }) {
   useUiTranslation();
   const collapseKey = conversationId && !pane
-    ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`
+    ? accountResourcePreferenceKey(`nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`)
     : null;
   const [storedCollapsed, setCollapsed] = useState(() => {
     try {

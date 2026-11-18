@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::Body,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, header},
     response::Response,
 };
@@ -978,6 +978,12 @@ pub async fn update_me(
     }))
 }
 
+/// Optional confirmation fence; older callers may omit it.
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteMeQuery {
+    expected_user_id: Option<String>,
+}
+
 /// DELETE /api/v1/users/me
 ///
 /// Permanently delete the currently authenticated user and related credentials/sessions.
@@ -986,15 +992,24 @@ pub async fn delete_me(
     auth_user: AuthUser,
     tele: TelemetryContext,
     headers: HeaderMap,
+    Query(query): Query<DeleteMeQuery>,
 ) -> AppResult<Json<DeleteAccountResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
+    let user_id = auth_user.user_id.to_string();
+    if query
+        .expected_user_id
+        .as_ref()
+        .is_some_and(|expected| expected != &user_id)
+    {
+        return Err(AppError::ValidationError(
+            "expected_user_id does not match the signed-in account".into(),
+        ));
+    }
     let deletion_policy = headers
         .get(admin_user_service::ACCOUNT_DELETION_POLICY_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     admin_user_service::validate_account_deletion_policy(deletion_policy)?;
-    let user_id = auth_user.user_id.to_string();
-
     let job = crate::services::personal_erasure_service::accept(
         &state.db,
         &user_id,
@@ -1015,6 +1030,112 @@ mod tests {
     use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn delete_me_expected_owner_fence() {
+        // Dedicated throwaway test database: never an HTTP destructive request.
+        let db = connect_test_database("delete_me_expected_owner")
+            .await
+            .unwrap();
+        crate::services::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for mode in ["mismatch", "match", "absent"] {
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                admin_user_service::ACCOUNT_DELETION_POLICY_HEADER,
+                admin_user_service::ACCOUNT_DELETION_POLICY_VERSION
+                    .parse()
+                    .unwrap(),
+            );
+            let query = if mode == "mismatch" {
+                format!("expected_user_id={}", Uuid::new_v4())
+            } else if mode == "match" {
+                format!("expected_user_id={owner}&future_parameter=ignored")
+            } else {
+                "future_parameter=ignored".into()
+            };
+            let uri: axum::http::Uri = format!("/users/me?{query}").parse().unwrap();
+            let mut accepted = false;
+            for _ in 0..64 {
+                let result = delete_me(
+                    State(state.clone()),
+                    test_auth_user(&owner),
+                    TelemetryContext::default(),
+                    headers.clone(),
+                    Query::try_from_uri(&uri).unwrap(),
+                )
+                .await;
+                if mode == "mismatch" {
+                    assert!(matches!(result, Err(AppError::ValidationError(ref message))
+                        if message == "expected_user_id does not match the signed-in account"));
+                    for collection in [
+                        "personal_erasure_jobs",
+                        "personal_erasure_preparations",
+                        "personal_erasure_revocations",
+                    ] {
+                        assert_eq!(
+                            db.collection::<bson::Document>(collection)
+                                .count_documents(doc! {})
+                                .await
+                                .unwrap(),
+                            0
+                        );
+                    }
+                    assert!(
+                        db.collection::<User>(USERS)
+                            .find_one(doc! {"_id": &owner})
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .is_active
+                    );
+                    break;
+                }
+                match result {
+                    Ok(Json(response)) => {
+                        let job = db
+                            .collection::<bson::Document>("personal_erasure_jobs")
+                            .find_one(doc! { "_id": &response.job_id })
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(job.get_str("user_id").unwrap(), owner);
+                        accepted = true;
+                        break;
+                    }
+                    Err(AppError::ErasurePreparing) => {
+                        assert!(
+                            crate::services::personal_erasure_service::prepare_one_for_test(
+                                &db,
+                                &crate::test_utils::test_encryption_keys()
+                            )
+                            .await
+                            .unwrap()
+                        );
+                    }
+                    Err(error) => panic!("unexpected fixture acceptance error: {error}"),
+                }
+            }
+            if mode != "mismatch" {
+                assert!(accepted, "fixture preparation must complete");
+            }
+            // Keep each scenario independent, including the no-job assertion.
+            for name in db.list_collection_names().await.unwrap() {
+                db.collection::<bson::Document>(&name)
+                    .delete_many(doc! {})
+                    .await
+                    .unwrap();
+            }
+        }
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn profile_reports_stored_password_independently_of_social_provider() {

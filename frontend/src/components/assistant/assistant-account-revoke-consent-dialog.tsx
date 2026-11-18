@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { actionControlIdentitySchema } from "@/schemas/assistant-actions";
 import { assertSecretFreeReadBack, errorMessage, isNotFound } from "./assistant-action-dialog-utils";
 
@@ -33,6 +34,7 @@ export function AssistantAccountRevokeConsentDialog({
   const [error, setError] = useState<string | null>(null);
   function close() { submittingRef.current = false; setSubmitting(false); setConfirmed(false); setVerifiedUserId(null); setError(null); onOpenChange(false); }
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || verifiedUserId) return;
     if (!confirmed) { setError("Confirm the consent revocation to continue."); return; }
     submittingRef.current = true; setSubmitting(true); setError(null);
@@ -42,7 +44,7 @@ export function AssistantAccountRevokeConsentDialog({
         `/users/me/consents/${encodeURIComponent(expected.clientId)}/authorization`,
       );
       assertSecretFreeReadBack(before);
-      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/revoke-consent", { actionRequestId, clientId: expected.clientId, confirmed }));
+      const response = responseSchema.parse(await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/account/revoke-consent", { actionRequestId, clientId: expected.clientId, confirmed })));
       try {
         const evidence = await api.get<unknown>(`/users/me/consents/${encodeURIComponent(expected.clientId)}/authorization`);
         assertSecretFreeReadBack(evidence);

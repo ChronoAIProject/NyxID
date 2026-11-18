@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   endpointDeleteActionParamsSchema,
@@ -102,6 +103,7 @@ export function AssistantEndpointDeleteDialog({
   }
 
   async function deleteEndpoint() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -109,10 +111,10 @@ export function AssistantEndpointDeleteDialog({
     try {
       const expected = endpointDeleteActionParamsSchema.parse(params);
       const response = assistantEndpointDeleteResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/endpoints/delete", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/endpoints/delete", {
           actionRequestId,
           endpointId: expected.endpointId,
-        }),
+        })),
       );
       setResult(response);
       await verifyAbsence(response.resource.endpointId);

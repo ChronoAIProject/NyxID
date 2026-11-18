@@ -1,3 +1,4 @@
+import { captureAccountOperation, isAccountAbort } from "./assistant/identity";
 import { apiUrl } from "./api-client";
 import {
   AudioActivityMeter,
@@ -90,6 +91,7 @@ export class AssistantDictationClient {
     preferences?: VoicePreferences,
     deviceId?: string,
   ) {
+    const operation = captureAccountOperation();
     let microphoneReady = false;
     try {
       this.callbacks.state("requesting");
@@ -108,6 +110,7 @@ export class AssistantDictationClient {
       this.meter.watch(stream, "input");
       microphoneReady = true;
       this.callbacks.state("connecting");
+      operation.assertCurrent();
       const prepared =
         typeof target === "string"
           ? { thread: target, preferences: preferences! }
@@ -119,6 +122,7 @@ export class AssistantDictationClient {
         location.href,
       );
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      operation.assertCurrent();
       const socket = new WebSocket(url);
       this.socket = socket;
       this.timeout = setTimeout(
@@ -247,6 +251,7 @@ export class AssistantDictationClient {
       socket.onerror = () => {};
 
     } catch (error) {
+      if (isAccountAbort(error)) { this.dispose(); this.callbacks.state("review"); return; }
       if (this.finishing || this.closed) return;
       this.fail(
         microphoneReady

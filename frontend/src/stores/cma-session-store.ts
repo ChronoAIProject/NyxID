@@ -1,5 +1,7 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { safePersistStorage } from "@/lib/safe-persist-storage";
+import { ownerPersistStorage, removeOwnerPersistedState } from "@/lib/owner-persist-storage";
+import { createJSONStorage, persist } from "zustand/middleware";
 import {
   cmaSessionKeySchema,
   cmaSessionPreferencesSchema,
@@ -24,7 +26,7 @@ interface CmaSessionStore {
 
 export const useCmaSessionStore = create<CmaSessionStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       ownerId: null,
       minimised: {},
       pinned: {},
@@ -62,9 +64,14 @@ export const useCmaSessionStore = create<CmaSessionStore>()(
           ]),
         }));
       },
-      clear: () => set({ ownerId: null, minimised: {}, pinned: {} }),
+      clear: () => {
+        const owner = get().ownerId;
+        set({ ownerId: null, minimised: {}, pinned: {} });
+        removeOwnerPersistedState("nyxid.cma-session", owner);
+      },
     }),
     {
+      storage: createJSONStorage(() => ownerPersistStorage("ownerId")),
       name: "nyxid.cma-session",
       version: 3,
       partialize: ({ ownerId, minimised, pinned }) => ({
@@ -74,6 +81,7 @@ export const useCmaSessionStore = create<CmaSessionStore>()(
       }),
       // Version-1 pins contain unverified inventory metadata and are discarded.
       migrate: (value, version) => {
+        if (version < 2) safePersistStorage.removeItem("nyxid.cma-session");
         const old = value as { ownerId?: unknown; minimised?: unknown } | null;
         const minimised = cmaSessionPreferencesSchema.safeParse(old?.minimised);
         return version === 2
@@ -119,4 +127,5 @@ export const useCmaSessionStore = create<CmaSessionStore>()(
 subscribeAssistantIdentity((next, previous) => {
   const { ownerId, clear } = useCmaSessionStore.getState();
   if (previous !== null || (ownerId !== null && ownerId !== next)) clear();
+  void useCmaSessionStore.persist.rehydrate();
 });

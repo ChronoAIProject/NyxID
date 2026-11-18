@@ -1,3 +1,4 @@
+import { isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError } from "@/lib/api-client";
 
 const SECRET_VALUE =
@@ -57,6 +58,7 @@ export function assertNoSensitiveActionParams(value: unknown): void {
 }
 
 export function errorMessage(caught: unknown, fallback: string): string {
+  if (isAccountAbort(caught)) return "";
   if (caught instanceof ApiError) return caught.message;
   if (caught instanceof Error && caught.message.trim()) return caught.message;
   return fallback;

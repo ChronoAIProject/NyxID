@@ -293,6 +293,7 @@ async function assistantHttpRequest(
       ...options.headers,
     },
   });
+  options.accountRequest?.assertCanDispatch(method);
   const mocked = await withNetworkError(
     () => mockResponse(endpoint, init),
     options.signal,
@@ -300,6 +301,7 @@ async function assistantHttpRequest(
   );
   // Account changes are authority failures, not transport failures.
   options.authorityGuard?.();
+  if (!mocked) options.accountRequest?.assertCanDispatch(method);
   const response = mocked ?? (await withNetworkError(
     () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
     options.signal,

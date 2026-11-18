@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
@@ -187,6 +188,7 @@ export function AssistantOrgActionDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (pendingRef.current || resultId) return;
     if (destructive && !confirmed) {
       setError("Confirm this destructive change to continue.");
@@ -287,10 +289,10 @@ export function AssistantOrgActionDialog({
             return { actionRequestId, orgId };
         }
       })();
-      const raw = await api.post<unknown>(
+      const raw = await operation.dispatch(() => api.post<unknown>(
         `/assistant/actions/org/org/${action.replaceAll("_", "-")}`,
         payload,
-      );
+      ));
       const response = responseSchema.parse(raw);
       const id = response.resource.orgId;
       if (action === "delete") {

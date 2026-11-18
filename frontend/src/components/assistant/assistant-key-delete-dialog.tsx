@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   keyDeleteActionParamsSchema,
@@ -166,6 +167,7 @@ export function AssistantKeyDeleteDialog({
   }
 
   async function deleteKey() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultKeyId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -174,11 +176,11 @@ export function AssistantKeyDeleteDialog({
       const expected = keyDeleteActionParamsSchema.parse(params);
       const before = await readLiveEvidence(expected.keyId);
       const response = assistantKeyDeleteResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/keys/delete", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/keys/delete", {
           actionRequestId,
           keyId: expected.keyId,
           expectedStateVersion: before.state_version,
-        }),
+        })),
       );
       setResultKeyId(response.resource.keyId);
       setReplayed(response.replayed);

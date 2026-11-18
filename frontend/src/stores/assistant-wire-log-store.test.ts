@@ -1,3 +1,4 @@
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import backendLadderFixtures from "./__fixtures__/assistant-upstream-envelope-ladder.json";
 import {
@@ -43,6 +44,7 @@ function envelope(index: number): AssistantUpstreamEnvelope {
 
 function resetStore(captureEnabled = false, featureEnabled = captureEnabled) {
   useAssistantWireLogStore.setState({
+    ownerUserId: "wire-owner",
     featureEnabled,
     captureEnabled,
     showResponses: true,
@@ -122,6 +124,7 @@ describe("useAssistantWireLogStore", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     localStorage.clear();
+    transitionAssistantIdentity("wire-owner");
     resetStore(true);
   });
 
@@ -161,10 +164,11 @@ describe("useAssistantWireLogStore", () => {
       .getState()
       .attachWireLines(id!, [{ text: "data: private", ending: "\n" }], 14);
     useAssistantWireLogStore.getState().finalizeCapture(id!, "complete");
-    const persisted = localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY);
+    const persisted = localStorage.getItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
     expect(persisted).not.toContain("data: private");
     resetStore();
-    localStorage.setItem(ASSISTANT_WIRE_LOG_STORAGE_KEY, persisted!);
+    localStorage.removeItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
+    localStorage.setItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`, persisted!);
 
     await useAssistantWireLogStore.persist.rehydrate();
 
@@ -178,6 +182,7 @@ describe("useAssistantWireLogStore", () => {
 
   it("explicitly migrates a real v2 payload to an empty v3 state", async () => {
     resetStore();
+    localStorage.removeItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
     localStorage.setItem(
       ASSISTANT_WIRE_LOG_STORAGE_KEY,
       JSON.stringify({
@@ -198,13 +203,13 @@ describe("useAssistantWireLogStore", () => {
       totalBytes: 0,
       captureBytes: 0,
     });
-    expect(localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY)).not.toContain(
-      "v1-private",
-    );
+    expect(localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`) ?? "").not.toContain("v1-private");
   });
 
   it("drops corrupt persisted v3 state during hydration", async () => {
     resetStore();
+    localStorage.removeItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
     localStorage.setItem(
       ASSISTANT_WIRE_LOG_STORAGE_KEY,
       JSON.stringify({
@@ -220,15 +225,16 @@ describe("useAssistantWireLogStore", () => {
       showResponses: true,
       entries: [],
     });
-    expect(localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`)).toBeNull();
   });
 
   it("persists the capture and responses toggles", async () => {
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     useAssistantWireLogStore.getState().setShowResponses(false);
-    const persisted = localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY);
+    const persisted = localStorage.getItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
     resetStore();
-    localStorage.setItem(ASSISTANT_WIRE_LOG_STORAGE_KEY, persisted!);
+    localStorage.removeItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
+    localStorage.setItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`, persisted!);
 
     await useAssistantWireLogStore.persist.rehydrate();
 
@@ -242,7 +248,7 @@ describe("useAssistantWireLogStore", () => {
     useAssistantWireLogStore.getState().setFeatureEnabled(true);
 
     const persisted = JSON.parse(
-      localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY)!,
+      localStorage.getItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`)!,
     ) as { state: Record<string, unknown> };
 
     expect(persisted.state).not.toHaveProperty("featureEnabled");
@@ -368,11 +374,12 @@ describe("useAssistantWireLogStore", () => {
   it("rehydrates id-backed metadata without inventing an inline payload", async () => {
     const id = recordWireLog(7);
     expect(id).not.toBeNull();
-    const persisted = localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY);
+    const persisted = localStorage.getItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
     expect(persisted).not.toBeNull();
 
     resetStore();
-    localStorage.setItem(ASSISTANT_WIRE_LOG_STORAGE_KEY, persisted!);
+    localStorage.removeItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`);
+    localStorage.setItem(`${ASSISTANT_WIRE_LOG_STORAGE_KEY}:wire-owner`, persisted!);
     await useAssistantWireLogStore.persist.rehydrate();
 
     const state = useAssistantWireLogStore.getState();

@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   serviceDeleteActionParamsSchema,
@@ -108,6 +109,7 @@ export function AssistantServiceDeleteDialog({
   }
 
   async function submit(cascadeGrant: boolean) {
+    const operation = captureAccountOperation();
     if (submittingRef.current || done) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -117,14 +119,14 @@ export function AssistantServiceDeleteDialog({
         userServiceId: params.userServiceId,
       });
       const response = assistantServiceDeleteResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/services/delete", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/services/delete", {
           actionRequestId,
           userServiceId: expected.userServiceId,
           ...(cascadeGrant ? { cascadeGrant: true } : {}),
           ...(cascadeGrant && cascade
             ? { cascadeSiblings: cascade.siblings }
             : {}),
-        }),
+        })),
       );
       await verifyDeletion(response.resource.userServiceId);
       setDone(true);

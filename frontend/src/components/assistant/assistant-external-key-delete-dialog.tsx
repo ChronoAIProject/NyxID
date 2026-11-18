@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   parseGrantCascadeDetails,
   type GrantCascadeDetails,
@@ -121,6 +122,7 @@ export function AssistantExternalKeyDeleteDialog({
     cascadeGrant?: boolean;
     grantScope?: "token";
   }) {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -128,7 +130,7 @@ export function AssistantExternalKeyDeleteDialog({
     try {
       const expected = externalKeyDeleteActionParamsSchema.parse(params);
       const response = assistantExternalKeyDeleteResponseSchema.parse(
-        await api.post<unknown>(
+        await operation.dispatch(() => api.post<unknown>(
           "/assistant/actions/endpoints/external-key-delete",
           {
             actionRequestId,
@@ -139,7 +141,7 @@ export function AssistantExternalKeyDeleteDialog({
               ? { cascadeSiblings: cascadeDetails.siblings }
               : {}),
           },
-        ),
+        )),
       );
       setCascadeDetails(null);
       setResult(response);

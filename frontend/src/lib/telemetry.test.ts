@@ -134,3 +134,15 @@ describe('authenticated relay analytics', () => {
     expect(state.api).not.toHaveBeenCalled();
   });
 });
+
+it('does not relay an event when evidence arrives during consent lookup', async () => {
+  const { invalidateAccountEvidence, settleAccountEvidence } = await import('./assistant/identity');
+  boot();
+  let release!: (value: typeof permission) => void;
+  state.api.mockImplementationOnce(() => new Promise((done) => { release = done; }));
+  const pending = capture(event);
+  invalidateAccountEvidence(); settleAccountEvidence();
+  release(permission);
+  await pending;
+  expect(state.api.mock.calls.filter(([path]) => path.endsWith('/events'))).toHaveLength(0);
+});

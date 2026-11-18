@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { nodeRotateTokenActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -64,6 +65,7 @@ export function AssistantNodeRotateTokenDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -78,10 +80,10 @@ export function AssistantNodeRotateTokenDialog({
         );
       }
       const response = assistantNodeEffectResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/nodes/rotate-token", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/nodes/rotate-token", {
           actionRequestId,
           nodeId: expected.nodeId,
-        }),
+        })),
       );
       const after = await readNodeAuthorization(response.resource.nodeId);
       if (

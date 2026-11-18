@@ -15,6 +15,7 @@ import { translateUi } from "@/i18n/use-ui-translation";
 // the local-server DisplayOnce wizard byte-for-byte in spirit.
 
 import { useEffect, useState } from "react";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError, api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
@@ -322,6 +323,7 @@ function StageRouter() {
       );
       setStage({ phase: "done", flow: claim.kind as WizardFlow });
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setStage({
         phase: "resending-ack",
         claim,
@@ -369,6 +371,7 @@ function StageRouter() {
         setStage({ phase: "secret", claim, result });
       }
     } catch (e) {
+      if (isAccountAbort(e)) return;
       // /complete failed — secret has been minted server-side, so
       // we stay in the notifying-cli / acking phase with the error
       // so the user can retry via the button. The pairing's
@@ -646,6 +649,7 @@ function EnterCodeForm({
   const prefilled = code.length > 0;
 
   async function submit(e: React.FormEvent) {
+    const operation = captureAccountOperation();
     e.preventDefault();
     if (!code.trim()) return;
     setLoading(true);
@@ -655,6 +659,7 @@ function EnterCodeForm({
         code: code.trim(),
       });
       if (!isPairingKind(res.kind)) {
+        operation.assertCurrent();
         // Version skew: the CLI / server emitted a kind this frontend
         // doesn't know how to render. We've already transitioned the
         // pairing to `claimed` server-side; if we just show an error,
@@ -676,6 +681,7 @@ function EnterCodeForm({
       }
       onClaim(res);
     } catch (e) {
+      if (isAccountAbort(e)) return;
       setError(extractErrorMessage(e));
     } finally {
       setLoading(false);

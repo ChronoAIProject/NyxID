@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   customServiceAuthMethodSchema,
@@ -185,6 +186,7 @@ export function AssistantServiceUpdateDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -202,7 +204,7 @@ export function AssistantServiceUpdateDialog({
         throw new Error("NyxID service evidence was missing its state version.");
       }
       const response = assistantServiceUpdateResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/services/update", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/services/update", {
           actionRequestId,
           userServiceId: expected.userServiceId,
           ...(expected.name ? { name: expected.name } : {}),
@@ -213,7 +215,7 @@ export function AssistantServiceUpdateDialog({
           ...(expected.authKeyName
             ? { authKeyName: expected.authKeyName }
             : {}),
-        }),
+        })),
       );
       setResultId(response.resource.userServiceId);
       setReplayed(response.replayed);

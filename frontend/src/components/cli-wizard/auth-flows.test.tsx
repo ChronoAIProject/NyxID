@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { invalidateAccountEvidence, settleAccountEvidence } from "@/lib/assistant/identity";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
@@ -40,6 +41,10 @@ vi.mock("@/lib/api-client", () => ({
       this.errorCode = response.error_code;
     }
   },
+}));
+
+vi.mock("@/hooks/use-runtime-config", () => ({
+  useRuntimeConfig: () => ({ data: { api_base_url: "https://nyxid.test" }, isLoading: false, isError: false }),
 }));
 
 vi.mock("@/pages/cli-pair/reserve-action", () => ({
@@ -704,4 +709,75 @@ describe("upstream scope override forwarding (issue #917)", () => {
       expect(query.get("scope")).toBeNull();
     });
   });
+});
+
+describe("wizard operation restart", () => {
+  beforeEach(() => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+  });
+  it.each(["oauth", "device"])("shows a restartable %s interruption after a committed placeholder", async (kind) => {
+    resetFlowMocks();
+    mockPost.mockImplementation(async (path: string) => {
+      if (path === "/keys") {
+        invalidateAccountEvidence();
+        return { id: "key-1", status: "pending_auth", slug: "llm-openai", label: "OpenAI" };
+      }
+      if (path.includes("device-code/initiate")) return { user_code: "RESTART", verification_uri: "https://provider.test", state: "state", interval: 60, expires_in: 900 };
+      return {};
+    });
+    mockGet.mockImplementation(async (path: string) => path.includes("connect/oauth") ? { authorization_url: "https://provider.test" } : { id: "key-1", status: "pending_auth" });
+    const view = kind === "oauth" ? renderOAuthFlow() : renderDeviceCodeFlow();
+    try {
+      expect(await screen.findByRole("alert")).toHaveTextContent("The signed-in account may have changed. Review this connection and try again.");
+      expect(mockGet.mock.calls.some(([path]) => String(path).includes("connect/oauth"))).toBe(false);
+      expect(mockPost.mock.calls.some(([path]) => String(path).includes("device-code/initiate"))).toBe(false);
+      settleAccountEvidence();
+      const { default: userEvent } = await import("@testing-library/user-event");
+      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      if (kind === "oauth") await screen.findByRole("link", { name: "Reopen provider sign-in" });
+      else await screen.findByText("RESTART");
+    } finally { view.unmount(); settleAccountEvidence(); }
+  });
+
+  it("captures fresh authority when OAuth credentials are confirmed after a same-account restore", async () => {
+    resetFlowMocks();
+    mockGet.mockResolvedValue({ keys: [] });
+    const onSuccess = vi.fn();
+    const view = renderOAuthFlow({ ownOAuthApp: true, onSuccess });
+    try {
+      await screen.findByLabelText("Client ID");
+      act(() => { invalidateAccountEvidence(); settleAccountEvidence(); });
+      const { default: userEvent } = await import("@testing-library/user-event");
+      await userEvent.type(screen.getByLabelText("Client ID"), "fixture-id");
+      await userEvent.type(screen.getByLabelText("Client Secret"), "fixture-secret");
+      await userEvent.click(screen.getByRole("button", { name: "Save and continue" }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    } finally { view.unmount(); settleAccountEvidence(); }
+  });
+
+  it("stops device waiting when authority expires during poll backoff and restarts", async () => {
+    resetFlowMocks();
+    mockPost.mockImplementation(async (path: string) => {
+      if (path === "/keys") return { id: "key-1", status: "pending_auth" };
+      if (path.includes("device-code/initiate")) return {
+        user_code: "RESTART-POLL", verification_uri: "https://provider.test", state: "state", interval: 0.1, expires_in: 900,
+      };
+      throw new Error(`unexpected POST ${path}`);
+    });
+    const view = renderDeviceCodeFlow();
+    try {
+      await screen.findByText("RESTART-POLL");
+      act(() => invalidateAccountEvidence());
+      expect(await screen.findByRole("alert")).toHaveTextContent("The signed-in account may have changed. Review this connection and try again.");
+      expect(screen.queryByText("Waiting for authorization...")).not.toBeInTheDocument();
+      expect(screen.queryByText("RESTART-POLL")).not.toBeInTheDocument();
+      expect(mockPost.mock.calls.some(([path]) => String(path).includes("device-code/poll"))).toBe(false);
+      settleAccountEvidence();
+      const { default: userEvent } = await import("@testing-library/user-event");
+      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await screen.findByText("RESTART-POLL");
+      expect(mockPost.mock.calls.filter(([path]) => String(path).includes("device-code/initiate"))).toHaveLength(2);
+    } finally { view.unmount(); settleAccountEvidence(); }
+  });
+
 });

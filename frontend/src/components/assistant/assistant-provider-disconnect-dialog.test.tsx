@@ -1,3 +1,4 @@
+import { invalidateAccountEvidence, settleAccountEvidence } from "@/lib/assistant/identity";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -107,4 +108,20 @@ describe("AssistantProviderDisconnectDialog", () => {
     );
     expect(mockGet).toHaveBeenCalledTimes(1);
   });
+});
+
+it("silently stops a confirmed effect when evidence arrives during read-back", async () => {
+  let finish!: (value: unknown) => void;
+  mockGet.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  render(<AssistantProviderDisconnectDialog open onOpenChange={vi.fn()} actionRequestId="fixture-action"
+    params={{ providerId: PROVIDER_ID }} onComplete={vi.fn()} />);
+  await userEvent.click(screen.getByRole("checkbox"));
+  await userEvent.click(screen.getByRole("button", { name: "Disconnect provider" }));
+  await waitFor(() => expect(finish).toBeDefined());
+  invalidateAccountEvidence(); settleAccountEvidence();
+  finish({ provider_id: PROVIDER_ID, status: "active", state_version: 1, updated_at: "2026-08-25T00:00:00Z" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Disconnect provider" })).toBeEnabled());
+  expect(mockPost).not.toHaveBeenCalled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("Account changed")).not.toBeInTheDocument();
 });

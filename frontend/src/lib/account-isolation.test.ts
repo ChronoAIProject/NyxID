@@ -256,7 +256,8 @@ describe("account boundary", () => {
     useAssistantContextStore.getState().recordScreen("A", "/keys/old");
     useCmaSessionStore.setState({ ownerId: "A", pinned: {}, minimised: {} });
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
-    const saved = localStorage.getItem(key)!;
+    const saved = localStorage.getItem(`${key}:A`)!;
+    expect(saved).not.toBeNull();
     useAuthStore.getState().setUser(person("B"));
     localStorage.setItem(key, saved);
     await useAssistantDraftStore.persist.rehydrate();
@@ -557,4 +558,73 @@ it("prunes collected fallback refs and their caller listeners on the next insert
   } finally {
     Object.defineProperty(AbortSignal, "any", { configurable: true, value: original });
   }
+});
+
+describe("coherent transitions when persistence is unavailable", () => {
+  it.each(["B", null])("publishes %s and replaces its client despite quota failures", async (to) => {
+    useAuthStore.getState().setUser(person("A"));
+    const { useMachinePaneStore } = await import("@/stores/machine-pane-store");
+    const { getAssistantIdentityUserId } = await import("./assistant/identity");
+    const scope = createAccountQueryScope({});
+    const old = scope.getClient();
+    old.setQueryData(["private"], "A data");
+    useMachinePaneStore.getState().setHidden("A conversation", true);
+    useAssistantDraftStore.getState().saveDraft("A", "draft", "A private draft");
+    useAssistantContextStore.getState().recordScreen("A", "A private screen");
+    useAssistantPinsStore.getState().toggle("A", "A private pin");
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    const generation = useAuthStore.getState().accountGeneration;
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => { throw new DOMException("quota", "QuotaExceededError"); });
+    vi.spyOn(localStorage, "removeItem").mockImplementation(() => { throw new DOMException("quota", "QuotaExceededError"); });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(to ? Response.json(person(to)) : Response.json({}, { status: 401 })));
+    try {
+      expect(await useAuthStore.getState().verifySession()).toBe(true);
+      expect(useAuthStore.getState().user?.id ?? null).toBe(to);
+      expect(getAssistantIdentityUserId()).toBe(to);
+      expect(scope.getClient()).not.toBe(old);
+      expect(useAuthStore.getState().accountGeneration).toBe(generation + 1);
+      expect(document.documentElement).not.toHaveAttribute("data-account-transition");
+      expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
+      expect(old.getQueryData(["private"])).toBeUndefined();
+      expect(useMachinePaneStore.getState().hidden).toEqual([]);
+      expect(useAssistantDraftStore.getState().drafts).toEqual({});
+      expect(useAssistantContextStore.getState().lastScreen).toBeNull();
+      expect(useAssistantPinsStore.getState().ids).toEqual([]);
+      expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+      expect(useAssistantWireLogStore.getState().captureEnabled).toBe(false);
+    } finally { scope.dispose(); }
+  });
+});
+
+it("a resumed A transition preserves incoming B context, wire history, machine, CMA and resource choices", async () => {
+  const { useMachinePaneStore } = await import("@/stores/machine-pane-store");
+  const { cmaSession } = await import("./assistant/cma-session.test-fixtures");
+  const { accountResourcePreferenceKey } = await import("./account-resource-preferences");
+  useAuthStore.getState().setUser(person("A"));
+  useAssistantContextStore.getState().recordScreen("A", "A screen");
+  useMachinePaneStore.getState().setHidden("A chat", true);
+  const cmaKey = `${cmaSession.connection.id}:${cmaSession.agentId}`;
+  useCmaSessionStore.getState().setMinimised("A", cmaKey, false);
+  const exchange = { id: "B-exchange", ts: 1794900000000, kind: "header", status: 200, conversationId: "B-chat", wireLogId: "B-wire", label: "POST /assistant/chat" };
+  // Another tab B saved these and closed while this tab still held A in memory.
+  const records = {
+    "nyxid.assistant_context:B": { version: 2, state: { ownerUserId: "B", lastScreen: "B screen" } },
+    [ASSISTANT_WIRE_LOG_STORAGE_KEY + ":B"]: { version: 3, state: { ownerUserId: "B", entries: [exchange], captureEnabled: true, showResponses: false } },
+    "nyxid.machine-pane:B": { version: 1, state: { ownerUserId: "B", hidden: ["B chat"], percent: 50 } },
+    "nyxid.cma-session:B": { version: 3, state: { ownerId: "B", pinned: { [cmaKey]: true }, minimised: { [cmaKey]: true } } },
+  };
+  for (const [key, value] of Object.entries(records)) localStorage.setItem(key, JSON.stringify(value));
+  localStorage.setItem("nyxid:resource:B:nyxid:last-picked-agent-key", "B key");
+  localStorage.setItem("nyxid:resource:B:nyxid:desktop-collapsed:B-chat", "1");
+  useAuthStore.getState().setUser(person("B"));
+  expect(useAssistantContextStore.getState().lastScreen).toBe("B screen");
+  expect(useAssistantWireLogStore.getState().entries).toEqual([exchange]);
+  expect(useAssistantWireLogStore.getState().captureEnabled).toBe(true);
+  expect(useMachinePaneStore.getState().hidden).toEqual(["B chat"]);
+  expect(useCmaSessionStore.getState().pinned[cmaKey]).toBe(true);
+  expect(useCmaSessionStore.getState().minimised[cmaKey]).toBe(true);
+  for (const [key, value] of Object.entries(records)) expect(JSON.parse(localStorage.getItem(key)!)).toEqual(value);
+  expect(localStorage.getItem(accountResourcePreferenceKey("nyxid:last-picked-agent-key"))).toBe("B key");
+  expect(localStorage.getItem(accountResourcePreferenceKey("nyxid:desktop-collapsed:B-chat"))).toBe("1");
+  expect(localStorage.getItem("nyxid.assistant_context:A")).toBeNull();
 });

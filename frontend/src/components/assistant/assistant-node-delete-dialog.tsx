@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { nodeDeleteActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -60,6 +61,7 @@ export function AssistantNodeDeleteDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -74,11 +76,11 @@ export function AssistantNodeDeleteDialog({
         );
       }
       const response = assistantNodeEffectResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/nodes/delete", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/nodes/delete", {
           actionRequestId,
           nodeId: expected.nodeId,
           expectedStateVersion: before.state_version,
-        }),
+        })),
       );
       try {
         await readNodeAuthorization(response.resource.nodeId);

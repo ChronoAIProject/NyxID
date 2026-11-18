@@ -1,3 +1,4 @@
+import { captureAccountOperation, isAccountAbort } from "./assistant/identity";
 import { voiceStartError, type VoiceStartStep } from "./voice-start-error";
 import {
   MicrophoneCapture,
@@ -29,6 +30,7 @@ export type VoiceConnectionStatus =
 
 /** Media is ephemeral; only the server's sideband can admit work or usage. */
 export class AssistantVoiceClient {
+  private readonly operation = captureAccountOperation();
   private grok?: GrokAudio;
   private audioEnd?: number;
   private peer?: RTCPeerConnection;
@@ -224,6 +226,7 @@ export class AssistantVoiceClient {
         if (this.closed) return;
         step = "server";
         this.setStatus("server");
+        this.operation.assertCurrent();
         const raw = await apiClient(this.path(), {
           method: "POST",
           signal: this.abort.signal,
@@ -288,6 +291,7 @@ export class AssistantVoiceClient {
       if (this.closed) return;
       step = "server";
       this.setStatus("server");
+      this.operation.assertCurrent();
       const raw = await apiClient(this.path(), {
         method: "POST",
         signal: this.abort.signal,
@@ -312,6 +316,7 @@ export class AssistantVoiceClient {
       step = "transport";
       this.openControls();
     } catch (error) {
+      if (isAccountAbort(error)) { this.dispose(); return; }
       if (!this.closed) {
         if (!this.session && step === "server") {
           try {
@@ -594,6 +599,7 @@ export class AssistantVoiceClient {
         t.enabled = false;
       });
     try {
+      this.operation.assertCurrent();
       this.session = voiceSessionSchema.parse(
         await api.post(`${this.path()}/${this.session.id}/control`, {
           command_id: crypto.randomUUID(),
@@ -602,17 +608,20 @@ export class AssistantVoiceClient {
         }),
       );
       this.updateInput();
-    } catch {
+    } catch (error) {
+      if (isAccountAbort(error)) return;
       this.onError("Voice controls changed. End this call and reconnect.");
     }
   }
   async stopTask(id: string) {
     try {
+      this.operation.assertCurrent();
       await api.post(
         `/assistant/nyxagent/conversations/${this.thread}/voice-requests/${id}/cancel`,
         {},
       );
-    } catch {
+    } catch (error) {
+      if (isAccountAbort(error)) return;
       this.onError("The task could not be stopped. Try again from the thread.");
     }
   }
@@ -637,6 +646,7 @@ export class AssistantVoiceClient {
       return;
     }
     try {
+      this.operation.assertCurrent();
       await api.post(`${this.path()}/${session.id}/control`, {
         command_id: crypto.randomUUID(),
         expected_revision: session.control_revision,

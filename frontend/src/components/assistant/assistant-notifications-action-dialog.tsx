@@ -19,6 +19,7 @@ import { globalApprovalModeSchema } from "@/schemas/approvals";
 import type { GlobalApprovalMode } from "@/types/approvals";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
@@ -128,6 +129,7 @@ export function AssistantNotificationsActionDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (pendingRef.current || result) return;
     if (!before) {
       setError("Notification evidence must load before this action can run.");
@@ -156,10 +158,10 @@ export function AssistantNotificationsActionDialog({
         payload.pushEnabled = pushEnabled;
       }
       const response = responseSchema.parse(
-        await api.post<unknown>(
+        await operation.dispatch(() => api.post<unknown>(
           `/assistant/actions/org/notifications/${action.replaceAll("_", "-")}`,
           payload,
-        ),
+        )),
       );
       const after = await readEvidence();
       if (response.resource.bindingId !== after.id) {

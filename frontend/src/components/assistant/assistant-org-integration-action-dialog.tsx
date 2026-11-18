@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertNoSensitiveActionParams,
@@ -112,6 +113,7 @@ export function AssistantOrgIntegrationActionDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (pendingRef.current || resultId) return;
     if (gcp && !keyJson.trim()) {
       setError("Paste the GCP service-account JSON in this browser dialog.");
@@ -128,14 +130,14 @@ export function AssistantOrgIntegrationActionDialog({
       assertNoSensitiveActionParams(params);
       if (gcp) {
         const response = externalResponseSchema.parse(
-          await api.post<unknown>("/assistant/actions/org/external-key/add-gcp-service-account", {
+          await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/external-key/add-gcp-service-account", {
             actionRequestId,
             label: label.trim() || undefined,
             keyJson,
             scopes: scopes.trim() || undefined,
             serviceSlugs: serviceSlugs.split(",").map((slug) => slug.trim()).filter(Boolean),
             targetOrgId: targetOrgId || undefined,
-          }),
+          })),
         );
         const raw = await api.get<unknown>(
           `/api-keys/external/${encodeURIComponent(response.resource.externalKeyId)}/authorization`,
@@ -149,12 +151,12 @@ export function AssistantOrgIntegrationActionDialog({
         setResultId(evidence.id);
       } else {
         const response = serviceResponseSchema.parse(
-          await api.post<unknown>("/assistant/actions/org/openclaw/connect", {
+          await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/openclaw/connect", {
             actionRequestId,
             gatewayUrl: gatewayUrl.trim(),
             credential,
             label: label.trim() || undefined,
-          }),
+          })),
         );
         const raw = await api.get<unknown>(
           `/keys/${encodeURIComponent(response.resource.userServiceId)}/authorization`,

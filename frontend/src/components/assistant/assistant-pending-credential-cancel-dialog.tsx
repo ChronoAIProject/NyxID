@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { pendingCredentialCancelActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -60,6 +61,7 @@ export function AssistantPendingCredentialCancelDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -75,14 +77,14 @@ export function AssistantPendingCredentialCancelDialog({
         throw new Error("This pending credential request is no longer active.");
       }
       const response = assistantPendingCredentialEffectResponseSchema.parse(
-        await api.post<unknown>(
+        await operation.dispatch(() => api.post<unknown>(
           "/assistant/actions/nodes/pending-credential-cancel",
           {
             actionRequestId,
             nodeId: expected.nodeId,
             pendingCredentialId: expected.pendingCredentialId,
           },
-        ),
+        )),
       );
       const after = await readPendingCredentialAuthorization(
         expected.nodeId,

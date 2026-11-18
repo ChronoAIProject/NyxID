@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { actionControlIdentitySchema } from "@/schemas/assistant-actions";
 import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import { assertSecretFreeReadBack, errorMessage } from "./assistant-action-dialog-utils";
@@ -52,10 +53,11 @@ export function AssistantAccountMfaSetupDialog({
   }
 
   async function start() {
+    const operation = captureAccountOperation();
     if (startRef.current || stage !== "start") return;
     startRef.current = true; setSubmitting(true); setError(null);
     try {
-      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/mfa-setup", { actionRequestId, stage: "start" }));
+      const response = responseSchema.parse(await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/account/mfa-setup", { actionRequestId, stage: "start" })));
       if (!response.factorId || !response.setupValue) throw new Error("NyxID did not return the one-time MFA setup material.");
       setFactorId(response.factorId); setSetupValue(response.setupValue); setStage("confirm");
     } catch (caught) { setError(errorMessage(caught, "NyxID could not start MFA setup.")); }
@@ -63,10 +65,11 @@ export function AssistantAccountMfaSetupDialog({
   }
 
   async function confirm() {
+    const operation = captureAccountOperation();
     if (confirmRef.current || stage !== "confirm" || !factorId || code.length !== 6) return;
     confirmRef.current = true; setSubmitting(true); setError(null);
     try {
-      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/mfa-setup", { actionRequestId, stage: "confirm", factorId, code }));
+      const response = responseSchema.parse(await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/account/mfa-setup", { actionRequestId, stage: "confirm", factorId, code })));
       const evidenceValue = await api.get<unknown>("/users/me/authorization");
       assertSecretFreeReadBack(evidenceValue);
       const evidence = evidenceSchema.parse(evidenceValue);

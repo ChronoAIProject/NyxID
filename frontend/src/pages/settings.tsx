@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { captureAccountRequest, isAccountAbort } from "@/lib/assistant/identity";
+import { captureAccountRequest, captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
@@ -386,6 +386,7 @@ function SecurityTab() {
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
   const [deleteConfirmEmail, setDeleteConfirmEmail] = useState("");
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+  const [deleteInterruption, setDeleteInterruption] = useState(false);
 
   // Email comparison is case-insensitive (addresses are), and requires the
   // user to actually be loaded — otherwise an empty input would match an
@@ -475,15 +476,19 @@ function SecurityTab() {
       toast.error(translateErrorMessage("Please enter your email to confirm"));
       return;
     }
+    const operation = captureAccountOperation();
+    setDeleteInterruption(false);
     setIsDeletingAccount(true);
     try {
+      operation.assertCurrent();
       const result = await withErasurePreparation(() =>
-        apiClient<DeleteAccountResponse>("/users/me", {
+        apiClient<DeleteAccountResponse>(`/users/me?expected_user_id=${encodeURIComponent(operation.userId!)}`, {
           method: "DELETE",
           headers: {
             "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION,
           },
         }),
+        operation,
       );
       toast.success(
         translateUi(result.status === "complete"
@@ -498,7 +503,10 @@ function SecurityTab() {
       queryClient.clear();
       void navigate({ to: "/login" });
     } catch (error) {
-      if (error instanceof ApiError) {
+      if (isAccountAbort(error)) {
+        setDeleteConfirmEmail("");
+        setDeleteInterruption(true);
+      } else if (error instanceof ApiError) {
         toast.error(translateErrorMessage(error.message));
       } else {
         toast.error(translateErrorMessage("Failed to delete account"));
@@ -510,6 +518,7 @@ function SecurityTab() {
 
   function handleDeleteAccountDialog(open: boolean) {
     setDeleteAccountOpen(open);
+    setDeleteInterruption(false);
     if (!open) {
       setDeleteConfirmEmail("");
     }
@@ -752,6 +761,7 @@ function SecurityTab() {
           </DialogHeader>
 
           <AccountDeletionDisclosure />
+          {deleteInterruption && <p role="alert" className="type-secondary text-destructive">{translateUi("The signed-in account may have changed. Review account deletion and enter your email again.")}</p>}
 
           <GroupedList
             footer={

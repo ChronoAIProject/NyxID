@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import { useAppForm } from "@/components/ui/form";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError } from "@/lib/api-client";
 import { useKeys } from "@/hooks/use-keys";
 import {
@@ -243,6 +244,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
       toast.success(translateUi("Agent order saved for {{name}}", { name: captured.name }));
       close(captured);
     } catch (error) {
+      if (isAccountAbort(error)) return;
       if (!valid(captured)) return;
       setFailure(
         error instanceof ApiError && error.status === 409
@@ -280,6 +282,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     return result.data;
   };
   const recover = async (overwrite: boolean) => {
+    const authority = captureAccountOperation();
     const captured = live.current;
     if (!captured || busy) return;
     setOperation(captured.token);
@@ -302,6 +305,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
           shouldDirty: false,
           shouldTouch: false,
         });
+        authority.assertCurrent();
         await persist(captured, { ordered, expected_version: latest.version });
       } else {
         const next = initialIds(latest, captured.group, fresh);
@@ -316,7 +320,8 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
         setMessage("");
         setRetryToken(null);
       }
-    } catch {
+    } catch (error) {
+      if (isAccountAbort(error)) return;
       if (valid(captured))
         setMessage(
           "Could not reload agent order. Your edits are kept. Retry recovery.",
@@ -361,6 +366,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     }
   };
   const releaseHidden = async () => {
+    const authority = captureAccountOperation();
     const captured = live.current;
     if (
       !captured ||
@@ -375,6 +381,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
     try {
       const latest = await reloadPreference();
       if (!valid(captured)) return;
+      authority.assertCurrent();
       const released = await mutation.release(latest.version);
       if (!valid(captured)) return;
       form.setValue("expected_version", released.version, {
@@ -387,6 +394,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
         "Unavailable preferences released. Your draft is kept. Retry save when ready.",
       );
     } catch (error) {
+      if (isAccountAbort(error)) return;
       if (valid(captured)) {
         setFailure(
           error instanceof ApiError && error.status === 409

@@ -20,7 +20,7 @@ import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
-import { Suspense } from "react";
+import { Suspense, useEffect, useMemo } from "react";
 import { captureUnexpectedNyxbotError } from "@/lib/assistant/error-telemetry";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
@@ -34,6 +34,8 @@ import {
   createRootRoute,
   redirect,
   Outlet,
+  useMatches,
+  useNavigate,
 } from "@tanstack/react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
@@ -164,23 +166,81 @@ import {
   DocsPage,
 } from "@/pages/lazy";
 
+// One admission decision serves fresh navigation and reactive account changes.
+function protectedAdmission(
+  state: Pick<ReturnType<typeof useAuthStore.getState>, "user" | "isAuthenticated" | "isLoading">,
+  pathname: string,
+  search: Record<string, unknown> = {},
+) {
+  const { user, isAuthenticated, isLoading } = state;
+  if (pathname === "/admin/tools") {
+    if (!canManageTools(user)) return { to: "/tools" as const };
+  } else if (pathname === "/services" || pathname.startsWith("/services/")) {
+    if (!canManageCatalog(user) && !canManageTools(user) && !hasAdminRead(user)) return { to: "/keys" as const, search: {} };
+  } else if (pathname === "/providers" || pathname.startsWith("/providers/")) {
+    if (pathname !== "/providers/callback" && !canManageCatalog(user)) return { to: "/keys" as const, search: {} };
+  } else if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    if (!isAuthenticated && !isLoading) return { to: "/login" as const };
+    if (isLoading) return;
+    if (!hasAdminRead(user)) {
+      const usage = pathname === "/admin/usage" || pathname === "/admin/analytics";
+      if (!((usage && canReadAdminUsage(user)) || (pathname === "/admin/feature-flags" && canReadFeatureFlags(user)))) {
+        if (canReadFeatureFlags(user)) return { to: "/admin/feature-flags" as const };
+        if (canReadAdminUsage(user)) return { to: "/admin/usage" as const };
+        return { to: "/dashboard" as const };
+      }
+    }
+    if (["/admin/platform-bots", "/admin/platform-credentials", "/admin/upload-retention"].includes(pathname) && !canAdminWrite(user))
+      return { to: "/dashboard" as const };
+    if (pathname === "/admin/usage") return usageTabAdmission(state, search);
+  }
+}
+
+function usageTabAdmission(state: Pick<ReturnType<typeof useAuthStore.getState>, "user" | "isLoading">, search: Record<string, unknown>) {
+  if (!state.isLoading && search.tab === "nyxbot" && !canReadAdminUsage(state.user))
+    return { to: "/admin/usage" as const, search: { ...usagePageSearch(search), tab: "dashboard" as const }, replace: true };
+}
+
+function requireProtectedAdmission(pathname: string, search?: Record<string, unknown>) {
+  const denied = protectedAdmission(useAuthStore.getState(), pathname, search);
+  if (denied) throw redirect(denied);
+}
+
+/** Decide before protected children mount, without reloading the router. */
+function useProtectedAdmission() {
+  const user = useAuthStore((state) => state.user);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const isLoading = useAuthStore((state) => state.isLoading);
+  // Matches describe the children Outlet will mount. The destination location
+  // can already have advanced while the previous route is still displayed.
+  const location = useMatches({ select: (matches) => matches.at(-1)! });
+  const navigate = useNavigate();
+  const denied = useMemo(() => protectedAdmission({ user, isAuthenticated, isLoading }, location.pathname, { ...location.search }),
+    [user, isAuthenticated, isLoading, location.pathname, location.search]);
+  useEffect(() => { if (denied) void navigate({ ...denied, replace: true }); }, [denied, navigate]);
+  return denied;
+}
+
 // ── Route tree ──
 
 const rootRoute = createRootRoute({
-  component: () => (
-    <AccountBoundary>
-      <TooltipProvider delayDuration={200}>
-        <CmaSessionProvider>
-          <Suspense>
-            <Outlet />
-          </Suspense>
-          <Toaster />
-          <CreditsDeniedHost />
-          <FloatingCmaSessions />
-        </CmaSessionProvider>
-      </TooltipProvider>
-    </AccountBoundary>
-  ),
+  component: function AccountRouteRoot() {
+    const denied = useProtectedAdmission();
+    return (
+      <AccountBoundary>
+        <TooltipProvider delayDuration={200}>
+          <CmaSessionProvider>
+            <Suspense>
+              {denied ? null : <Outlet />}
+            </Suspense>
+            <Toaster />
+            <CreditsDeniedHost />
+            <FloatingCmaSessions />
+          </CmaSessionProvider>
+        </TooltipProvider>
+      </AccountBoundary>
+    );
+  },
 });
 
 const authLayout = createRoute({
@@ -551,27 +611,14 @@ const toolsRoute = createRoute({
 export const adminToolsRoute = createRoute({
   path: "/admin/tools",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: () => {
-    if (!canManageTools(useAuthStore.getState().user))
-      throw redirect({ to: "/tools" });
-  },
+  beforeLoad: () => requireProtectedAdmission("/admin/tools"),
   component: AdminToolsPage,
 });
 
 export const servicesRedirectRoute = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: async () => {
-    const { user } = useAuthStore.getState();
-    if (
-      canManageCatalog(user) ||
-      canManageTools(user) ||
-      hasAdminRead(user)
-    ) {
-      return;
-    }
-    throw redirect({ to: "/keys", search: {} });
-  },
+  beforeLoad: ({ location, search }) => requireProtectedAdmission(location.pathname, search),
   component: ServicesPage,
 });
 
@@ -605,20 +652,8 @@ const connectionsRedirectRoute = createRoute({
 export const providersRedirectRoute = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: ({ location }) => {
-    // The backend's OAuth callback redirects every authenticated user here
-    // with ?status=error&message=... on account mismatch (issue #695).
-    // ProvidersCallbackPage must render for non-admins too; otherwise the
-    // actionable error stored by issue #651 never reaches the user.
-    if (location.pathname === "/providers/callback") {
-      return;
-    }
-    const { user } = useAuthStore.getState();
-    if (canManageCatalog(user)) {
-      return;
-    }
-    throw redirect({ to: "/keys", search: {} });
-  },
+  // OAuth callback errors remain available to members too.
+  beforeLoad: ({ location, search }) => requireProtectedAdmission(location.pathname, search),
   component: ProvidersLayout,
 });
 
@@ -1054,33 +1089,15 @@ const orgJoinRoute = createRoute({
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: ({ location }) => {
-    const { user, isAuthenticated, isLoading } = useAuthStore.getState();
-    if (!isAuthenticated && !isLoading) {
-      throw redirect({ to: "/login" });
-    }
-    if (isLoading || hasAdminRead(user)) return;
-    const usagePath =
-      location.pathname === "/admin/usage" ||
-      location.pathname === "/admin/analytics";
-    const flagsPath = location.pathname === "/admin/feature-flags";
-    if (
-      (usagePath && canReadAdminUsage(user)) ||
-      (flagsPath && canReadFeatureFlags(user))
-    )
-      return;
-    if (canReadFeatureFlags(user))
-      throw redirect({ to: "/admin/feature-flags" });
-    if (canReadAdminUsage(user)) throw redirect({ to: "/admin/usage" });
-    throw redirect({ to: "/dashboard" });
-  },
+  beforeLoad: ({ location, search }) => requireProtectedAdmission(location.pathname, search),
   component: () => <Outlet />,
 });
 
-export const adminPlatformBotsRoute = createRoute({path: "platform-bots", getParentRoute: () => adminLayout, beforeLoad: () => {
-  const {user, isLoading} = useAuthStore.getState();
-  if (!isLoading && !canAdminWrite(user)) throw redirect({to: "/dashboard"});
-}, component: AdminPlatformBotsPage});
+export const adminPlatformBotsRoute = createRoute({
+  path: "platform-bots", getParentRoute: () => adminLayout,
+  beforeLoad: ({ location, search }) => requireProtectedAdmission(location.pathname, search),
+  component: AdminPlatformBotsPage,
+});
 
 const adminUsersRoute = createRoute({
   path: "users",
@@ -1203,10 +1220,8 @@ const adminUsageRoute = createRoute({
   component: AdminUsagePage,
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
-    const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && search.tab === "nyxbot" && !canReadAdminUsage(user)) {
-      throw redirect({ to: "/admin/usage", search: { ...search, tab: "dashboard" }, replace: true });
-    }
+    const denied = usageTabAdmission(useAuthStore.getState(), search);
+    if (denied) throw redirect(denied);
     const params = new URLSearchParams(location.searchStr);
     if (
       ["period", "from", "to", "user", "service"].some((key) => params.has(key))
@@ -1270,23 +1285,14 @@ const adminInviteCodesRoute = createRoute({
 const adminPlatformCredentialsRoute = createRoute({
   path: "platform-credentials",
   getParentRoute: () => adminLayout,
-  beforeLoad: () => {
-    const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && !canAdminWrite(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-  },
+  beforeLoad: ({ location, search }) => requireProtectedAdmission(location.pathname, search),
   component: AdminPlatformCredentialsPage,
 });
 
 const adminUploadRetentionRoute = createRoute({
   path: "upload-retention",
   getParentRoute: () => adminLayout,
-  beforeLoad: () => {
-    const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && !canAdminWrite(user))
-      throw redirect({ to: "/dashboard" });
-  },
+  beforeLoad: ({ location, search }) => requireProtectedAdmission(location.pathname, search),
   component: AdminUploadRetentionPage,
 });
 

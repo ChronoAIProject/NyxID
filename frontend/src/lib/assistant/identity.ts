@@ -7,6 +7,8 @@ type AssistantIdentityListener = (
 
 let currentUserId: string | null = null;
 let identityRevision = 0;
+let evidenceEpoch = 0;
+let evidencePending = false;
 let requests = new AbortController();
 const listeners = new Set<AssistantIdentityListener>();
 // Neither the epoch nor a long-lived caller keeps fallback requests alive.
@@ -29,6 +31,7 @@ interface AccountRequest {
   readonly signal: AbortSignal;
   dispose(): void;
   assertCurrent(): void;
+  assertCanDispatch(method?: string): void;
 }
 
 export function getAssistantIdentityUserId(): string | null {
@@ -38,6 +41,31 @@ export function getAssistantIdentityUserId(): string | null {
 /** Changes even when an account switches away and back during one request. */
 export function getAssistantIdentityRevision(): number {
   return identityRevision;
+}
+
+/** Incompatible cookie evidence invalidates queued effects, without remounting UI. */
+export function invalidateAccountEvidence(): void {
+  evidenceEpoch += 1;
+  evidencePending = true;
+}
+
+export function settleAccountEvidence(): void {
+  evidencePending = false;
+}
+
+/** Authority for a complete user-confirmed operation, including waits/retries. */
+export function captureAccountOperation() {
+  const userId = currentUserId;
+  const revision = identityRevision;
+  const epoch = evidenceEpoch;
+  const assertCurrent = () => {
+    if (revision !== identityRevision || epoch !== evidenceEpoch || evidencePending)
+      throw new AccountChangedError();
+  };
+  return {
+    userId, revision, evidenceEpoch: epoch, assertCurrent,
+    dispatch<T>(request: () => T): T { assertCurrent(); return request(); },
+  };
 }
 
 export function transitionAssistantIdentity(userId: string | null): void {
@@ -72,6 +100,7 @@ export function subscribeAssistantIdentity(
 /** Capture before any await, and check again after consuming response bodies. */
 export function captureAccountRequest(signal?: AbortSignal): AccountRequest {
   const revision = identityRevision;
+  const epoch = evidenceEpoch;
   const epochSignal = requests.signal;
   let dispose = () => {};
   let combined = epochSignal;
@@ -112,12 +141,17 @@ export function captureAccountRequest(signal?: AbortSignal): AccountRequest {
     signal: combined,
     dispose,
     assertCurrent,
+    assertCanDispatch(method = "GET") {
+      assertCurrent();
+      if (!["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase()) &&
+          (epoch !== evidenceEpoch || evidencePending)) throw new AccountChangedError();
+    },
   };
 }
 
 /** Only account changes are silent; caller/user cancellations keep their own handling. */
 export class AccountChangedError extends DOMException {
-  constructor() { super("Account changed", "AbortError"); }
+  constructor(message = "Account changed") { super(message, "AbortError"); }
 }
 
 export function isAccountAbort(error: unknown): error is AccountChangedError {

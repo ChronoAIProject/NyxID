@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { actionControlIdentitySchema } from "@/schemas/assistant-actions";
 import {
   assertSecretFreeReadBack,
@@ -79,6 +80,7 @@ export function AssistantAccountProfileUpdateDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultUserId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -95,11 +97,11 @@ export function AssistantAccountProfileUpdateDialog({
       assertSecretFreeReadBack(beforeValue);
       const before = evidenceSchema.parse(beforeValue);
       const response = responseSchema.parse(
-        await api.post<unknown>("/assistant/actions/org/account/profile-update", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/org/account/profile-update", {
           actionRequestId,
           displayName: expected.displayName,
           avatarUrl: expected.avatarUrl,
-        }),
+        })),
       );
       const afterValue = await api.get<unknown>("/users/me/authorization");
       assertSecretFreeReadBack(afterValue);

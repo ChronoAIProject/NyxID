@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountStorageKey } from "@/lib/owner-persist-storage";
 import { assistantPinsSchema } from "@/schemas/assistant-pins";
 
 export const PIN_STORAGE_KEY = "nyxid.assistant_pins";
@@ -20,9 +21,9 @@ export function createAssistantPinsStore() {
       try {
         if (ids.length) {
           const payload = assistantPinsSchema.parse({ version: 1, ownerUserId: userId, ids });
-          localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify(payload));
+          localStorage.setItem(accountStorageKey(PIN_STORAGE_KEY, userId), JSON.stringify(payload));
         } else {
-          localStorage.removeItem(PIN_STORAGE_KEY);
+          localStorage.removeItem(accountStorageKey(PIN_STORAGE_KEY, userId));
         }
         set({ ids, error: null });
         return true;
@@ -43,19 +44,30 @@ export function createAssistantPinsStore() {
         // Clear memory before reading storage, including when storage is unavailable.
         set({ ownerUserId: userId, ids: EMPTY_IDS, error: null });
         try {
-          if (!userId || (previous.ownerUserId && previous.ownerUserId !== userId)) {
-            localStorage.removeItem(PIN_STORAGE_KEY);
-            return;
-          }
-          const raw = localStorage.getItem(PIN_STORAGE_KEY);
+          if (previous.ownerUserId && previous.ownerUserId !== userId)
+            localStorage.removeItem(accountStorageKey(PIN_STORAGE_KEY, previous.ownerUserId));
+          if (!userId) return;
+          const scopedKey = accountStorageKey(PIN_STORAGE_KEY, userId);
+          const scoped = localStorage.getItem(scopedKey);
+          const raw = scoped ?? localStorage.getItem(PIN_STORAGE_KEY);
           if (!raw) return;
-          const stored = assistantPinsSchema.safeParse(JSON.parse(raw));
-          if (!stored.success) throw new Error("Invalid conversation pin preference");
+          let value: unknown;
+          try { value = JSON.parse(raw); }
+          catch (error) { if (!scoped) localStorage.removeItem(PIN_STORAGE_KEY); throw error; }
+          const stored = assistantPinsSchema.safeParse(value);
+          if (!stored.success) {
+            if (!scoped) localStorage.removeItem(PIN_STORAGE_KEY);
+            throw new Error("Invalid conversation pin preference");
+          }
           if (stored.data.ownerUserId !== userId) {
             localStorage.removeItem(PIN_STORAGE_KEY);
             return;
           }
           set({ ids: [...new Set(stored.data.ids)] });
+          if (!scoped) {
+            localStorage.setItem(scopedKey, raw);
+            localStorage.removeItem(PIN_STORAGE_KEY);
+          }
         } catch {
           set({ error: userId ? "load" : "clear" });
         }

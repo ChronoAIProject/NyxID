@@ -17,6 +17,7 @@ import { AssistantPlatformServiceFields } from "./assistant-platform-service-fie
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { deviceOnboardActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -80,6 +81,7 @@ export function AssistantDeviceOnboardDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -102,7 +104,7 @@ export function AssistantDeviceOnboardDialog({
           : {}),
       });
       const response = assistantDeviceEffectResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/nodes/device-onboard", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/nodes/device-onboard", {
           actionRequestId,
           label: reviewed.label,
           targetOrgId: reviewed.targetOrgId,
@@ -110,7 +112,7 @@ export function AssistantDeviceOnboardDialog({
           ...(reviewed.allowAutoConnectedServices
             ? { allowAutoConnectedServices: true }
             : {}),
-        }),
+        })),
       );
       const evidence = await readDeviceAuthorization(
         response.resource.deviceId,

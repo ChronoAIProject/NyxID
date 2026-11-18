@@ -168,6 +168,7 @@ export async function apiClient<T>(
     if (import.meta.env.DEV) {
       const { isMockMode, getMockResponse } = await import("./mock-data");
       options.authorityGuard?.();
+      request.assertCanDispatch(options.method);
       if (isMockMode()) {
         const mock = getMockResponse(
           endpoint,
@@ -214,6 +215,7 @@ export async function apiFetch(
     const userAtRequest = useAuthStore.getState().user;
     const actorId = options.creditsDenial ? currentCreditsActor() : null;
     options.authorityGuard?.();
+    request.assertCanDispatch(options.method);
     const response = await fetch(
       apiUrl(endpoint, options.apiBaseUrl),
       buildFetchConfig(options),

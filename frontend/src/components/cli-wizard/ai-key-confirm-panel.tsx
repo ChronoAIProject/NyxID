@@ -35,6 +35,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import { cn } from "@/lib/utils";
@@ -801,6 +802,7 @@ function CustomServiceForm({
           : "API key / credential";
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
@@ -827,17 +829,18 @@ function CustomServiceForm({
       if (viaNode) body.node_id = viaNode;
       if (targetOrgId) body.target_org_id = targetOrgId;
 
-      await reservePairingAction(pairingId);
-      const res = await withRewindOnError(pairingId, () =>
+      await operation.dispatch(() => reservePairingAction(pairingId));
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<UserServiceCreated>("/keys", body),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "ai-key",
         service_id: res.id,
         slug: res.slug,
         label: res.label,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       // `ApiError.message` can be empty when the proxy returns a body the
       // shared parser couldn't extract a `message` from. Without the
       // fallback the user sees no error and the button silently re-enables
@@ -1085,6 +1088,7 @@ function CatalogConfirmForm({
   const [authFlowActive, setAuthFlowActive] = useState(false);
 
   async function submit() {
+    const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
     try {
@@ -1131,20 +1135,21 @@ function CatalogConfirmForm({
       // UserService / UserApiKey and orphaning the first one from
       // the CLI's ack. Throws 409/404 in stale-tab scenarios so the
       // surrounding try/catch aborts before the duplicate POST.
-      await reservePairingAction(pairingId);
+      await operation.dispatch(() => reservePairingAction(pairingId));
       // Rewind the reservation if `POST /keys` fails (e.g. backend
       // rejects a malformed label or credential); the user can fix
       // the input in place and retry without re-running the CLI.
-      const res = await withRewindOnError(pairingId, () =>
+      const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<UserServiceCreated>("/keys", body),
-      );
-      onSuccess({
+      ));
+      operation.dispatch(() => onSuccess({
         kind: "ai-key",
         service_id: res.id,
         slug: res.slug,
         label: res.label,
-      });
+      }));
     } catch (e) {
+      if (isAccountAbort(e)) return;
       // `ApiError.message` can be empty when the proxy returns a body the
       // shared parser couldn't extract a `message` from. Without the
       // fallback the user sees no error and the button silently re-enables

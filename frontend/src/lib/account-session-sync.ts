@@ -1,4 +1,4 @@
-import { getAssistantIdentityRevision } from "./assistant/identity";
+import { getAssistantIdentityRevision, invalidateAccountEvidence, settleAccountEvidence } from "./assistant/identity";
 import { useAuthStore } from "@/stores/auth-store";
 
 const STORAGE_KEY = "nyxid:account-session";
@@ -12,7 +12,7 @@ export function installAccountSessionSync(): () => void {
   let restoring = false;
   let disposed = false;
   let lastAttempt = Date.now();
-  type Attempt = { revision: number; evidence: boolean; target?: string | null; again: boolean; timer?: ReturnType<typeof setTimeout> };
+  type Attempt = { revision: number; evidence: boolean; target?: string | null; controller: AbortController; timer?: ReturnType<typeof setTimeout> };
   let pending: Attempt | undefined;
   const seen = new Set<string>();
   const remember = (nonce: string) => {
@@ -47,6 +47,7 @@ export function installAccountSessionSync(): () => void {
   };
   const reveal = () => {
     restoring = false;
+    settleAccountEvidence();
     document.documentElement.removeAttribute("data-account-verifying");
     useAuthStore.setState({ isIdentityVerifying: false });
     const saved = focusBeforeHide;
@@ -74,27 +75,26 @@ export function installAccountSessionSync(): () => void {
   const verify = (evidence: boolean, target?: string | null) => {
     if (disposed) return;
     if (pending) {
-      if (evidence) {
-        // A silent read may have captured the old session before this evidence.
-        if (!pending.evidence || pending.target !== target) pending.again = true;
-        pending.target = target;
-        pending.evidence = true;
-        hide();
-        armDeadline(pending);
-      }
-      return;
+      if (!evidence || (pending.evidence && pending.target === target)) return;
+      // New evidence supersedes the read before it can commit a profile. This
+      // includes an A hint while an A -> B check is still pending.
+      clearTimeout(pending.timer);
+      pending.controller.abort();
+      pending = undefined;
     }
     lastAttempt = Date.now();
-    const attempt: Attempt = { revision: getAssistantIdentityRevision(), evidence, target, again: false };
+    const attempt: Attempt = { revision: getAssistantIdentityRevision(), evidence, target, controller: new AbortController() };
     pending = attempt;
     if (evidence) { hide(); armDeadline(attempt); }
-    void useAuthStore.getState().verifySession().then((confirmed) => {
+    void useAuthStore.getState().verifySession({
+      signal: attempt.controller.signal,
+      isCurrent: () => !disposed && pending === attempt,
+    }).then((confirmed) => {
       if (disposed || pending !== attempt) return;
       clearTimeout(attempt.timer);
       pending = undefined;
       if (attempt.evidence && !confirmed && attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
-      if (attempt.again) verify(true, attempt.target);
-      else reveal();
+      reveal();
     });
   };
   const armDeadline = (attempt: Attempt) => {
@@ -102,6 +102,7 @@ export function installAccountSessionSync(): () => void {
     attempt.timer = setTimeout(() => {
       if (disposed || pending !== attempt) return;
       pending = undefined;
+      attempt.controller.abort();
       if (attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
       reveal();
     }, EVIDENCE_TIMEOUT_MS);
@@ -115,7 +116,8 @@ export function installAccountSessionSync(): () => void {
       if (seen.has(value.nonce)) return;
       remember(value.nonce);
     }
-    if (id === (useAuthStore.getState().user?.id ?? null)) return;
+    if (!pending && id === (useAuthStore.getState().user?.id ?? null)) return;
+    if (id !== (useAuthStore.getState().user?.id ?? null)) invalidateAccountEvidence();
     verify(true, id);
   };
   const openChannel = () => {
@@ -154,6 +156,7 @@ export function installAccountSessionSync(): () => void {
         const hint = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
         if (typeof hint?.nonce === "string") remember(hint.nonce);
       } catch { /* Storage unavailable; the authoritative check still runs. */ }
+      invalidateAccountEvidence();
       verify(true);
     }
   };
@@ -179,6 +182,7 @@ export function installAccountSessionSync(): () => void {
   return () => {
     disposed = true;
     clearTimeout(pending?.timer);
+    pending?.controller.abort();
     clearInterval(timer);
     clearTimeout(blurTimer);
     reveal();

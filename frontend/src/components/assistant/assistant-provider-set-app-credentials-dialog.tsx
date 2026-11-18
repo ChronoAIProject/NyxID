@@ -20,6 +20,7 @@ import {
   errorMessage,
 } from "@/components/assistant/assistant-action-dialog-utils";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   providerSetAppCredentialsActionParamsSchema,
@@ -137,6 +138,7 @@ export function AssistantProviderSetAppCredentialsDialog({
   }
 
   async function submit(values: CredentialFormValues) {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultId) return;
     const clientId = values.clientId;
     if (!clientId.trim()) {
@@ -174,10 +176,10 @@ export function AssistantProviderSetAppCredentialsDialog({
         expectedStateVersion: expectedVersion,
       };
       if (clientSecret) body.clientSecret = clientSecret;
-      const rawResponse = await api.post<unknown>(
+      const rawResponse = await operation.dispatch(() => api.post<unknown>(
         "/assistant/actions/providers/set-app-credentials",
         body,
-      );
+      ));
       assertSecretFreeReadBack(rawResponse);
       const response = credentialsEffectSchema.parse(rawResponse);
       setResultId(response.resource.providerId);

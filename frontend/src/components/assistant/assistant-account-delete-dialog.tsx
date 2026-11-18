@@ -1,6 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { useRef, useState } from "react";
 import { z } from "zod";
@@ -33,16 +34,30 @@ export function AssistantAccountDeleteDialog({
   const [submitting, setSubmitting] = useState(false);
   const [verifiedUserId, setVerifiedUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  function close() { const deleted = verifiedUserId !== null; submittingRef.current = false; setConfirmEmail(""); setAccountEmail(null); setSubmitting(false); setVerifiedUserId(null); setError(null); onOpenChange(false); if (deleted) useAuthStore.getState().setUser(null); }
+  function close() {
+    const deleted = verifiedUserId !== null;
+    submittingRef.current = false;
+    setConfirmEmail("");
+    setAccountEmail(null);
+    setSubmitting(false);
+    setVerifiedUserId(null);
+    setError(null);
+    onOpenChange(false);
+    if (deleted) useAuthStore.getState().setUser(null);
+  }
   async function submit() {
     if (submittingRef.current || verifiedUserId) return;
     submittingRef.current = true; setSubmitting(true); setError(null);
+    const operation = captureAccountOperation();
     try {
+      operation.assertCurrent();
       paramsSchema.parse({});
       const profile = await api.get<{ email: string }>("/users/me");
+      operation.assertCurrent();
       setAccountEmail(profile.email);
       if (confirmEmail.trim().toLowerCase() !== profile.email.trim().toLowerCase()) throw new Error("Type your account email exactly to continue.");
       const before = await api.get<unknown>("/users/me/authorization");
+      operation.assertCurrent();
       assertSecretFreeReadBack(before);
       const response = responseSchema.parse(await withErasurePreparation(() => api.post<unknown>("/assistant/actions/org/account/delete", {
         actionRequestId,
@@ -51,11 +66,16 @@ export function AssistantAccountDeleteDialog({
         // so a browser-side comparison is not a control.
         confirmEmail: confirmEmail.trim(),
         deletionPolicyVersion: ACCOUNT_DELETION_POLICY_VERSION,
-      })));
+      }), operation));
       // Authority closes at acceptance. A subsequent 401 cannot attest erasure;
       // the durable response is the authoritative acceptance/progress result.
       setVerifiedUserId(response.resource.userId);
-    } catch (caught) { setError(errorMessage(caught, "NyxID could not delete this account.")); }
+    } catch (caught) {
+      if (isAccountAbort(caught)) {
+        setConfirmEmail("");
+        setError("The signed-in account may have changed. Review account deletion and enter your email again.");
+      } else setError(errorMessage(caught, "NyxID could not delete this account."));
+    }
     finally { submittingRef.current = false; setSubmitting(false); }
   }
   return (

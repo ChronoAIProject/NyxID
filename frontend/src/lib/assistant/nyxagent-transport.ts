@@ -3,7 +3,7 @@ import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { settledInterruptedTurn } from "./interrupted-turn";
 import { assistantTitleLanguage } from "@/lib/assistant/title-language";
-import { AccountChangedError, getAssistantIdentityUserId, isAccountAbort, subscribeAssistantIdentity } from "@/lib/assistant/identity";
+import { captureAccountOperation, AccountChangedError, getAssistantIdentityUserId, isAccountAbort, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
 import { AssistantHttpError, assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
@@ -1303,7 +1303,9 @@ export class NyxAgentTransport {
     );
     if (!failed) throw new Error("Failed reply not found. Refresh the conversation.");
     const generation = this.identity();
+    const operation = captureAccountOperation();
     const recovery = await this.refreshRecovery(id, messageId, generation);
+    operation.assertCurrent();
     const current = this.histories.get(id)?.messages.find((message) => message.id === messageId);
     if (!current || current.status !== "failed" || current.turn_id !== failed.turn_id) {
       throw new DOMException("Conversation changed", "AbortError");

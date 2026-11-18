@@ -1,3 +1,5 @@
+import { accountResourcePreferenceKey } from "@/lib/account-resource-preferences";
+import { safePersistStorage } from "@/lib/safe-persist-storage";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useMemo, useState } from "react";
@@ -75,7 +77,7 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
       return userOverride;
     }
     const stored =
-      typeof window !== "undefined" ? localStorage.getItem(LS_KEY) : null;
+      typeof window !== "undefined" ? safePersistStorage.getItem(accountResourcePreferenceKey(LS_KEY)) : null;
     if (stored && activeKeys.some((k) => k.id === stored)) {
       return stored;
     }
@@ -90,7 +92,7 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
       onSelect?.(null);
       return;
     }
-    localStorage.setItem(LS_KEY, selectedId);
+    safePersistStorage.setItem(accountResourcePreferenceKey(LS_KEY), selectedId);
     const k = activeKeys.find((x) => x.id === selectedId);
     if (!k) {
       onSelect?.(null);

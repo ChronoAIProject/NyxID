@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { ownerPersistStorage, removeOwnerPersistedState } from "@/lib/owner-persist-storage";
+import { createJSONStorage, persist } from "zustand/middleware";
 import { getAssistantIdentityUserId } from "@/lib/assistant/identity";
 
 const STORAGE_KEY = "nyxid.assistant_context";
@@ -9,6 +10,7 @@ interface AssistantContextState {
   readonly lastScreen: string | null;
   readonly recordScreen: (userId: string, screenKey: string) => void;
   readonly clear: () => void;
+  readonly bindAccount: (userId: string | null) => void;
 }
 
 type PersistedAssistantContext = Pick<
@@ -37,7 +39,7 @@ function migrateAssistantContext(
 
 export const useAssistantContextStore = create<AssistantContextState>()(
   persist<AssistantContextState, [], [], PersistedAssistantContext>(
-    (set) => ({
+    (set, get) => ({
       ...EMPTY_CONTEXT,
       recordScreen: (userId, screenKey) => {
         if (getAssistantIdentityUserId() !== userId) return;
@@ -52,11 +54,14 @@ export const useAssistantContextStore = create<AssistantContextState>()(
           return { lastScreen: screenKey };
         });
       },
+      bindAccount: (userId) => {
+        if (get().ownerUserId !== userId) get().clear();
+        void useAssistantContextStore.persist.rehydrate();
+      },
       clear: () => {
+        const owner = get().ownerUserId;
         set(EMPTY_CONTEXT);
-        if (typeof localStorage !== "undefined") {
-          localStorage.removeItem(STORAGE_KEY);
-        }
+        removeOwnerPersistedState(STORAGE_KEY, owner);
       },
     }),
     {
@@ -66,6 +71,7 @@ export const useAssistantContextStore = create<AssistantContextState>()(
         if (owner && value?.ownerUserId !== owner) return current;
         return { ...current, ...value };
       },
+      storage: createJSONStorage(() => ownerPersistStorage()),
       name: STORAGE_KEY,
       version: 2,
       migrate: migrateAssistantContext,

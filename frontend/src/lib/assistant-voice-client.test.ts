@@ -1,3 +1,4 @@
+import { invalidateAccountEvidence, settleAccountEvidence } from "./assistant/identity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantVoiceClient } from "./assistant-voice-client";
 import { ApiError } from "./api-client";
@@ -834,4 +835,22 @@ describe("uncertain start ownership", () => {
     );
     expect(mocks.post).not.toHaveBeenCalled();
   });
+});
+
+it("does not create a voice session after evidence arrives during provider preparation", async () => {
+  let finish!: () => void;
+  const waiting = new Promise<void>((resolve) => { finish = resolve; });
+  const onError = vi.fn();
+  const client = new AssistantVoiceClient("fixture-thread", vi.fn(), onError);
+  const beforeProvider = vi.fn(() => waiting);
+  const start = client.start(preferences, "openai_live", beforeProvider);
+  await vi.waitFor(() => expect(beforeProvider).toHaveBeenCalledOnce());
+  invalidateAccountEvidence();
+  settleAccountEvidence();
+  finish();
+  await start;
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+  expect(client.isClosed).toBe(true);
 });

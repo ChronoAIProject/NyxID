@@ -16,6 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { copyToClipboard } from "@/lib/utils";
 import {
   actionControlIdentitySchema,
@@ -296,6 +297,7 @@ export function AssistantKeyRotateDialog({
   }
 
   async function rotateKey() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -303,10 +305,10 @@ export function AssistantKeyRotateDialog({
     try {
       const expected = keyRotateActionParamsSchema.parse(params);
       const response = assistantKeyRotateResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/key-rotate", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/key-rotate", {
           actionRequestId,
           keyId: expected.keyId,
-        }),
+        })),
       );
       setResult(response);
       await verifyReplacement(response, expected.keyId);

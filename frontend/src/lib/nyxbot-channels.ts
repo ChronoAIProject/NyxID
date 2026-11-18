@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError, apiClient } from "@/lib/api-client";
 import { creditsAttemptNonce } from "@/lib/credits-denial";
 import {
@@ -130,12 +131,15 @@ export async function registerNyxbotTelegram(
   botToken: string,
   serviceIds: readonly string[] = [],
 ): Promise<NyxbotChannelRegistrationResult> {
+  const operation = captureAccountOperation();
   const token = botToken.trim();
   const identity = await getTelegramBotIdentity(token);
   const botName = identity.first_name;
   try {
     // Aevatar owns bot creation and relay provisioning; do not create a second NyxID bot.
+    operation.assertCurrent();
     const authorization = await getAevatarAuthorization();
+    operation.assertCurrent();
     const response = await apiClient<unknown>(AEVATAR_CHANNELS_PATH, {
       method: "POST",
       headers: { Authorization: authorization },
@@ -160,6 +164,7 @@ export async function registerNyxbotTelegram(
       telegram_url: `https://t.me/${identity.username}`,
     };
   } catch (error) {
+    if (isAccountAbort(error)) throw error;
     if (error instanceof AevatarAuthError)
       throw new NyxbotChannelError(error.code);
     if (error instanceof ApiError && error.status === 401)

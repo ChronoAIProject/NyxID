@@ -105,7 +105,7 @@ it("drops the retired Ask/Full draft preference from persisted drafts", () => {
     }),
   );
   useAssistantDraftStore.getState().saveDraft("one", "screen:nyxagent:assistant", "Work");
-  const stored = localStorage.getItem("nyxid.assistant_drafts") ?? "";
+  const stored = localStorage.getItem("nyxid.assistant_drafts:one") ?? "";
   expect(stored).toContain("Work");
   expect(stored).not.toContain("nyxAgentAccessMode");
 });

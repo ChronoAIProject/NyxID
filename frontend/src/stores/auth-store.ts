@@ -62,12 +62,9 @@ function applyIdentityTransition(
     savedViewId: undefined,
   });
   if (previousUser !== null) clearAccountLocalState();
-  else useAssistantWireLogStore.getState().reset();
-  // A reload may hydrate a different account's persisted state before auth.
-  if (useAssistantDraftStore.getState().ownerUserId !== nextUser?.id)
-    useAssistantDraftStore.getState().clear();
-  if (useAssistantContextStore.getState().ownerUserId !== nextUser?.id)
-    useAssistantContextStore.getState().clear();
+  useAssistantWireLogStore.getState().bindAccount(nextUser?.id ?? null);
+  useAssistantDraftStore.getState().bindAccount(nextUser?.id ?? null);
+  useAssistantContextStore.getState().bindAccount(nextUser?.id ?? null);
 }
 
 interface LoginResult {
@@ -94,7 +91,7 @@ interface AuthActions {
     /** QR session handoff: clear the unconfirmed identity and fence restoration. */
     isCurrent?: () => boolean;
   }) => Promise<boolean>;
-  readonly verifySession: () => Promise<boolean>;
+  readonly verifySession: (options?: { isCurrent?: () => boolean; signal?: AbortSignal }) => Promise<boolean>;
   readonly setUser: (user: User | null) => void;
   readonly setMfaRequired: (required: boolean, token: string | null) => void;
   readonly clearMfaState: () => void;
@@ -253,11 +250,14 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  verifySession: (): Promise<boolean> => {
+  verifySession: ({ isCurrent, signal } = {}): Promise<boolean> => {
     const revision = getAssistantIdentityRevision();
-    if (sessionVerification?.revision === revision) return sessionVerification.promise;
-    const request = captureAccountRequest();
+    if (!isCurrent && sessionVerification?.revision === revision) return sessionVerification.promise;
     const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    const request = captureAccountRequest(controller.signal);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -269,10 +269,11 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const promise = (async () => {
       try {
         const user = await Promise.race([
-          apiClient<User>("/users/me", { preserveSessionOn401: true, signal: controller.signal }),
+          apiClient<User>("/users/me", { preserveSessionOn401: true, signal: controller.signal, accountRequest: request }),
           deadline,
         ]);
         request.assertCurrent();
+        if (isCurrent && !isCurrent()) return false;
         const previous = get().user;
         if (previous?.id === user.id) {
           // Idempotent binds retry a previous browser-storage read failure.
@@ -281,18 +282,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         } else get().setUser(user);
         return true;
       } catch (error) {
-        if (isAccountAbort(error) || revision !== getAssistantIdentityRevision()) return false;
+        if ((isCurrent && !isCurrent()) || controller.signal.aborted || isAccountAbort(error) || revision !== getAssistantIdentityRevision()) return false;
         request.assertCurrent();
         if (error instanceof ApiError && error.status === 401) {
           if (get().user) get().setUser(null);
           return true;
         }
         return false;
-      } finally { clearTimeout(timer); request.dispose(); }
+      } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); request.dispose(); }
     })().finally(() => {
-      if (sessionVerification?.revision === revision) sessionVerification = undefined;
+      if (sessionVerification?.promise === promise) sessionVerification = undefined;
     });
-    sessionVerification = { revision, promise };
+    if (!isCurrent) sessionVerification = { revision, promise };
     return promise;
   },
 

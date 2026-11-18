@@ -530,3 +530,59 @@ it.each(["broadcast", "bfcache"])("requires a fresh profile after %s evidence su
   expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
   expect(document.documentElement).not.toHaveAttribute("data-account-verifying");
 });
+
+it.each(["two hints", "three hints", "bfcache"])("never commits a superseded verification (%s)", async (scenario) => {
+  const replies: Array<(value: Response) => void> = [];
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => replies.push(done))));
+  const published: Array<string | undefined> = [];
+  const generation = useAuthStore.getState().accountGeneration;
+  const { useAssistantDraftStore } = await import("@/stores/assistant-draft-store");
+  useAssistantDraftStore.getState().saveDraft("A", "draft", "A unsent");
+  const watch = useAuthStore.subscribe((state) => published.push(state.user?.id));
+  try {
+    if (scenario === "bfcache") {
+      window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+      window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+    } else receive({ data: { userId: "B", nonce: "first" } });
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+    receive({ data: { userId: "A", nonce: "second" } });
+    replies[0]!(Response.json(person("B")));
+    await vi.waitFor(() => expect(replies).toHaveLength(2));
+    if (scenario === "three hints") {
+      receive({ data: { userId: "B", nonce: "third" } });
+      replies[1]!(Response.json(person("A")));
+      await vi.waitFor(() => expect(replies).toHaveLength(3));
+    }
+    expect(published).not.toContain("B");
+    expect(post).not.toHaveBeenCalledWith(expect.objectContaining({ userId: "B" }));
+    expect(useAuthStore.getState().accountGeneration).toBe(generation);
+    expect(useAssistantDraftStore.getState().getDraft("draft")).toBe("A unsent");
+    expect(document.documentElement).toHaveAttribute("data-account-verifying");
+    const final = scenario === "three hints" ? "B" : "A";
+    replies.at(-1)!(Response.json(person(final)));
+    await vi.waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+    expect(useAuthStore.getState().user?.id).toBe(final);
+  } finally { watch(); }
+});
+
+it.each(["B", "A"])("interrupts a queued erasure before retry and requires fresh confirmation after hint %s", async (confirmed) => {
+  vi.useFakeTimers();
+  const { withErasurePreparation } = await import("./erasure-preparation");
+  const { ApiError } = await import("./api-client");
+  let resolve!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((done) => { resolve = done; })));
+  // Harmless callback only: no destructive endpoint is ever requested.
+  const effect = vi.fn().mockRejectedValueOnce(new ApiError(409, { error: "erasure_preparing", error_code: 12801, message: "preparing" })).mockResolvedValue("accepted fixture");
+  const pending = withErasurePreparation(effect);
+  const outcome = pending.then(() => "accepted", () => "interrupted");
+  receive({ data: { userId: "B", nonce: "replacement-session" } });
+  await vi.advanceTimersByTimeAsync(500);
+  expect(effect).toHaveBeenCalledOnce();
+  expect(await outcome).toBe("interrupted");
+  resolve(Response.json(person(confirmed)));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(effect).toHaveBeenCalledOnce();
+  expect(useAuthStore.getState().isIdentityVerifying).toBe(false);
+  await expect(withErasurePreparation(effect)).resolves.toBe("accepted fixture");
+  expect(effect).toHaveBeenCalledTimes(2);
+});

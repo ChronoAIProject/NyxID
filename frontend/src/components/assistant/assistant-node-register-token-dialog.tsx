@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import { nodeRegisterTokenActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
@@ -65,6 +66,7 @@ export function AssistantNodeRegisterTokenDialog({
   }
 
   async function submit() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -76,11 +78,11 @@ export function AssistantNodeRegisterTokenDialog({
         ...(targetOrgId.trim() ? { targetOrgId: targetOrgId.trim() } : {}),
       });
       const response = assistantNodeEffectResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/nodes/register-token", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/nodes/register-token", {
           actionRequestId,
           name: reviewed.name,
           targetOrgId: reviewed.targetOrgId,
-        }),
+        })),
       );
       const evidence = await readNodeAuthorization(response.resource.nodeId);
       if (

@@ -342,6 +342,8 @@
   "The requester can now receive the approved credential.": "请求者现在可以接收已批准的凭据。",
   "The requester suggested creating a new key. You can also choose a matching existing key.": "请求者建议创建一个新密钥。你还可以选择匹配的现有密钥。",
   "The selected accounts keep all their provider permissions.": "所选账号保留其全部提供商权限。",
+  "The signed-in account may have changed. Review account deletion and enter your email again.": "登录账号可能已更改。请重新确认账号删除操作并再次输入电子邮箱。",
+  "The signed-in account may have changed. Review this connection and try again.": "登录的账户可能已更改。请检查此连接并重试。",
   "These services are required to continue. Cancel if you do not want to grant access.": "需要这些服务才能继续。如果你不想授予访问权限，请取消。",
   "This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.": "此应用可能会接收上述账号信息并使用你批准的服务。请仅在你信任它时继续。你之后可以在“已授权应用”中撤销访问权限。",
   "This app may receive the account information above and use the services you approve. You can revoke access later from Authorized Applications.": "此应用可能会接收上述账号信息并使用你批准的服务。你之后可以在“已授权应用”中撤销访问权限。",

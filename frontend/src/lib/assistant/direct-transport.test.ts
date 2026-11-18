@@ -5,7 +5,7 @@ import {
   DirectAssistantTransport,
   type DirectTurnEvent,
 } from "@/lib/assistant/direct-transport";
-import { transitionAssistantIdentity } from "@/lib/assistant/identity";
+import { AccountChangedError, invalidateAccountEvidence, settleAccountEvidence, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -830,4 +830,18 @@ describe("DirectAssistantTransport credits denial", () => {
     await waitForTerminal(events);
     expect(useCreditsDenialStore.getState().current).toBeNull();
   });
+});
+
+it("refuses a direct send during evidence before optimistic state or telemetry", async () => {
+  const fetchFn = vi.fn();
+  const transport = new DirectAssistantTransport({ fetch: fetchFn });
+  const id = await startedConversation(transport);
+  const before = transport.getHistorySnapshot(id);
+  invalidateAccountEvidence();
+  try {
+    expect(() => transport.sendMessage(id, "queued A text", vi.fn())).toThrow(AccountChangedError);
+    expect(transport.getHistorySnapshot(id)).toStrictEqual(before);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+  } finally { settleAccountEvidence(); }
 });

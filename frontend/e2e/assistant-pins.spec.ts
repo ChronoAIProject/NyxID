@@ -173,6 +173,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click();
     await expect(conversationRow(page, titles[0]!)).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => localStorage.getItem("nyxid.assistant_pins"))).toBeNull();
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("nyxid.assistant_pins:")))).toEqual([]);
   });
 }
 
@@ -243,7 +244,7 @@ test("storage failures remain retryable and account changes clear saved pins", a
   await page.evaluate(() => {
     const original = Storage.prototype.setItem;
     Storage.prototype.setItem = function (key, value) {
-      if (key === "nyxid.assistant_pins") {
+      if (key === "nyxid.assistant_pins" || key.startsWith("nyxid.assistant_pins:")) {
         Storage.prototype.setItem = original;
         throw new DOMException("Storage full", "QuotaExceededError");
       }
@@ -261,5 +262,6 @@ test("storage failures remain retryable and account changes clear saved pins", a
     authStore.getState().setUser({ ...authStore.getState().user!, id: "another-human" });
   });
   await expect.poll(() => page.evaluate(() => localStorage.getItem("nyxid.assistant_pins"))).toBeNull();
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("nyxid.assistant_pins:")))).toEqual([]);
   await expect(page.getByRole("img", { name: "Pinned chat", exact: true })).toHaveCount(0);
 });

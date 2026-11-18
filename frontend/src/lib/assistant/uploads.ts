@@ -96,6 +96,7 @@ export async function uploadFile(
       const mock = globalThis.__nyxidAssistantHttpMock;
       return await (async () => {
         if (signal.aborted) throw isAccountAbort(signal.reason) ? signal.reason : new Error("Upload cancelled.");
+        request.assertCanDispatch("POST");
         const response = await mock({
           endpoint: attachmentPath(scope),
           init: { method: "POST", body: file, signal, headers: { "x-attachment-name": encodeURIComponent(file.name) } },
@@ -116,7 +117,7 @@ export async function uploadFile(
       const rejectFailure = (error: unknown, code: NyxbotErrorCode) => {
         if (settled) return;
         settled = true;
-        if (!signal.aborted && getAssistantIdentityRevision() === identityRevision) {
+        if (!isAccountAbort(error) && !signal.aborted && getAssistantIdentityRevision() === identityRevision) {
           try {
             const headers = new Headers();
             for (const name of ["x-request-id", "x-correlation-id", "X-NyxID-Trace-Id", "x-trace-id"]) {
@@ -188,6 +189,7 @@ export async function uploadFile(
         return;
       }
       try {
+        request.assertCanDispatch("POST");
         xhr.send(file);
       } catch (error) {
         signal.removeEventListener("abort", abort);

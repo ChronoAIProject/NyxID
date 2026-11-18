@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   keyCreateActionParamsSchema,
@@ -316,6 +317,7 @@ export function AssistantKeyCreateDialog({
   }
 
   async function createKey() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || result) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -324,13 +326,13 @@ export function AssistantKeyCreateDialog({
       const expected = keyCreateActionParamsSchema.parse(reviewedParams);
       await verifyAllowedServices(expected.allowedServiceIds);
       const response = assistantKeyCreateResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/key-create", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/key-create", {
           actionRequestId,
           name: expected.name,
           platform: expected.platform,
           allowedServiceIds: [...expected.allowedServiceIds],
           allowAutoConnectedServices: expected.allowAutoConnectedServices,
-        }),
+        })),
       );
       setResult(response);
       await verifyCreatedKey(response, expected);

@@ -3,7 +3,9 @@ import {
   AssistantTurnActiveError,
 } from "@/lib/assistant/errors";
 import {
+  captureAccountOperation,
   captureAccountRequest,
+  isAccountAbort,
   getAssistantIdentityUserId,
   subscribeAssistantIdentity,
 } from "@/lib/assistant/identity";
@@ -623,6 +625,7 @@ export class DirectAssistantTransport {
     content: string,
     onEvent: (event: DirectTurnEvent) => void,
   ): DirectTurnHandle {
+    captureAccountOperation().assertCurrent();
     this.ensureSignedInOwner();
     const stored = this.conversations.get(conversationId);
     if (!stored) throw new AssistantConversationNotFoundError();
@@ -822,7 +825,7 @@ export class DirectAssistantTransport {
     const firstByteDeadline = this.now() + this.firstByteTimeoutMs;
     const account = captureAccountRequest(run.controller.signal);
     try {
-      account.assertCurrent();
+      account.assertCanDispatch("POST");
       const response = await this.withTimeout(
         this.fetchFn(DIRECT_COMPLETIONS_URL, {
           method: "POST",
@@ -939,6 +942,10 @@ export class DirectAssistantTransport {
       this.finishDrain(conversationId, run);
     } catch (error) {
       if (run.discarded || run.drained) return;
+      if (isAccountAbort(error)) {
+        this.cancelRun(conversationId, run);
+        return;
+      }
       if (run.controller.signal.aborted && run.terminalEmitted) {
         this.finishDrain(conversationId, run);
         return;

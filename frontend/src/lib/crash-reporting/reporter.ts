@@ -2,6 +2,7 @@ import { coarseRuntime } from "./runtime";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { apiClient } from "../api-client";
+import { captureAccountOperation } from "../assistant/identity";
 import { ApiError } from "../api-error";
 import { readAnalyticsConsent } from "../analytics-consent";
 import { isDntActive, isSensitivePath } from "../telemetry";
@@ -121,6 +122,7 @@ function capture(error: unknown, kind: CrashKind): Promise<void> {
     if (seen.has(error)) return Promise.resolve();
     seen.add(error);
   }
+  const operation = captureAccountOperation();
   const actor = useAuthStore.getState().user!.id,
     deviceRevision = useConsentStore.getState().revision,
     epoch = generation;
@@ -156,6 +158,7 @@ function capture(error: unknown, kind: CrashKind): Promise<void> {
   admissions++;
   total++;
   const guard = () => {
+    operation.assertCurrent();
     if (
       !localGate() ||
       generation !== epoch ||

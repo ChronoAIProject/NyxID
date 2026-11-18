@@ -143,3 +143,18 @@ describe("withRewindOnError", () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 });
+
+it("preserves account aborts and never rewinds a reservation after new evidence", async () => {
+  const { AccountChangedError, invalidateAccountEvidence, settleAccountEvidence } = await import("@/lib/assistant/identity");
+  const abort = new AccountChangedError();
+  mockPost.mockRejectedValueOnce(abort);
+  await expect(reservePairingAction("fixture-pair")).rejects.toBe(abort);
+  mockPost.mockClear();
+  let fail!: (error: Error) => void;
+  const result = withRewindOnError("fixture-pair", () => new Promise((_, reject) => { fail = reject; }));
+  const rejected = expect(result).rejects.toBeInstanceOf(AccountChangedError);
+  invalidateAccountEvidence(); settleAccountEvidence();
+  fail(apiError(400));
+  await rejected;
+  expect(mockPost).not.toHaveBeenCalled();
+});

@@ -1,3 +1,7 @@
+import { invalidateAccountEvidence, settleAccountEvidence } from "@/lib/assistant/identity";
+import { installAccountSessionSync } from "@/lib/account-session-sync";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -64,7 +68,7 @@ const {
   freshReconnectRead: { value: null as Record<string, unknown> | null },
   mockHardRedirect: vi.fn(),
   mockNavigate: vi.fn(),
-  toastFns: { success: vi.fn(), error: vi.fn() },
+  toastFns: { success: vi.fn(), error: vi.fn(), dismiss: vi.fn() },
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
@@ -2268,5 +2272,63 @@ describe("AddKeyDialog — consolidated PostHog", () => {
     }];
     render(<AddKeyDialog open onOpenChange={vi.fn()} />);
     expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(3);
+  });
+});
+
+const interruptedConnection = "The signed-in account may have changed. Review this connection and try again.";
+describe("connection authority at confirmation", () => {
+  it.each([OAUTH_ENTRY, DEVICE_CODE_ENTRY])("an open $provider_type step works after a same-account persisted restore", async (entry) => {
+    catalog.entries = [entry];
+    const initial = useAuthStore.getState();
+    useAuthStore.getState().setUser({ id: "restore-owner" } as User);
+    const verify = vi.fn().mockResolvedValue(true);
+    useAuthStore.setState({ verifySession: verify });
+    const stop = installAccountSessionSync();
+    try {
+      render(<AddKeyDialog open onOpenChange={vi.fn()} reconnectKey={makeReconnectKey({ catalog_service_slug: entry.slug })} />);
+      act(() => {
+        window.dispatchEvent(Object.assign(new Event("pagehide"), { persisted: true }));
+        window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+      });
+      await waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+      expect(verify).toHaveBeenCalledOnce();
+      await userEvent.click(screen.getByRole("button", { name: entry === OAUTH_ENTRY ? /Connect with GitHub/ : "Continue" }));
+      await waitFor(() => expect(entry === OAUTH_ENTRY ? initiateOAuthMutateAsync : initiateDeviceCodeMutateAsync).toHaveBeenCalledOnce());
+    } finally { stop(); useAuthStore.setState(initial); settleAccountEvidence(); }
+  });
+
+  it.each([OAUTH_ENTRY, DEVICE_CODE_ENTRY])("interrupts $provider_type between ensureKey and initiate, and can restart", async (entry) => {
+    catalog.entries = [entry];
+    const key = makeReconnectKey({ catalog_service_slug: entry.slug });
+    mockApiGet.mockImplementationOnce(async () => { invalidateAccountEvidence(); return key; });
+    render(<AddKeyDialog open onOpenChange={vi.fn()} reconnectKey={key} />);
+    try {
+      await userEvent.click(screen.getByRole("button", { name: entry === OAUTH_ENTRY ? /Connect with GitHub/ : "Continue" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(interruptedConnection);
+      expect(initiateOAuthMutateAsync).not.toHaveBeenCalled();
+      expect(initiateDeviceCodeMutateAsync).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Requesting code from/)).not.toBeInTheDocument();
+      settleAccountEvidence();
+      await userEvent.click(screen.getByRole("button", { name: entry === OAUTH_ENTRY ? /Connect with GitHub/ : "Try Again" }));
+      await waitFor(() => expect(entry === OAUTH_ENTRY ? initiateOAuthMutateAsync : initiateDeviceCodeMutateAsync).toHaveBeenCalledOnce());
+    } finally { settleAccountEvidence(); }
+  });
+
+  it("refuses the device poll after backoff, stops waiting and allows a fresh attempt", async () => {
+    catalog.entries = [DEVICE_CODE_ENTRY];
+    initiateDeviceCodeMutateAsync.mockResolvedValueOnce({ user_code: "ABCD-EFGH", verification_uri: "https://provider.example/device", state: "held", expires_in: 900, interval: 0.2 });
+    render(<AddKeyDialog open onOpenChange={vi.fn()} reconnectKey={makeReconnectKey({ catalog_service_slug: DEVICE_CODE_ENTRY.slug })} />);
+    try {
+      await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+      await screen.findByText("ABCD-EFGH");
+      act(() => invalidateAccountEvidence());
+      expect(await screen.findByRole("alert")).toHaveTextContent(interruptedConnection);
+      expect(pollDeviceCodeMutate).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Waiting for authorization/)).not.toBeInTheDocument();
+      settleAccountEvidence();
+      await userEvent.click(screen.getByRole("button", { name: "Try Again" }));
+      await waitFor(() => expect(initiateDeviceCodeMutateAsync).toHaveBeenCalledTimes(2));
+      expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+    } finally { settleAccountEvidence(); }
   });
 });

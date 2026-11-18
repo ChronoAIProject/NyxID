@@ -1,5 +1,5 @@
 import { AGUIEventType } from "@/lib/assistant/agui-types";
-import { captureAccountRequest, isAccountAbort } from "./identity";
+import { captureAccountOperation, captureAccountRequest, isAccountAbort } from "./identity";
 import {
   decodeActorFrame,
   reduceActorFrame,
@@ -93,6 +93,7 @@ export async function runChatStream({
   refreshConversations,
   updateEntry,
 }: ChatStreamOrchestratorOptions): Promise<string | undefined> {
+  const operation = captureAccountOperation();
   const account = captureAccountRequest(controller.signal);
   const assistantMessageId = createClientId();
   const assistantMessage: ChatMessage = {
@@ -132,7 +133,7 @@ export async function runChatStream({
   let correlation: ErrorCorrelation = {};
 
   const reportError = (error: unknown, code?: NyxbotErrorCode) => {
-    if (errorReported || isAccountAbort(account.signal.reason)) return;
+    if (errorReported || isAccountAbort(error) || isAccountAbort(account.signal.reason)) return;
     errorReported = true;
     const httpError =
       error instanceof ChatApiError || error instanceof ApiError
@@ -194,6 +195,7 @@ export async function runChatStream({
     ) {
       return;
     }
+    try { operation.assertCurrent(); } catch { return; }
     void sendChatCommand(
       {
         type: "task.stop",
@@ -381,6 +383,10 @@ export async function runChatStream({
     return authoritativeConversationId;
   } catch (error) {
     if (isAccountAbort(account.signal.reason)) throw account.signal.reason;
+    if (isAccountAbort(error)) {
+      if (!adopted) updateEntry(entryKey, { projection: initialProjection, session: base });
+      throw error;
+    }
     const reason = controller.signal.aborted ? controller.signal.reason : error;
     const stopped = reason instanceof ReaderStoppedError || serverStopped;
     if (!stopped) reportError(reason);

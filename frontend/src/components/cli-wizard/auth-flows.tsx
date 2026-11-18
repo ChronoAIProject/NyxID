@@ -23,6 +23,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError, api } from "@/lib/api-client";
 import { Copy, ExternalLink, Loader2 } from "lucide-react";
 import type { AiKeyPairingSuccess } from "./ai-key-confirm-panel";
@@ -161,6 +162,7 @@ interface DeviceCodePollResponse {
  * landed and committed a placeholder we'll never observe.
  */
 async function createPlaceholderKey(
+  operation: ReturnType<typeof captureAccountOperation>,
   slug: string,
   label: string,
   createSentRef: { current: boolean },
@@ -199,8 +201,9 @@ async function createPlaceholderKey(
     }
   }
   try {
-    return await api.post<PlaceholderKeyResponse>("/keys", body);
+    return await operation.dispatch(() => api.post<PlaceholderKeyResponse>("/keys", body));
   } catch (e) {
+    if (isAccountAbort(e)) throw e;
     // On a clean 4xx the server rejected the request before any
     // placeholder write. We can safely tell the caller "no side
     // effect" so rewind becomes possible. Anything else (5xx,
@@ -227,7 +230,7 @@ async function createPlaceholderKey(
  * race-free) precisely because the client has no time for a
  * round-trip GET during unload.
  */
-function abandonPlaceholderKeyOnUnload(keyId: string): void {
+function abandonPlaceholderKeyOnUnload(operation: ReturnType<typeof captureAccountOperation>, keyId: string): void {
   if (typeof window === "undefined") return;
   try {
     // Use fetch with keepalive rather than navigator.sendBeacon:
@@ -245,14 +248,14 @@ function abandonPlaceholderKeyOnUnload(keyId: string): void {
     // the worst case, and users can always rerun the CLI for a
     // fresh code — both are strictly safer than the duplicate-mint
     // risk.
-    void fetch(
+    void operation.dispatch(() => fetch(
       `/api/v1/keys/${encodeURIComponent(keyId)}?only_if_pending=true`,
       {
         method: "DELETE",
         credentials: "include",
         keepalive: true,
       },
-    );
+    ));
   } catch {
     // No-op: nothing more we can do from a page that's about to unload.
   }
@@ -274,10 +277,10 @@ function abandonPlaceholderKeyOnUnload(keyId: string): void {
  * target the unseen-by-the-client placeholder from inside a
  * keepalive request.
  */
-function cancelPairingOnUnload(pairingId: string): void {
+function cancelPairingOnUnload(operation: ReturnType<typeof captureAccountOperation>, pairingId: string): void {
   if (typeof window === "undefined") return;
   try {
-    void fetch(
+    void operation.dispatch(() => fetch(
       `/api/v1/cli-pairings/${encodeURIComponent(pairingId)}/cancel`,
       {
         method: "POST",
@@ -286,7 +289,7 @@ function cancelPairingOnUnload(pairingId: string): void {
         headers: { "Content-Type": "application/json" },
         body: "{}",
       },
-    );
+    ));
   } catch {
     // No-op: we're unloading anyway.
   }
@@ -314,6 +317,7 @@ function cancelPairingOnUnload(pairingId: string): void {
  * even though the credential is already live.
  */
 function tryCompleteAiKeyOnUnload(
+  operation: ReturnType<typeof captureAccountOperation>,
   pairingId: string,
   keyId: string,
   slug: string,
@@ -321,7 +325,7 @@ function tryCompleteAiKeyOnUnload(
 ): void {
   if (typeof window === "undefined") return;
   try {
-    void fetch(
+    void operation.dispatch(() => fetch(
       `/api/v1/cli-pairings/${encodeURIComponent(pairingId)}/complete`,
       {
         method: "POST",
@@ -337,7 +341,7 @@ function tryCompleteAiKeyOnUnload(
           },
         }),
       },
-    );
+    ));
   } catch {
     // Best-effort — if this fails, the CLI falls back to a normal
     // timeout and the user re-runs.
@@ -381,13 +385,14 @@ type AbandonOutcome =
  * replay mint a duplicate service.
  */
 async function abandonPlaceholderKey(
+  operation: ReturnType<typeof captureAccountOperation>,
   keyId: string | null,
 ): Promise<AbandonOutcome> {
   if (!keyId) return { kind: "unknown" };
   try {
-    const res = await api.delete<{ readonly deleted?: boolean }>(
+    const res = await operation.dispatch(() => api.delete<{ readonly deleted?: boolean }>(
       `/keys/${encodeURIComponent(keyId)}?only_if_pending=true`,
-    );
+    ));
     if (res.deleted === true) return { kind: "deleted" };
     // Server skipped because the key is no longer pending_auth.
     // That covers TWO cases:
@@ -403,9 +408,9 @@ async function abandonPlaceholderKey(
     // expired, refresh_failed, ...) falls through to
     // `unknown` → the caller runs the normal cancel path.
     try {
-      const live = await api.get<ActiveKeyResponse>(
+      const live = await operation.dispatch(() => api.get<ActiveKeyResponse>(
         `/keys/${encodeURIComponent(keyId)}`,
-      );
+      ));
       if (live.status === "active") {
         return { kind: "active", key: live };
       }
@@ -459,12 +464,14 @@ async function abandonPlaceholderKey(
  * refs outlive the component unmount.
  */
 async function releaseServerStateOnUnmount(
+  operation: ReturnType<typeof captureAccountOperation> | null,
   pairingId: string,
   keyIdRef: React.MutableRefObject<string | null>,
   reservedRef: React.MutableRefObject<boolean>,
   placeholderCreateSentRef: React.MutableRefObject<boolean>,
   placeholderCreateInFlightRef: React.MutableRefObject<Promise<unknown> | null>,
 ): Promise<void> {
+  if (!operation) return;
   // Wait for any in-flight `createPlaceholderKey` to resolve
   // BEFORE reading the post-await ref values. This is the
   // difference between "correct cleanup" and "latched for 15
@@ -492,9 +499,9 @@ async function releaseServerStateOnUnmount(
   let canRewind = reserved && !createWasSent;
   if (keyId) {
     try {
-      const res = await api.delete<{ readonly deleted?: boolean }>(
+      const res = await operation.dispatch(() => api.delete<{ readonly deleted?: boolean }>(
         `/keys/${encodeURIComponent(keyId)}?only_if_pending=true`,
-      );
+      ));
       if (res.deleted === true && reserved) {
         canRewind = true;
       } else if (res.deleted === false) {
@@ -506,10 +513,10 @@ async function releaseServerStateOnUnmount(
         // times out despite successful setup. Don't rewind; the
         // pairing is completing, not restarting.
         try {
-          const active = await api.get<ActiveKeyResponse>(
+          const active = await operation.dispatch(() => api.get<ActiveKeyResponse>(
             `/keys/${encodeURIComponent(keyId)}`,
-          );
-          await api.post(
+          ));
+          await operation.dispatch(() => api.post(
             `/cli-pairings/${encodeURIComponent(pairingId)}/complete`,
             {
               ack: {
@@ -519,7 +526,7 @@ async function releaseServerStateOnUnmount(
                 label: active.label,
               },
             },
-          );
+          ));
         } catch {
           // Best-effort: if we can't read the active record or
           // post complete, the CLI's poll will eventually time
@@ -538,7 +545,7 @@ async function releaseServerStateOnUnmount(
   }
   if (canRewind) {
     try {
-      await rewindPairingAction(pairingId);
+      await operation.dispatch(() => rewindPairingAction(pairingId));
     } catch {
       // Best-effort — TTL reclaims the latch eventually.
     }
@@ -564,6 +571,7 @@ export function OAuthFlow({
   onSuccess,
   onCancel,
 }: FlowProps) {
+  const operationRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   useUiTranslation();
   // Manage-scopes mode: re-auth an existing connection rather than minting a
   // placeholder. The credential sub-step is skipped (the connection already
@@ -643,6 +651,8 @@ export function OAuthFlow({
   // the now-active credential.
   useEffect(() => {
     function handleBeforeUnload() {
+      const operation = operationRef.current;
+      if (!operation) return;
       if (successRef.current) return;
       // Manage-scopes mode: the "key" is a real existing connection, not a
       // disposable placeholder. Never DELETE it or fire a spurious /complete
@@ -657,8 +667,8 @@ export function OAuthFlow({
         // one succeeds and the other is a no-op, based on
         // whether the placeholder is still pending or has
         // flipped to active.
-        abandonPlaceholderKeyOnUnload(stale);
-        tryCompleteAiKeyOnUnload(pairingId, stale, slug, label);
+        abandonPlaceholderKeyOnUnload(operation, stale);
+        tryCompleteAiKeyOnUnload(operation, pairingId, stale, slug, label);
         return;
       }
       // In-flight create: `placeholderCreateSentRef` was set
@@ -670,7 +680,7 @@ export function OAuthFlow({
       // pairing would latch `action_started_at` until TTL even
       // though the user is clearly gone.
       if (placeholderCreateSentRef.current) {
-        cancelPairingOnUnload(pairingId);
+        cancelPairingOnUnload(operation, pairingId);
       }
     }
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -687,6 +697,7 @@ export function OAuthFlow({
       // correctly decide between rewinding, revoking, or
       // completing.
       void releaseServerStateOnUnmount(
+        operationRef.current,
         pairingId,
         keyIdRef,
         reservedRef,
@@ -717,9 +728,10 @@ export function OAuthFlow({
    * prove the server committed nothing (rewind skipped so a
    * replay can't mint a duplicate placeholder).
    */
-  async function releaseServerState(): Promise<
+  async function releaseServerState(operation = operationRef.current): Promise<
     "active" | "released" | "uncertain"
   > {
+    if (!operation) return "released";
     // Manage-scopes mode created no placeholder and holds no reservation, and
     // must never delete the existing connection. Nothing to release.
     if (isReconnect) return "uncertain";
@@ -742,7 +754,7 @@ export function OAuthFlow({
     }
     const stale = keyIdRef.current;
     keyIdRef.current = null;
-    const outcome = await abandonPlaceholderKey(stale);
+    const outcome = await abandonPlaceholderKey(operation, stale);
     // Provider-callback race winner: the placeholder flipped to
     // `active` between us deciding to bail and our DELETE hitting
     // the server. Tearing the state machine down via `onCancel()`
@@ -781,7 +793,7 @@ export function OAuthFlow({
     const deleted = outcome.kind === "deleted";
     if (reservedRef.current && (deleted || noCreateSent)) {
       reservedRef.current = false;
-      await rewindPairingAction(pairingId);
+      await operation.dispatch(() => rewindPairingAction(pairingId));
       return "released";
     }
     reservedRef.current = false;
@@ -857,7 +869,7 @@ export function OAuthFlow({
         // Best-effort: if the fetch fails we just don't show the picker.
       }
     })();
-  }, [ownOAuthApp, slug]);
+  }, [ownOAuthApp, slug, isReconnect]);
 
   function saveUserCredentials() {
     const copyMode = !!copyFromKeyId;
@@ -871,6 +883,13 @@ export function OAuthFlow({
     // Custom App secret of any pre-existing legacy
     // (`connection_id: null`) connection for this same `(user, provider)`
     // — breaking the legacy refresh path which reads from that table.
+    operationRef.current = captureAccountOperation();
+    setError(null);
+    setPhase("starting");
+  }
+
+  function retryOAuth() {
+    operationRef.current = captureAccountOperation();
     setError(null);
     setPhase("starting");
   }
@@ -878,6 +897,8 @@ export function OAuthFlow({
   // Placeholder + redirect + poll runs as soon as `phase === "starting"`.
   useEffect(() => {
     if (phase !== "starting") return;
+    const operation = operationRef.current ?? captureAccountOperation();
+    operationRef.current = operation;
     let cancel = false;
     cancelledRef.current = false;
     void (async () => {
@@ -886,7 +907,7 @@ export function OAuthFlow({
         // exists. Idempotent server-side, so re-runs on retry are a
         // no-op after the first call.
         if (!keyIdRef.current) {
-          await reservePairingAction(pairingId);
+          await operation.dispatch(() => reservePairingAction(pairingId));
           reservedRef.current = true;
         }
         // Reuse placeholder if we already minted one on a prior
@@ -919,6 +940,7 @@ export function OAuthFlow({
           // pass through empty strings here and the backend ignores
           // them.
           const createPromise = createPlaceholderKey(
+            operation,
             slug,
             label,
             placeholderCreateSentRef,
@@ -954,7 +976,7 @@ export function OAuthFlow({
         // If a prior session already authorized the same provider and
         // the backend short-circuited to `active`, skip the popup.
         if (placeholder.status === "active") {
-          await completeWithKey(placeholder.id);
+          await completeWithKey(placeholder.id, operation);
           return;
         }
 
@@ -977,9 +999,9 @@ export function OAuthFlow({
         if (scopeOverride !== undefined) {
           initiateQuery.set("scope_override", scopeOverride.join(","));
         }
-        const initiate = await api.get<InitiateOAuthResponse>(
+        const initiate = await operation.dispatch(() => api.get<InitiateOAuthResponse>(
           `/providers/${encodeURIComponent(providerId)}/connect/oauth?${initiateQuery.toString()}`,
-        );
+        ));
         if (cancel) return;
         if (!initiate.authorization_url) {
           throw new Error("provider did not return an authorization_url");
@@ -995,12 +1017,19 @@ export function OAuthFlow({
           setError(
             "Browser blocked the popup. Use the button below to open the provider sign-in.",
           );
-          await pollUntilActive(placeholder.id);
+          await pollUntilActive(placeholder.id, operation);
           return;
         }
         setPhase("waiting");
-        await pollUntilActive(placeholder.id);
+        await pollUntilActive(placeholder.id, operation);
       } catch (e) {
+        if (isAccountAbort(e)) {
+          if (!cancelledRef.current) {
+            setPhase("error");
+            setError("The signed-in account may have changed. Review this connection and try again.");
+          }
+          return;
+        }
         if (cancel) return;
         setPhase("error");
         setError(extractMessage(e));
@@ -1011,7 +1040,7 @@ export function OAuthFlow({
         // reservation can safely rewind; later-stage failures (5xx,
         // missing authorization_url) fall through to `uncertain`
         // and the TTL reclaims the latch.
-        void releaseServerState();
+        void releaseServerState(operation);
       }
     })();
     return () => {
@@ -1050,7 +1079,7 @@ export function OAuthFlow({
     };
   }, []);
 
-  async function pollUntilActive(keyId: string) {
+  async function pollUntilActive(keyId: string, operation: ReturnType<typeof captureAccountOperation>) {
     // Manage-scopes mode: the connection is ALREADY `active`, so completion
     // can't be "status === active" (that's true on the first poll, before the
     // user re-consents). Wait for `last_authorized_at` to advance past the
@@ -1062,8 +1091,8 @@ export function OAuthFlow({
     await pollOAuthKeyUntilActive({
       keyId,
       getKey: (id) =>
-        api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
-      completeWithKey,
+        operation.dispatch(() => api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`)),
+      completeWithKey: (id) => completeWithKey(id, operation),
       isCancelled: () => cancelledRef.current,
       ...(isReconnect
         ? {
@@ -1091,10 +1120,10 @@ export function OAuthFlow({
     });
   }
 
-  async function completeWithKey(keyId: string) {
-    const finalKey = await api.get<ActiveKeyResponse>(
+  async function completeWithKey(keyId: string, operation: ReturnType<typeof captureAccountOperation>) {
+    const finalKey = await operation.dispatch(() => api.get<ActiveKeyResponse>(
       `/keys/${encodeURIComponent(keyId)}`,
-    );
+    ));
     if (cancelledRef.current) return;
     successRef.current = true;
     setPhase("done");
@@ -1252,6 +1281,7 @@ export function OAuthFlow({
       ) : null}
 
       {error ? <ErrorLine message={error} /> : null}
+      {phase === "error" ? <Button variant="primary" onClick={retryOAuth}>{translateUi("Try again")}</Button> : null}
 
       {phase !== "done" ? (
         <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
@@ -1274,6 +1304,7 @@ export function DeviceCodeFlow({
   onSuccess,
   onCancel,
 }: FlowProps) {
+  const operationRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   useUiTranslation();
   const [code, setCode] = useState<string | null>(null);
   const [verifyUrl, setVerifyUrl] = useState<string | null>(null);
@@ -1321,9 +1352,10 @@ export function DeviceCodeFlow({
    * Cancel path AND the error catch so a reload from the error
    * screen doesn't leave the pairing latched.
    */
-  async function releaseServerState(): Promise<
+  async function releaseServerState(operation = operationRef.current): Promise<
     "active" | "released" | "uncertain"
   > {
+    if (!operation) return "released";
     // Wait for the in-flight `createPlaceholderKey` (if any) to
     // settle so a clean 4xx has a chance to reset
     // `placeholderCreateSentRef` before we read it. See the
@@ -1339,7 +1371,7 @@ export function DeviceCodeFlow({
     }
     const stale = keyIdRef.current;
     keyIdRef.current = null;
-    const outcome = await abandonPlaceholderKey(stale);
+    const outcome = await abandonPlaceholderKey(operation, stale);
     if (outcome.kind === "active") {
       reservedRef.current = false;
       successRef.current = true;
@@ -1356,7 +1388,7 @@ export function DeviceCodeFlow({
     const deleted = outcome.kind === "deleted";
     if (reservedRef.current && (deleted || noCreateSent)) {
       reservedRef.current = false;
-      await rewindPairingAction(pairingId);
+      await operation.dispatch(() => rewindPairingAction(pairingId));
       return "released";
     }
     reservedRef.current = false;
@@ -1383,6 +1415,8 @@ export function DeviceCodeFlow({
   // paths so a completed flow doesn't revoke its own credential.
   useEffect(() => {
     function handleBeforeUnload() {
+      const operation = operationRef.current;
+      if (!operation) return;
       if (successRef.current) return;
       const stale = keyIdRef.current;
       if (stale) {
@@ -1390,15 +1424,15 @@ export function DeviceCodeFlow({
         // reconstructed /complete. Server's active-check
         // arbitrates — the appropriate one succeeds and the
         // other is a no-op.
-        abandonPlaceholderKeyOnUnload(stale);
-        tryCompleteAiKeyOnUnload(pairingId, stale, slug, label);
+        abandonPlaceholderKeyOnUnload(operation, stale);
+        tryCompleteAiKeyOnUnload(operation, pairingId, stale, slug, label);
         return;
       }
       // In-flight create case: no key id to target yet, so
       // cancel the pairing so the CLI exits without waiting for
       // TTL. See the matching comment in `OAuthFlow`.
       if (placeholderCreateSentRef.current) {
-        cancelPairingOnUnload(pairingId);
+        cancelPairingOnUnload(operation, pairingId);
       }
     }
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -1411,6 +1445,7 @@ export function DeviceCodeFlow({
       // matrix (rewind / revoke / complete with ai-key ack when
       // the placeholder flipped to active).
       void releaseServerStateOnUnmount(
+        operationRef.current,
         pairingId,
         keyIdRef,
         reservedRef,
@@ -1451,6 +1486,8 @@ export function DeviceCodeFlow({
   }
 
   async function startSession() {
+    const operation = captureAccountOperation();
+    operationRef.current = operation;
     const myGen = ++genRef.current;
     setPhase("starting");
     setError(null);
@@ -1464,7 +1501,7 @@ export function DeviceCodeFlow({
         // cancel would skip rewind (good) but the WINNING tab
         // would also skip rewind on its own cancel (bad), leaving
         // the pairing latched forever and forcing a CLI rerun.
-        await reservePairingAction(pairingId);
+        await operation.dispatch(() => reservePairingAction(pairingId));
         reservedRef.current = true;
         // Flag BEFORE the fetch leaves: see the matching comment
         // in OAuthFlow. The server may commit a placeholder we
@@ -1474,6 +1511,7 @@ export function DeviceCodeFlow({
         // wait for it to settle before the rewind decision; see
         // the matching comment in `OAuthFlow`.
         const createPromise = createPlaceholderKey(
+          operation,
           slug,
           label,
           placeholderCreateSentRef,
@@ -1509,9 +1547,9 @@ export function DeviceCodeFlow({
         // "enter code XXXX-XXXX at google.com/device" prompt
         // and the pairing times out if they ignore it.
         if (placeholder.status === "active") {
-          const active = await api.get<ActiveKeyResponse>(
-            `/keys/${encodeURIComponent(keyId)}`,
-          );
+          const active = await operation.dispatch(() => api.get<ActiveKeyResponse>(
+            `/keys/${encodeURIComponent(placeholder.id)}`,
+          ));
           if (myGen !== genRef.current) return;
           successRef.current = true;
           setPhase("done");
@@ -1539,12 +1577,12 @@ export function DeviceCodeFlow({
         initQuery.set("scope_override", scopeOverride.join(","));
       }
       const initQueryString = initQuery.toString();
-      const init = await api.post<DeviceCodeInitiateResponse>(
+      const init = await operation.dispatch(() => api.post<DeviceCodeInitiateResponse>(
         `/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate${
           initQueryString ? `?${initQueryString}` : ""
         }`,
         {},
-      );
+      ));
       if (myGen !== genRef.current) return;
 
       setCode(init.user_code);
@@ -1584,12 +1622,14 @@ export function DeviceCodeFlow({
         if (myGen !== genRef.current || cancelledRef.current) return;
         await sleep(interval * 1000);
         if (myGen !== genRef.current || cancelledRef.current) return;
+        operation.assertCurrent();
         let res: DeviceCodePollResponse;
         try {
-          res = await api.post<DeviceCodePollResponse>(pollPath, {
+          res = await operation.dispatch(() => api.post<DeviceCodePollResponse>(pollPath, {
             state: init.state,
-          });
-        } catch {
+          }));
+        } catch (error) {
+          if (isAccountAbort(error)) throw error;
           continue;
         }
         if (myGen !== genRef.current) return;
@@ -1599,9 +1639,9 @@ export function DeviceCodeFlow({
           status === "authorized" ||
           res.access_token
         ) {
-          const final = await api.get<ActiveKeyResponse>(
+          const final = await operation.dispatch(() => api.get<ActiveKeyResponse>(
             `/keys/${encodeURIComponent(keyId)}`,
-          );
+          ));
           if (myGen !== genRef.current) return;
           successRef.current = true;
           setPhase("done");
@@ -1619,7 +1659,7 @@ export function DeviceCodeFlow({
           // "Request a new code" button below calls `startSession()` again,
           // which mints a fresh placeholder when `keyIdRef.current` is null
           // (releaseServerState nulls it). NyxID#706.
-          await releaseServerState();
+          await releaseServerState(operation);
           if (myGen !== genRef.current) return;
           setPhase("expired");
           return;
@@ -1627,7 +1667,7 @@ export function DeviceCodeFlow({
         if (status === "denied") {
           // Denied is terminal — no renew UI, just an error. Free the
           // placeholder so it doesn't linger in `nyxid service list`.
-          await releaseServerState();
+          await releaseServerState(operation);
           if (myGen !== genRef.current) return;
           setPhase("error");
           setError("Authorization denied on the provider side.");
@@ -1640,11 +1680,20 @@ export function DeviceCodeFlow({
       if (myGen === genRef.current) {
         // Client-side deadline reached without a terminal poll response —
         // same cleanup as the server-side `expired` arm.
-        await releaseServerState();
+        await releaseServerState(operation);
         if (myGen !== genRef.current) return;
         setPhase("expired");
       }
     } catch (e) {
+      if (isAccountAbort(e)) {
+        if (myGen === genRef.current && !cancelledRef.current) {
+          setCode(null);
+          setVerifyUrl(null);
+          setPhase("error");
+          setError("The signed-in account may have changed. Review this connection and try again.");
+        }
+        return;
+      }
       if (myGen === genRef.current) {
         setPhase("error");
         setError(extractMessage(e));
@@ -1652,7 +1701,7 @@ export function DeviceCodeFlow({
         // screen doesn't leave the pairing latched with
         // `action_started=true` and nothing to clean up. See the
         // matching comment in `OAuthFlow`.
-        void releaseServerState();
+        void releaseServerState(operation);
       }
     }
   }
@@ -1726,6 +1775,7 @@ export function DeviceCodeFlow({
       ) : null}
 
       {error ? <ErrorLine message={error} /> : null}
+      {phase === "error" ? <Button variant="primary" onClick={() => void startSession()}>{translateUi("Try again")}</Button> : null}
 
       {phase !== "done" ? (
         <Button variant="outline" onClick={() => void cancelAndCleanup()}>{translateUi("Cancel")}</Button>
@@ -1739,7 +1789,7 @@ export function DeviceCodeFlow({
 function ErrorLine({ message }: { readonly message: string }) {
   useUiTranslation();
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
+    <p role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
       {translateUi(message)}
     </p>
   );

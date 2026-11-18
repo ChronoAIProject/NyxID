@@ -342,6 +342,8 @@
   "The requester can now receive the approved credential.": "The requester can now receive the approved credential.",
   "The requester suggested creating a new key. You can also choose a matching existing key.": "The requester suggested creating a new key. You can also choose a matching existing key.",
   "The selected accounts keep all their provider permissions.": "The selected accounts keep all their provider permissions.",
+  "The signed-in account may have changed. Review account deletion and enter your email again.": "The signed-in account may have changed. Review account deletion and enter your email again.",
+  "The signed-in account may have changed. Review this connection and try again.": "The signed-in account may have changed. Review this connection and try again.",
   "These services are required to continue. Cancel if you do not want to grant access.": "These services are required to continue. Cancel if you do not want to grant access.",
   "This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.": "This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.",
   "This app may receive the account information above and use the services you approve. You can revoke access later from Authorized Applications.": "This app may receive the account information above and use the services you approve. You can revoke access later from Authorized Applications.",

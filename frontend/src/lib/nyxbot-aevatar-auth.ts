@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { apiClient } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 
@@ -52,6 +53,7 @@ function base64url(bytes: Uint8Array): string {
 }
 
 async function authorize(userId: string): Promise<Access> {
+  const operation = captureAccountOperation();
   const config = authConfigSchema.parse(
     await apiClient("/proxy/s/aevatar/api/auth/nyxid/config", {
       preserveSessionOn401: true,
@@ -101,6 +103,7 @@ async function authorize(userId: string): Promise<Access> {
   // NyxID's existing JSON authorization mode accepts the first-party browser
   // session and honors existing consent. No redirect, CLI token, or new client
   // registration is needed; the registered redirect is verified below.
+  operation.assertCurrent();
   const authorization = await fetch(`/oauth/authorize?${query}`, {
     headers: { Accept: "application/json" },
     credentials: "include",
@@ -135,6 +138,7 @@ async function authorize(userId: string): Promise<Access> {
   )
     throw new AevatarAuthError("channelAuthRequired");
 
+  operation.assertCurrent();
   const issued = await fetch("/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -192,6 +196,7 @@ export async function getAevatarAuthorization(): Promise<string> {
     cached = access;
     return `Bearer ${access.token}`;
   } catch (error) {
+    if (isAccountAbort(error)) throw error;
     // OAuth errors can contain authorization codes or tokens; never retain them.
     throw error instanceof AevatarAuthError
       ? error

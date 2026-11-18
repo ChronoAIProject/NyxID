@@ -1,5 +1,5 @@
 import { beforeEach, expect, it } from "vitest";
-import { bindAccountResourcePreferences } from "./account-resource-preferences";
+import { bindAccountResourcePreferences, accountResourcePreferenceKey } from "./account-resource-preferences";
 import { useMachinePaneStore } from "@/stores/machine-pane-store";
 import { transitionAssistantIdentity } from "./assistant/identity";
 
@@ -12,7 +12,7 @@ it.each(["A", "B", null])("restores resource preferences only for their persiste
   localStorage.setItem(collapse, "1");
   useMachinePaneStore.getState().bindAccount("A");
   useMachinePaneStore.getState().setHidden("A-thread", true);
-  const saved = localStorage.getItem("nyxid.machine-pane")!;
+  const saved = localStorage.getItem("nyxid.machine-pane:A")!;
   // A new page starts without a confirmed owner, then hydrates persisted preferences.
   transitionAssistantIdentity(null);
   useMachinePaneStore.setState({ ownerUserId: null, hidden: [] });
@@ -21,8 +21,8 @@ it.each(["A", "B", null])("restores resource preferences only for their persiste
   bindAccountResourcePreferences(owner);
   transitionAssistantIdentity(owner);
   useMachinePaneStore.getState().bindAccount(owner);
-  expect(localStorage.getItem(key)).toBe(owner === "A" ? "A-key" : null);
-  expect(localStorage.getItem(collapse)).toBe(owner === "A" ? "1" : null);
+  expect(localStorage.getItem(accountResourcePreferenceKey(key))).toBe(owner === "A" ? "A-key" : null);
+  expect(localStorage.getItem(accountResourcePreferenceKey(collapse))).toBe(owner === "A" ? "1" : null);
   expect(useMachinePaneStore.getState().hidden).toEqual(owner === "A" ? ["A-thread"] : []);
 });
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError } from "@/lib/api-client";
 import { MfaStepUpForm } from "@/components/auth/mfa-step-up";
 import { useAuthStore } from "@/stores/auth-store";
@@ -17,6 +18,7 @@ export function useMfaStepUp(scope: string, onCancel?: () => void) {
   const accountId = useAuthStore.getState().user?.id;
   const [pending, setPending] = useState<{
     retry: () => Promise<void>;
+    operation: ReturnType<typeof captureAccountOperation>;
     message: string;
     scope: string;
     accountId: string | undefined;
@@ -41,7 +43,7 @@ export function useMfaStepUp(scope: string, onCancel?: () => void) {
         useAuthStore.getState().user?.id !== accountId
       )
         return false;
-      setPending({ retry, message: error.message, scope, accountId });
+      setPending({ retry, operation: captureAccountOperation(), message: error.message, scope, accountId });
       return true;
     },
     [scope, accountId],
@@ -61,6 +63,7 @@ export function useMfaStepUp(scope: string, onCancel?: () => void) {
             useAuthStore.getState().user?.id !== pending.accountId
           )
             return;
+          try { pending.operation.assertCurrent(); } catch (error) { if (isAccountAbort(error)) return; throw error; }
           await pending.retry();
         }}
       />

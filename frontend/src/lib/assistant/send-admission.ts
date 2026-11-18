@@ -1,3 +1,5 @@
+import { isAccountAbort } from "./identity";
+
 /**
  * A send the server admitted (its POST returned 2xx) before the client lost
  * the reply. The server already stored the user message and bound its uploads,
@@ -6,7 +8,8 @@
  */
 export type AdmittedSendError = Error & { readonly admitted: true };
 
-export function markAdmitted(error: unknown): AdmittedSendError {
+export function markAdmitted(error: unknown): Error {
+  if (isAccountAbort(error)) return error;
   const marked =
     error instanceof Error
       ? error
@@ -15,5 +18,5 @@ export function markAdmitted(error: unknown): AdmittedSendError {
 }
 
 export function isAdmittedSendError(error: unknown): error is AdmittedSendError {
-  return error instanceof Error && (error as Partial<AdmittedSendError>).admitted === true;
+  return !isAccountAbort(error) && error instanceof Error && (error as Partial<AdmittedSendError>).admitted === true;
 }

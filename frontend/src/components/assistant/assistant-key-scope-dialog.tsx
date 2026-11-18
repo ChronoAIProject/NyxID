@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApiError, api } from "@/lib/api-client";
+import { captureAccountOperation } from "@/lib/assistant/identity";
 import {
   actionControlIdentitySchema,
   keyExtendScopeActionParamsSchema,
@@ -188,6 +189,7 @@ export function AssistantKeyScopeDialog({
   }
 
   async function extendScope() {
+    const operation = captureAccountOperation();
     if (submittingRef.current || resultKeyId) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -196,13 +198,13 @@ export function AssistantKeyScopeDialog({
       const expected = keyExtendScopeActionParamsSchema.parse(reviewedParams);
       const before = await readEvidence(expected.keyId);
       const response = assistantKeyExtendResponseSchema.parse(
-        await api.post<unknown>("/assistant/actions/keys/extend-scope", {
+        await operation.dispatch(() => api.post<unknown>("/assistant/actions/keys/extend-scope", {
           actionRequestId,
           keyId: expected.keyId,
           addServiceIds: [...expected.addServiceIds],
           allowAutoConnectedServices: expected.allowAutoConnectedServices,
           expectedStateVersion: before.state_version,
-        }),
+        })),
       );
       setResultKeyId(response.resource.keyId);
       setReplayed(response.replayed);
